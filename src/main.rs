@@ -6,6 +6,7 @@
 //! (patching, chunk storage, sockets, credentials, windowing) is Rust.
 
 mod chunks;
+mod diagnostics;
 mod error;
 mod keychain;
 mod layout;
@@ -143,8 +144,23 @@ fn main() {
         }
     };
 
+    // Started before the window so that whatever the shell costs to build is
+    // in the record too.
+    let recorder = diagnostics::Recorder::open(diagnostics::default_log_dir());
+    diagnostics::spawn_sampler(Arc::clone(&recorder), {
+        let snapshot = snapshot.clone();
+        move || match &snapshot {
+            Some(store) => {
+                let (cache, net, coalesced) = store.stats();
+                serde_json::json!({"fromCache": cache, "fetched": net, "coalesced": coalesced})
+            }
+            None => serde_json::Value::Null,
+        }
+    });
+
     let token = session_token();
-    let loopback = server::spawn(root.clone(), snapshot, token.clone()).expect("bind loopback");
+    let loopback =
+        server::spawn(root.clone(), snapshot, recorder, token.clone()).expect("bind loopback");
     let url = format!("http://{}/index.html", loopback.addr);
     eprintln!("[gwnative] serving {} at {}", root.display(), url);
 

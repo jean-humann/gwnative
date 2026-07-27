@@ -94,6 +94,41 @@ would restart a loop WebKit had stopped, and drive the client's animation and
 audio off `performance.now()` instead of the frame clock — which is audible.
 `web/harness.js` says the same thing at the one place that is tempted to do it.
 
+## Diagnostics
+
+Every run appends a JSON record per second to
+`~/Library/Application Support/gwnative/diagnostics/gwnative.jsonl`, rotating at
+5 MiB and keeping five files. One record has what the kernel says about the
+process and what the page has counted, on the same clock:
+
+```json
+{"t":1753627543.6,"uptime":25.2,"footprintMiB":34.7,"residentMiB":109.7,
+ "cpuPercent":3.6,"cpuSeconds":1.93,
+ "host":{"fromCache":391,"fetched":0,"coalesced":0},
+ "metrics":{"gw.boot.first-frame.ms":889.18,"gw.boot.wasm.ms":47.3,
+            "gw.frame.ms":16.62,"gw.frame.ms.max":31.72,"gw.frames":1391,
+            "gw.range.ms":0.26,"gw.range.ms.max":44.54,"gw.range.requests":226}}
+```
+
+`footprintMiB` is the figure to compare between applications — it is what
+Activity Monitor's Memory column and `footprint` report. `residentMiB` is three
+times larger here and always will be, because it counts shared clean pages this
+process did not cause to exist. Reasoning from resident size inverted the
+ranking against Electron twice before this file existed, which is why both are
+written and only one is recommended.
+
+CPU comes from `proc_pid_rusage`, whose `ri_user_time` is in **mach absolute
+time**, not the nanoseconds the field name suggests. On Apple silicon a tick is
+41.67 ns, so reading it directly understates CPU by that factor and looks
+entirely plausible while doing it. `src/diagnostics.rs` converts through
+`mach_timebase_info`; the conversion was checked against `getrusage(2)` over the
+same burn, both giving 0.3279 s.
+
+Metrics carry three behaviours, matching on both sides of the loopback origin: a
+count accumulates, a gauge keeps the last value, a peak keeps the largest. The
+page posts increments to `__diag` once a second and `GET /__diag` reads
+everything back, host figures included.
+
 ## Status
 
 Playable. The window opens, the harness and the client boot over loopback, the

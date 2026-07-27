@@ -9,6 +9,8 @@
 // machine, which buys nothing when the client renders at the canvas's own size —
 // EGL gets the visible canvas directly and the compositor presents it.
 
+import * as diagnostics from './diagnostics.js';
+
 /**
  * @param {{
  *   env: Record<string, unknown>,
@@ -37,14 +39,32 @@ export function installGraphics({ env, renderScale, firstFrame, log }) {
     env.emscripten_get_device_pixel_ratio = renderScale;
   }
 
+  // Every presented frame passes through here, which makes it the one place
+  // frame pacing can be measured. Reading performance.now() per frame is not
+  // the thing harness.js warns about: what is audible is *substituting* it for
+  // the timestamp handed to the client, because that is the clock the client
+  // drives animation and audio from. Nothing here touches that clock.
   const swap = env.eglSwapBuffers;
   if (typeof swap === 'function') {
     let waiting = true;
+    let previous = 0;
     env.eglSwapBuffers = (...args) => {
       const ok = swap(...args);
       if (waiting && ok) {
         waiting = false;
         firstFrame();
+      } else if (ok) {
+        const now = performance.now();
+        // The first interval after a stall spans the whole stall, so it is a
+        // real datum rather than an outlier to drop — a covered window is
+        // exactly what it should show.
+        if (previous) {
+          const ms = now - previous;
+          diagnostics.count('gw.frames', 1);
+          diagnostics.gauge('gw.frame.ms', ms);
+          diagnostics.peak('gw.frame.ms.max', ms);
+        }
+        previous = now;
       }
       return ok;
     };

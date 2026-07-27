@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::chunks::ChunkStore;
+use crate::diagnostics::{self, Recorder};
 use crate::patch::SNAPSHOT;
 use crate::sockets::{self, Registry};
 use crate::{keychain, net, proxy, qos, ws};
@@ -66,6 +67,7 @@ struct Context {
     root: PathBuf,
     snapshot: Option<Arc<ChunkStore>>,
     sockets: Arc<Registry>,
+    recorder: Arc<Recorder>,
     token: String,
 }
 
@@ -79,6 +81,7 @@ struct Context {
 pub fn spawn(
     root: PathBuf,
     snapshot: Option<Arc<ChunkStore>>,
+    recorder: Arc<Recorder>,
     token: String,
 ) -> std::io::Result<Loopback> {
     let listener = bind()?;
@@ -87,6 +90,7 @@ pub fn spawn(
         root,
         snapshot,
         sockets: Arc::default(),
+        recorder,
         token,
     });
 
@@ -549,6 +553,33 @@ fn handle(
         return Ok(flow);
     }
 
+    // The page's own metrics. POST folds a batch in, GET reads back everything
+    // the host has — its own sampler's figures included, so one fetch answers
+    // "what is this process doing" from inside the page.
+    if request.path == "__diag" {
+        if request.method == "POST" {
+            match serde_json::from_slice(&request.body) {
+                Ok(body) => diagnostics::absorb(&context.recorder.metrics, &body),
+                Err(e) => eprintln!("[diag] ignoring a malformed batch: {e}"),
+            }
+        }
+        let usage = diagnostics::usage().unwrap_or_default();
+        let body = serde_json::json!({
+            "footprintMiB": usage.footprint as f64 / 1048576.0,
+            "cpuSeconds": usage.cpu().as_secs_f64(),
+            "metrics": context.recorder.metrics.snapshot(),
+        });
+        respond(
+            stream,
+            200,
+            "OK",
+            "application/json",
+            body.to_string().as_bytes(),
+            &[],
+        )?;
+        return Ok(flow);
+    }
+
     // The harness says the first frame is up. Everything the store read before
     // now is what booting costs, so that is the list worth warming next time.
     if request.path == "__booted"
@@ -580,10 +611,21 @@ fn handle(
     if request.path == SNAPSHOT
         && let Some(store) = &context.snapshot
     {
+        // Worth timing rather than merely counting: a range that has to fetch
+        // the chunks it covers blocks the client for as long as it takes, and
+        // it is the one host-side latency the player feels directly. The mean
+        // hides that, so keep the worst as well.
+        let began = std::time::Instant::now();
         // A range that fails part way through has already put bytes on the wire
         // under a Content-Length it can no longer honour. There is no way back
         // to a clean message boundary, so the connection ends here.
-        return Ok(match serve_snapshot(stream, &request, store)? {
+        let intact = serve_snapshot(stream, &request, store)?;
+        let ms = began.elapsed().as_secs_f64() * 1000.0;
+        let metrics = &context.recorder.metrics;
+        metrics.count("gw.range.requests", 1.0);
+        metrics.gauge("gw.range.ms", ms);
+        metrics.peak("gw.range.ms.max", ms);
+        return Ok(match intact {
             true => flow,
             false => Flow::Close,
         });
