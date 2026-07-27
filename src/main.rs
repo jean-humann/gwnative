@@ -18,6 +18,7 @@ mod instance;
 mod keychain;
 mod layout;
 mod manifest;
+mod menu;
 mod net;
 mod patch;
 mod proxy;
@@ -35,12 +36,11 @@ mod ws;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use objc2::MainThreadOnly;
 use objc2::rc::Retained;
-use objc2::runtime::Sel;
-use objc2::{MainThreadOnly, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
-    NSEventModifierFlags, NSMenu, NSMenuItem, NSRunningApplication,
+    NSRunningApplication,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL, NSURLRequest};
 use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration};
@@ -289,14 +289,21 @@ fn main() {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
-    app.setMainMenu(Some(&make_menu(mtm)));
-
     // The frame the web view is created at does not matter: `window::open`
     // resizes the window to the remembered one before it is ever shown, and the
     // content view follows.
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
     let webview = make_webview(mtm, frame, &url, &token, &loopback.settings.get());
     let window = window::open(mtm, &webview, support_dir().join("window.json"));
+
+    // After the window, not before: two of the menu's items are requests to the
+    // page, and one moves the window. The menu only has to exist before `run`.
+    app.setMainMenu(Some(&menu::install(
+        mtm,
+        &webview,
+        loopback.settings.clone(),
+        diagnostics::default_log_dir(),
+    )));
 
     commands::attach(&webview);
     // After the load has been asked for, which is fine: the delegate is
@@ -453,92 +460,4 @@ fn make_webview(
     unsafe { webview.loadRequest(&request) };
 
     webview
-}
-
-/// The application menu bar.
-///
-/// It is not decoration. A ⌘-key is delivered as a key equivalent, and what
-/// turns ⌘V into the `paste:` action is an Edit menu item claiming it — with no
-/// main menu, pasting an account name into the login field does nothing, and so
-/// does ⌘Q. WKWebView already implements every one of these actions; the menu
-/// only supplies the route to them.
-fn make_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
-    fn item(
-        mtm: MainThreadMarker,
-        title: &str,
-        action: Sel,
-        key: &str,
-        modifiers: Option<NSEventModifierFlags>,
-    ) -> Retained<NSMenuItem> {
-        // SAFETY: the selectors are AppKit's own first-responder actions, sent
-        // down the responder chain rather than to a specific object.
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(title),
-                Some(action),
-                &NSString::from_str(key),
-            )
-        };
-        if let Some(modifiers) = modifiers {
-            item.setKeyEquivalentModifierMask(modifiers);
-        }
-        item
-    }
-
-    fn submenu(mtm: MainThreadMarker, title: &str, items: &[&NSMenuItem]) -> Retained<NSMenuItem> {
-        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
-        for item in items {
-            menu.addItem(item);
-        }
-        let holder = NSMenuItem::new(mtm);
-        holder.setSubmenu(Some(&menu));
-        holder
-    }
-
-    let command = NSEventModifierFlags::Command;
-    let menu = NSMenu::new(mtm);
-
-    // The first submenu is the application menu whatever it is titled; macOS
-    // substitutes the process name for the title it is given.
-    menu.addItem(&submenu(
-        mtm,
-        "Guild Wars",
-        &[
-            &item(mtm, "Hide Guild Wars", sel!(hide:), "h", None),
-            &item(
-                mtm,
-                "Hide Others",
-                sel!(hideOtherApplications:),
-                "h",
-                Some(command | NSEventModifierFlags::Option),
-            ),
-            &NSMenuItem::separatorItem(mtm),
-            &item(mtm, "Quit Guild Wars", sel!(terminate:), "q", None),
-        ],
-    ));
-
-    // Cut and copy matter as much as paste: the client's own fields are these
-    // proxies, so the player expects the ordinary Mac editing keys in them.
-    menu.addItem(&submenu(
-        mtm,
-        "Edit",
-        &[
-            &item(mtm, "Undo", sel!(undo:), "z", None),
-            &item(
-                mtm,
-                "Redo",
-                sel!(redo:),
-                "z",
-                Some(command | NSEventModifierFlags::Shift),
-            ),
-            &NSMenuItem::separatorItem(mtm),
-            &item(mtm, "Cut", sel!(cut:), "x", None),
-            &item(mtm, "Copy", sel!(copy:), "c", None),
-            &item(mtm, "Paste", sel!(paste:), "v", None),
-            &item(mtm, "Select All", sel!(selectAll:), "a", None),
-        ],
-    ));
-
-    menu
 }

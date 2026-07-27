@@ -505,6 +505,37 @@ set to keep comes from the manifest rather than from a listing, so a chunk being
 written this instant is one the manifest named and survives; a manifest that
 names nothing at all is disbelieved rather than obeyed.
 
+**A menu bar that reaches the things AppKit hides.** A ⌘-key is delivered as a
+key equivalent, and what turns ⌘V into `paste:` is an Edit menu item claiming
+it: with no main menu, pasting an account name into the login field does
+nothing, and neither does ⌘Q. Full screen is the same story — without an item
+there is no ⌃⌘F, and the green button is a poor only way in for a game.
+
+The rest of the menu is things with no other route. **Reset Window Size and
+Position** is the escape hatch for a window the fitting above cannot rescue,
+because nothing about it is wrong: dragged mostly off an edge, or left full
+screen on a machine whose second display went away. Leaving full screen is
+animated and ends by restoring the frame the window had before it started —
+which is the frame being replaced — so the new frame is queued and applied when
+`NSWindowDidExitFullScreen` says the animation is over. **Toggle Diagnostics**
+writes the setting and tells the live page, because the page reads that setting
+once at boot and will not read it again. **Reload Game** is deliberately
+unguarded, unlike the Electron build, which asks first when a game socket is
+open: there ⌘R is a browser reflex Chromium honours everywhere, here the key
+equivalent exists only because the item does, and the reload is the escape
+hatch for a client that has already stopped answering — which is exactly when a
+modal about sockets is in the way.
+
+**Show Diagnostics Log…** reveals `gwnative.jsonl` in the Finder rather than
+exporting a report. The Electron build has to build one because its diagnostics
+live in memory; here they have been a file on disk all along, a line a second
+for the whole session, so an export would be a copy of something the player can
+attach to an issue directly. **Project Website** is absent from this build on
+purpose: the item's URL comes from the package's `repository` field, and a Help
+menu that offers to open a website and then opens nothing — or opens someone
+else's repository because the URL was guessed — is worse than a Help menu with
+one item in it.
+
 And one instance at a time. Two copies share the web root, the generation
 record, the settings file and the boot list, each written whole — only the
 content-addressed chunk cache survives the collision, which is why it went
