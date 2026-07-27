@@ -1,0 +1,10 @@
+/target
+/dist
+*.app
+.DS_Store
+
+# Game data and client artifacts are fetched from ArenaNet at runtime and are
+# never committed.
+/web/Gw.jspi.*
+/web/version.json
+*.dat

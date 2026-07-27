@@ -1,0 +1,25 @@
+[package]
+name = "gwnative"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.90"
+description = "Native macOS host for the Guild Wars WebAssembly client"
+license = "GPL-2.0-or-later"
+publish = false
+
+[[bin]]
+name = "gwnative"
+path = "src/main.rs"
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-web-kit = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
