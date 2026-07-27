@@ -15,10 +15,15 @@ import * as diagnostics from './diagnostics.js';
 const handlers = new Map();
 
 /**
+ * Not exported. Every command in the vocabulary is registered below, in this
+ * file, on purpose: that is what makes the list readable next to `send` in
+ * `src/commands.rs`. A module that registered its own would move half the
+ * vocabulary somewhere the other side cannot be checked against.
+ *
  * @param {string} name
  * @param {(detail: unknown) => void} run
  */
-export function onCommand(name, run) {
+function onCommand(name, run) {
   handlers.set(name, run);
 }
 

@@ -12,6 +12,7 @@ mod diagnostics;
 mod disk;
 mod error;
 mod generation;
+mod http;
 mod instance;
 mod keychain;
 mod layout;
