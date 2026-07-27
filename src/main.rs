@@ -17,6 +17,7 @@ mod patch;
 mod proxy;
 mod qos;
 mod server;
+mod settings;
 mod sockets;
 mod wasm;
 mod ws;
@@ -190,12 +191,19 @@ fn main() {
         }
     };
 
+    // Read before the window exists: the render scale the client is handed and
+    // the gesture translation the page installs are both settled before the
+    // first frame, so asking the page to fetch them later would mean booting
+    // once at the wrong scale and correcting it in front of the player.
+    let settings = Arc::new(settings::Store::open(support_dir().join("settings.json")));
+
     let token = session_token();
     let loopback = server::spawn(
         root.clone(),
         snapshot,
         recorder,
         derived_wasm,
+        settings,
         token.clone(),
     )
     .expect("bind loopback");
@@ -216,7 +224,7 @@ fn main() {
     app.setMainMenu(Some(&make_menu(mtm)));
 
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
-    let webview = make_webview(mtm, frame, &url, &token);
+    let webview = make_webview(mtm, frame, &url, &token, &loopback.settings.get());
     let window = make_window(mtm, frame, &webview);
 
     commands::attach(&webview);
@@ -278,6 +286,7 @@ fn make_webview(
     frame: NSRect,
     url: &str,
     token: &str,
+    settings: &settings::Settings,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
 
@@ -288,15 +297,22 @@ fn make_webview(
     // The keyboard layout rides the same channel for a different reason: it has
     // to be in place before the page can see a keydown, and a fetch at boot
     // would not be. See `layout` for what the page does with it.
+    //
+    // Settings ride it for that same reason. The render scale is read by the
+    // client's first call into the graphics host and the touch mode decides
+    // which listeners `input.js` installs, so both are needed before anything
+    // the page could await. `PUT /__settings` is what changes them afterwards;
+    // this is only the value they start at.
     unsafe {
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
             WKUserScript::alloc(mtm),
             &NSString::from_str(&format!(
                 "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
-                 window.__gwnativeBridgeMarkers = {};",
+                 window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};",
                 serde_json::Value::from(token),
                 layout::as_json(),
-                wasm::markers_json()
+                wasm::markers_json(),
+                serde_json::to_string(settings).unwrap_or_else(|_| "{}".to_owned()),
             )),
             WKUserScriptInjectionTime::AtDocumentStart,
             true,

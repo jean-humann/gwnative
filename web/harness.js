@@ -235,6 +235,9 @@ const STARTUP_LABELS = {
 };
 
 let imageSource = null;
+// Overwritten from the settings the host injects, before the client's first
+// call into the graphics host. 1 is only what it reads if that injection is
+// missing entirely — the shape a page opened outside the app has.
 let renderScale = 1;
 
 // The supporting modules are ESM; this bootstrap is not, because the generated
@@ -447,7 +450,7 @@ function appendGlue() {
   }
 
   try {
-    const [graphics, filesystem, image, sockets, platform, input, templates, metrics] =
+    const [graphics, filesystem, image, sockets, platform, input, templates, prefs, metrics] =
       await Promise.all([
         import('./graphics.js'),
         import('./filesystem.js'),
@@ -456,6 +459,7 @@ function appendGlue() {
         import('./platform-capabilities.js'),
         import('./input.js'),
         import('./template-save.js'),
+        import('./settings.js'),
         import('./diagnostics.js'),
       ]);
     host = {
@@ -466,6 +470,7 @@ function appendGlue() {
       ...platform,
       ...input,
       ...templates,
+      ...prefs,
     };
     // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
     // contract could plausibly want for something else.
@@ -473,6 +478,23 @@ function appendGlue() {
   } catch (error) {
     return fail(`The game host contract could not be loaded: ${error}`);
   }
+
+  // The settings that decide how the client is built, applied before it exists.
+  // Synchronous on purpose — see settings.js for why they are injected rather
+  // than fetched. Anything that changes one of these afterwards has to reload,
+  // which is what the host already does for a client-module change.
+  const settings = host.currentSettings();
+  renderScale = settings.renderScale;
+  if (settings.showDiagnostics) window.gwLog(true);
+  // Said out loud for the same reason input.js announces its touch mode: the
+  // render scale is the one setting whose effect is a cost rather than a
+  // control, so a session's log has to record which one it was paying.
+  log(`settings: render scale ${settings.renderScale}, touch mode ${settings.touchMode}`);
+  window.gwSettings = {
+    current: host.currentSettings,
+    read: host.readSettings,
+    save: host.saveSettings,
+  };
 
   if (!('Suspending' in WebAssembly)) {
     return fail('This WebView lacks WebAssembly JSPI (WebAssembly.Suspending).');
@@ -551,7 +573,11 @@ function appendGlue() {
 
   // Before the glue, so a corrected key event replaces the original rather than
   // arriving after the client has already acted on it.
-  window.gwInput = host.installGameInput({ canvas, log });
+  window.gwInput = host.installGameInput({
+    canvas,
+    touchMode: settings.touchMode,
+    log,
+  });
 
   // Text entry does not run through keydown on the canvas: the client focuses
   // one of these fields and reads the composed result back. Without them it
