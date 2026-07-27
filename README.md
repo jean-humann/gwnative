@@ -82,14 +82,12 @@ cargo run
 ```
 
 Missing client artifacts are fetched on first launch; `cargo run -- sync`
-refreshes them without opening a window. Both need the patch service access
-key, which this repository does not carry:
+refreshes them without opening a window. Neither needs setting up: the patch
+service access key identifies the official client rather than a player, so it is
+the same value everywhere and ships in `src/patch.rs`.
 
-```sh
-export GWNATIVE_ACCESS_KEY=...
-```
-
-`GWNATIVE_WEB_ROOT` overrides the harness directory and `GWNATIVE_PATCH_ROOT`
+`GWNATIVE_ACCESS_KEY` overrides it should ArenaNet rotate the value,
+`GWNATIVE_WEB_ROOT` overrides the harness directory, and `GWNATIVE_PATCH_ROOT`
 the patch endpoint.
 
 ## Licence

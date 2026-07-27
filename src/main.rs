@@ -7,9 +7,11 @@
 
 mod chunks;
 mod error;
+mod keychain;
 mod manifest;
 mod net;
 mod patch;
+mod proxy;
 mod server;
 mod sockets;
 mod ws;
@@ -17,13 +19,15 @@ mod ws;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use objc2::MainThreadOnly;
 use objc2::rc::Retained;
+use objc2::runtime::Sel;
+use objc2::{MainThreadOnly, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEventModifierFlags, NSMenu,
+    NSMenuItem, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL, NSURLRequest};
-use objc2_web_kit::{WKWebView, WKWebViewConfiguration};
+use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration};
 
 fn web_root() -> PathBuf {
     // Development runs from the source tree; a packaged build reads from
@@ -83,7 +87,8 @@ fn main() {
         }
     };
 
-    let loopback = server::spawn(root.clone(), snapshot).expect("bind loopback");
+    let token = session_token();
+    let loopback = server::spawn(root.clone(), snapshot, token.clone()).expect("bind loopback");
     let url = format!("http://{}/index.html", loopback.addr);
     eprintln!("[gwnative] serving {} at {}", root.display(), url);
 
@@ -98,8 +103,10 @@ fn main() {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
+    app.setMainMenu(Some(&make_menu(mtm)));
+
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
-    let webview = make_webview(mtm, frame, &url);
+    let webview = make_webview(mtm, frame, &url, &token);
     let window = make_window(mtm, frame, &webview);
 
     window.makeKeyAndOrderFront(None);
@@ -130,8 +137,53 @@ fn sync(root: &Path, missing: &[&'static str]) -> error::Result<()> {
     Ok(())
 }
 
-fn make_webview(mtm: MainThreadMarker, frame: NSRect, url: &str) -> Retained<WKWebView> {
+/// A fresh random secret per launch, shared with the page and nothing else.
+///
+/// From the kernel, not a seeded generator: this authorises reading the saved
+/// password, so it must not be reproducible by anything that knows when the
+/// process started.
+fn session_token() -> String {
+    let mut bytes = [0u8; 32];
+    getrandom(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn getrandom(buffer: &mut [u8]) {
+    // SAFETY: `buffer` is a live slice and its length is passed alongside it.
+    // `getentropy` fills exactly that many bytes and cannot fail for a length
+    // of 256 or under, which is the only way it is called here.
+    let status = unsafe { libc_getentropy(buffer.as_mut_ptr(), buffer.len()) };
+    assert_eq!(status, 0, "getentropy failed");
+}
+
+unsafe extern "C" {
+    #[link_name = "getentropy"]
+    fn libc_getentropy(buffer: *mut u8, length: usize) -> i32;
+}
+
+fn make_webview(
+    mtm: MainThreadMarker,
+    frame: NSRect,
+    url: &str,
+    token: &str,
+) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
+
+    // Hand the page its token out of band. Serving it over the loopback origin
+    // instead would put it where any local process could simply ask for it,
+    // which is the exposure the token exists to close.
+    unsafe {
+        let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+            WKUserScript::alloc(mtm),
+            &NSString::from_str(&format!(
+                "window.__gwnativeToken = {};",
+                serde_json::Value::from(token)
+            )),
+            WKUserScriptInjectionTime::AtDocumentStart,
+            true,
+        );
+        config.userContentController().addUserScript(&script);
+    }
 
     let webview =
         unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config) };
@@ -150,6 +202,94 @@ fn make_webview(mtm: MainThreadMarker, frame: NSRect, url: &str) -> Retained<WKW
     unsafe { webview.loadRequest(&request) };
 
     webview
+}
+
+/// The application menu bar.
+///
+/// It is not decoration. A ⌘-key is delivered as a key equivalent, and what
+/// turns ⌘V into the `paste:` action is an Edit menu item claiming it — with no
+/// main menu, pasting an account name into the login field does nothing, and so
+/// does ⌘Q. WKWebView already implements every one of these actions; the menu
+/// only supplies the route to them.
+fn make_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
+    fn item(
+        mtm: MainThreadMarker,
+        title: &str,
+        action: Sel,
+        key: &str,
+        modifiers: Option<NSEventModifierFlags>,
+    ) -> Retained<NSMenuItem> {
+        // SAFETY: the selectors are AppKit's own first-responder actions, sent
+        // down the responder chain rather than to a specific object.
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::from_str(key),
+            )
+        };
+        if let Some(modifiers) = modifiers {
+            item.setKeyEquivalentModifierMask(modifiers);
+        }
+        item
+    }
+
+    fn submenu(mtm: MainThreadMarker, title: &str, items: &[&NSMenuItem]) -> Retained<NSMenuItem> {
+        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+        for item in items {
+            menu.addItem(item);
+        }
+        let holder = NSMenuItem::new(mtm);
+        holder.setSubmenu(Some(&menu));
+        holder
+    }
+
+    let command = NSEventModifierFlags::Command;
+    let menu = NSMenu::new(mtm);
+
+    // The first submenu is the application menu whatever it is titled; macOS
+    // substitutes the process name for the title it is given.
+    menu.addItem(&submenu(
+        mtm,
+        "Guild Wars",
+        &[
+            &item(mtm, "Hide Guild Wars", sel!(hide:), "h", None),
+            &item(
+                mtm,
+                "Hide Others",
+                sel!(hideOtherApplications:),
+                "h",
+                Some(command | NSEventModifierFlags::Option),
+            ),
+            &NSMenuItem::separatorItem(mtm),
+            &item(mtm, "Quit Guild Wars", sel!(terminate:), "q", None),
+        ],
+    ));
+
+    // Cut and copy matter as much as paste: the client's own fields are these
+    // proxies, so the player expects the ordinary Mac editing keys in them.
+    menu.addItem(&submenu(
+        mtm,
+        "Edit",
+        &[
+            &item(mtm, "Undo", sel!(undo:), "z", None),
+            &item(
+                mtm,
+                "Redo",
+                sel!(redo:),
+                "z",
+                Some(command | NSEventModifierFlags::Shift),
+            ),
+            &NSMenuItem::separatorItem(mtm),
+            &item(mtm, "Cut", sel!(cut:), "x", None),
+            &item(mtm, "Copy", sel!(copy:), "c", None),
+            &item(mtm, "Paste", sel!(paste:), "v", None),
+            &item(mtm, "Select All", sel!(selectAll:), "a", None),
+        ],
+    ));
+
+    menu
 }
 
 fn make_window(mtm: MainThreadMarker, frame: NSRect, webview: &WKWebView) -> Retained<NSWindow> {
@@ -171,5 +311,11 @@ fn make_window(mtm: MainThreadMarker, frame: NSRect, webview: &WKWebView) -> Ret
     window.setTitle(&NSString::from_str("Guild Wars"));
     window.center();
     window.setContentView(Some(webview));
+    // Key events go to the first responder; mouse events are hit-tested and do
+    // not. A window that never hands the web view first responder therefore
+    // looks alive to the trackpad and deaf to the keyboard, which is exactly
+    // what the game does when its canvas never sees a keydown.
+    window.setInitialFirstResponder(Some(webview));
+    window.makeFirstResponder(Some(webview));
     window
 }

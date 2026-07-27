@@ -10,6 +10,7 @@
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
@@ -61,6 +62,48 @@ impl Drop for Slot {
 
 fn escape(text: &str) -> String {
     text.replace('\\', r"\\").replace('"', "\\\"")
+}
+
+/// Per-packet tracing, off unless `GWNATIVE_TRACE_SOCKETS` is set.
+///
+/// `=hex` additionally prints the head of each frame, which is what tells a
+/// heartbeat apart from a request that went unanswered. It stops at
+/// [`TRACE_HEAD`] bytes: the login exchange carries the account password, and a
+/// trace is exactly the kind of thing a bug report carries off the machine.
+/// A Guild Wars packet header fits well inside that, so the cap costs nothing.
+const TRACE_HEAD: usize = 16;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Trace {
+    Off,
+    Sizes,
+    Hex,
+}
+
+fn tracing() -> Trace {
+    static MODE: OnceLock<Trace> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("GWNATIVE_TRACE_SOCKETS") {
+        Err(_) => Trace::Off,
+        Ok(value) if value.eq_ignore_ascii_case("hex") => Trace::Hex,
+        Ok(_) => Trace::Sizes,
+    })
+}
+
+/// One trace line: direction, length, and — in hex mode — the capped head.
+fn trace(destination: &str, direction: &str, data: &[u8]) {
+    match tracing() {
+        Trace::Off => {}
+        Trace::Sizes => eprintln!("[socket] {destination}: {direction} {}", data.len()),
+        Trace::Hex => {
+            let head = &data[..data.len().min(TRACE_HEAD)];
+            let hex: String = head.iter().map(|b| format!("{b:02x}")).collect();
+            let elided = if data.len() > head.len() { "…" } else { "" };
+            eprintln!(
+                "[socket] {destination}: {direction} {} {hex}{elided}",
+                data.len()
+            );
+        }
+    }
 }
 
 /// Bridge an upgraded WebSocket to `destination` until either side closes.
@@ -125,6 +168,7 @@ pub fn bridge(
             }
         };
         let counter = Arc::clone(&downstream);
+        let destination = destination.to_owned();
         thread::spawn(move || {
             let mut buffer = vec![0u8; READ_BUFFER];
             loop {
@@ -132,6 +176,7 @@ pub fn bridge(
                     Ok(0) => break,
                     Ok(n) if sink.send(BINARY, &buffer[..n]).is_ok() => {
                         counter.fetch_add(n, Ordering::Relaxed);
+                        trace(&destination, "down", &buffer[..n]);
                     }
                     _ => break,
                 }
@@ -150,6 +195,7 @@ pub fn bridge(
         match ws::read_message(&mut reader, &sink) {
             Ok(Some(Message::Binary(data))) => {
                 sent += data.len();
+                trace(destination, "up", &data);
                 if game.write_all(&data).is_err() {
                     break;
                 }

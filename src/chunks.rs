@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 
 use crate::error::{Error, Result};
 use crate::manifest::{ContentHash, Manifest};
@@ -21,6 +22,25 @@ use crate::patch::Client;
 /// many reads the client has in flight.
 const MAX_CONCURRENT_FETCHES: usize = 8;
 
+/// Background prefetch never claims more than this share of
+/// [`MAX_CONCURRENT_FETCHES`], so a full download always leaves slots free for
+/// the reads the game is actually blocked on. Without the reserve a sweep of
+/// 16000 chunks would sit in front of every demand read and stall rendering —
+/// which is the whole reason gwonmac splits its queue by priority.
+const MAX_PREFETCH_FETCHES: usize = 3;
+
+/// Progress of a background full download.
+///
+/// `total` is 0 when no sweep has ever run, which is how the page tells "idle"
+/// apart from "finished".
+#[derive(Default)]
+pub struct Prefetch {
+    pub done: AtomicU64,
+    pub total: AtomicU64,
+    pub running: AtomicBool,
+    stop: AtomicBool,
+}
+
 pub struct ChunkStore {
     client: Client,
     manifest: Manifest,
@@ -29,7 +49,11 @@ pub struct ChunkStore {
     cache_dir: PathBuf,
     inflight: Mutex<HashMap<ContentHash, Arc<Slot>>>,
     permits: Semaphore,
+    /// Held *in addition to* `permits` by prefetch workers only. See
+    /// [`MAX_PREFETCH_FETCHES`].
+    prefetch_permits: Semaphore,
     stats: Stats,
+    prefetch: Prefetch,
 }
 
 /// Where chunks came from. `coalesced` is the count of reads that joined a
@@ -52,7 +76,9 @@ impl ChunkStore {
             cache_dir,
             inflight: Mutex::new(HashMap::new()),
             permits: Semaphore::new(MAX_CONCURRENT_FETCHES),
+            prefetch_permits: Semaphore::new(MAX_PREFETCH_FETCHES),
             stats: Stats::default(),
+            prefetch: Prefetch::default(),
         })
     }
 
@@ -173,6 +199,80 @@ impl ChunkStore {
             }
         }
         bits
+    }
+
+    /// How many chunks the snapshot is made of.
+    pub fn chunk_count(&self) -> usize {
+        self.manifest.files[&self.snapshot].chunk_hashes.len()
+    }
+
+    /// `(done, total, running)` for the current or last full download.
+    pub fn prefetch_progress(&self) -> (u64, u64, bool) {
+        (
+            self.prefetch.done.load(Ordering::Relaxed),
+            self.prefetch.total.load(Ordering::Relaxed),
+            self.prefetch.running.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Ask a running full download to stop at the next chunk boundary.
+    pub fn stop_full_download(&self) {
+        self.prefetch.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Start downloading every chunk that is not already cached.
+    ///
+    /// Returns `false` if a sweep is already running — starting a second one
+    /// would double the request rate against a shared access key for no gain.
+    /// Workers walk disjoint strides of the chunk list so no two of them race
+    /// for the same hash, and each one is throttled by `prefetch_permits` so
+    /// demand reads keep their share of the pool.
+    pub fn start_full_download(self: &Arc<Self>) -> bool {
+        if self.prefetch.running.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        self.prefetch.stop.store(false, Ordering::Relaxed);
+        self.prefetch.done.store(0, Ordering::Relaxed);
+        self.prefetch
+            .total
+            .store(self.chunk_count() as u64, Ordering::Relaxed);
+
+        let workers = MAX_PREFETCH_FETCHES;
+        let outstanding = Arc::new(AtomicU64::new(workers as u64));
+        for worker in 0..workers {
+            let store = Arc::clone(self);
+            let outstanding = Arc::clone(&outstanding);
+            thread::spawn(move || {
+                let total = store.chunk_count();
+                let mut index = worker;
+                while index < total {
+                    if store.prefetch.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // A cached chunk costs a stat, not a request, so the common
+                    // resume case sweeps the whole list almost instantly.
+                    let _permit = store.prefetch_permits.acquire();
+                    if let Err(e) = store.chunk(index) {
+                        // One bad chunk should not abandon the sweep; the game
+                        // will ask for it again on demand and surface the error
+                        // there, where it can be acted on.
+                        eprintln!("[gwnative] prefetch chunk {index}: {e}");
+                    }
+                    store.prefetch.done.fetch_add(1, Ordering::Relaxed);
+                    index += workers;
+                }
+                if outstanding.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    store.prefetch.running.store(false, Ordering::SeqCst);
+                    let (done, total, _) = store.prefetch_progress();
+                    eprintln!("[gwnative] full download finished: {done}/{total} chunks");
+                }
+            });
+        }
+        eprintln!(
+            "[gwnative] full download started: {} chunks, {workers} workers",
+            self.chunk_count()
+        );
+        true
     }
 
     fn cache_path(&self, hash: &ContentHash) -> PathBuf {
