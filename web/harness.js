@@ -249,6 +249,13 @@ Module = {
         performance.mark('gw.frame.first-submit');
         status(null);
         log('first frame presented');
+        // Everything the chunk store served up to here is what booting costs.
+        // Telling the host now, rather than at some later milestone, is what
+        // keeps the recorded list to the chunks that gate the first frame.
+        fetch('__booted', {
+          method: 'POST',
+          headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
+        }).catch(() => {});
       },
       log,
     });

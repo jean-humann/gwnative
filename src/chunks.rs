@@ -6,7 +6,7 @@
 //! Chunks are deduplicated by construction — the same hash appearing twice in
 //! the manifest is stored once.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::FileExt;
@@ -55,6 +55,12 @@ pub struct ChunkStore {
     prefetch_permits: Semaphore,
     stats: Stats,
     prefetch: Prefetch,
+    /// Which chunks this session has read, while the boot list is still being
+    /// recorded. See [`seal_boot_list`](ChunkStore::seal_boot_list).
+    touched: Mutex<BTreeSet<usize>>,
+    /// Whether `touched` is still accumulating. Checked before the lock, so a
+    /// sealed list costs a relaxed load per read rather than a mutex.
+    recording: AtomicBool,
     /// Hashes whose cached bytes have been checked against them this session.
     ///
     /// A 4 GB cache sitting on disk for months is exactly where bit rot shows
@@ -98,6 +104,8 @@ impl ChunkStore {
             prefetch_permits: Semaphore::new(MAX_PREFETCH_FETCHES),
             stats: Stats::default(),
             prefetch: Prefetch::default(),
+            touched: Mutex::default(),
+            recording: AtomicBool::new(true),
             verified: Mutex::default(),
         })
     }
@@ -183,6 +191,7 @@ impl ChunkStore {
     ) -> Result<()> {
         let hash = self.chunk_hash(index)?;
         let expected = self.chunk_length(index)?;
+        self.note(index);
         // Only chunks already hashed this session may be served by the window;
         // the full read in `chunk` is what earns them that place.
         if self.verified.lock().unwrap().contains(&hash)
@@ -329,6 +338,98 @@ impl ChunkStore {
     /// How many chunks the snapshot is made of.
     pub fn chunk_count(&self) -> usize {
         self.manifest.files[&self.snapshot].chunk_hashes.len()
+    }
+
+    /// Add `index` to the boot list, if it is still open.
+    fn note(&self, index: usize) {
+        if self.recording.load(Ordering::Relaxed) {
+            self.touched.lock().unwrap().insert(index);
+        }
+    }
+
+    /// Close the boot list and write it out.
+    ///
+    /// Called when the page reports its first frame, so what it records is
+    /// exactly the set of chunks between launch and a usable login screen —
+    /// the part of the snapshot every session pays for, and the only part
+    /// worth knowing in advance.
+    ///
+    /// Idempotent, because nothing stops the page saying so twice.
+    pub fn seal_boot_list(&self) {
+        if !self.recording.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let chunks: Vec<usize> = self.touched.lock().unwrap().iter().copied().collect();
+        if chunks.is_empty() {
+            return;
+        }
+        let count = chunks.len();
+        // The indices only mean the byte ranges they meant if the chunks are
+        // still the same size. Chunk *count* deliberately is not recorded: the
+        // snapshot grows with every patch, and an index below the old count
+        // still names the same offset, which is what the client reads by.
+        let list = BootList {
+            chunk_size: self.chunk_size(),
+            chunks,
+        };
+        match write_boot_list(&self.boot_list_path(), &list) {
+            Ok(()) => eprintln!("[gwnative] boot list: {count} chunks recorded"),
+            Err(e) => eprintln!("[gwnative] could not write the boot list: {e}"),
+        }
+    }
+
+    /// Fetch last session's boot chunks in the background, ahead of demand.
+    ///
+    /// On a warm cache this is a few thousand `stat` calls and nothing else. On
+    /// a cold one it is the whole point: the client asks for these chunks one
+    /// at a time as it needs them, so without this the boot is a serial chain
+    /// of round trips, and with it they overlap. `prefetch_permits` keeps the
+    /// warm-up behind whatever the client is actually blocked on, so being
+    /// wrong about the list costs bandwidth and never latency.
+    pub fn warm_boot(self: &Arc<Self>) {
+        let path = self.boot_list_path();
+        let Some(list) = read_boot_list(&path) else {
+            return;
+        };
+        if list.chunk_size != self.chunk_size() {
+            eprintln!(
+                "[gwnative] boot list is for {} KiB chunks, not {} KiB; discarding it",
+                list.chunk_size / 1024,
+                self.chunk_size() / 1024
+            );
+            let _ = fs::remove_file(&path);
+            return;
+        }
+
+        let total = self.chunk_count();
+        let chunks: Vec<usize> = list.chunks.into_iter().filter(|&i| i < total).collect();
+        if chunks.is_empty() {
+            return;
+        }
+        eprintln!("[gwnative] warming {} boot chunks", chunks.len());
+        let chunks = Arc::new(chunks);
+        for worker in 0..MAX_PREFETCH_FETCHES {
+            let store = Arc::clone(self);
+            let chunks = Arc::clone(&chunks);
+            thread::spawn(move || {
+                crate::qos::set(crate::qos::Class::Utility);
+                for &index in chunks.iter().skip(worker).step_by(MAX_PREFETCH_FETCHES) {
+                    let _permit = store.prefetch_permits.acquire();
+                    if let Err(e) = store.ensure(index) {
+                        // The list is a guess about a previous session. A chunk
+                        // that is gone or changed is ordinary, and the demand
+                        // read that wants it will report it properly.
+                        eprintln!("[gwnative] warm chunk {index}: {e}");
+                    }
+                }
+            });
+        }
+    }
+
+    fn boot_list_path(&self) -> PathBuf {
+        // Inside the cache rather than beside it: this describes that cache,
+        // and has to travel and be discarded with it.
+        self.cache_dir.join(BOOT_LIST)
     }
 
     /// `(done, total, running)` for the current or last full download.
@@ -520,6 +621,51 @@ fn read_window(path: &Path, expected: u64, within: usize, take: usize) -> Option
     Some(window)
 }
 
+/// Filename of the boot list, inside the cache directory.
+const BOOT_LIST: &str = "boot-chunks.json";
+
+/// The chunks one session read on its way to a first frame.
+struct BootList {
+    chunk_size: u64,
+    chunks: Vec<usize>,
+}
+
+fn write_boot_list(path: &Path, list: &BootList) -> std::io::Result<()> {
+    let body = serde_json::json!({
+        "chunkSize": list.chunk_size,
+        "chunks": list.chunks,
+    });
+    // Same rename-in discipline as a chunk: a warm-up that read a half-written
+    // list would warm a truncated set and never say why.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(body.to_string().as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// Read the boot list, or `None` if there is not a usable one. Every failure is
+/// the same answer — warm nothing — so none of them is worth distinguishing.
+fn read_boot_list(path: &Path) -> Option<BootList> {
+    let raw: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    Some(BootList {
+        chunk_size: raw.get("chunkSize")?.as_u64()?,
+        chunks: raw
+            .get("chunks")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_u64().map(|n| n as usize))
+            .collect(),
+    })
+}
+
 /// Anything left over from a crashed write. Older than this and no live writer
 /// can still own it: a chunk is 256 KiB, so a write that has not finished in an
 /// hour is not going to.
@@ -537,24 +683,30 @@ fn sweep_orphans(cache_dir: &Path) {
         return;
     };
     let mut removed = 0usize;
+    let mut take = |entry: fs::DirEntry| {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { return };
+        if !name.ends_with(".tmp") || name.contains(&ours) {
+            return;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .and_then(|t| t.elapsed().map_err(std::io::Error::other))
+            .is_ok_and(|age| age > ORPHAN_AGE);
+        if stale && fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    };
     for bucket in buckets.flatten() {
+        // The top level holds the boot list as well as the fan-out buckets, and
+        // it is written the same rename-in way, so it can leave the same litter.
         let Ok(entries) = fs::read_dir(bucket.path()) else {
+            take(bucket);
             continue;
         };
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if !name.ends_with(".tmp") || name.contains(&ours) {
-                continue;
-            }
-            let stale = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .and_then(|t| t.elapsed().map_err(std::io::Error::other))
-                .is_ok_and(|age| age > ORPHAN_AGE);
-            if stale && fs::remove_file(entry.path()).is_ok() {
-                removed += 1;
-            }
+            take(entry);
         }
     }
     if removed > 0 {
@@ -864,5 +1016,61 @@ mod tests {
             "another instance may be downloading this right now"
         );
         assert!(chunk.exists(), "a cached chunk is not a temp file");
+    }
+
+    #[test]
+    fn the_sweep_reaches_the_top_level_too() {
+        let temp = TempDir::new("toplevel");
+        let stale = temp.0.join("boot-chunks.999999.tmp");
+        let list = temp.0.join(BOOT_LIST);
+        fs::write(&stale, b"x").unwrap();
+        fs::write(&list, b"{}").unwrap();
+        let long_ago =
+            std::time::SystemTime::now() - ORPHAN_AGE - std::time::Duration::from_secs(60);
+        fs::File::open(&stale)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        sweep_orphans(&temp.0);
+
+        assert!(!stale.exists(), "the boot list writes temps here as well");
+        assert!(list.exists(), "the boot list itself is not litter");
+    }
+
+    #[test]
+    fn a_boot_list_survives_the_round_trip() {
+        let temp = TempDir::new("bootlist");
+        let path = temp.0.join(BOOT_LIST);
+        let list = BootList {
+            chunk_size: 256 * 1024,
+            chunks: vec![0, 1, 7, 16_166],
+        };
+
+        write_boot_list(&path, &list).unwrap();
+        let read = read_boot_list(&path).unwrap();
+
+        assert_eq!(read.chunk_size, list.chunk_size);
+        assert_eq!(read.chunks, list.chunks);
+        assert!(
+            !path
+                .with_extension(format!("{}.tmp", std::process::id()))
+                .exists(),
+            "the temp should have been renamed away, not left beside the list"
+        );
+    }
+
+    #[test]
+    fn a_boot_list_that_cannot_be_trusted_reads_as_absent() {
+        let temp = TempDir::new("bootjunk");
+        let path = temp.0.join(BOOT_LIST);
+
+        assert!(read_boot_list(&path).is_none(), "nothing written yet");
+        fs::write(&path, b"not json at all").unwrap();
+        assert!(read_boot_list(&path).is_none());
+        // A list without the chunk size cannot be checked against this
+        // snapshot's geometry, so it is worth no more than no list.
+        fs::write(&path, br#"{"chunks":[1,2]}"#).unwrap();
+        assert!(read_boot_list(&path).is_none());
     }
 }

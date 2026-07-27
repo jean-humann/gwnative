@@ -131,6 +131,10 @@ fn main() {
                 store.snapshot_size() as f64 / 1e9,
                 store.chunk_size() / 1024
             );
+            // Pull what the last boot needed while the window is still being
+            // built. By the time the client asks, the chunks that gate the
+            // first frame are already local.
+            store.warm_boot();
             Some(store)
         }
         Err(e) => {
