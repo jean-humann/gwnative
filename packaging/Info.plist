@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for Contents/Info.plist; scripts/bundle substitutes __VERSION__.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+
+	<key>CFBundleExecutable</key>
+	<string>gwnative</string>
+
+	<!--
+	  Must stay com.gwnative.app. codesign takes a bundle's signing identifier
+	  from this key, and the keychain records the application allowed to read
+	  the saved login by its signing identity. scripts/signed-run has been
+	  passing this same identifier to bare binaries since the identity was made
+	  stable, so a player who moves from a `cargo run` build to a bundle keeps
+	  their login instead of being quietly asked to sign in again.
+	-->
+	<key>CFBundleIdentifier</key>
+	<string>com.gwnative.app</string>
+
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+
+	<!--
+	  AppKit substitutes this for whatever title the first submenu was given, so
+	  it is the word that appears next to the Apple menu and inside "Hide …" and
+	  "Quit …". make_menu already writes those two out in full; this is the key
+	  that has to agree with them.
+	-->
+	<key>CFBundleName</key>
+	<string>Guild Wars</string>
+
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+
+	<!--
+	  The reason this bundle exists. Game Mode only considers applications in a
+	  game category, and a category can only be declared here — no amount of
+	  runtime configuration makes a bare executable eligible.
+	-->
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.games</string>
+
+	<!--
+	  The client is Gw.jspi.wasm: it suspends and resumes WebAssembly stacks
+	  through the JavaScript Promise Integration API, which WebKit shipped in
+	  Safari 18.2. Anything older loads the page and then fails to instantiate.
+	-->
+	<key>LSMinimumSystemVersion</key>
+	<string>15.2</string>
+
+	<!--
+	  Without this the window is composited at 1x and scaled up, which on a
+	  Retina display is exactly the blur the native port exists to avoid.
+	-->
+	<key>NSHighResolutionCapable</key>
+	<true/>
+
+	<!--
+	  Nothing here needs the discrete GPU. On the Intel machines that have one,
+	  saying so keeps the game on the integrated part and off the fans.
+	-->
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+
+	<!--
+	  The page is served from http://127.0.0.1 by design — a TLS certificate for
+	  loopback would have to be trusted machine-wide to buy nothing. This is the
+	  narrow exemption for that case; it does not permit insecure loads to
+	  anywhere else, and every remote host the client talks to goes out through
+	  the Rust side rather than the web view.
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<key>NSHumanReadableCopyright</key>
+	<string>GPL-2.0-or-later</string>
+</dict>
+</plist>

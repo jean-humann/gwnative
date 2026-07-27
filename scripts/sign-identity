@@ -1,0 +1,29 @@
+#!/bin/sh
+# Print the code-signing identity to use, or nothing if there is none.
+#
+# Deliberately discovered rather than hardcoded: the common name embeds a
+# developer's account, and these files are committed. `GWNATIVE_SIGN_IDENTITY`
+# overrides the search for anyone with more than one certificate installed.
+#
+# Shared by scripts/signed-run and scripts/bundle so a bare `cargo run` build
+# and a packaged one are signed by the same identity. They have to be: the
+# keychain matches the saved login against the signature, so two identities
+# would mean two applications and one of them without an account.
+set -e
+
+if [ -n "$GWNATIVE_SIGN_IDENTITY" ]; then
+	echo "$GWNATIVE_SIGN_IDENTITY"
+	exit 0
+fi
+
+identities=$(security find-identity -v -p codesigning 2>/dev/null || true)
+
+# Prefer a development certificate; fall back to whatever is installed, which
+# on a machine with only a self-signed certificate is still stable across
+# rebuilds and so still does the job.
+identity=$(echo "$identities" | sed -n 's/.*"\(Apple Development:.*\)"/\1/p' | head -1)
+if [ -z "$identity" ]; then
+	identity=$(echo "$identities" | sed -n 's/.*"\(.*\)"/\1/p' | head -1)
+fi
+
+echo "$identity"
