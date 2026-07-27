@@ -780,15 +780,7 @@ fn serve_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A scratch directory that is this test's alone, named for it.
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("gwnative-server-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::scratch::TempDir;
 
     /// One request, one answer: `(status, body)`.
     ///
@@ -840,7 +832,8 @@ mod tests {
     /// fallback covers the other order.
     #[test]
     fn the_settings_route_is_gated_typed_and_durable() {
-        let dir = scratch("settings");
+        let temp = TempDir::new("server-settings");
+        let dir = temp.0.clone();
         let file = dir.join("settings.json");
         let token = "test-token";
         let loopback = spawn(

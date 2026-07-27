@@ -6,6 +6,7 @@
 //! (patching, chunk storage, sockets, credentials, windowing) is Rust.
 
 mod app;
+mod cache;
 mod chunks;
 mod commands;
 mod diagnostics;
@@ -22,6 +23,8 @@ mod patch;
 mod proxy;
 mod qos;
 mod renderer;
+#[cfg(test)]
+mod scratch;
 mod server;
 mod settings;
 mod sockets;
@@ -45,7 +48,7 @@ use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebVie
 /// `~/Library/Application Support/gwnative`, the one place this app writes.
 ///
 /// The chunk cache is already a directory inside it — see
-/// [`chunks::default_cache_dir`], which explains why it is here rather than in
+/// [`cache::default_cache_dir`], which explains why it is here rather than in
 /// `~/Library/Caches`.
 fn support_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
@@ -315,7 +318,7 @@ fn main() {
 fn open_snapshot() -> error::Result<Arc<chunks::ChunkStore>> {
     let client = patch::Client::from_env()?;
     let manifest = client.fetch_manifest()?;
-    let store = chunks::ChunkStore::open(client, manifest, chunks::default_cache_dir())?;
+    let store = chunks::ChunkStore::open(client, manifest, cache::default_cache_dir())?;
     Ok(Arc::new(store))
 }
 
