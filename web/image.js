@@ -114,7 +114,9 @@ export async function loadSnapshotMetadata() {
     throw new Error('snapshot metadata: no usable Content-Length');
   }
 
-  const residency = await fetch('__resident');
+  const residency = await fetch('__resident', {
+    headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
+  });
   if (!residency.ok) throw new Error(`snapshot residency: HTTP ${residency.status}`);
   const chunkSize = Number(residency.headers.get('X-Chunk-Size'));
   const resident = new Uint8Array(await residency.arrayBuffer());

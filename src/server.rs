@@ -155,6 +155,17 @@ impl Request {
         })
     }
 
+    /// The token the caller offered, by header or by query string.
+    ///
+    /// The header is the right place for it and is what every `fetch` here
+    /// uses. The query string exists for one caller: a browser `WebSocket`
+    /// cannot set request headers, so `__socket` — the route that bridges to
+    /// arbitrary outbound TCP, and therefore the one most worth gating — has
+    /// nowhere else to carry it. Nothing logs the query string.
+    fn offered_token(&self) -> Option<String> {
+        self.token.clone().or_else(|| self.param("token"))
+    }
+
     fn wants_websocket(&self) -> bool {
         self.upgrade
             .as_deref()
@@ -367,6 +378,25 @@ fn handle(
         eprintln!("[loopback] -> {} /{}", request.method, request.path);
     }
 
+    // Every `__` route is a host capability rather than page content: name
+    // resolution, an outbound TCP bridge, the keychain, the download control,
+    // the residency map. Loopback is host-wide — any process running as this
+    // user can reach this port — so the token is the whole of what separates
+    // the page from everything else on the machine, and it belongs on all of
+    // them rather than only on the one that happens to touch a password.
+    // `Gw.snapshot` and the static files stay open, because the vendored client
+    // requests those itself and cannot be taught to carry a token.
+    if request.path.starts_with("__")
+        && !token_matches(&context.token, request.offered_token().as_deref())
+    {
+        eprintln!(
+            "[loopback] refused an untokened {} /{}",
+            request.method, request.path
+        );
+        respond(stream, 403, "Forbidden", "text/plain", b"forbidden", &[])?;
+        return Ok(flow);
+    }
+
     // Diagnostic channel for the bring-up harness. Real host calls will go over
     // WKScriptMessageHandlerWithReply; this only exists so a page can report
     // results without a UI.
@@ -409,16 +439,8 @@ fn handle(
         return Ok(flow);
     }
 
-    // Saved login. Gated on the injected token; see `spawn`.
+    // Saved login. Already gated above with every other `__` route.
     if request.path == "__credentials" {
-        if !token_matches(&context.token, request.token.as_deref()) {
-            eprintln!(
-                "[credentials] refused an untokened {} request",
-                request.method
-            );
-            respond(stream, 403, "Forbidden", "text/plain", b"forbidden", &[])?;
-            return Ok(flow);
-        }
         match request.method.as_str() {
             "GET" => match keychain::load() {
                 Some(credentials) => {
