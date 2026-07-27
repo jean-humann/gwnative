@@ -6,9 +6,10 @@
 //! Chunks are deduplicated by construction — the same hash appearing twice in
 //! the manifest is stored once.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -54,6 +55,15 @@ pub struct ChunkStore {
     prefetch_permits: Semaphore,
     stats: Stats,
     prefetch: Prefetch,
+    /// Hashes whose cached bytes have been checked against them this session.
+    ///
+    /// A 4 GB cache sitting on disk for months is exactly where bit rot shows
+    /// up, and length alone cannot see it: the file is still the right size, so
+    /// the corrupt bytes go straight to the client as game data. Re-hashing on
+    /// every read would cost a full 256 KiB read per 472-byte request, which is
+    /// the amplification the pread path exists to remove — so each chunk is
+    /// checked the first time this session asks for it and preads after that.
+    verified: Mutex<HashSet<ContentHash>>,
 }
 
 /// Where chunks came from. `coalesced` is the count of reads that joined a
@@ -69,6 +79,12 @@ impl ChunkStore {
     pub fn open(client: Client, manifest: Manifest, cache_dir: PathBuf) -> Result<Self> {
         let snapshot = manifest.require_unique(crate::patch::SNAPSHOT)?.to_owned();
         fs::create_dir_all(&cache_dir)?;
+        // Off the launch path: this walks 256 directories and the game has
+        // nothing to gain by waiting for it.
+        thread::spawn({
+            let cache_dir = cache_dir.clone();
+            move || sweep_orphans(&cache_dir)
+        });
         Ok(Self {
             client,
             manifest,
@@ -79,6 +95,7 @@ impl ChunkStore {
             prefetch_permits: Semaphore::new(MAX_PREFETCH_FETCHES),
             stats: Stats::default(),
             prefetch: Prefetch::default(),
+            verified: Mutex::default(),
         })
     }
 
@@ -98,42 +115,121 @@ impl ChunkStore {
         self.manifest.chunk_size
     }
 
-    /// Read `length` bytes at `offset` from the snapshot, fetching whatever
-    /// chunks are not cached. A read past the end is clamped, not an error.
-    pub fn read(&self, offset: u64, length: u64) -> Result<Vec<u8>> {
+    /// How many bytes a read at `offset` for `length` will actually produce.
+    ///
+    /// Arithmetic, not I/O. The range handler needs a Content-Length before it
+    /// has read a byte, so it can send the head and stream the body straight to
+    /// the socket instead of buffering the whole span to measure it.
+    pub fn readable(&self, offset: u64, length: u64) -> u64 {
         let size = self.snapshot_size();
         if offset >= size {
-            return Ok(Vec::new());
+            0
+        } else {
+            length.min(size - offset)
         }
-        let end = size.min(offset.saturating_add(length));
+    }
+
+    /// Write `length` bytes at `offset` from the snapshot to `out`, fetching
+    /// whatever chunks are not cached. A read past the end is clamped, not an
+    /// error.
+    ///
+    /// Returns the number of bytes written, which always equals
+    /// [`readable`](Self::readable) when it returns `Ok`. A failure part way
+    /// through has already written to `out`, so a caller that has committed to a
+    /// response cannot recover — it has to close the connection.
+    pub fn read_into(&self, offset: u64, length: u64, out: &mut impl Write) -> Result<u64> {
+        let produced = self.readable(offset, length);
+        let end = offset + produced;
         let chunk_size = self.chunk_size();
 
-        let mut out = Vec::with_capacity((end - offset) as usize);
         let mut cursor = offset;
         while cursor < end {
             let index = (cursor / chunk_size) as usize;
-            let chunk = self.chunk(index)?;
             let within = (cursor % chunk_size) as usize;
-            let take = ((end - cursor) as usize).min(chunk.len() - within);
-            out.extend_from_slice(&chunk[within..within + take]);
+            let resident = self.chunk_length(index)?;
+            // A manifest whose chunk is shorter than the offset into it would
+            // otherwise underflow, or leave `take` at zero and spin here.
+            let rest = resident
+                .checked_sub(within as u64)
+                .filter(|&rest| rest > 0)
+                .ok_or_else(|| {
+                    Error::ManifestFormat(format!(
+                        "chunk {index} is {resident} bytes, shorter than the offset {within} into it"
+                    ))
+                })?;
+            let take = ((end - cursor) as usize).min(rest as usize);
+            self.window_into(index, within, take, out)?;
             cursor += take as u64;
         }
-        Ok(out)
+        Ok(produced)
+    }
+
+    /// Write `take` bytes starting `within` chunk `index` to `out`.
+    ///
+    /// The cached path reads exactly that window with one `pread`. It matters
+    /// more than it looks: the client's median snapshot read is 9 KB and ten
+    /// thousand of them a session are *472 bytes*, so pulling the enclosing
+    /// 256 KiB file in to answer each one turned 6 MB of wanted data into 3 GB
+    /// of read data.
+    fn window_into(
+        &self,
+        index: usize,
+        within: usize,
+        take: usize,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        let hash = self.chunk_hash(index)?;
+        let expected = self.chunk_length(index)?;
+        // Only chunks already hashed this session may be served by the window;
+        // the full read in `chunk` is what earns them that place.
+        if self.verified.lock().unwrap().contains(&hash)
+            && let Some(window) = self.read_cached_window(&hash, expected, within, take)
+        {
+            self.stats.from_cache.fetch_add(1, Ordering::Relaxed);
+            out.write_all(&window)?;
+            return Ok(());
+        }
+        let chunk = self.chunk(index)?;
+        out.write_all(&chunk[within..within + take])?;
+        Ok(())
+    }
+
+    fn chunk_hash(&self, index: usize) -> Result<ContentHash> {
+        self.manifest.files[&self.snapshot]
+            .chunk_hashes
+            .get(index)
+            .cloned()
+            .ok_or_else(|| Error::ManifestFormat(format!("chunk {index} out of range")))
+    }
+
+    /// How long chunk `index` is — the last one is short.
+    fn chunk_length(&self, index: usize) -> Result<u64> {
+        self.manifest
+            .chunk_length(&self.snapshot, index)
+            .ok_or_else(|| Error::ManifestFormat(format!("chunk {index} out of range")))
+    }
+
+    /// Make sure chunk `index` is on disk, without reading its bytes.
+    ///
+    /// A resume sweep walks all 16167 chunks, and asking each one for its
+    /// contents would read — and, the first time, hash — the entire 4 GB cache
+    /// to learn what a `stat` already says. Integrity is still checked, just at
+    /// the point where the game actually reads the chunk, which is the only
+    /// place a corrupt one can do harm.
+    fn ensure(&self, index: usize) -> Result<()> {
+        let hash = self.chunk_hash(index)?;
+        if self.cached_len(&hash) == Some(self.chunk_length(index)?) {
+            self.stats.from_cache.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+        self.chunk(index).map(|_| ())
     }
 
     /// Fetch chunk `index`, from cache if present. Concurrent callers asking
     /// for the same chunk share one fetch rather than racing to download it.
     fn chunk(&self, index: usize) -> Result<Arc<Vec<u8>>> {
-        let entry = &self.manifest.files[&self.snapshot];
-        let hash = entry
-            .chunk_hashes
-            .get(index)
-            .ok_or_else(|| Error::ManifestFormat(format!("chunk {index} out of range")))?
-            .clone();
-        let expected = self
-            .manifest
-            .chunk_length(&self.snapshot, index)
-            .expect("index checked above");
+        let hash = self.chunk_hash(index)?;
+        let expected = self.chunk_length(index)?;
 
         if let Some(cached) = self.read_cached(&hash, expected) {
             self.stats.from_cache.fetch_add(1, Ordering::Relaxed);
@@ -173,8 +269,14 @@ impl ChunkStore {
             Ok(bytes) => {
                 // Cache failures are not read failures: a full or read-only
                 // cache should cost speed, not correctness.
-                if let Err(e) = self.write_cached(&hash, &bytes) {
-                    eprintln!("[gwnative] chunk cache write failed: {e}");
+                match self.write_cached(&hash, &bytes) {
+                    // `fetch_chunk` hashed these bytes before returning them, so
+                    // what just landed on disk is known good and later reads can
+                    // go straight to the pread window.
+                    Ok(()) => {
+                        self.verified.lock().unwrap().insert(hash.clone());
+                    }
+                    Err(e) => eprintln!("[gwnative] chunk cache write failed: {e}"),
                 }
                 let shared = Arc::new(bytes);
                 slot.fulfil(Ok(Arc::clone(&shared)));
@@ -192,9 +294,27 @@ impl ChunkStore {
     /// what a previous session already paid for.
     pub fn resident_bitmap(&self) -> Vec<u8> {
         let hashes = &self.manifest.files[&self.snapshot].chunk_hashes;
+
+        // One directory listing per fan-out bucket rather than one `stat` per
+        // chunk: 256 syscalls instead of 16167, over the same directory blocks.
+        let buckets: HashSet<&str> = hashes.iter().map(|h| &h.as_str()[..2]).collect();
+        let mut present: HashSet<String> = HashSet::new();
+        for bucket in buckets {
+            let Ok(entries) = fs::read_dir(self.cache_dir.join(bucket)) else {
+                continue;
+            };
+            present.extend(
+                entries
+                    .flatten()
+                    .filter_map(|e| e.file_name().into_string().ok()),
+            );
+        }
+
         let mut bits = vec![0u8; hashes.len().div_ceil(8)];
         for (i, hash) in hashes.iter().enumerate() {
-            if self.cache_path(hash).exists() {
+            // A `.tmp` left by a write in flight is in the listing too, and does
+            // not match a bare hash, which is the answer wanted anyway.
+            if present.contains(hash.as_str()) {
                 bits[i / 8] |= 1 << (i % 8);
             }
         }
@@ -252,7 +372,7 @@ impl ChunkStore {
                     // A cached chunk costs a stat, not a request, so the common
                     // resume case sweeps the whole list almost instantly.
                     let _permit = store.prefetch_permits.acquire();
-                    if let Err(e) = store.chunk(index) {
+                    if let Err(e) = store.ensure(index) {
                         // One bad chunk should not abandon the sweep; the game
                         // will ask for it again on demand and surface the error
                         // there, where it can be acted on.
@@ -282,26 +402,150 @@ impl ChunkStore {
         self.cache_dir.join(&hex[..2]).join(hex)
     }
 
+    /// The size of the cached file for `hash`, if there is one.
+    fn cached_len(&self, hash: &ContentHash) -> Option<u64> {
+        fs::metadata(self.cache_path(hash)).ok().map(|m| m.len())
+    }
+
+    /// The whole cached chunk, if it is there and its bytes still hash right.
+    ///
+    /// The hash is checked the first time this session touches a chunk and
+    /// remembered afterwards, which is what lets [`window_into`](Self::window_into)
+    /// pread. A file that fails is unlinked, so the caller refetches it rather
+    /// than handing corrupt bytes to the client and leaving the bad copy behind
+    /// to fail again next launch.
     fn read_cached(&self, hash: &ContentHash, expected: u64) -> Option<Vec<u8>> {
-        let bytes = fs::read(self.cache_path(hash)).ok()?;
-        // Length is the cheap integrity check on the hot path; the hash was
-        // verified when the chunk was written.
-        (bytes.len() as u64 == expected).then_some(bytes)
+        let path = self.cache_path(hash);
+        let bytes = fs::read(&path).ok()?;
+        if bytes.len() as u64 != expected {
+            let _ = fs::remove_file(&path);
+            return None;
+        }
+        if self.verified.lock().unwrap().contains(hash) {
+            return Some(bytes);
+        }
+        if let Err(e) = crate::patch::verify(&bytes, hash) {
+            eprintln!("[gwnative] cached chunk is corrupt, refetching: {e}");
+            let _ = fs::remove_file(&path);
+            return None;
+        }
+        self.verified.lock().unwrap().insert(hash.clone());
+        Some(bytes)
+    }
+
+    /// `take` bytes at `within` from the cached chunk, in one `pread`.
+    ///
+    /// Only sound for a hash already in `verified`: the length check inside
+    /// would not see rot, and the window is too small a sample to hash.
+    fn read_cached_window(
+        &self,
+        hash: &ContentHash,
+        expected: u64,
+        within: usize,
+        take: usize,
+    ) -> Option<Vec<u8>> {
+        read_window(&self.cache_path(hash), expected, within, take)
     }
 
     fn write_cached(&self, hash: &ContentHash, bytes: &[u8]) -> Result<()> {
         let path = self.cache_path(hash);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let parent = path.parent().expect("cache paths always have a bucket");
+        fs::create_dir_all(parent)?;
+
+        // Rename in: a reader must never observe a half-written chunk. The temp
+        // name carries the pid because the fixed `.partial` it replaces meant
+        // two instances sharing this cache — a second launch, or the launcher
+        // beside the game — wrote the same file over each other and renamed in
+        // a blend of the two, which then failed its hash on the next read.
+        let tmp = parent.join(format!(
+            "{}.{}.{:08x}.tmp",
+            hash.as_str(),
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        let written = (|| -> Result<()> {
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&tmp, &path)?;
+            Ok(())
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
         }
-        // Rename in: a reader must never observe a half-written chunk.
-        let tmp = path.with_extension("partial");
-        let mut file = fs::File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&tmp, &path)?;
+        written?;
+
+        // The rename is metadata, and `sync_all` above only covered the data.
+        // Without this a power cut can leave the directory entry missing while
+        // the blocks it would have pointed at are safely on disk — a chunk paid
+        // for and lost.
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
         Ok(())
+    }
+}
+
+/// Distinguishes the temp files of one process from each other; the pid
+/// distinguishes them from another instance's.
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// `take` bytes at `within` of `path`, in one `pread`, provided the file is
+/// exactly `expected` bytes long.
+///
+/// The length is the only check available here — the window is a fraction of
+/// the chunk, so there is nothing to hash it against. Callers must already know
+/// the file's contents are good.
+fn read_window(path: &Path, expected: u64, within: usize, take: usize) -> Option<Vec<u8>> {
+    let file = fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() != expected {
+        return None;
+    }
+    let mut window = vec![0u8; take];
+    file.read_exact_at(&mut window, within as u64).ok()?;
+    Some(window)
+}
+
+/// Anything left over from a crashed write. Older than this and no live writer
+/// can still own it: a chunk is 256 KiB, so a write that has not finished in an
+/// hour is not going to.
+const ORPHAN_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Delete temp files a previous run died holding.
+///
+/// Every one is a quarter-megabyte that nothing will ever read, and nothing
+/// else removes them — before this the cache grew by one per crash, forever.
+/// Our own pid is skipped outright and the rest have to be stale, so a second
+/// instance downloading right now keeps its files.
+fn sweep_orphans(cache_dir: &Path) {
+    let ours = format!(".{}.", std::process::id());
+    let Ok(buckets) = fs::read_dir(cache_dir) else {
+        return;
+    };
+    let mut removed = 0usize;
+    for bucket in buckets.flatten() {
+        let Ok(entries) = fs::read_dir(bucket.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.ends_with(".tmp") || name.contains(&ours) {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .and_then(|t| t.elapsed().map_err(std::io::Error::other))
+                .is_ok_and(|age| age > ORPHAN_AGE);
+            if stale && fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        eprintln!("[gwnative] cleared {removed} abandoned chunk writes");
     }
 }
 
@@ -539,5 +783,73 @@ mod tests {
         migrate_cache(&legacy, &current);
 
         assert!(!current.exists(), "nothing to move should create nothing");
+    }
+
+    #[test]
+    fn a_window_reads_only_its_own_span() {
+        let temp = TempDir::new("window");
+        let chunk: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        let path = temp.0.join("chunk");
+        fs::write(&path, &chunk).unwrap();
+
+        assert_eq!(
+            read_window(&path, 4096, 1000, 472).unwrap(),
+            chunk[1000..1472],
+            "the pread window must match the same span of the whole chunk"
+        );
+        // The commonest read of all: the first bytes of a chunk.
+        assert_eq!(read_window(&path, 4096, 0, 8).unwrap(), chunk[..8]);
+        // And the last, which must not read past the end.
+        assert_eq!(read_window(&path, 4096, 4090, 6).unwrap(), chunk[4090..]);
+    }
+
+    #[test]
+    fn a_window_refuses_a_file_of_the_wrong_length() {
+        let temp = TempDir::new("truncated");
+        let path = temp.0.join("chunk");
+        fs::write(&path, vec![0u8; 100]).unwrap();
+
+        // A truncated cache file is the case the length check exists for: the
+        // pread inside would happily serve a window that lies wholly within it.
+        assert!(read_window(&path, 4096, 0, 8).is_none());
+        assert!(read_window(&temp.0.join("missing"), 100, 0, 8).is_none());
+        // Past the end of a correctly-sized file, `read_exact_at` is the check.
+        assert!(read_window(&path, 100, 96, 8).is_none());
+    }
+
+    #[test]
+    fn the_sweep_takes_stale_temps_and_leaves_everything_else() {
+        let temp = TempDir::new("orphans");
+        let bucket = temp.0.join("ab");
+        fs::create_dir_all(&bucket).unwrap();
+
+        let ours = bucket.join(format!("abcd.{}.00000001.tmp", std::process::id()));
+        let theirs_fresh = bucket.join("abce.999999.00000001.tmp");
+        let theirs_stale = bucket.join("abcf.999999.00000002.tmp");
+        let chunk = bucket.join("abc0");
+        for path in [&ours, &theirs_fresh, &theirs_stale, &chunk] {
+            fs::write(path, b"x").unwrap();
+        }
+        // Only mtime distinguishes the two foreign temps, so back one of them up
+        // past the cutoff rather than waiting an hour for it.
+        let long_ago =
+            std::time::SystemTime::now() - ORPHAN_AGE - std::time::Duration::from_secs(60);
+        fs::File::open(&theirs_stale)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        sweep_orphans(&temp.0);
+
+        assert!(
+            !theirs_stale.exists(),
+            "a crashed write should be reclaimed"
+        );
+        assert!(ours.exists(), "our own write is still in progress");
+        assert!(
+            theirs_fresh.exists(),
+            "another instance may be downloading this right now"
+        );
+        assert!(chunk.exists(), "a cached chunk is not a temp file");
     }
 }
