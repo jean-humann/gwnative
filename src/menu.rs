@@ -9,7 +9,7 @@
 //! The rest of it is things a player has no other way to reach. Most menu items
 //! here have no target: AppKit sends a nil-targeted action up the responder
 //! chain, so `toggleFullScreen:` finds the key window and `hide:` finds the
-//! application without either being named. The four that do have a target are
+//! application without either being named. The ones that do have a target are
 //! the ones nothing in AppKit implements, and they are why this file owns a
 //! class at all.
 
@@ -35,7 +35,7 @@ use crate::{settings, window};
 const WEBSITE: &str = env!("CARGO_PKG_REPOSITORY");
 
 pub struct Ivars {
-    /// The page, for the two items that are really requests to it.
+    /// The page, for the items that are really requests to it.
     webview: Retained<WKWebView>,
     /// The settings file, so that a diagnostics overlay switched on from the
     /// menu is still on after a relaunch.
@@ -56,6 +56,19 @@ define_class!(
     unsafe impl NSObjectProtocol for Actions {}
 
     impl Actions {
+        /// Open the page's settings panel.
+        ///
+        /// Sent as a command rather than performed here: every setting in it is
+        /// one whose effect the page owns, and a native panel would need a
+        /// second copy of the same four values kept in step with the first.
+        #[unsafe(method(gwOpenSettings:))]
+        fn open_settings(&self, _sender: Option<&AnyObject>) {
+            self.evaluate(
+                "window.dispatchEvent(new CustomEvent('gw:command', \
+                 { detail: { name: 'settings-open' } }));",
+            );
+        }
+
         #[unsafe(method(gwResetWindow:))]
         fn reset_window(&self, _sender: Option<&AnyObject>) {
             window::reset(MainThreadMarker::from(self));
@@ -251,6 +264,8 @@ fn build(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenu> {
                 "",
                 None,
             ),
+            &NSMenuItem::separatorItem(mtm),
+            &ours(mtm, actions, "Settings…", sel!(gwOpenSettings:), ",", None),
             &NSMenuItem::separatorItem(mtm),
             &item(mtm, "Hide Guild Wars", sel!(hide:), "h", None),
             &item(

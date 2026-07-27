@@ -341,6 +341,28 @@ player who wants the cheaper picture can have it; that is what the setting is
 for. Which one a session paid is in its log: `settings: render scale 2, touch
 mode off`.
 
+Until now none of the four could be changed without a text editor. ⌘, opens a
+panel over the running game — the page's own, not AppKit's, because every one of
+these settings is one whose effect the page owns and a native panel would need
+a second copy of the same four values kept in step with the first. The controls
+are a table in `web/settings-panel.js`; the markup is built from it, and so are
+the tests, so a list that disagrees with itself is not a shape this can take.
+
+Two of the four cannot take effect until the next launch, and the panel says so
+instead of pretending. The render scale reaches the client through an import it
+reads when it recomputes the canvas, and the gesture translation is a set of
+listeners installed once at boot around a mode captured by value. Both are
+fixable, and both are a change to the boot path to fix — which is not a change
+worth making from inside a settings panel. The overlay and the download
+strategy do apply immediately, and the overlay is switched from what the host
+answered with rather than from what was asked for, so a patch the host clamped
+cannot leave the screen disagreeing with the file.
+
+Only what moved is written. A panel opened and closed sends no patch, which
+matters because the host persists on every patch it accepts — and `null` for
+`dataStrategy` is compared as a value rather than as an absence, since it is
+how the launcher's question gets asked again.
+
 ## The one question asked before the client exists
 
 The snapshot is 4.2 GB and only a fraction of it is touched in a session, so

@@ -539,7 +539,7 @@ function appendGlue() {
   try {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
-      start, metrics,
+      start, panel, metrics,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -552,6 +552,7 @@ function appendGlue() {
       import('./template-save.js'),
       import('./settings.js'),
       import('./launcher.js'),
+      import('./settings-panel.js'),
       import('./diagnostics.js'),
     ]);
     host = {
@@ -566,6 +567,7 @@ function appendGlue() {
       ...templates,
       ...prefs,
       ...start,
+      ...panel,
     };
     // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
     // contract could plausibly want for something else.
@@ -590,6 +592,16 @@ function appendGlue() {
     read: host.readSettings,
     save: host.saveSettings,
   };
+
+  // The panel is wired before the client exists, so ⌘, answers from the first
+  // moment the page is up rather than only once the game has booted — which is
+  // exactly when a wrong render scale is worth changing.
+  window.gwOpenSettings = host.installSettingsPanel({
+    read: host.currentSettings,
+    save: host.saveSettings,
+    showLog: (on) => window.gwLog(on),
+    log,
+  });
 
   if (!('Suspending' in WebAssembly)) {
     return fail('This WebView lacks WebAssembly JSPI (WebAssembly.Suspending).');
