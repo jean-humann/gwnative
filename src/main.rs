@@ -29,6 +29,7 @@ mod scratch;
 mod server;
 mod settings;
 mod sockets;
+mod transport;
 mod wasm;
 mod window;
 mod ws;
