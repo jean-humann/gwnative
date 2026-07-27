@@ -161,6 +161,20 @@ impl ChunkStore {
         }
     }
 
+    /// Bitmap of which snapshot chunks are already on disk, LSB first. The
+    /// harness seeds `image.isCached` from this so a restart does not re-prefetch
+    /// what a previous session already paid for.
+    pub fn resident_bitmap(&self) -> Vec<u8> {
+        let hashes = &self.manifest.files[&self.snapshot].chunk_hashes;
+        let mut bits = vec![0u8; hashes.len().div_ceil(8)];
+        for (i, hash) in hashes.iter().enumerate() {
+            if self.cache_path(hash).exists() {
+                bits[i / 8] |= 1 << (i % 8);
+            }
+        }
+        bits
+    }
+
     fn cache_path(&self, hash: &ContentHash) -> PathBuf {
         // Two-level fan-out: 16k files in one directory is fine on APFS, but
         // this keeps directory listings usable when debugging by hand.

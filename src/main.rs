@@ -8,8 +8,11 @@
 mod chunks;
 mod error;
 mod manifest;
+mod net;
 mod patch;
 mod server;
+mod sockets;
+mod ws;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

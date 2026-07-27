@@ -1,134 +1,64 @@
-<!doctype html>
 <meta charset="utf-8">
-<title>gw native capability probe</title>
-<body style="background:#111;color:#eee;font:13px monospace">
-<pre id="out">running…</pre>
-<script>
-// Minimal wasm module:
-//   (module (import "e" "f" (func $f (result i32)))
-//           (func (export "g") (result i32) call $f))
-const PROBE_WASM = new Uint8Array([
-  0x00,0x61,0x73,0x6d, 0x01,0x00,0x00,0x00,
-  0x01,0x05,0x01,0x60,0x00,0x01,0x7f,
-  0x02,0x07,0x01,0x01,0x65,0x01,0x66,0x00,0x00,
-  0x03,0x02,0x01,0x00,
-  0x07,0x05,0x01,0x01,0x67,0x00,0x01,
-  0x0a,0x06,0x01,0x04,0x00,0x10,0x00,0x0b,
-]);
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guild Wars</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #000; color: #cdd6f4;
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  #canvas {
+    display: block; width: 100%; height: 100%;
+    outline: none; touch-action: none;
+  }
+  #status {
+    position: fixed; inset: auto 0 0 0; padding: 10px 14px;
+    display: flex; gap: 14px; align-items: baseline;
+    background: rgba(0, 0, 0, .75); border-top: 1px solid #313244;
+    font-variant-numeric: tabular-nums; pointer-events: none;
+  }
+  #status[hidden] { display: none; }
+  #status-label { flex: 1; min-width: 0; }
+  #status-detail { color: #9399b2; }
+  /* Progress rail, sitting on the status bar's top border. */
+  #bar {
+    position: absolute; top: -1px; left: 0; right: 0; height: 3px;
+    background: #181825; overflow: hidden;
+  }
+  #bar-fill {
+    height: 100%; width: 0;
+    background: linear-gradient(90deg, #8a6a2b, #d9b25c 55%, #f3dd9d);
+    transition: width .3s ease;
+  }
+  /* The client reports several boot stages with no total to divide by. A sweep
+     says "working" without inventing a percentage none of them supply. */
+  #bar.busy #bar-fill { width: 35%; animation: sweep 1.5s ease-in-out infinite; }
+  @keyframes sweep {
+    from { transform: translateX(-110%); }
+    to { transform: translateX(320%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #bar-fill { transition: none; }
+    #bar.busy #bar-fill { animation: none; width: 100%; opacity: .5; }
+  }
+  #log {
+    position: fixed; inset: 0 0 auto 0; max-height: 60%;
+    margin: 0; padding: 10px 14px; overflow: auto;
+    background: rgba(0, 0, 0, .85); border-bottom: 1px solid #313244;
+    font-family: ui-monospace, "JetBrainsMono Nerd Font Mono", monospace;
+    font-size: 11px; white-space: pre-wrap; display: none;
+  }
+</style>
 
-async function probe() {
-  const r = {};
-  const t = (k, fn) => { try { r[k] = fn(); } catch (e) { r[k] = 'ERR: ' + e; } };
+<canvas id="canvas" tabindex="-1"></canvas>
+<div id="status">
+  <div id="bar" class="busy"><div id="bar-fill"></div></div>
+  <span id="status-label">Starting…</span>
+  <span id="status-detail"></span>
+</div>
+<pre id="log"></pre>
 
-  // --- origin / context -----------------------------------------------
-  t('href',            () => location.href);
-  t('origin',          () => location.origin);
-  t('isSecureContext', () => self.isSecureContext);
-  t('crossOriginIsolated', () => self.crossOriginIsolated);
-  t('userAgent',       () => navigator.userAgent);
-
-  // --- JSPI: presence then FUNCTIONAL round trip ----------------------
-  t('jspi.Suspending', () => 'Suspending' in WebAssembly);
-  t('jspi.promising',  () => 'promising' in WebAssembly);
-  try {
-    const mod = new WebAssembly.Module(PROBE_WASM);
-    const imp = { e: { f: new WebAssembly.Suspending(async () => { await 0; return 42; }) } };
-    const inst = new WebAssembly.Instance(mod, imp);
-    const g = WebAssembly.promising(inst.exports.g);
-    const v = await g();
-    r['jspi.functional'] = (v === 42) ? 'OK (suspend+resume returned 42)' : 'UNEXPECTED ' + v;
-  } catch (e) { r['jspi.functional'] = 'FAIL: ' + e; }
-
-  // --- graphics -------------------------------------------------------
-  try {
-    const oc = new OffscreenCanvas(256, 256);
-    const gl = oc.getContext('webgl2') || oc.getContext('webgl');
-    r['gl.offscreenWebGL2'] = gl ? gl.constructor.name : 'null';
-    if (gl) {
-      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
-      r['gl.renderer'] = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
-      r['gl.vendor']   = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)   : gl.getParameter(gl.VENDOR);
-      r['gl.version']  = gl.getParameter(gl.VERSION);
-      r['gl.glsl']     = gl.getParameter(gl.SHADING_LANGUAGE_VERSION);
-      r['gl.maxTexture'] = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-      r['gl.debugRendererInfo'] = !!dbg;
-      r['gl.parallelShaderCompile'] = !!gl.getExtension('KHR_parallel_shader_compile');
-      r['gl.extCount'] = (gl.getSupportedExtensions() || []).length;
-    }
-    r['gl.transferToImageBitmap'] = typeof oc.transferToImageBitmap === 'function';
-    if (gl && typeof oc.transferToImageBitmap === 'function') {
-      gl.clearColor(0, 1, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
-      const bmp = oc.transferToImageBitmap();
-      r['gl.bitmapSize'] = bmp.width + 'x' + bmp.height;
-      const vis = document.createElement('canvas');
-      const brc = vis.getContext('bitmaprenderer');
-      r['gl.bitmaprenderer'] = !!brc;
-      if (brc) { brc.transferFromImageBitmap(bmp); r['gl.presentRoundTrip'] = 'OK'; }
-    }
-  } catch (e) { r['gl.error'] = 'FAIL: ' + e; }
-
-  // --- storage: the IDBFS gate ---------------------------------------
-  r['idb.present'] = (typeof indexedDB !== 'undefined' && indexedDB !== null);
-  try {
-    await new Promise((res, rej) => {
-      const to = setTimeout(() => rej(new Error('timeout 5s')), 5000);
-      const req = indexedDB.open('gw-probe-db', 1);
-      req.onupgradeneeded = () => req.result.createObjectStore('s');
-      req.onsuccess = () => { clearTimeout(to); req.result.close(); res(); };
-      req.onerror   = () => { clearTimeout(to); rej(req.error || new Error('onerror')); };
-      req.onblocked = () => { clearTimeout(to); rej(new Error('blocked')); };
-    });
-    r['idb.open'] = 'OK';
-  } catch (e) { r['idb.open'] = 'FAIL: ' + e; }
-
-  // write a 8 MiB blob to see whether quota bites early
-  try {
-    await new Promise((res, rej) => {
-      const req = indexedDB.open('gw-probe-db', 1);
-      req.onsuccess = () => {
-        const db = req.result;
-        const tx = db.transaction('s', 'readwrite');
-        tx.objectStore('s').put(new Uint8Array(8 * 1024 * 1024), 'blob');
-        tx.oncomplete = () => { db.close(); res(); };
-        tx.onerror = () => { db.close(); rej(tx.error); };
-      };
-      req.onerror = () => rej(req.error);
-    });
-    r['idb.write8MiB'] = 'OK';
-  } catch (e) { r['idb.write8MiB'] = 'FAIL: ' + e; }
-
-  try { r['storage.estimate'] = await navigator.storage?.estimate?.(); } catch (e) { r['storage.estimate'] = 'ERR: ' + e; }
-  try { r['storage.persist']  = await navigator.storage?.persist?.();  } catch (e) { r['storage.persist']  = 'ERR: ' + e; }
-
-  // --- platform APIs the gwonmac host shim uses -----------------------
-  t('kbd.getLayoutMap', () => !!(navigator.keyboard && navigator.keyboard.getLayoutMap));
-  t('TouchEvent.ctor',  () => { new TouchEvent('touchstart'); return true; });
-  t('Touch.ctor',       () => { new Touch({ identifier: 0, target: document.body }); return true; });
-  t('AudioContext',     () => typeof AudioContext !== 'undefined');
-  t('SharedArrayBuffer',() => typeof SharedArrayBuffer !== 'undefined');
-  t('WebAssembly.Memory.grow', () => { const m = new WebAssembly.Memory({initial:1}); m.grow(1); return true; });
-  t('wasm.exceptions',  () => WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,10,8,1,6,0,6,64,25,11,11])));
-  t('devicePixelRatio', () => window.devicePixelRatio);
-  t('pointerLock',      () => 'requestPointerLock' in Element.prototype);
-  t('fetch',            () => typeof fetch === 'function');
-  t('XMLHttpRequest',   () => typeof XMLHttpRequest === 'function');
-  t('WebSocket',        () => typeof WebSocket === 'function');
-  t('crypto.subtle',    () => !!(crypto && crypto.subtle));
-
-  return r;
-}
-
-window.__probe = probe;
-probe().then(r => {
-  document.getElementById('out').textContent = JSON.stringify(r, null, 2);
-  // Bring-up only: report to the Rust host so a headless run can verify the stack.
-  fetch('/__report', { method: 'POST', body: JSON.stringify({
-    jspi: r['jspi.functional'], suspending: r['jspi.Suspending'],
-    webgl: r['gl.offscreenWebGL2'], renderer: r['gl.renderer'],
-    present: r['gl.presentRoundTrip'], s3tc: r['gl.debugRendererInfo'],
-    idb: r['idb.open'], secure: r.isSecureContext, isolated: r.crossOriginIsolated,
-    sab: r.SharedArrayBuffer, quotaGB: +(r['storage.estimate']?.quota/1e9).toFixed(1),
-    ua: r.userAgent,
-  }) });
-});
-</script>
+<!-- Classic script, not a module: the generated glue declares `var Module`, so
+     the harness has to share that top-level scope. -->
+<script src="harness.js"></script>
