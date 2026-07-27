@@ -37,7 +37,7 @@ Measured inside this binary's own WKWebView, not Safari:
 | Secure context | yes, on a loopback origin |
 | Cross-origin isolated | yes, `SharedArrayBuffer` available |
 | `WEBGL_compressed_texture_s3tc` | present, so DXT stays compressed |
-| WASM memory growth | to 4096 MiB |
+| WASM memory growth | WebKit allows 4096 MiB; this client caps itself at 2048 |
 
 Frame path cost at 3840x2160: `transferToImageBitmap` p50 0.20 ms / p95 0.30 ms,
 `transferFromImageBitmap` p50 0.02 ms. Both the offscreen path and a
@@ -50,8 +50,18 @@ Both give a secure context with IndexedDB — a custom `WKURLSchemeHandler` sche
 works fine on macOS 27, and can reach cross-origin isolation if it sends
 COOP/COEP. But WebKit clamps `performance.now()` to 1 ms on a custom scheme,
 while the loopback origin resolves to 0.02 ms. The harness records per-frame
-timings in microseconds, so the server wins. It binds 127.0.0.1 on an ephemeral
-port; nothing is reachable off-host.
+timings in microseconds, so the server wins. It binds 127.0.0.1 on a **fixed**
+port, 38112; nothing is reachable off-host.
+
+The port has to be fixed. WebKit keys IndexedDB by origin and the port is part
+of the origin, so an ephemeral port would hand the page an empty store on every
+launch — skill templates, settings and chat logs gone each time. 38112 is
+unassigned by IANA and below macOS's ephemeral floor of 49152, so the kernel
+will not lend it to somebody's outbound socket while we are not listening. If it
+is taken anyway the bind falls back to an ephemeral port and says so, because a
+launchable app that has forgotten everything beats one that will not start.
+`GWNATIVE_PORT` overrides it, which is also how a second instance gets a private
+store instead of fighting over this one.
 
 ## What WKWebView does not provide
 
@@ -190,7 +200,31 @@ same burn, both giving 0.3279 s.
 Metrics carry three behaviours, matching on both sides of the loopback origin: a
 count accumulates, a gauge keeps the last value, a peak keeps the largest. The
 page posts increments to `__diag` once a second and `GET /__diag` reads
-everything back, host figures included.
+everything back, host figures and the chunk store's counters included.
+
+The POST answers `204`. It used to answer with the whole snapshot, which meant
+serializing every metric the host holds once a second into a body the page never
+reads — and the page never reads it because nothing on that side wants it. The
+name table is capped at 512 names of 128 bytes, with anything past that counted
+under `gw.metrics.dropped`: the names arrive over the loopback from a page that
+could be made to send anything, and a map that only grows is a leak with a
+network trigger.
+
+`web/memory.js` reports the one number the host cannot see. `footprintMiB` is
+the host process; the WASM heap, the GL resources and the JavaScript objects are
+all in the web content process, which is accounted for separately — the host
+reads about 27 MiB while the client holds hundreds. WebKit exposes no
+`performance.memory` and no `measureUserAgentSpecificMemory`, so the client's
+own linear memory is measured by wrapping `emscripten_resize_heap`: every
+increase is an explicit call, so the wrapper sees each one as it happens rather
+than sampling a number that has mostly not moved. It also sees the refusal,
+which is otherwise silent — the client aborts or fails a load and nothing says
+why.
+
+`web/audio.js` reports the other blind spot. It has to construct the client's
+`AudioContext` to reach it at all (see below), and having done so it can say
+what the output device actually is: sample rate, state, base and output latency,
+context creation and close, and every mute transition.
 
 ## When booting fails, and what the host pushes
 
@@ -326,7 +360,8 @@ the difference is not cosmetic. `GET /__prefetch` reports both, and six seconds
 into a sweep over a half-full cache they read:
 
 ```
-{"cached":8480,"total":16023,"fetched":5376,"running":true,"chunkSize":262144}
+{"cached":8480,"total":16023,"fetched":5376,"running":true,"chunkSize":262144,
+ "outstanding":24,"needed":1976367104,"free":81003741184}
 ```
 
 `fetched` had passed five thousand because the sweep counts the chunks it walks
@@ -336,6 +371,13 @@ downloaded. A bar driven by the first would leap to a third full and then crawl.
 directory scan that builds the residency bitmap — 256 listings, not 16023
 `stat`s — and a test asserts the count and the bitmap agree, because two answers
 to "what is on disk" that could disagree eventually will.
+
+`outstanding` is how many fetches are in flight, which is what separates a sweep
+that is slow from one that is wedged. `needed` and `free` are bytes, and the
+POST refuses to start a sweep that would leave less than 2 GB behind — a volume
+with nothing left does not merely stop downloading, it breaks swap, the WebKit
+caches and every atomic rename in this process, and the first casualty would be
+the game rather than the download that caused it.
 
 **Play now** does not cancel the download. The sweep is host-side, runs at
 Utility QoS, and holds at most three of the eight fetch permits, so it yields to
@@ -506,11 +548,49 @@ the login on every rebuild, and says so.
 
 A login saved by an earlier, differently signed build is not lost. macOS offers
 it on first read, and Always Allow adopts it; declining that just means signing
-in once more, which replaces the item outright.
+in once more, which replaces the item outright — the update is refused for the
+same reason the read was, so `src/keychain.rs` deletes and recreates instead.
+Removing an item does not require permission to open it, which is the whole
+trick. Once only: the second write is a create against nothing, so a refusal
+there is a different condition and the only thing left to say is which item to
+delete by hand.
+
+The three ways the keychain says no are kept apart, because they used to share
+one message and it was wrong twice out of three times. Only `errSecAuthFailed`
+is the signature story. `errSecUserCanceled` means the prompt was dismissed a
+second ago, and `errSecInteractionNotAllowed` means the screen was locked and
+nobody was asked at all — sending either of those to read about code signing
+wastes the reader's time. The retry is behind a small trait so the refusal paths
+have tests; against the real keychain they would need a second signing identity
+and somebody to press Cancel.
+
+## Two WebKit data roots, and why they stay that way
+
+WebKit keys its storage root by bundle identifier, falling back to the process
+name when there is no bundle. So `cargo run` writes to
+`~/Library/WebKit/gwnative` and `dist/Guild Wars.app` writes to
+`~/Library/WebKit/com.gwnative.app`, and IndexedDB — the account record in
+`Gw.dat`, skill templates, chat logs — does not cross between them. Signing the
+development binary does not merge them: the identifier the keychain matches on
+is not the one WebKit reads.
+
+`WKWebsiteDataStore.dataStoreForIdentifier:` looks like the fix and is not. An
+identified store is created *inside* whichever root the process already got, as
+`CustomWebsiteData/<uuid>`, so it nests the split rather than closing it — and
+adopting one would abandon what both roots already hold. The split is inherent;
+what matters is knowing it is there. Wiping game state for a measurement means
+naming the right root, and the two are 44 MB and 1.2 MB apart precisely because
+they are not the same store.
 
 `GWNATIVE_ACCESS_KEY` overrides the access key should ArenaNet rotate the value,
 `GWNATIVE_WEB_ROOT` overrides the harness directory, and `GWNATIVE_PATCH_ROOT`
-the patch endpoint.
+the patch endpoint. `GWNATIVE_PORT` moves the loopback origin. `GWNATIVE_PRINT_TOKEN`
+prints the session token to stderr: the windowed app otherwise keeps it to
+itself — it reaches the page over the injection channel and nowhere else — and
+every measurement worth taking is behind that gate on `__diag`.
+`GWNATIVE_TRACE_HTTP` and `GWNATIVE_TRACE_SOCKETS` log per request and per
+socket, both off by default because a boot issues a couple of hundred range
+requests and stderr is a synchronous write on the thread serving the read.
 
 ## Package
 
