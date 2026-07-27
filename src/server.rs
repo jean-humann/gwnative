@@ -108,6 +108,10 @@ pub fn spawn(
 ) -> std::io::Result<Loopback> {
     let listener = bind()?;
     let addr = listener.local_addr()?;
+    // Before the first response can be written, and only once — a second
+    // `spawn` in the same process would be a second origin, which is exactly
+    // what `instance` exists to prevent.
+    let _ = POLICY.set(policy(addr));
     let context = Arc::new(Context {
         root,
         snapshot,
@@ -988,6 +992,47 @@ fn mime(path: &Path) -> &'static str {
     }
 }
 
+/// The policy every response carries, once the origin's address is known.
+///
+/// A `OnceLock` rather than a constant because `connect-src` names the
+/// WebSocket origin explicitly. `'self'` ought to cover `ws://` to the same
+/// host and port per CSP3, but the port here is configurable and a policy that
+/// silently stops the game talking to its own sockets is not worth the two
+/// tokens it saves.
+static POLICY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// What the client's own JavaScript needs, and nothing more.
+///
+/// The two `unsafe` grants are not decoration. Emscripten glue calls `new
+/// Function` on generated source for its dynamic call thunks, so `'unsafe-eval'`
+/// is the difference between the game booting and not; `'wasm-unsafe-eval'` is
+/// what permits `WebAssembly.instantiate` at all. `worker-src blob:` is there
+/// for the same reason: the glue spawns its workers from object URLs.
+///
+/// What the policy actually buys is everything it does *not* list. No `img-src`
+/// beyond the origin and `data:`, no `frame-src` at all, `object-src 'none'`,
+/// `base-uri 'none'` so nothing can retarget every relative URL on the page, and
+/// `form-action 'none'` so a form cannot post anywhere. Those close the routes
+/// by which injected content in an 8.2 MB third-party module could reach off the
+/// machine — which is the exposure worth closing, since the module itself has to
+/// be run as it was shipped.
+fn policy(addr: SocketAddr) -> String {
+    format!(
+        "default-src 'self'; \
+         script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; \
+         style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data: blob:; \
+         font-src 'self'; \
+         connect-src 'self' ws://{addr} blob: data:; \
+         worker-src 'self' blob:; \
+         object-src 'none'; \
+         base-uri 'none'; \
+         frame-src 'none'; \
+         form-action 'none'; \
+         frame-ancestors 'none'"
+    )
+}
+
 /// Headers every response carries. COOP/COEP are what make the origin
 /// cross-origin isolated; CORP lets the page embed its own subresources under
 /// that policy.
@@ -1009,7 +1054,10 @@ fn common_headers(
          Cache-Control: {cache}\r\n\
          Cross-Origin-Opener-Policy: same-origin\r\n\
          Cross-Origin-Embedder-Policy: require-corp\r\n\
-         Cross-Origin-Resource-Policy: same-origin\r\n"
+         Cross-Origin-Resource-Policy: same-origin\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Content-Security-Policy: {}\r\n",
+        POLICY.get().map_or("default-src 'self'", String::as_str)
     );
     for (name, value) in extra {
         head.push_str(&format!("{name}: {value}\r\n"));

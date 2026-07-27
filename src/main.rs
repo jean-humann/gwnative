@@ -19,10 +19,12 @@ mod net;
 mod patch;
 mod proxy;
 mod qos;
+mod renderer;
 mod server;
 mod settings;
 mod sockets;
 mod wasm;
+mod window;
 mod ws;
 
 use std::path::{Path, PathBuf};
@@ -32,9 +34,8 @@ use objc2::rc::Retained;
 use objc2::runtime::Sel;
 use objc2::{MainThreadOnly, sel};
 use objc2_app_kit::{
-    NSApplicationActivationOptions, NSRunningApplication,
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEventModifierFlags, NSMenu,
-    NSMenuItem, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
+    NSEventModifierFlags, NSMenu, NSMenuItem, NSRunningApplication,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL, NSURLRequest};
 use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration};
@@ -152,6 +153,10 @@ fn main() {
         }
     };
 
+    // Before the client can ask for the login, so the reason it will not get one
+    // is on screen ahead of the dialog rather than after it.
+    keychain::check_identity();
+
     let root = web_root();
 
     // Before anything reads the web root: a client installed last launch that
@@ -226,10 +231,7 @@ fn main() {
     // plays, it just cannot save, list or delete a build — which is where the
     // client started. See `wasm` for what the derived module changes.
     let derived_wasm = match wasm::prepare(&root.join("Gw.jspi.wasm"), &derived_dir()) {
-        Ok(Some(path)) => {
-            println!("[gwnative] template save: serving the derived client");
-            Some(path)
-        }
+        Ok(Some(path)) => Some(path),
         Ok(None) => {
             println!("[gwnative] template save: unavailable, this client build is not certified");
             None
@@ -277,15 +279,25 @@ fn main() {
 
     app.setMainMenu(Some(&make_menu(mtm)));
 
+    // The frame the web view is created at does not matter: `window::open`
+    // resizes the window to the remembered one before it is ever shown, and the
+    // content view follows.
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
     let webview = make_webview(mtm, frame, &url, &token, &loopback.settings.get());
-    let window = make_window(mtm, frame, &webview);
+    let window = window::open(mtm, &webview, support_dir().join("window.json"));
 
     commands::attach(&webview);
+    // After the load has been asked for, which is fine: the delegate is
+    // consulted when the navigation is decided, not when it is requested.
+    renderer::guard(mtm, &webview, &format!("http://{}", loopback.addr));
 
     window.makeKeyAndOrderFront(None);
     app.activate();
     app.run();
+
+    // `run` returns after `applicationWillTerminate`, so `window` has already
+    // written itself once. This catches the exits that do not post it.
+    window::flush();
 }
 
 fn open_snapshot() -> error::Result<Arc<chunks::ChunkStore>> {
@@ -514,32 +526,4 @@ fn make_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     ));
 
     menu
-}
-
-fn make_window(mtm: MainThreadMarker, frame: NSRect, webview: &WKWebView) -> Retained<NSWindow> {
-    let style = NSWindowStyleMask::Titled
-        | NSWindowStyleMask::Closable
-        | NSWindowStyleMask::Miniaturizable
-        | NSWindowStyleMask::Resizable;
-
-    let window = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            NSWindow::alloc(mtm),
-            frame,
-            style,
-            NSBackingStoreType::Buffered,
-            false,
-        )
-    };
-
-    window.setTitle(&NSString::from_str("Guild Wars"));
-    window.center();
-    window.setContentView(Some(webview));
-    // Key events go to the first responder; mouse events are hit-tested and do
-    // not. A window that never hands the web view first responder therefore
-    // looks alive to the trackpad and deaf to the keyboard, which is exactly
-    // what the game does when its canvas never sees a keydown.
-    window.setInitialFirstResponder(Some(webview));
-    window.makeFirstResponder(Some(webview));
-    window
 }

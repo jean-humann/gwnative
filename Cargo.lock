@@ -162,6 +162,7 @@ name = "gwnative"
 version = "0.0.1"
 dependencies = [
  "base64",
+ "block2",
  "flate2",
  "hex",
  "md-5",

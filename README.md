@@ -405,6 +405,72 @@ once, then checked like any other. Without that step the install most likely to
 have rotted would be the only one nothing was watching, until some future patch
 happened to replace it.
 
+## The window, and the page inside it
+
+Two things WKWebView will not do on its own, and one thing the disk will not.
+
+**A window that comes back where it was.** The last *normal* frame is stored,
+never the zoomed or full-screen one — a full-screen frame restored as a normal
+window is a window the size of the display with no obvious way back to a usable
+size. The mode is stored beside it and applied after the frame, so a maximized
+window comes back maximized over the frame it would return to.
+
+A stored frame is a request rather than an instruction. Displays get unplugged,
+rearranged and rescaled, and a frame that made sense last week can put the
+titlebar off-screen — at which point the window cannot be dragged back, because
+the part you drag it by is what is missing. So the frame is fitted to the
+displays that exist now: it goes to whichever work area it overlaps most, and if
+it overlaps none it is centred on the primary one at its remembered size. Tried
+against a real machine: `x: 99000` came back at `x: 450`, centred; a `width` of
+`1e9` was refused by name, the file removed, and a default window written in its
+place.
+
+**A page confined to its origin.** Nothing in `web/` links off-origin, so a
+navigation that leaves the loopback address is either the client following
+something it parsed out of server content or a script that got somewhere it
+should not have. Allowing it would turn the game's window into a browser
+pointed at somebody else's page with the session token still in the realm it
+came from, so a `WKNavigationDelegate` cancels anything that is not the origin
+the window was opened at — compared as a prefix that must be followed by `/`,
+which is what stops `:381120` from passing for `:38112`.
+
+Underneath that, every response carries a CSP. Two `unsafe` grants are
+unavoidable — Emscripten calls `new Function` for its dynamic call thunks and
+`'wasm-unsafe-eval'` is what permits `WebAssembly.instantiate` at all — so what
+the policy buys is everything it does *not* list: `object-src 'none'`,
+`frame-src 'none'`, `base-uri 'none'` so nothing can retarget every relative URL
+on the page, and `form-action 'none'`. Those are the routes by which injected
+content in an 8.2 MB third-party module could reach off the machine, and the
+module itself has to be run as it was shipped.
+
+**A renderer that restarts.** The web content process is a separate process and
+it can be killed — by the jetsam pressure a 4.2 GB streaming game invites, or by
+a driver fault. WKWebView does not reload itself when that happens; it leaves a
+blank white view and no error, which reads exactly like the app hanging. One
+automatic reload turns that into a re-boot the player watches happen. Only one:
+a client that crashed its renderer every boot would otherwise reload forever,
+and a loop is worse than a message. Verified by killing the content process
+outright mid-session — the reload ran and the client reached a first frame
+again.
+
+**A cache that forgets old builds.** The chunk cache is content-addressed, which
+is what makes deduplication free and what makes this necessary: when ArenaNet
+patches, the chunks whose contents changed get new hashes, and nothing ever
+writes to the old names again. The cache was a union of every snapshot the
+machine had ever seen — a second 4.2 GB after the first patch and another after
+the next. Activating a manifest now drops every cached chunk it cannot name. The
+set to keep comes from the manifest rather than from a listing, so a chunk being
+written this instant is one the manifest named and survives; a manifest that
+names nothing at all is disbelieved rather than obeyed.
+
+And one instance at a time. Two copies share the web root, the generation
+record, the settings file and the boot list, each written whole — only the
+content-addressed chunk cache survives the collision, which is why it went
+unnoticed. An advisory `flock` is the right shape for it: the kernel releases it
+when the process dies however it dies, so a crash cannot leave a stale lock the
+way a pid file would. A second launch raises the window that already exists
+instead of failing silently.
+
 ## Status
 
 Playable. The window opens, the harness and the client boot over loopback, the

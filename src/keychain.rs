@@ -51,6 +51,45 @@ const DENIED_HELP: &str = "a saved login exists, but this build is not allowed t
     It was saved by a build with a different code signature; sign in once more to hand it \
     to this one. See scripts/signed-run for why that happens and how it is avoided.";
 
+/// The identifier `scripts/signed-run` and `scripts/bundle` both set, and the
+/// one the ACL of a saved item ends up naming. Cargo's ad-hoc linker signature
+/// uses `gwnative-<build hash>` instead, which is a different identifier after
+/// every relink.
+const IDENTIFIER: &str = "com.gwnative.app";
+
+/// Say so, once at startup, when this build cannot keep a saved login.
+///
+/// Waiting for the read to fail is too late and too quiet: by then the person
+/// has already been asked for their system password by a dialog that names an
+/// application they have never heard of, and whichever way they answer it the
+/// account does not appear. The failure is decided at link time, so it can be
+/// reported at startup — before the client asks — and named for what it is.
+///
+/// `cargo run` goes through the runner and is signed. `cargo build` is not,
+/// which is the whole reason this check exists: the binary it leaves behind
+/// runs perfectly well and silently loses the login on the next rebuild.
+pub fn check_identity() {
+    use std::str::FromStr;
+
+    use security_framework::os::macos::code_signing::{Flags, SecCode, SecRequirement};
+
+    let Ok(requirement) = SecRequirement::from_str(&format!("identifier \"{IDENTIFIER}\"")) else {
+        return;
+    };
+    let Ok(code) = SecCode::for_self(Flags::NONE) else {
+        return;
+    };
+    if code.check_validity(Flags::NONE, &requirement).is_ok() {
+        return;
+    }
+    eprintln!(
+        "[keychain] this build is ad-hoc signed, so the saved login will not survive the \
+         next rebuild — the account stops appearing and macOS asks for your system \
+         password instead. Run it through scripts/signed-run (`cargo run`) or \
+         scripts/bundle to sign it with a stable identity."
+    );
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Credentials {
     pub username: String,
