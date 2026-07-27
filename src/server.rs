@@ -25,6 +25,7 @@ use std::thread;
 
 use crate::chunks::ChunkStore;
 use crate::diagnostics::{self, Recorder};
+use crate::generation;
 use crate::patch::SNAPSHOT;
 use crate::settings;
 use crate::sockets::{self, Registry};
@@ -76,6 +77,7 @@ struct Context {
     /// for what it changes and why the base module is kept untouched.
     derived_wasm: Option<PathBuf>,
     settings: Arc<settings::Store>,
+    generations: Arc<generation::Store>,
     token: String,
 }
 
@@ -92,6 +94,7 @@ pub fn spawn(
     recorder: Arc<Recorder>,
     derived_wasm: Option<PathBuf>,
     settings: Arc<settings::Store>,
+    generations: Arc<generation::Store>,
     token: String,
 ) -> std::io::Result<Loopback> {
     let listener = bind()?;
@@ -103,6 +106,7 @@ pub fn spawn(
         recorder,
         derived_wasm,
         settings: Arc::clone(&settings),
+        generations,
         token,
     });
 
@@ -631,12 +635,18 @@ fn handle(
         return Ok(flow);
     }
 
-    // The harness says the first frame is up. Everything the store read before
-    // now is what booting costs, so that is the list worth warming next time.
-    if request.path == "__booted"
-        && let Some(store) = &context.snapshot
-    {
-        store.seal_boot_list();
+    // The harness says the first frame is up. Two things follow from that.
+    // Everything the store read before now is what booting costs, so that is
+    // the list worth warming next time — and the client on disk has just proved
+    // it runs here, which is the only evidence a freshly synced build can offer
+    // and the thing the generation record is waiting for. Deliberately one
+    // route: a second one would be a second chance to disagree about what
+    // "it booted" means.
+    if request.path == "__booted" {
+        if let Some(store) = &context.snapshot {
+            store.seal_boot_list();
+        }
+        context.generations.prove();
         respond(stream, 204, "No Content", "text/plain", b"", &[])?;
         return Ok(flow);
     }
@@ -1187,6 +1197,7 @@ mod tests {
             Recorder::open(dir.join("diagnostics")),
             None,
             Arc::new(settings::Store::open(file.clone())),
+            Arc::new(generation::Store::open(dir.join("generations"))),
             token.to_owned(),
         )
         .unwrap();

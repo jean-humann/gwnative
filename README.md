@@ -355,11 +355,62 @@ than 8486 — 243 MB, with the client correctly still unbuilt behind the overlay
 token on one line so these routes can be exercised from curl, which is the only
 way past the gate from outside the page.
 
+## A client is not the same thing as a client that runs
+
+Until now the question asked of the three downloaded artifacts was whether they
+existed. That misses both ways a client goes wrong.
+
+The first is that the bytes are not the bytes: a sync interrupted at 90%, a disk
+that filled, an editor that saved over a file. Every artifact is now recorded
+with its length and the SHA-256 of the whole assembled file, and checked against
+that record at launch — length first, because it is a `stat` rather than a read
+of eight megabytes and truncation is both the likeliest corruption and the one
+this catches for free. Anything that fails is re-downloaded, alone. Live, with
+one byte of `version.json` changed and the length left intact — the corruption
+an existence check cannot see:
+
+```
+[generation] version.json: content is 0130d01e3212cbad…, 845168e34f763c9b… recorded
+[gwnative] fetching client artifacts: version.json
+[generation] client build 77e195b2c164ffad installed, not yet proven
+```
+
+The second is that a perfectly downloaded build can still fail to run here. So a
+freshly written set is recorded **unproven**, and the set it replaced is copied
+aside first — 8.7 MB, which is cheap next to being unable to play. `__booted`,
+which the harness already hits at the first frame, is what settles it. If the
+app is launched again while the record still says unproven, the previous set is
+restored and the build that never drew a frame is refused by name, so the next
+launch does not walk into it again:
+
+```
+[gwnative] client build bad00000000000000 never reached a first frame; restored the one before it
+```
+
+Two identities do two different jobs. A build id is derived from the manifest's
+chunk hashes, so it is known *before* anything is downloaded — that is what
+makes refusing a build possible at all. An artifact hash is of the file as
+written, and says what is on this disk. Neither substitutes for the other.
+
+Three refusals, all of them deliberate. A build is only refused when there is
+something to go back to: on a first install the one client on the disk is not
+taken away, because a boot that failed for an unrelated reason would leave an
+app with nothing to run. A refused build is retried anyway, loudly, if the disk
+copy is incomplete — a broken client and a refused replacement is not a choice.
+And only eight refusals are remembered; one that falls off the end is old enough
+that nobody is being offered it.
+
+An installation that predates all of this is adopted on first launch — hashed
+once, then checked like any other. Without that step the install most likely to
+have rotted would be the only one nothing was watching, until some future patch
+happened to replace it.
+
 ## Status
 
 Playable. The window opens, the harness and the client boot over loopback, the
-patch client fetches and verifies `Gw.jspi.js`, `Gw.jspi.wasm` and
-`version.json` against the live service, the 4.2 GB snapshot is served on
+patch client fetches `Gw.jspi.js`, `Gw.jspi.wasm` and `version.json` from the
+live service and checks them by size and content at every launch, the 4.2 GB
+snapshot is served on
 demand out of the chunk store, the ArenaNet sockets bridge through to the game,
 and the login is kept in the Keychain.
 
