@@ -44,22 +44,35 @@ function installPathNormalization(fs) {
 
 /**
  * IDBFS persists a file when the client closes it, so anything still open when
- * the window goes away — the account record in `Gw.dat` above all — is only in
- * memory. One last sync on the way out costs nothing on a quit and is the
- * difference between remembering a login and asking for it again.
+ * the app goes away — the account record in `Gw.dat` above all — is only in
+ * memory. One last sync on the way out is the difference between remembering a
+ * login and asking for it again.
  *
- * `pagehide` over `beforeunload`: it is the event macOS actually delivers when
- * the window closes, and it also fires when the app is backgrounded on the way
- * to being killed. The sync cannot be awaited here, but IndexedDB commits a
- * transaction that has already been opened, so starting it is what counts.
+ * The host drives this, not the page. Nothing gwnative does unloads the
+ * document: closing the window does not deallocate it, and quitting sends
+ * `terminate:`, which kills the web content process rather than unloading it.
+ * So `pagehide` is registered because it costs nothing and covers a reload, but
+ * it is not the path that matters — `applicationShouldTerminate:` in `src/app.rs`
+ * is, and it calls the function published here and waits for the answer.
  */
 function installShutdownFlush(sync, log) {
-  let flushed = false;
-  globalThis.addEventListener('pagehide', () => {
-    if (flushed) return;
-    flushed = true;
-    sync(false).catch((error) => log('fs: the closing sync did not finish:', error));
-  });
+  let running = null;
+  const flush = () => {
+    // Idempotent: the host asks once, but a reload arriving mid-quit would
+    // otherwise start a second sync against the same IndexedDB transaction.
+    running ??= sync(false)
+      .then(() => true)
+      .catch((error) => {
+        log('fs: the closing sync did not finish:', error);
+        return false;
+      })
+      .finally(() => {
+        running = null;
+      });
+    return running;
+  };
+  globalThis.gwFlushFilesystem = flush;
+  globalThis.addEventListener('pagehide', flush);
 }
 
 /**

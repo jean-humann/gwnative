@@ -23,6 +23,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 
+use crate::app;
 use crate::chunks::ChunkStore;
 use crate::diagnostics::{self, Recorder};
 use crate::disk;
@@ -662,6 +663,15 @@ fn handle(
         context.generations.prove();
         respond(stream, 204, "No Content", "text/plain", b"", &[])?;
         return Ok(flow);
+    }
+
+    // The client has exited cleanly and there is nothing left on screen but its
+    // last frame. Answered before quitting rather than after, because
+    // `terminate:` runs the flush and the reply would otherwise race it.
+    if request.method == "POST" && request.path == "__quit" {
+        respond(stream, 204, "No Content", "text/plain", b"", &[])?;
+        app::request_quit();
+        return Ok(Flow::Close);
     }
 
     // Full download: POST starts or stops the background sweep, GET polls it.
