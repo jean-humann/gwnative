@@ -32,4 +32,11 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = "symbols"
+# Not `strip = "symbols"`. That made the shipped binary smaller and every
+# release-build profile useless: `sample` and Instruments report raw addresses,
+# so diagnosing a release-only regression meant rebuilding first, on a binary
+# that is no longer the one that misbehaved. Keeping line tables in a separate
+# .dSYM costs the shipped binary nothing and leaves something to symbolicate
+# against.
+debug = 1
+split-debuginfo = "packed"

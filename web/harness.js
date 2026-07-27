@@ -386,13 +386,14 @@ function appendGlue() {
 (async function boot() {
   status('Loading host…');
   try {
-    const [graphics, filesystem, image, sockets] = await Promise.all([
+    const [graphics, filesystem, image, sockets, platform] = await Promise.all([
       import('./graphics.js'),
       import('./filesystem.js'),
       import('./image.js'),
       import('./sockets.js'),
+      import('./platform-capabilities.js'),
     ]);
-    host = { ...graphics, ...filesystem, ...image, ...sockets };
+    host = { ...graphics, ...filesystem, ...image, ...sockets, ...platform };
   } catch (error) {
     return fail(`The game host contract could not be loaded: ${error}`);
   }
@@ -435,6 +436,10 @@ function appendGlue() {
 
   Module.dns = host.createDns({ log });
   Module.socket = host.createSockets({ log });
+
+  // Two namespaces the client dereferences after deciding they are missing.
+  // See platform-capabilities.js — neither is implemented, both must exist.
+  Object.assign(Module, host.unavailablePlatformCapabilities(log));
 
   // preRun, so it only has to precede the glue that appendGlue() loads below.
   host.installGameFilesystem({
