@@ -118,6 +118,45 @@ because a WebSocket occupies its worker until the player quits and a cold chunk
 read blocks on the network, so a fixed pool deadlocks. More machinery, a new
 failure mode, no measurable gain.
 
+## One file per chunk, held open
+
+The other queued change was to replace the 16,167-file content-addressed cache
+with a single sparse `snapshot.bin`, on a microbenchmark showing 44.42 µs/op for
+the cache path against 0.63 µs for a pread on one open sparse file. Re-measured
+against the pread path that has since landed, over 2000 real cached chunks, 20
+iterations, 32 KiB windows:
+
+```
+A  landed path (open + fstat + pread + close)   23.56 us/op
+C  file per chunk, descriptor held open          2.82 us/op
+B  one sparse file, descriptor held open         2.39 us/op
+```
+
+The layout was never what mattered. Of the 9.9x available, **8.3x is holding
+the descriptor open** and the single-file layout adds 1.18x on top — so
+`src/chunks.rs` now keeps up to 2048 cached chunk files open and preads into
+them. A real boot ends with 38 held, 130 file descriptors in the process, and
+the limit here is 1048576. It is sound because the cache is content-addressed:
+the bytes behind a hash never change, so a descriptor cannot come to name the
+wrong content.
+
+The sparse file was refused on the other half of its premise. Sparseness does
+not survive scattered writes on this filesystem — measured by writing 256 KiB
+chunks into a truncate-extended 4.2 GB file and reading back `st_blocks`:
+
+```
+   10 chunks:    2.6 MB payload ->     2.6 MB allocated  ( 1.00x)
+  100 chunks:   26.2 MB payload ->    90.4 MB allocated  ( 3.45x)
+  500 chunks:  131.1 MB payload ->  4200.0 MB allocated  (32.04x)
+ 2000 chunks:  524.3 MB payload ->  4200.0 MB allocated  ( 8.01x)
+```
+
+`set_len` alone occupies nothing, and a handful of chunks stays honest, but by
+five hundred APFS has materialised the entire file. A `snapshot.bin` would
+therefore cost 4.2 GB on disk however little of the game was cached — which is
+most of the point of caching on demand, and the whole point of offering to start
+without downloading everything first.
+
 ## Diagnostics
 
 Every run appends a JSON record per second to
