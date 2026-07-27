@@ -94,6 +94,30 @@ would restart a loop WebKit had stopped, and drive the client's animation and
 audio off `performance.now()` instead of the frame clock — which is audible.
 `web/harness.js` says the same thing at the one place that is tempted to do it.
 
+## A thread per connection, deliberately
+
+`src/server.rs` still spawns one thread per accepted connection, which sounds
+like the thing every server guide tells you not to do. It was, once: before the
+loopback kept connections alive, one profile counted **689 distinct threads in
+four seconds**, each with a 2 MiB stack, and the `mmap`/`munmap`/`mprotect`
+churn of creating and tearing them down was a large fraction of host CPU. An
+elastic worker pool was the obvious fix.
+
+Keep-alive removed the premise instead. Re-measured on the same machine, a
+six-second profile covering the whole boot — the heaviest load the app ever
+sees — finds **33 threads in the process, 19 of them running any gwnative code
+at all, and 6 of those serving connections**. `lsof` at steady state shows
+**8 established connections**, held open for the session.
+
+That is not a number a pool improves. WebKit caps persistent connections per
+origin at six, plus the `__socket` WebSocket, so the connection count is bounded
+by the browser and every one of those threads now lives for the whole session —
+a pool would replace 8 long-lived threads with 8 long-lived workers and add a
+queue in front of them. It would also have to be elastic to be correct at all,
+because a WebSocket occupies its worker until the player quits and a cold chunk
+read blocks on the network, so a fixed pool deadlocks. More machinery, a new
+failure mode, no measurable gain.
+
 ## Diagnostics
 
 Every run appends a JSON record per second to
