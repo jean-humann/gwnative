@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::error::{Error, Result};
@@ -52,6 +52,22 @@ pub struct Client {
     agent: ureq::Agent,
     root: String,
     access_key: String,
+    retries: Retries,
+}
+
+/// What the retry ladder in [`Client::fetch`] cost, which is otherwise
+/// invisible.
+///
+/// A transient failure is retried without a word — nothing is logged, and a
+/// fetch that eventually succeeds looks from the outside exactly like one that
+/// was merely slow. Since the sleeps are seconds long and a demand read blocks
+/// behind them, a stalled read cannot be told from a queued one without this.
+#[derive(Default)]
+pub struct Retries {
+    /// Attempts after the first, across every fetch.
+    pub attempts: AtomicU64,
+    /// Milliseconds spent asleep between them.
+    pub slept_ms: AtomicU64,
 }
 
 impl Client {
@@ -78,7 +94,17 @@ impl Client {
             agent,
             root: root.trim_end_matches('/').to_owned(),
             access_key,
+            retries: Retries::default(),
         }
+    }
+
+    /// Retries so far: attempts after the first, and milliseconds slept between
+    /// them. See [`Retries`].
+    pub fn retries(&self) -> (u64, u64) {
+        (
+            self.retries.attempts.load(Ordering::Relaxed),
+            self.retries.slept_ms.load(Ordering::Relaxed),
+        )
     }
 
     pub fn fetch_manifest(&self) -> Result<Manifest> {
@@ -178,7 +204,12 @@ impl Client {
         let mut last = None;
         for attempt in 0..MAX_ATTEMPTS {
             if attempt > 0 {
-                std::thread::sleep(Duration::from_secs(1 << attempt));
+                let nap = Duration::from_secs(1 << attempt);
+                self.retries.attempts.fetch_add(1, Ordering::Relaxed);
+                self.retries
+                    .slept_ms
+                    .fetch_add(nap.as_millis() as u64, Ordering::Relaxed);
+                std::thread::sleep(nap);
             }
             match self.get_once(url, limit) {
                 Ok(bytes) => return Ok(bytes),
@@ -388,5 +419,32 @@ mod tests {
     fn gzip_limit_allows_incompressible_growth() {
         assert!(encoded_limit(1024, Compression::Gzip) > 1024);
         assert_eq!(encoded_limit(1024, Compression::None), 1024);
+    }
+
+    /// The ladder itself is not exercised here — one round of it sleeps for two
+    /// seconds and a full one for fourteen, which is not a price a unit suite
+    /// should pay. What is checked is the wiring, which is where a counter that
+    /// silently reads zero forever would actually come from.
+    #[test]
+    fn the_retry_ladder_is_reported_from_the_counters_it_increments() {
+        let client = Client::new(String::new(), String::new());
+        assert_eq!(
+            client.retries(),
+            (0, 0),
+            "a fresh client has retried nothing"
+        );
+
+        client.retries.attempts.fetch_add(3, Ordering::Relaxed);
+        client.retries.slept_ms.fetch_add(14_000, Ordering::Relaxed);
+        assert_eq!(client.retries(), (3, 14_000));
+    }
+
+    /// The sleeps are the whole reason a retry is visible in a range time:
+    /// `1 << attempt` over attempts 1..4 is 2 s, 4 s and 8 s, so a fetch that
+    /// uses the whole ladder cannot come in under fourteen seconds.
+    #[test]
+    fn the_backoff_ladder_sums_to_fourteen_seconds() {
+        let slept: u64 = (1..MAX_ATTEMPTS).map(|attempt| 1u64 << attempt).sum();
+        assert_eq!(slept, 14);
     }
 }
