@@ -41,7 +41,12 @@ async function sweep(action) {
     method: 'POST',
     headers: headers(),
   });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) {
+    // The host explains a refusal in the body — "not enough room" is the one
+    // worth repeating to the player rather than reporting as a status code.
+    const detail = await response.json().catch(() => null);
+    throw new Error(detail?.error ?? `HTTP ${response.status}`);
+  }
   return response.json();
 }
 
@@ -103,6 +108,12 @@ export async function resolveDataStrategy(snapshotBytes, { log, save, strategy }
     }
   };
 
+  // Whether the volume could take the rest of the image, headroom included. A
+  // host that will not say is treated as room enough: not knowing is not the
+  // same as knowing there is a problem, and the host refuses the start anyway
+  // if it turns out there is.
+  const room = info.free === null || info.free >= info.needed;
+
   let choice = strategy;
   if (choice === null) {
     const cachedBytes = Math.min(info.cached * info.chunkSize, snapshotBytes);
@@ -112,14 +123,23 @@ export async function resolveDataStrategy(snapshotBytes, { log, save, strategy }
       'for it, which starts in seconds and fetches each area the first time you ' +
       'visit it, or downloaded in full first, which takes a while once and then ' +
       'never touches the network for game data again.';
-    el('launcher-detail').textContent = info.cached
-      ? `${gb(cachedBytes)} GB already cached from earlier sessions.`
-      : '';
+    const cached = info.cached ? `${gb(cachedBytes)} GB already cached from earlier sessions.` : '';
+    // Offering a button the host is going to refuse would be worse than not
+    // offering it, so when there is no room the option is replaced by the
+    // reason there is none.
+    el('launcher-detail').textContent = room
+      ? cached
+      : `${cached} Downloading it all would need ${gb(info.outstanding)} GB more, ` +
+        `and this disk has ${gb(info.free)} GB free.`;
     overlay.hidden = false;
-    choice = await choose([
-      { label: 'Play now, stream as needed', value: 'quick', primary: true },
-      { label: 'Download everything first', value: 'full' },
-    ]);
+    choice = await choose(
+      room
+        ? [
+            { label: 'Play now, stream as needed', value: 'quick', primary: true },
+            { label: 'Download everything first', value: 'full' },
+          ]
+        : [{ label: 'Play now, stream as needed', value: 'quick', primary: true }],
+    );
     log(`launcher: data strategy set to ${choice}`);
     await remember(choice);
   }

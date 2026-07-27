@@ -418,6 +418,11 @@ impl ChunkStore {
         self.manifest.files[&self.snapshot].chunk_hashes.len()
     }
 
+    /// Where the cache lives, for anyone who needs to ask the volume about it.
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
     /// Add `index` to the boot list, if it is still open.
     fn note(&self, index: usize) {
         if self.recording.load(Ordering::Relaxed) {
