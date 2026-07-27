@@ -60,8 +60,12 @@ export function installGraphics({ env, renderScale, firstFrame, log }) {
         // exactly what it should show.
         if (previous) {
           const ms = now - previous;
+          // A total rather than a gauge: a gauge keeps only the last value
+          // written, so it would report whichever frame happened to draw last
+          // before the sample. Divided by the frame count it is the mean, and
+          // the peak beside it keeps the stall the mean hides.
           diagnostics.count('gw.frames', 1);
-          diagnostics.gauge('gw.frame.ms', ms);
+          diagnostics.count('gw.frame.ms.total', ms);
           diagnostics.peak('gw.frame.ms.max', ms);
         }
         previous = now;

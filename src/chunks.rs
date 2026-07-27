@@ -33,6 +33,43 @@ const MAX_CONCURRENT_FETCHES: usize = 8;
 /// which is the whole reason gwonmac splits its queue by priority.
 const MAX_PREFETCH_FETCHES: usize = 3;
 
+/// How far ahead of the client's read cursor to fetch, in chunks.
+///
+/// [`warm_boot`](ChunkStore::warm_boot) overlaps the round trips a boot spends
+/// on the snapshot, but it can only replay a list some earlier session left
+/// behind — so the very first launch, the one a new player actually judges the
+/// app on, gets nothing from it. Measured from a blank install, that launch
+/// reached its first frame somewhere between 94 s and 144 s across runs,
+/// against the Electron build's 15 to 21 — a spread too wide to quote a figure
+/// from, but never near the other build. The shape underneath it is the part
+/// worth fixing: one round trip per read, each waiting for the last, at ten
+/// chunk fetches a second, against a transport that does 22 MiB/s when eight
+/// requests are in flight.
+///
+/// 24 chunks is 6 MiB — enough to keep the pool busy through the client's walk
+/// of the snapshot, small enough that it is still streaming rather than the
+/// full download the player did not ask for.
+const READAHEAD_CHUNKS: usize = 24;
+
+/// The window of chunks readahead workers are allowed to fetch.
+///
+/// `next` is where the workers have got to and `limit` is one past the last
+/// index worth fetching; both move with the client's reads. Behind one mutex
+/// rather than two atomics because a seek has to move them together — a worker
+/// that saw the new `next` against the old `limit` would fetch into whatever
+/// the cursor had just left.
+#[derive(Default)]
+struct Readahead {
+    window: Mutex<Window>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct Window {
+    next: usize,
+    limit: usize,
+}
+
 /// Progress of a background full download.
 ///
 /// `total` is 0 when no sweep has ever run, which is how the page tells "idle"
@@ -58,6 +95,8 @@ pub struct ChunkStore {
     prefetch_permits: Semaphore,
     stats: Stats,
     prefetch: Prefetch,
+    /// The chunks demand reads have moved past. See [`READAHEAD_CHUNKS`].
+    readahead: Readahead,
     /// Which chunks this session has read, while the boot list is still being
     /// recorded. See [`seal_boot_list`](ChunkStore::seal_boot_list).
     touched: Mutex<BTreeSet<usize>>,
@@ -182,6 +221,7 @@ impl ChunkStore {
             prefetch_permits: Semaphore::new(MAX_PREFETCH_FETCHES),
             stats: Stats::default(),
             prefetch: Prefetch::default(),
+            readahead: Readahead::default(),
             touched: Mutex::default(),
             recording: AtomicBool::new(true),
             verified: Mutex::default(),
@@ -271,6 +311,7 @@ impl ChunkStore {
         let hash = self.chunk_hash(index)?;
         let expected = self.chunk_length(index)?;
         self.note(index);
+        self.advance_readahead(index);
         // Only chunks already hashed this session may be served by the window;
         // the full read in `chunk` is what earns them that place.
         if self.verified.lock().unwrap().contains(&hash)
@@ -313,12 +354,35 @@ impl ChunkStore {
             self.stats.from_cache.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
-        self.chunk(index).map(|_| ())
+        // Speculative by definition — every caller of this is guessing about a
+        // chunk nothing has asked for yet. Take the fetch permit *before*
+        // claiming the chunk: a demand read joins whatever fetch is already
+        // claimed for a chunk, so a guess that claims one and then queues for a
+        // permit makes the read it was meant to save wait behind the entire
+        // queue in front of it. Measured, that inversion turned the worst
+        // snapshot read of a session from 1.4 s into 16.1 s.
+        let permit = self.permits.acquire();
+        self.fetch_holding_permit(index, permit).map(|_| ())
     }
 
     /// Fetch chunk `index`, from cache if present. Concurrent callers asking
     /// for the same chunk share one fetch rather than racing to download it.
     fn chunk(&self, index: usize) -> Result<Arc<Vec<u8>>> {
+        self.fetch(index, None)
+    }
+
+    /// [`chunk`](Self::chunk) for a caller that already holds a fetch permit,
+    /// which it hands over: if this turns out to coalesce onto someone else's
+    /// fetch, the permit is released rather than held across the wait.
+    fn fetch_holding_permit<'a>(
+        &'a self,
+        index: usize,
+        permit: Permit<'a>,
+    ) -> Result<Arc<Vec<u8>>> {
+        self.fetch(index, Some(permit))
+    }
+
+    fn fetch<'a>(&'a self, index: usize, permit: Option<Permit<'a>>) -> Result<Arc<Vec<u8>>> {
         let hash = self.chunk_hash(index)?;
         let expected = self.chunk_length(index)?;
 
@@ -341,6 +405,10 @@ impl ChunkStore {
         };
 
         if !owned {
+            // A waiter has no use for a permit, and a caller that brought one
+            // gives it back here rather than hold a fetch slot across a wait
+            // for somebody else's download.
+            drop(permit);
             self.stats.coalesced.fetch_add(1, Ordering::Relaxed);
             return slot.wait();
         }
@@ -349,7 +417,7 @@ impl ChunkStore {
         // Only the owner holds a permit, so waiters never occupy one — which is
         // what keeps a burst of reads for one chunk from starving the pool.
         let fetched = {
-            let _permit = self.permits.acquire();
+            let _permit = permit.unwrap_or_else(|| self.permits.acquire());
             self.client
                 .fetch_chunk(&hash, expected, self.manifest.compression)
         };
@@ -450,6 +518,62 @@ impl ChunkStore {
     fn note(&self, index: usize) {
         if self.recording.load(Ordering::Relaxed) {
             self.touched.lock().unwrap().insert(index);
+        }
+    }
+
+    /// Move the readahead window past the chunk a demand read just asked for.
+    ///
+    /// Called on every read, cached or not: what makes the next read cheap is
+    /// knowing where this one was, and a run of cache hits is the clearest
+    /// possible signal that the client is walking forwards.
+    fn advance_readahead(&self, index: usize) {
+        let start = index + 1;
+        let limit = (start + READAHEAD_CHUNKS).min(self.chunk_count());
+        if start >= limit {
+            return;
+        }
+        let mut window = self.readahead.window.lock().unwrap();
+        // Outside the window means the client seeked, and the chunks the
+        // workers were about to fetch are no longer the ones in front of it.
+        // Inside it means they are already ahead, and where they have got to is
+        // worth more than starting the run again.
+        if window.next < start || window.next > limit {
+            window.next = start;
+        }
+        window.limit = limit;
+        drop(window);
+        self.readahead.wake.notify_all();
+    }
+
+    /// Fetch a little way ahead of wherever the client is reading.
+    ///
+    /// Idle until a read moves the window, so it costs a parked thread and
+    /// nothing else on a warm cache. Workers take `prefetch_permits` for the
+    /// same reason [`warm_boot`](ChunkStore::warm_boot) does: a guess about
+    /// what comes next must never sit in front of a read the game is blocked
+    /// on. Being wrong costs bandwidth, never latency.
+    pub fn start_readahead(self: &Arc<Self>) {
+        for _ in 0..MAX_PREFETCH_FETCHES {
+            let store = Arc::clone(self);
+            thread::spawn(move || {
+                crate::qos::set(crate::qos::Class::Utility);
+                loop {
+                    let index = {
+                        let mut window = store.readahead.window.lock().unwrap();
+                        while window.next >= window.limit {
+                            window = store.readahead.wake.wait(window).unwrap();
+                        }
+                        let index = window.next;
+                        window.next += 1;
+                        index
+                    };
+                    let _permit = store.prefetch_permits.acquire();
+                    // Best effort by construction: nothing has asked for this
+                    // chunk yet, and the demand read that eventually does is
+                    // where a failure has to be reported from.
+                    let _ = store.ensure(index);
+                }
+            });
         }
     }
 
@@ -869,6 +993,177 @@ mod tests {
             cache_dir,
         )
         .expect("the store should open over an empty cache")
+    }
+
+    /// A store over `count` chunks, for the arithmetic that only bites on a
+    /// snapshot bigger than the readahead window.
+    fn store_of(cache_dir: PathBuf, count: usize) -> ChunkStore {
+        let hashes = (0..count)
+            .map(|i| format!(r#""{i:032x}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let manifest = Manifest::parse(
+            format!(
+                r#"{{"compressionMode":"none","chunkSize":1024,
+                     "files":[{{"name":"Gw.snapshot","size":{},
+                                "chunkHashes":[{hashes}]}}]}}"#,
+                count * 1024
+            )
+            .as_bytes(),
+        )
+        .expect("the synthetic manifest should parse");
+        ChunkStore::open(
+            Client::new(String::new(), String::new()),
+            manifest,
+            cache_dir,
+        )
+        .expect("the store should open over an empty cache")
+    }
+
+    #[test]
+    fn the_readahead_window_follows_the_reads_and_stops_at_the_end() {
+        let temp = TempDir::new("readahead");
+        let store = store_of(temp.0.join("chunks"), 200);
+        let window = || {
+            let w = store.readahead.window.lock().unwrap();
+            (w.next, w.limit)
+        };
+
+        store.advance_readahead(0);
+        assert_eq!(window(), (1, 1 + READAHEAD_CHUNKS), "opens past the read");
+
+        // Workers have got to 10. A read at 5 is behind them, and where they
+        // are is worth more than starting the run over — only the far edge
+        // moves.
+        store.readahead.window.lock().unwrap().next = 10;
+        store.advance_readahead(5);
+        assert_eq!(window(), (10, 6 + READAHEAD_CHUNKS));
+
+        // A seek out of the window is the case that matters: the chunks the
+        // workers were about to fetch are no longer in front of the client.
+        store.advance_readahead(150);
+        assert_eq!(window(), (151, 151 + READAHEAD_CHUNKS));
+
+        // And a seek backwards far enough to leave them behind it.
+        store.advance_readahead(3);
+        assert_eq!(window(), (4, 4 + READAHEAD_CHUNKS));
+    }
+
+    /// The whole point of taking the permit first. A demand read joins a fetch
+    /// already claimed for the chunk it wants, so a speculative fetch holding
+    /// that claim while it queues for a permit hands its own wait to the read
+    /// it was supposed to save — which measured as a worst-case snapshot read
+    /// of 16.1 s against 1.4 s without any readahead at all.
+    #[test]
+    fn a_speculative_fetch_claims_no_chunk_until_it_can_start() {
+        let temp = TempDir::new("no-inversion");
+        let store = store_of(temp.0.join("chunks"), 200);
+
+        // Every fetch slot taken, as they are whenever the client is busy.
+        let held: Vec<_> = (0..MAX_CONCURRENT_FETCHES)
+            .map(|_| store.permits.acquire())
+            .collect();
+
+        std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                // No network behind this store, so it fails once it starts —
+                // starting is the part under test.
+                let _ = store.ensure(1);
+            });
+
+            // Long enough that a claim-then-queue would have left its mark.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(
+                store.inflight.lock().unwrap().is_empty(),
+                "a chunk was claimed by a fetch that had not started"
+            );
+
+            // Put the chunk where the warm will find it once it is let through,
+            // so this ends on the cache rather than on four rounds of retry
+            // against a network this store does not have. It could not have
+            // been there earlier: `ensure` would have returned on it and never
+            // reached the permit this test is about.
+            let hash = store.manifest.files["Gw.snapshot"].chunk_hashes[1];
+            let path = store.cache_path(&hash);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, vec![0u8; 1024]).unwrap();
+            store.verified.lock().unwrap().insert(hash);
+
+            drop(held);
+            waiting
+                .join()
+                .expect("the warm should end, successfully or not");
+        });
+    }
+
+    /// The other half of taking the permit first. Having taken one, a
+    /// speculative fetch that finds the chunk already being downloaded has
+    /// nothing left to do but wait, and a fetch slot is far too scarce to spend
+    /// on waiting — there are eight for every read the client has in flight.
+    #[test]
+    fn a_fetch_that_coalesces_gives_its_permit_back() {
+        let temp = TempDir::new("coalesce-permit");
+        let store = store_of(temp.0.join("chunks"), 200);
+        let free = || *store.permits.available.lock().unwrap();
+
+        // Stand in for a download this store already has under way.
+        let hash = store.manifest.files["Gw.snapshot"].chunk_hashes[1];
+        let slot = Arc::new(Slot::new());
+        store
+            .inflight
+            .lock()
+            .unwrap()
+            .insert(hash, Arc::clone(&slot));
+
+        // Everything is observed inside the scope and judged outside it. An
+        // assertion that fires while the spawned thread is still parked on the
+        // slot would hang here rather than fail, because the scope waits for a
+        // thread only this test's own later lines will ever release.
+        let (coalesced, free_while_waiting) = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                let _ = store.ensure(1);
+            });
+
+            // `ensure` takes its permit before it looks, so the count dipping
+            // and coming back is the handover happening.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while store.stats.coalesced.load(Ordering::Relaxed) == 0
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let observed = (store.stats.coalesced.load(Ordering::Relaxed), free());
+
+            slot.fulfil(Ok(Arc::new(vec![0u8; 1024])));
+            waiting.join().expect("the wait should end");
+            observed
+        });
+
+        assert_eq!(coalesced, 1, "the fetch never joined the one in flight");
+        assert_eq!(
+            free_while_waiting, MAX_CONCURRENT_FETCHES,
+            "a fetch slot was held across a wait for somebody else's download"
+        );
+        assert_eq!(free(), MAX_CONCURRENT_FETCHES, "a permit went missing");
+    }
+
+    #[test]
+    fn readahead_never_points_past_the_last_chunk() {
+        let temp = TempDir::new("readahead-end");
+        let store = store_of(temp.0.join("chunks"), 5);
+        let window = || {
+            let w = store.readahead.window.lock().unwrap();
+            (w.next, w.limit)
+        };
+
+        store.advance_readahead(0);
+        assert_eq!(window(), (1, 5), "a short snapshot clamps to what exists");
+
+        // The last chunk has nothing after it. Leaving `limit` where it was
+        // would be worse than doing nothing: the workers would fetch the tail
+        // again every time the client read it.
+        store.advance_readahead(4);
+        assert_eq!(window(), (1, 5), "the end of the file opens no window");
     }
 
     #[test]

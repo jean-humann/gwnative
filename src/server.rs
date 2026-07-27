@@ -585,8 +585,11 @@ fn handle(
     {
         // Worth timing rather than merely counting: a range that has to fetch
         // the chunks it covers blocks the client for as long as it takes, and
-        // it is the one host-side latency the player feels directly. The mean
-        // hides that, so keep the worst as well.
+        // it is the one host-side latency the player feels directly. Record the
+        // total rather than a gauge — a gauge keeps only the last value written,
+        // so it would report whichever range happened to finish last instead of
+        // anything about the session. Divided by the request count it is the
+        // mean, and the mean hides the stalls, so keep the worst as well.
         let began = std::time::Instant::now();
         // A range that fails part way through has already put bytes on the wire
         // under a Content-Length it can no longer honour. There is no way back
@@ -595,7 +598,7 @@ fn handle(
         let ms = began.elapsed().as_secs_f64() * 1000.0;
         let metrics = &context.recorder.metrics;
         metrics.count("gw.range.requests", 1.0);
-        metrics.gauge("gw.range.ms", ms);
+        metrics.count("gw.range.ms.total", ms);
         metrics.peak("gw.range.ms.max", ms);
         return Ok(match intact {
             true => flow,

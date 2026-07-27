@@ -209,6 +209,9 @@ fn main() {
             // built. By the time the client asks, the chunks that gate the
             // first frame are already local.
             store.warm_boot();
+            // And on the launch that has no list to replay — the first one —
+            // stay a little ahead of wherever the client is reading instead.
+            store.start_readahead();
             Some(store)
         }
         Err(e) => {
