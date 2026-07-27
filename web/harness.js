@@ -386,14 +386,15 @@ function appendGlue() {
 (async function boot() {
   status('Loading host…');
   try {
-    const [graphics, filesystem, image, sockets, platform] = await Promise.all([
+    const [graphics, filesystem, image, sockets, platform, input] = await Promise.all([
       import('./graphics.js'),
       import('./filesystem.js'),
       import('./image.js'),
       import('./sockets.js'),
       import('./platform-capabilities.js'),
+      import('./input.js'),
     ]);
-    host = { ...graphics, ...filesystem, ...image, ...sockets, ...platform };
+    host = { ...graphics, ...filesystem, ...image, ...sockets, ...platform, ...input };
   } catch (error) {
     return fail(`The game host contract could not be loaded: ${error}`);
   }
@@ -472,6 +473,10 @@ function appendGlue() {
   // WebGL to reallocate and clear the buffer on every resize event.
   const canvas = Module.canvas;
   canvas.focus();
+
+  // Before the glue, so a corrected key event replaces the original rather than
+  // arriving after the client has already acted on it.
+  window.gwInput = host.installGameInput({ canvas, log });
 
   // Text entry does not run through keydown on the canvas: the client focuses
   // one of these fields and reads the composed result back. Without them it
