@@ -29,17 +29,7 @@ gwnative) ;;
 *) exec "$binary" "$@" ;;
 esac
 
-# Deliberately discovered rather than hardcoded: the common name embeds a
-# developer's account, and this file is committed.
-identity=$GWNATIVE_SIGN_IDENTITY
-if [ -z "$identity" ]; then
-	identity=$(security find-identity -v -p codesigning 2>/dev/null |
-		sed -n 's/.*"\(Apple Development:.*\)"/\1/p' | head -1)
-fi
-if [ -z "$identity" ]; then
-	identity=$(security find-identity -v -p codesigning 2>/dev/null |
-		sed -n 's/.*"\(.*\)"/\1/p' | head -1)
-fi
+identity=$("$(dirname "$0")/sign-identity")
 
 if [ -z "$identity" ]; then
 	# Still runnable, just back to a signature that changes every build.

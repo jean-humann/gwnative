@@ -1,0 +1,72 @@
+#!/bin/sh
+# Assemble "Guild Wars.app" around the release binary.
+#
+# Why a bundle at all: macOS Game Mode only considers applications whose
+# LSApplicationCategoryType names a game category, and a category can only be
+# declared in an Info.plist. Game Mode is worth being eligible for — it gives
+# the frontmost full-screen game priority on the performance cores and doubles
+# the Bluetooth polling rate for controllers and AirPods — and no amount of
+# runtime configuration substitutes for it. A bare executable is simply not a
+# candidate.
+#
+# Everything else a bundle brings follows from the same file: a real bundle
+# identifier instead of a nil one, a name for the application menu, a Retina
+# backing store, and a Finder icon to launch rather than a path to type.
+#
+# Usage: scripts/bundle [output.app]
+set -e
+
+cd "$(dirname "$0")/.."
+root=$PWD
+app=${1:-$root/dist/Guild Wars.app}
+
+cargo build --release
+
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/web"
+
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+sed "s/__VERSION__/$version/g" packaging/Info.plist > "$app/Contents/Info.plist"
+
+# Pre-bundle-identifier legacy, but Launch Services still reads it and it costs
+# eight bytes.
+printf 'APPL????' > "$app/Contents/PkgInfo"
+
+cp target/release/gwnative "$app/Contents/MacOS/gwnative"
+
+# The shell only. Gw.jspi.js, Gw.jspi.wasm and version.json are the client
+# itself, fetched from ArenaNet against the live manifest; shipping a copy would
+# freeze the game at whatever build this was packaged from, because the patch
+# sync only runs for an artifact that is missing.
+for path in web/*.js web/*.html; do
+	case ${path##*/} in
+	Gw.jspi.*) continue ;;
+	esac
+	cp "$path" "$app/Contents/Resources/web/"
+done
+
+# Symbols live beside the bundle rather than inside it: they are half the build
+# output, nothing at runtime reads them, and `sample` and Instruments find a
+# .dSYM by UUID wherever it sits on the volume.
+rm -rf "$root/dist/gwnative.dSYM"
+if [ -d target/release/gwnative.dSYM ]; then
+	cp -R target/release/gwnative.dSYM "$root/dist/gwnative.dSYM"
+fi
+
+identity=$(scripts/sign-identity)
+if [ -z "$identity" ]; then
+	echo "[bundle] no code-signing identity found; the saved login will not" \
+		"survive this build. Set GWNATIVE_SIGN_IDENTITY to choose one." >&2
+else
+	# --identifier is redundant with CFBundleIdentifier and passed anyway, so
+	# that a plist edit cannot silently change which application the keychain
+	# thinks is asking. No --options runtime: the hardened runtime buys nothing
+	# without notarization, and this is not distributed.
+	codesign --force --sign "$identity" --identifier com.gwnative.app "$app" 2>&1 |
+		sed 's/^/[bundle] /' >&2
+	codesign --verify --strict "$app"
+fi
+
+echo "[bundle] $app"
+echo "[bundle] open it from Finder, or run \"$app/Contents/MacOS/gwnative\"" \
+	"to keep the diagnostics on your terminal"

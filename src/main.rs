@@ -31,21 +31,71 @@ use objc2_app_kit::{
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL, NSURLRequest};
 use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration};
 
+/// `~/Library/Application Support/gwnative`, the one place this app writes.
+///
+/// The chunk cache is already a directory inside it — see
+/// [`chunks::default_cache_dir`], which explains why it is here rather than in
+/// `~/Library/Caches`.
+fn support_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+    PathBuf::from(home).join("Library/Application Support/gwnative")
+}
+
+/// The directory the loopback origin serves, and the one `patch::sync` fills.
+///
+/// Development runs straight out of the source tree. A packaged build does
+/// *not* serve out of `Contents/Resources/web`, tempting as that is: the patch
+/// client writes `Gw.jspi.wasm` into this directory, and writing into a bundle
+/// invalidates its code signature — the same signature the keychain matches the
+/// saved login against, so the cost of getting this wrong is an account that
+/// silently stops appearing. The bundle's copy is a seed for a writable root
+/// instead, refreshed on every launch so an upgraded app ships an upgraded
+/// shell.
 fn web_root() -> PathBuf {
-    // Development runs from the source tree; a packaged build reads from
-    // Contents/Resources/web.
     if let Ok(dir) = std::env::var("GWNATIVE_WEB_ROOT") {
         return PathBuf::from(dir);
     }
     let exe = std::env::current_exe().expect("current_exe");
-    let bundled = exe
+    let seed = exe
         .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.join("Resources/web"));
-    match bundled {
-        Some(p) if p.is_dir() => p,
-        _ => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web"),
+        .and_then(Path::parent)
+        .map(|contents| contents.join("Resources/web"))
+        .filter(|seed| seed.is_dir());
+    let Some(seed) = seed else {
+        return PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web");
+    };
+    let live = support_dir().join("web");
+    if let Err(e) = seed_web(&seed, &live) {
+        // Reported rather than fatal, and still the root we return: a partial
+        // seed leaves the missing file to be noticed by whatever needed it,
+        // whereas falling back to the bundle would put the patch sync inside
+        // it, which is the one outcome this function exists to prevent.
+        eprintln!("[gwnative] could not lay out {}: {e}", live.display());
     }
+    live
+}
+
+/// Copy the bundle's shell files over the live web root.
+///
+/// Only what the bundle carries: the client artifacts sit in the same directory
+/// once fetched and must survive. Contents are compared rather than timestamps,
+/// which a copy does not preserve — these are a few tens of kilobytes, so the
+/// comparison costs less than being wrong about it would.
+fn seed_web(seed: &Path, live: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(live)?;
+    for entry in std::fs::read_dir(seed)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let fresh = std::fs::read(entry.path())?;
+        let installed = live.join(entry.file_name());
+        if std::fs::read(&installed).is_ok_and(|current| current == fresh) {
+            continue;
+        }
+        std::fs::write(&installed, &fresh)?;
+    }
+    Ok(())
 }
 
 fn main() {

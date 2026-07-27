@@ -106,6 +106,38 @@ in once more, which replaces the item outright.
 `GWNATIVE_WEB_ROOT` overrides the harness directory, and `GWNATIVE_PATCH_ROOT`
 the patch endpoint.
 
+## Package
+
+```sh
+scripts/bundle
+```
+
+Builds `dist/Guild Wars.app`. The bundle exists for one reason that cannot be
+had any other way: macOS Game Mode only considers applications whose
+`LSApplicationCategoryType` names a game category, and a category can only be
+declared in an `Info.plist`. Being eligible is worth it — Game Mode gives the
+frontmost full-screen game priority on the performance cores and doubles the
+Bluetooth polling rate for controllers and AirPods. The rest follows from the
+same file: a real bundle identifier instead of a nil one, `Guild Wars` in the
+application menu, and a Retina backing store.
+
+It is signed with the same identity and the same `com.gwnative.app` identifier
+as `cargo run` uses, so its designated requirement is byte-for-byte the one the
+keychain already knows and the saved login carries over.
+
+A packaged build does not serve out of `Contents/Resources/web`. The patch
+client writes `Gw.jspi.wasm` into the web root, and writing into a bundle
+invalidates its signature — the same signature the login depends on. The
+bundle's copy is a seed for `~/Library/Application Support/gwnative/web`,
+refreshed on each launch, and the client artifacts are fetched there. For the
+same reason the bundle carries only the shell: a packaged `Gw.jspi.wasm` would
+freeze the game at the build it was packaged from, because the sync only runs
+for an artifact that is missing.
+
+Launch it from Finder, or run `dist/Guild Wars.app/Contents/MacOS/gwnative` to
+keep the diagnostics on the terminal — the executable resolves its own bundle
+either way.
+
 ## Licence
 
 GPL-2.0-or-later, matching the upstream project.
