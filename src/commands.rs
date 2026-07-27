@@ -13,7 +13,8 @@ use std::ffi::c_void;
 
 use objc2::Message;
 use objc2::rc::Retained;
-use objc2_foundation::NSString;
+use objc2_app_kit::NSApplication;
+use objc2_foundation::{MainThreadMarker, NSString};
 use objc2_web_kit::WKWebView;
 
 use crate::layout;
@@ -100,37 +101,55 @@ unsafe extern "C" {
     );
 }
 
-/// Tell the page when the window stops being the key window.
+/// Tell the page when the window gains or loses key status.
 ///
-/// `input.js` already releases everything on `blur`, and that covers most of
-/// it. What it does not cover is the case that actually strands a key: ⌘Tab
-/// away mid-stride and the keyup goes to whatever took focus, so the client
-/// walks into a wall until the key is pressed and released again. AppKit sees
-/// the window resign key every time, including the times the page's own blur
-/// does not fire.
+/// Two things ride on this. Input: `input.js` already releases everything on
+/// `blur`, and that covers most of it, but not the case that actually strands a
+/// key — ⌘Tab away mid-stride and the keyup goes to whatever took focus, so the
+/// client walks into a wall until the key is pressed and released again. AppKit
+/// sees the window resign key every time, including the times the page's own
+/// blur does not fire.
+///
+/// Audio: the Electron build goes quiet when another window is selected. That
+/// is the client's own doing — it registers a blur callback on the canvas, and
+/// Chromium blurs the focused element when the window resigns key. WebKit only
+/// fires blur on the window, so the client never hears it and keeps playing.
+/// The page has a fallback on `window` blur, but this is the reliable half, for
+/// the same reason it is the reliable half for input.
+///
+/// Registered as a pair, deliberately: a mute with no matching unmute is a game
+/// that is silent until relaunch.
 fn watch_focus() {
     // AppKit posts to the default `NSNotificationCenter`, which is the same
     // centre as Core Foundation's local one — the two are bridged. Reading it
     // this way avoids declaring an Objective-C class purely to own a selector.
-    let name = NSString::from_str("NSWindowDidResignKeyNotification");
-    // SAFETY: `NSString` is toll-free bridged to `CFStringRef`. The name is
-    // deliberately leaked: the observer is never removed, because it is wanted
-    // for as long as the process runs, so the name has to outlive it. The
-    // observer pointer is null and is only ever handed back to `resigned_key`,
-    // which ignores it.
-    unsafe {
-        let name = Retained::into_raw(name).cast::<c_void>();
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetLocalCenter(),
-            std::ptr::null(),
-            resigned_key,
-            name,
-            std::ptr::null(),
-            // Local notifications are not suspended, so the behaviour is moot;
-            // 0 is `CFNotificationSuspensionBehaviorDrop`, which the local
-            // centre ignores.
-            0,
-        );
+    for (name, callback) in [
+        (
+            "NSWindowDidResignKeyNotification",
+            resigned_key as CFNotificationCallback,
+        ),
+        ("NSWindowDidBecomeKeyNotification", became_key),
+    ] {
+        let name = NSString::from_str(name);
+        // SAFETY: `NSString` is toll-free bridged to `CFStringRef`. The name is
+        // deliberately leaked: the observer is never removed, because it is
+        // wanted for as long as the process runs, so the name has to outlive
+        // it. The observer pointer is null and is only ever handed back to the
+        // callbacks, which ignore it.
+        unsafe {
+            let name = Retained::into_raw(name).cast::<c_void>();
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetLocalCenter(),
+                std::ptr::null(),
+                callback,
+                name,
+                std::ptr::null(),
+                // Local notifications are not suspended, so the behaviour is
+                // moot; 0 is `CFNotificationSuspensionBehaviorDrop`, which the
+                // local centre ignores.
+                0,
+            );
+        }
     }
 }
 
@@ -143,4 +162,28 @@ extern "C" fn resigned_key(
     _info: *const c_void,
 ) {
     send("input-reset");
+    // The observer is registered for any window in the process, so a host panel
+    // taking key — the crash alert in `renderer`, a save dialog — arrives here
+    // too. Losing the key window while the application is still frontmost is
+    // not the player switching away, and ducking the game for it would be
+    // wrong. `NSApp.isActive` is the distinction, and it is one the page cannot
+    // make.
+    if !application_is_active() {
+        send("audio-mute");
+    }
+}
+
+extern "C" fn became_key(
+    _center: CFNotificationCenterRef,
+    _observer: *mut c_void,
+    _name: *const c_void,
+    _object: *const c_void,
+    _info: *const c_void,
+) {
+    send("audio-unmute");
+}
+
+/// Whether this application is the frontmost one. Main thread.
+fn application_is_active() -> bool {
+    MainThreadMarker::new().is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
 }
