@@ -13,6 +13,7 @@
 //! neither. The account name is not itself a secret, but splitting it out would
 //! mean two items that can disagree.
 
+use security_framework::base::Error;
 use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
 };
@@ -21,6 +22,34 @@ use serde::{Deserialize, Serialize};
 /// Shown in Keychain Access as the item's name, so it says what it is.
 const SERVICE: &str = "gwnative (Guild Wars)";
 const ACCOUNT: &str = "login";
+
+/// `errSecItemNotFound`: nothing saved yet. The ordinary state on a first run,
+/// and the only failure here that deserves no comment.
+const ITEM_NOT_FOUND: i32 = -25300;
+
+/// The three ways the keychain says "not for you": the ACL refused, the person
+/// dismissed the prompt, or there was no way to put a prompt on screen. They
+/// are one condition as far as this module is concerned.
+const AUTH_FAILED: i32 = -25293;
+const USER_CANCELED: i32 = -128;
+const INTERACTION_NOT_ALLOWED: i32 = -25308;
+
+fn denied(e: &Error) -> bool {
+    matches!(
+        e.code(),
+        AUTH_FAILED | USER_CANCELED | INTERACTION_NOT_ALLOWED
+    )
+}
+
+/// The keychain identifies the application allowed to open an item by its code
+/// signature. Cargo links an ad-hoc signature whose hash changes on every
+/// build, so under one of those every rebuild is a different application and
+/// the saved login turns unreadable — while looking exactly like never having
+/// logged in at all. Telling those two apart is the entire reason this module
+/// inspects status codes instead of using `.ok()`.
+const DENIED_HELP: &str = "a saved login exists, but this build is not allowed to open it. \
+    It was saved by a build with a different code signature; sign in once more to hand it \
+    to this one. See scripts/signed-run for why that happens and how it is avoided.";
 
 #[derive(Serialize, Deserialize)]
 pub struct Credentials {
@@ -34,7 +63,20 @@ pub struct Credentials {
 const MAX_FIELD: usize = 4096;
 
 pub fn load() -> Option<Credentials> {
-    let raw = get_generic_password(SERVICE, ACCOUNT).ok()?;
+    let raw = match get_generic_password(SERVICE, ACCOUNT) {
+        Ok(raw) => raw,
+        Err(e) if e.code() == ITEM_NOT_FOUND => return None,
+        Err(e) if denied(&e) => {
+            eprintln!("[keychain] {DENIED_HELP}");
+            return None;
+        }
+        // Anything else is unexpected rather than explicable, so pass the
+        // system's own wording through instead of guessing at a cause.
+        Err(e) => {
+            eprintln!("[keychain] could not read the saved login: {e}");
+            return None;
+        }
+    };
     match serde_json::from_slice::<Credentials>(&raw) {
         Ok(credentials) => Some(credentials),
         // An item that will not parse is one this app cannot use, and leaving it
@@ -52,7 +94,28 @@ pub fn store(credentials: &Credentials) -> Result<(), String> {
         return Err("credentials are too long to store".into());
     }
     let encoded = serde_json::to_vec(credentials).map_err(|e| e.to_string())?;
-    set_generic_password(SERVICE, ACCOUNT, &encoded).map_err(|e| e.to_string())
+    match set_generic_password(SERVICE, ACCOUNT, &encoded) {
+        Ok(()) => Ok(()),
+        // Saving over an existing item is an update, and an update asks the
+        // same permission a read does. So an item left by a differently signed
+        // build refuses the overwrite too, and signing in again — the one thing
+        // that would fix it — is exactly what cannot happen. Replacing it does
+        // work: removing an item does not require opening it, so the delete
+        // goes through where the update would not, and adding it back is an
+        // ordinary create that records this build as the owner. Once only; a
+        // second refusal is a real failure and says what to remove by hand.
+        Err(e) if denied(&e) => {
+            if let Err(e) = delete_generic_password(SERVICE, ACCOUNT) {
+                return Err(format!(
+                    "the saved login belongs to a differently signed build and could not \
+                     be replaced ({e}); delete \"{SERVICE}\" in Keychain Access, then sign \
+                     in again"
+                ));
+            }
+            set_generic_password(SERVICE, ACCOUNT, &encoded).map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Deleting what was never there is the caller's intended end state, so a

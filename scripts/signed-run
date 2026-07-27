@@ -1,0 +1,53 @@
+#!/bin/sh
+# Cargo runner: sign the binary with a stable identity, then run it.
+#
+# Cargo links an ad-hoc signature whose identifier carries a build hash
+# (`gwnative-207c770bcfdfe50d`), so both the identifier and the CDHash change on
+# every build. The keychain records the application allowed to read an item by
+# its code signature, so under an ad-hoc signature every rebuild is a different
+# application to the keychain and the saved login stops being readable — the
+# symptom is an account that silently fails to appear.
+#
+# Signing with a real certificate replaces that with
+#   identifier "com.gwnative.app" and anchor apple generic
+#   and certificate leaf[subject.CN] = "Apple Development: ..."
+# which does not mention the CDHash and so survives rebuilds. It survives
+# certificate renewal too: the leaf is matched by common name, not by hash.
+#
+# Wired up as the cargo runner in .cargo/config.toml so `cargo run` cannot leave
+# an unsigned binary behind. `cargo build` on its own still can, which is why
+# the run path is the documented one.
+set -e
+
+binary=$1
+shift
+
+# cargo routes test and example binaries through the runner as well; those are
+# not this application and must not claim its identity.
+case ${binary##*/} in
+gwnative) ;;
+*) exec "$binary" "$@" ;;
+esac
+
+# Deliberately discovered rather than hardcoded: the common name embeds a
+# developer's account, and this file is committed.
+identity=$GWNATIVE_SIGN_IDENTITY
+if [ -z "$identity" ]; then
+	identity=$(security find-identity -v -p codesigning 2>/dev/null |
+		sed -n 's/.*"\(Apple Development:.*\)"/\1/p' | head -1)
+fi
+if [ -z "$identity" ]; then
+	identity=$(security find-identity -v -p codesigning 2>/dev/null |
+		sed -n 's/.*"\(.*\)"/\1/p' | head -1)
+fi
+
+if [ -z "$identity" ]; then
+	# Still runnable, just back to a signature that changes every build.
+	echo "[sign] no code-signing identity found; the saved login will not" \
+		"survive this rebuild. Set GWNATIVE_SIGN_IDENTITY to choose one." >&2
+else
+	codesign --force --sign "$identity" --identifier com.gwnative.app "$binary" 2>&1 |
+		sed 's/^/[sign] /' >&2
+fi
+
+exec "$binary" "$@"

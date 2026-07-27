@@ -86,7 +86,23 @@ refreshes them without opening a window. Neither needs setting up: the patch
 service access key identifies the official client rather than a player, so it is
 the same value everywhere and ships in `src/patch.rs`.
 
-`GWNATIVE_ACCESS_KEY` overrides it should ArenaNet rotate the value,
+`cargo run` signs the binary first, through the runner in `.cargo/config.toml`.
+That is not packaging: the keychain identifies the application allowed to open a
+saved item by its code signature, and the signature cargo links by itself
+carries a build hash, so without this every rebuild is a new application to the
+keychain and the saved login quietly stops appearing. Signing with a
+certificate replaces the hash with a rule naming the identifier and the
+certificate's common name, which survives both rebuilds and certificate
+renewal. Any codesigning identity in the login keychain will do and the first
+one found is used; `GWNATIVE_SIGN_IDENTITY` picks a specific one. With no
+identity at all the app still builds and runs — it just goes back to forgetting
+the login on every rebuild, and says so.
+
+A login saved by an earlier, differently signed build is not lost. macOS offers
+it on first read, and Always Allow adopts it; declining that just means signing
+in once more, which replaces the item outright.
+
+`GWNATIVE_ACCESS_KEY` overrides the access key should ArenaNet rotate the value,
 `GWNATIVE_WEB_ROOT` overrides the harness directory, and `GWNATIVE_PATCH_ROOT`
 the patch endpoint.
 
