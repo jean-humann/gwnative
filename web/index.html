@@ -79,6 +79,40 @@
   #failure button:hover { background: #45475a; }
   #failure button.danger { color: #f38ba8; }
   #failure-note { color: #9399b2; max-width: 46em; min-height: 1.5em; }
+  /* Launcher overlay. Same shape as #failure — it covers the canvas and takes
+     pointer events for the same reason: the client does not exist yet, so
+     there is nothing behind it. Wired by launcher.js. */
+  #launcher {
+    position: fixed; inset: 0; z-index: 2;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px;
+    padding: 40px; text-align: center;
+    background: rgba(0, 0, 0, .92);
+  }
+  #launcher[hidden] { display: none; }
+  #launcher-title { margin: 0; font-size: 20px; font-weight: 500; }
+  #launcher-text { max-width: 42em; color: #9399b2; }
+  #launcher-detail { color: #9399b2; min-height: 1.5em; font-variant-numeric: tabular-nums; }
+  #launcher-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #launcher button {
+    padding: 7px 16px; border-radius: 6px; cursor: pointer;
+    font: inherit; color: #cdd6f4;
+    background: #313244; border: 1px solid #45475a;
+  }
+  #launcher button:hover { background: #45475a; }
+  #launcher button.primary { border-color: #d9b25c; }
+  /* Wider than the status rail because here it is the subject, not a footnote. */
+  #launcher-rail {
+    width: min(32em, 70vw); height: 6px; border-radius: 3px;
+    background: #181825; overflow: hidden;
+  }
+  #launcher-rail[hidden] { display: none; }
+  #launcher-rail-fill {
+    height: 100%; width: 0;
+    background: linear-gradient(90deg, #8a6a2b, #d9b25c 55%, #f3dd9d);
+    transition: width .3s ease;
+  }
+  @media (prefers-reduced-motion: reduce) { #launcher-rail-fill { transition: none; } }
   #log {
     position: fixed; inset: 0 0 auto 0; max-height: 60%;
     margin: 0; padding: 10px 14px; overflow: auto;
@@ -100,6 +134,16 @@
   <div id="failure-text"></div>
   <div id="failure-actions"></div>
   <div id="failure-note"></div>
+</div>
+<!-- Filled in by launcher.js, which asks how the game image should be fetched
+     before the client is built. Markup rather than a built fragment so the
+     styling above stays with the rest of it. -->
+<div id="launcher" hidden>
+  <h1 id="launcher-title"></h1>
+  <div id="launcher-text"></div>
+  <div id="launcher-rail" hidden><div id="launcher-rail-fill"></div></div>
+  <div id="launcher-detail"></div>
+  <div id="launcher-actions"></div>
 </div>
 <!-- The client probes for Module.oskInput and concludes it cannot accept text at
      all if these are missing — which is why the login fields ignored every key.

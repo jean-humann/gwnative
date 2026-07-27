@@ -653,8 +653,19 @@ fn handle(
                 store.start_full_download();
             }
         }
-        let (done, total, running) = store.prefetch_progress();
-        let body = format!(r#"{{"done":{done},"total":{total},"running":{running}}}"#);
+        // `cached` is residency, not sweep progress: the launcher's question is
+        // how much of the game is already paid for, and a sweep's own counter
+        // restarts at zero every time one does. `fetched` is kept beside it
+        // because it is the only number that moves when a sweep is re-walking
+        // ground it already has, which is what "running but not advancing"
+        // looks like from the page.
+        let (fetched, _, running) = store.prefetch_progress();
+        let cached = store.resident_count();
+        let total = store.chunk_count();
+        let chunk_size = store.chunk_size();
+        let body = format!(
+            r#"{{"cached":{cached},"total":{total},"fetched":{fetched},"running":{running},"chunkSize":{chunk_size}}}"#
+        );
         respond(stream, 200, "OK", "application/json", body.as_bytes(), &[])?;
         return Ok(flow);
     }

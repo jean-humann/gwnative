@@ -450,18 +450,20 @@ function appendGlue() {
   }
 
   try {
-    const [graphics, filesystem, image, sockets, platform, input, templates, prefs, metrics] =
-      await Promise.all([
-        import('./graphics.js'),
-        import('./filesystem.js'),
-        import('./image.js'),
-        import('./sockets.js'),
-        import('./platform-capabilities.js'),
-        import('./input.js'),
-        import('./template-save.js'),
-        import('./settings.js'),
-        import('./diagnostics.js'),
-      ]);
+    const [
+      graphics, filesystem, image, sockets, platform, input, templates, prefs, start, metrics,
+    ] = await Promise.all([
+      import('./graphics.js'),
+      import('./filesystem.js'),
+      import('./image.js'),
+      import('./sockets.js'),
+      import('./platform-capabilities.js'),
+      import('./input.js'),
+      import('./template-save.js'),
+      import('./settings.js'),
+      import('./launcher.js'),
+      import('./diagnostics.js'),
+    ]);
     host = {
       ...graphics,
       ...filesystem,
@@ -471,6 +473,7 @@ function appendGlue() {
       ...input,
       ...templates,
       ...prefs,
+      ...start,
     };
     // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
     // contract could plausibly want for something else.
@@ -547,6 +550,7 @@ function appendGlue() {
   });
 
   status('Preparing game data…');
+  let snapshotBytes = 0;
   try {
     const meta = await host.loadSnapshotMetadata();
     const source = host.createImageSource({
@@ -555,6 +559,7 @@ function appendGlue() {
       log,
     });
     imageSource = source;
+    snapshotBytes = meta.size;
     Module.image = source.image;
     window.gwStats = () => source.stats();
     log(
@@ -562,6 +567,24 @@ function appendGlue() {
     );
   } catch (error) {
     return fail(`Game data could not be prepared: ${error}`);
+  }
+
+  // Asked here because it is the last moment there is anywhere to ask: after
+  // appendGlue() the client owns the canvas and the keyboard. It returns at once
+  // unless there is a real choice to make — see launcher.js.
+  window.gwResolveDataStrategy = (bytes) =>
+    host.resolveDataStrategy(bytes, {
+      log,
+      save: host.saveSettings,
+      strategy: host.currentSettings().dataStrategy,
+    });
+  try {
+    await window.gwResolveDataStrategy(snapshotBytes);
+  } catch (error) {
+    // The launcher's own failure paths already end in "boot anyway"; this is
+    // for the one it cannot catch, which deserves the same answer.
+    log(`[warn] launcher: ${error}`);
+    document.getElementById('launcher').hidden = true;
   }
 
   // The canvas is sized by the client, not here. It owns the drawing buffer —
