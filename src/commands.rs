@@ -13,8 +13,7 @@ use std::ffi::c_void;
 
 use objc2::Message;
 use objc2::rc::Retained;
-use objc2_app_kit::NSApplication;
-use objc2_foundation::{MainThreadMarker, NSString};
+use objc2_foundation::NSString;
 use objc2_web_kit::WKWebView;
 
 use crate::layout;
@@ -101,7 +100,8 @@ unsafe extern "C" {
     );
 }
 
-/// Tell the page when the window gains or loses key status.
+/// Tell the page when focus moves — the window's key status, and the
+/// application's own.
 ///
 /// Two things ride on this. Input: `input.js` already releases everything on
 /// `blur`, and that covers most of it, but not the case that actually strands a
@@ -117,8 +117,23 @@ unsafe extern "C" {
 /// The page has a fallback on `window` blur, but this is the reliable half, for
 /// the same reason it is the reliable half for input.
 ///
-/// Registered as a pair, deliberately: a mute with no matching unmute is a game
-/// that is silent until relaunch.
+/// The two are watched separately because they are two different questions.
+/// Input follows the *window*: a key stranded by ⌘Tab is stranded whether or not
+/// anything else in this process took over. Audio follows the *application*,
+/// because "another window is selected" means another app's window — a host
+/// panel of ours taking key is not the player switching away, and ducking the
+/// game for it would be wrong.
+///
+/// Audio used to hang off the window notification too, asking `NSApp.isActive`
+/// to tell the two cases apart — and end to end, switching away left the game
+/// playing: the page was never told. Asking mid-transition is the flaw. The
+/// window resigns key and the application resigns active as one gesture, and a
+/// guard evaluated during it depends on which half AppKit has finished, which
+/// is not a thing this code should have an opinion about. An application
+/// notification *is* the state change, so there is nothing left to ask.
+///
+/// Registered in matched pairs, deliberately: a mute with no matching unmute is
+/// a game that is silent until relaunch.
 fn watch_focus() {
     // AppKit posts to the default `NSNotificationCenter`, which is the same
     // centre as Core Foundation's local one — the two are bridged. Reading it
@@ -128,7 +143,8 @@ fn watch_focus() {
             "NSWindowDidResignKeyNotification",
             resigned_key as CFNotificationCallback,
         ),
-        ("NSWindowDidBecomeKeyNotification", became_key),
+        ("NSApplicationDidResignActiveNotification", resigned_active),
+        ("NSApplicationDidBecomeActiveNotification", became_active),
     ] {
         let name = NSString::from_str(name);
         // SAFETY: `NSString` is toll-free bridged to `CFStringRef`. The name is
@@ -162,18 +178,20 @@ extern "C" fn resigned_key(
     _info: *const c_void,
 ) {
     send("input-reset");
-    // The observer is registered for any window in the process, so a host panel
-    // taking key — the crash alert in `renderer`, a save dialog — arrives here
-    // too. Losing the key window while the application is still frontmost is
-    // not the player switching away, and ducking the game for it would be
-    // wrong. `NSApp.isActive` is the distinction, and it is one the page cannot
-    // make.
-    if !application_is_active() {
-        send("audio-mute");
-    }
 }
 
-extern "C" fn became_key(
+/// The player switched to another application. Delivered on the main thread.
+extern "C" fn resigned_active(
+    _center: CFNotificationCenterRef,
+    _observer: *mut c_void,
+    _name: *const c_void,
+    _object: *const c_void,
+    _info: *const c_void,
+) {
+    send("audio-mute");
+}
+
+extern "C" fn became_active(
     _center: CFNotificationCenterRef,
     _observer: *mut c_void,
     _name: *const c_void,
@@ -181,9 +199,4 @@ extern "C" fn became_key(
     _info: *const c_void,
 ) {
     send("audio-unmute");
-}
-
-/// Whether this application is the frontmost one. Main thread.
-fn application_is_active() -> bool {
-    MainThreadMarker::new().is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
 }
