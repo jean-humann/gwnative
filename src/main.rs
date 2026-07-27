@@ -8,8 +8,10 @@
 mod chunks;
 mod commands;
 mod diagnostics;
+mod disk;
 mod error;
 mod generation;
+mod instance;
 mod keychain;
 mod layout;
 mod manifest;
@@ -30,6 +32,7 @@ use objc2::rc::Retained;
 use objc2::runtime::Sel;
 use objc2::{MainThreadOnly, sel};
 use objc2_app_kit::{
+    NSApplicationActivationOptions, NSRunningApplication,
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEventModifierFlags, NSMenu,
     NSMenuItem, NSWindow, NSWindowStyleMask,
 };
@@ -115,12 +118,41 @@ fn seed_web(seed: &Path, live: &Path) -> std::io::Result<()> {
 }
 
 fn main() {
-    let root = web_root();
     let command = std::env::args().nth(1);
     let force_sync = command.as_deref() == Some("sync");
     // `serve` runs the origin without a window, so the snapshot range path can
     // be exercised from curl or a test.
     let headless = command.as_deref() == Some("serve");
+
+    // Before `web_root`, which seeds files a second instance may be reading.
+    // Held for as long as the process lives; the kernel takes it back if the
+    // process does not.
+    let lock_path = support_dir().join("gwnative.lock");
+    let _instance = match instance::acquire(&lock_path) {
+        Ok(held) => held,
+        Err(reason) => {
+            eprintln!("[gwnative] {reason}");
+            // A second launch of a windowed app should look like asking for the
+            // one that is already open, not like nothing happening. Raising it
+            // by pid rather than bundle id works in development too, where
+            // there is no bundle to identify.
+            if !headless
+                && !force_sync
+                && let Some(pid) = instance::holder(&lock_path)
+                && let Some(mtm) = MainThreadMarker::new()
+            {
+                let _ = mtm;
+                if let Some(running) =
+                    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+                {
+                    running.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+                }
+            }
+            std::process::exit(1);
+        }
+    };
+
+    let root = web_root();
 
     // Before anything reads the web root: a client installed last launch that
     // never reported a first frame is one this build cannot run, and the set it

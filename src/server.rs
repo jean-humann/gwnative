@@ -25,6 +25,7 @@ use std::thread;
 
 use crate::chunks::ChunkStore;
 use crate::diagnostics::{self, Recorder};
+use crate::disk;
 use crate::generation;
 use crate::patch::SNAPSHOT;
 use crate::settings;
@@ -39,6 +40,14 @@ use crate::{keychain, net, proxy, qos, ws};
 /// how long one request occupies a connection and a fetch slot: 32 MiB is 128
 /// chunks, and a demand read arriving behind that waits for all of them.
 const MAX_RANGE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Room to leave behind after a full download.
+///
+/// A volume with nothing left is not merely full: swap, the WebKit caches and
+/// every atomic rename in this process all want space, and the first thing to
+/// break would be the game rather than the download that caused it. 2 GB is
+/// generous next to a 4.2 GB snapshot and cheap next to the alternative.
+const DISK_HEADROOM: u64 = 2 * 1024 * 1024 * 1024;
 
 /// The origin's port. Any constant would do; this one is unassigned by IANA and
 /// sits below macOS's ephemeral floor of 49152, so the kernel will not hand it
@@ -656,9 +665,39 @@ fn handle(
     if request.path == "__prefetch"
         && let Some(store) = &context.snapshot
     {
+        // What a full download would still have to write, and what the volume
+        // says it could take. Both are reported on every poll so the page can
+        // show the price before the player agrees to it — asking for 4.2 GB and
+        // then filling the disk is the failure this exists to avoid.
+        let outstanding =
+            (store.chunk_count() - store.resident_count()) as u64 * store.chunk_size();
+        let free = disk::available(store.cache_dir());
+
         if request.method == "POST" {
             if request.query == "stop" {
                 store.stop_full_download();
+            } else if let Some(free) = free.filter(|free| *free < outstanding + DISK_HEADROOM) {
+                // Refused rather than started-and-abandoned: a sweep that runs
+                // until the volume fills takes the rest of the machine down
+                // with it, and the client streams perfectly well without it.
+                eprintln!(
+                    "[prefetch] refused: {:.1} GB free, {:.1} GB needed",
+                    free as f64 / 1e9,
+                    (outstanding + DISK_HEADROOM) as f64 / 1e9
+                );
+                let body = format!(
+                    r#"{{"error":"not enough room","free":{free},"needed":{}}}"#,
+                    outstanding + DISK_HEADROOM
+                );
+                respond(
+                    stream,
+                    507,
+                    "Insufficient Storage",
+                    "application/json",
+                    body.as_bytes(),
+                    &[],
+                )?;
+                return Ok(flow);
             } else {
                 store.start_full_download();
             }
@@ -673,8 +712,16 @@ fn handle(
         let cached = store.resident_count();
         let total = store.chunk_count();
         let chunk_size = store.chunk_size();
+        // `null` rather than a guess when the volume will not say: the page
+        // treats not knowing as no reason to stop, which is the same thing it
+        // does when this whole route is missing.
+        let free = free.map_or("null".to_owned(), |free| free.to_string());
+        // Two numbers, because they answer different questions: `outstanding`
+        // is what the download would write and belongs in the prose, `needed`
+        // is what the volume must have and is what the refusal above compares.
+        let needed = outstanding + DISK_HEADROOM;
         let body = format!(
-            r#"{{"cached":{cached},"total":{total},"fetched":{fetched},"running":{running},"chunkSize":{chunk_size}}}"#
+            r#"{{"cached":{cached},"total":{total},"fetched":{fetched},"running":{running},"chunkSize":{chunk_size},"outstanding":{outstanding},"needed":{needed},"free":{free}}}"#
         );
         respond(stream, 200, "OK", "application/json", body.as_bytes(), &[])?;
         return Ok(flow);
