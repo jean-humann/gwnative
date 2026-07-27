@@ -276,6 +276,14 @@ thread_local! {
     static TRACKED: RefCell<Option<Tracker>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// Where the window should land once it has finished leaving full screen.
+    ///
+    /// Set only by [`reset`], and only when the window is full screen at the
+    /// time. Main thread, like everything else here.
+    static PENDING: std::cell::Cell<Option<Bounds>> = const { std::cell::Cell::new(None) };
+}
+
 struct Tracker {
     window: Retained<NSWindow>,
     path: PathBuf,
@@ -387,6 +395,44 @@ fn observe(tracker: &mut Tracker) -> State {
     }
 }
 
+/// Put the window back where a first launch would have put it.
+///
+/// `fit` already rescues the frames it can reason about — a window on a display
+/// that has been unplugged, one too small to grab. What it cannot rescue is the
+/// window a player has merely lost: dragged mostly off the edge, or left full
+/// screen on a machine whose second display went away between sessions. This is
+/// the escape hatch for those, and it is why the Electron build has the same
+/// item in the same menu.
+pub fn reset(mtm: MainThreadMarker) {
+    // Cloned out rather than used inside the borrow: every AppKit call below
+    // posts a window notification synchronously, and the handlers for those
+    // borrow `TRACKED` again.
+    let window = TRACKED.with(|tracked| {
+        tracked
+            .borrow()
+            .as_ref()
+            .map(|tracker| tracker.window.clone())
+    });
+    let Some(window) = window else { return };
+
+    let (_, primary) = work_areas(mtm);
+    let bounds = default_state(primary).bounds;
+
+    if window.styleMask().contains(NSWindowStyleMask::FullScreen) {
+        // Leaving full screen is an animation, and it ends by restoring the
+        // frame the window had before it started — which is the frame being
+        // replaced. Setting one now would be setting it twice, the second time
+        // by AppKit. So it is remembered and applied on the way out.
+        PENDING.with(|pending| pending.set(Some(bounds)));
+        window.toggleFullScreen(None);
+        return;
+    }
+    if window.isZoomed() {
+        window.zoom(None);
+    }
+    window.setFrame_display_animate(bounds.to_rect(), true, true);
+}
+
 /// Write the tracked window's state now, whatever the coalescing interval says.
 ///
 /// Called on the notifications that mean a gesture has finished, and on the way
@@ -454,7 +500,7 @@ fn watch() {
         ("NSWindowDidResizeNotification", moved),
         ("NSWindowDidEndLiveResizeNotification", settled),
         ("NSWindowDidEnterFullScreenNotification", settled),
-        ("NSWindowDidExitFullScreenNotification", settled),
+        ("NSWindowDidExitFullScreenNotification", left_full_screen),
         ("NSWindowDidResignKeyNotification", settled),
         ("NSApplicationWillTerminateNotification", settled),
     ] {
@@ -496,6 +542,32 @@ extern "C" fn settled(
     _object: *const c_void,
     _info: *const c_void,
 ) {
+    flush();
+}
+
+/// The other half of a [`reset`] that had to leave full screen first.
+///
+/// A separate callback rather than a check inside `settled`, because `settled`
+/// answers to five other notifications and a pending frame must be spent on
+/// exactly the one it was queued for.
+extern "C" fn left_full_screen(
+    _center: CFNotificationCenterRef,
+    _observer: *mut c_void,
+    _name: *const c_void,
+    _object: *const c_void,
+    _info: *const c_void,
+) {
+    if let Some(bounds) = PENDING.with(std::cell::Cell::take) {
+        let window = TRACKED.with(|tracked| {
+            tracked
+                .borrow()
+                .as_ref()
+                .map(|tracker| tracker.window.clone())
+        });
+        if let Some(window) = window {
+            window.setFrame_display_animate(bounds.to_rect(), true, true);
+        }
+    }
     flush();
 }
 
