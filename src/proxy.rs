@@ -17,9 +17,9 @@
 //! domain. The page can put any path it likes in front of us, and this is the one
 //! place in the host that will open a connection to an arbitrary name on demand.
 
-use std::io::Read;
-use std::sync::OnceLock;
 use std::time::Duration;
+
+use crate::transport;
 
 /// The five hosts the client reaches for. Each key is the first label of its
 /// value, because that is all the glue keeps when it rewrites the URL.
@@ -78,22 +78,6 @@ pub fn host(route: &str) -> Option<&'static str> {
         .map(|(_, host)| *host)
 }
 
-fn agent() -> &'static ureq::Agent {
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .timeout_global(Some(TIMEOUT))
-            // Followed by hand below, so a redirect that leaves the allowlisted
-            // host is refused instead of quietly fetched.
-            .max_redirects(0)
-            // A 401 is an answer the client knows how to render; it is not a
-            // transport failure and must reach the page intact.
-            .http_status_as_error(false)
-            .build()
-            .new_agent()
-    })
-}
-
 /// Forward one request. `tail` is the path after the route label, leading slash
 /// included; `query` is the raw query string without its `?`.
 pub fn forward(
@@ -105,53 +89,44 @@ pub fn forward(
     body: Vec<u8>,
 ) -> Result<Reply, String> {
     let host = host(route).ok_or_else(|| format!("unknown proxy route: {route}"))?;
+    if !matches!(method, "GET" | "POST" | "PUT") {
+        return Err(format!("method not allowed: {method}"));
+    }
     let url = if query.is_empty() {
         format!("https://{host}{tail}")
     } else {
         format!("https://{host}{tail}?{query}")
     };
 
-    let forwarded: Vec<(&str, &str)> = headers
+    // Identity last so it wins if the page sent an accept-encoding of its own:
+    // the bodies here are already compressed or small, and decoding one
+    // transfer layer only to re-frame it below buys nothing.
+    let mut forwarded: Vec<(&str, &str)> = headers
         .iter()
         .filter(|(name, _)| !REQUEST_DROP.contains(&name.as_str()))
         .map(|(name, value)| (name.as_str(), value.as_str()))
         .collect();
+    forwarded.push(("accept-encoding", "identity"));
 
-    // The bodies here are already compressed or small, and decoding one
-    // transfer layer only to re-frame it below buys nothing.
-    let mut response = match method {
-        "GET" => {
-            let mut request = agent().get(&url).header("accept-encoding", "identity");
-            for (name, value) in forwarded {
-                request = request.header(name, value);
-            }
-            request.call()
-        }
-        "POST" | "PUT" => {
-            let mut request = match method {
-                "POST" => agent().post(&url),
-                _ => agent().put(&url),
-            }
-            .header("accept-encoding", "identity");
-            for (name, value) in forwarded {
-                request = request.header(name, value);
-            }
-            request.send(&body)
-        }
-        _ => return Err(format!("method not allowed: {method}")),
-    }
-    .map_err(|e| e.to_string())?;
+    // Redirects are not followed — the transport hands the 3xx back — so a
+    // redirect that leaves the allowlisted host is refused below instead of
+    // quietly fetched. A 401 is an answer the client knows how to render; it
+    // arrives here as a status like any other and reaches the page intact.
+    let response = transport::fetch(
+        method,
+        &url,
+        &forwarded,
+        matches!(method, "POST" | "PUT").then_some(body.as_slice()),
+        TIMEOUT,
+    )?;
 
-    let status = response.status().as_u16();
     let mut out = Vec::new();
-    for (name, value) in response.headers() {
-        let name = name.as_str().to_ascii_lowercase();
+    for (name, value) in response.headers {
         if RESPONSE_DROP.contains(&name.as_str()) {
             continue;
         }
-        let Ok(value) = value.to_str() else { continue };
         if name == "location" {
-            match rewrite_location(route, host, value) {
+            match rewrite_location(route, host, &value) {
                 Some(safe) => out.push((name, safe)),
                 // Dropping the header turns the redirect into a bare 3xx, which
                 // the client reports as a failed request rather than following
@@ -160,24 +135,17 @@ pub fn forward(
             }
             continue;
         }
-        out.push((name, value.to_owned()));
+        out.push((name, value));
     }
 
-    let mut buffer = Vec::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(MAX_BODY as u64 + 1)
-        .read_to_end(&mut buffer)
-        .map_err(|e| e.to_string())?;
-    if buffer.len() > MAX_BODY {
+    if response.body.len() > MAX_BODY {
         return Err(format!("response body over {MAX_BODY} bytes"));
     }
 
     Ok(Reply {
-        status,
+        status: response.status,
         headers: out,
-        body: buffer,
+        body: response.body,
     })
 }
 

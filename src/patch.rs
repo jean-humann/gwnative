@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 use crate::manifest::{Compression, ContentHash, HashAlgo, Manifest};
+use crate::transport;
 
 pub const PATCH_ROOT: &str = "https://patching.1.arenanetworks.com";
 
@@ -49,7 +50,6 @@ pub const COMMON_ARTIFACTS: [&str; 1] = ["version.json"];
 pub const SNAPSHOT: &str = "Gw.snapshot";
 
 pub struct Client {
-    agent: ureq::Agent,
     root: String,
     access_key: String,
     retries: Retries,
@@ -81,17 +81,7 @@ impl Client {
     }
 
     pub fn new(root: String, access_key: String) -> Self {
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(REQUEST_TIMEOUT))
-            // Redirects off: a patch endpoint that suddenly wants to send us
-            // elsewhere is a signal to stop, not to follow.
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .user_agent(USER_AGENT)
-            .build()
-            .new_agent();
         Self {
-            agent,
             root: root.trim_end_matches('/').to_owned(),
             access_key,
             retries: Retries::default(),
@@ -222,20 +212,28 @@ impl Client {
     }
 
     fn get_once(&self, url: &str, limit: u64) -> Result<Vec<u8>> {
-        let mut response = self
-            .agent
-            .get(url)
-            .header("X-Access-Key", &self.access_key)
-            // Identity encoding: chunks are already compressed per the manifest,
-            // and a transfer-level layer would defeat the byte budget below.
-            .header("Accept-Encoding", "identity")
-            .call()
-            .map_err(|e| Error::Transport {
-                url: url.to_owned(),
-                detail: e.to_string(),
-            })?;
+        // Redirects come back as their 3xx and land in FATAL below: a patch
+        // endpoint that suddenly wants to send us elsewhere is a signal to
+        // stop, not to follow. Identity encoding because chunks are already
+        // compressed per the manifest, and a transfer-level layer would defeat
+        // the byte budget below.
+        let response = transport::fetch(
+            "GET",
+            url,
+            &[
+                ("X-Access-Key", &self.access_key),
+                ("Accept-Encoding", "identity"),
+                ("User-Agent", USER_AGENT),
+            ],
+            None,
+            REQUEST_TIMEOUT,
+        )
+        .map_err(|detail| Error::Transport {
+            url: url.to_owned(),
+            detail,
+        })?;
 
-        let status = response.status().as_u16();
+        let status = response.status;
         if status != 200 {
             let fatal = FATAL_STATUS.contains(&status) || (300..400).contains(&status);
             return Err(if fatal {
@@ -251,38 +249,17 @@ impl Client {
             });
         }
 
-        if let Some(declared) = response
-            .headers()
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            && declared > limit
-        {
+        // The budget is enforced after receipt rather than during it — the OS
+        // stack buffers the body before this code sees a byte, so an overrun
+        // costs its size in memory once, but it is still refused rather than
+        // truncated into a hash mismatch.
+        if response.body.len() as u64 > limit {
             return Err(Error::TooLarge {
                 url: url.to_owned(),
                 limit,
             });
         }
-
-        // Read one byte past the budget so an undeclared overrun is caught
-        // rather than silently truncated into a hash mismatch.
-        let mut body = Vec::new();
-        response
-            .body_mut()
-            .as_reader()
-            .take(limit + 1)
-            .read_to_end(&mut body)
-            .map_err(|e| Error::Transport {
-                url: url.to_owned(),
-                detail: e.to_string(),
-            })?;
-        if body.len() as u64 > limit {
-            return Err(Error::TooLarge {
-                url: url.to_owned(),
-                limit,
-            });
-        }
-        Ok(body)
+        Ok(response.body)
     }
 }
 
