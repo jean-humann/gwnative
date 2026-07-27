@@ -313,7 +313,7 @@ fn decode_chunk(encoded: &[u8], expected_len: u64, compression: Compression) -> 
     Ok(decoded)
 }
 
-fn verify(bytes: &[u8], hash: &ContentHash) -> Result<()> {
+pub fn verify(bytes: &[u8], hash: &ContentHash) -> Result<()> {
     use md5::Digest as _;
     let actual = match hash.algo() {
         HashAlgo::Md5 => hex::encode(md5::Md5::digest(bytes)),

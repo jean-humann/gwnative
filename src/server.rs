@@ -29,8 +29,13 @@ use crate::sockets::{self, Registry};
 use crate::{keychain, net, proxy, ws};
 
 /// Largest span served from one request. The harness asks for far less; this
-/// only stops a stray `Range: bytes=0-` from trying to buffer the whole image.
-const MAX_RANGE_BYTES: u64 = 32 * 1024 * 1024;
+/// only stops a stray `Range: bytes=0-` from walking the whole image in one go.
+///
+/// 8 MiB, the figure gwonmac settled on, not the 32 MiB this used to be. The
+/// body is streamed now so the cap no longer bounds memory, but it still bounds
+/// how long one request occupies a connection and a fetch slot: 32 MiB is 128
+/// chunks, and a demand read arriving behind that waits for all of them.
+const MAX_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The origin's port. Any constant would do; this one is unassigned by IANA and
 /// sits below macOS's ephemeral floor of 49152, so the kernel will not hand it
@@ -561,8 +566,13 @@ fn handle(
     if request.path == SNAPSHOT
         && let Some(store) = &context.snapshot
     {
-        serve_snapshot(stream, &request, store)?;
-        return Ok(flow);
+        // A range that fails part way through has already put bytes on the wire
+        // under a Content-Length it can no longer honour. There is no way back
+        // to a clean message boundary, so the connection ends here.
+        return Ok(match serve_snapshot(stream, &request, store)? {
+            true => flow,
+            false => Flow::Close,
+        });
     }
 
     // The client's own web requests, which it addressed to this origin because
@@ -651,66 +661,93 @@ fn handle(
     Ok(flow)
 }
 
+/// Answer a snapshot range, streaming the body rather than assembling it.
+///
+/// Returns whether the connection is still usable: `false` means the head was
+/// already on the wire when the body failed, so the caller must close.
 fn serve_snapshot(
     stream: &mut TcpStream,
     request: &Request,
     store: &ChunkStore,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     let total = store.snapshot_size();
 
     // A HEAD is how the client learns the image size without pulling a byte.
     if request.method == "HEAD" {
-        return respond_head(stream, total, &[("Accept-Ranges", "bytes".into())]);
+        respond_head(stream, total, &[("Accept-Ranges", "bytes".into())])?;
+        return Ok(true);
     }
 
     let Some((start, end)) = request.range.as_deref().and_then(|r| parse_range(r, total)) else {
         // Refusing an unranged GET is deliberate: answering it means streaming
         // 4.2 GB, which is never what the client wants.
-        return respond(
+        respond(
             stream,
             416,
             "Range Not Satisfiable",
             "text/plain",
             b"snapshot requires a byte range",
             &[("Content-Range", format!("bytes */{total}"))],
-        );
+        )?;
+        return Ok(true);
     };
 
     let length = (end - start + 1).min(MAX_RANGE_BYTES);
-    match store.read(start, length) {
-        Ok(body) => {
-            let last = start + body.len() as u64 - 1;
-            if tracing() {
-                eprintln!(
-                    "[loopback] 206 /{SNAPSHOT} bytes {start}-{last}/{total} ({} bytes)",
-                    body.len()
-                );
-            }
-            respond(
-                stream,
-                206,
-                "Partial Content",
-                "application/octet-stream",
-                &body,
-                &[
-                    ("Content-Range", format!("bytes {start}-{last}/{total}")),
-                    ("Accept-Ranges", "bytes".into()),
-                ],
-            )
-        }
-        Err(e) => {
-            eprintln!("[loopback] 502 /{SNAPSHOT} {start}+{length}: {e}");
-            respond(
-                stream,
-                502,
-                "Bad Gateway",
-                "text/plain",
-                e.to_string().as_bytes(),
-                &[],
-            )
-        }
+    // Arithmetic, not I/O — which is the point. The old shape read the whole
+    // span into a Vec purely to learn how long it was, so a 32 MiB range meant
+    // 32 MiB resident in the host before a single byte reached the socket.
+    let produced = store.readable(start, length);
+    if produced == 0 {
+        respond(
+            stream,
+            416,
+            "Range Not Satisfiable",
+            "text/plain",
+            b"range starts past the end of the snapshot",
+            &[("Content-Range", format!("bytes */{total}"))],
+        )?;
+        return Ok(true);
     }
+
+    // Chunks arrive as they are read, so the first one can be on the wire while
+    // the last is still being fetched — and the peak allocation is one chunk
+    // rather than the whole range.
+    let last = start + produced - 1;
+    let head = format!(
+        "HTTP/1.1 206 Partial Content\r\n{}",
+        common_headers(
+            "application/octet-stream",
+            produced,
+            "no-store",
+            &[
+                ("Content-Range", format!("bytes {start}-{last}/{total}")),
+                ("Accept-Ranges", "bytes".into()),
+            ],
+        )
+    );
+    stream.write_all(head.as_bytes())?;
+
+    let mut body = std::io::BufWriter::with_capacity(BODY_BUFFER, &mut *stream);
+    if let Err(e) = store.read_into(start, length, &mut body) {
+        eprintln!("[loopback] /{SNAPSHOT} {start}+{length} failed mid-body: {e}");
+        return Ok(false);
+    }
+    body.flush()?;
+    drop(body);
+    stream.flush()?;
+
+    if tracing() {
+        eprintln!("[loopback] 206 /{SNAPSHOT} bytes {start}-{last}/{total} ({produced} bytes)");
+    }
+    Ok(true)
 }
+
+/// How much of a streamed body to gather before it goes to the socket.
+///
+/// A range is served chunk-window by chunk-window, and the commonest of those is
+/// 472 bytes; handing each one to `write` separately would be a syscall per
+/// window with `TCP_NODELAY` sending each as its own segment.
+const BODY_BUFFER: usize = 64 * 1024;
 
 /// Parse a single-span `bytes=` range into an inclusive, clamped `(start, end)`.
 /// Multi-range requests are not supported and fall through as unsatisfiable.
