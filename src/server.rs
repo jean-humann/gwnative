@@ -471,10 +471,18 @@ fn handle(
             .snapshot
             .as_ref()
             .map_or((0, 0, 0), |store| store.stats());
+        // Beside them because they explain them: a slow session with no retries
+        // was queueing, and the same session with seconds on the clock here was
+        // waiting for a network that had already failed.
+        let (retried, slept_ms) = context
+            .snapshot
+            .as_ref()
+            .map_or((0, 0), |store| store.retries());
         let body = serde_json::json!({
             "footprintMiB": usage.footprint as f64 / 1048576.0,
             "cpuSeconds": usage.cpu().as_secs_f64(),
             "chunks": { "fromCache": from_cache, "fetched": fetched, "coalesced": coalesced },
+            "retries": { "attempts": retried, "sleptMs": slept_ms },
             "metrics": context.recorder.metrics.snapshot(),
         });
         respond(

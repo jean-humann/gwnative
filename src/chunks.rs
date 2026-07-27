@@ -237,6 +237,12 @@ impl ChunkStore {
         )
     }
 
+    /// What the transport's retry ladder has cost this session. See
+    /// [`Retries`](crate::patch::Retries).
+    pub fn retries(&self) -> (u64, u64) {
+        self.client.retries()
+    }
+
     pub fn snapshot_size(&self) -> u64 {
         self.manifest.files[&self.snapshot].size
     }
