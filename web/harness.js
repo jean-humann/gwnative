@@ -190,6 +190,8 @@ const downloadProgress = (seconds) => {
 // least show that it is still running.
 let stageClock = null;
 let stageLabel = null;
+/** Re-read the client's heap size. Set once the module's imports exist. */
+let readHeap = null;
 
 const releaseStage = () => {
   clearInterval(stageClock);
@@ -298,7 +300,14 @@ Module = {
       firstFrame: () => {
         performance.mark('gw.frame.first-submit');
         status(null);
+        // Nothing is loading any more, and the startup clock has no reason to
+        // keep ticking. The client does send `complete`, which already does
+        // this, but a frame on screen is the stronger evidence of the two.
+        releaseStage();
         log('first frame presented');
+        // The heap the client settled on to get here, which is the number a
+        // later reading has to be compared against to mean anything.
+        readHeap?.();
         // Time to first frame, from the page's own origin rather than from
         // process start — the one launch number a change can be judged by.
         diag?.gauge('gw.boot.first-frame.ms', performance.now());
@@ -310,6 +319,15 @@ Module = {
           headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
         }).catch(() => {});
       },
+      log,
+    });
+
+    // The client's linear memory lives in the web content process, which the
+    // host's own sampler cannot see at all. This is the only way its size is
+    // ever reported.
+    readHeap = host.installMemorySensor({
+      env: imports.env,
+      heapBytes: () => Module.HEAPU8?.byteLength ?? 0,
       log,
     });
 
@@ -479,7 +497,20 @@ Module = {
 
   onExit(code) {
     log('wasm exited:', code);
-    if (code !== 0) fail('The game client stopped unexpectedly.');
+    if (code !== 0) {
+      fail('The game client stopped unexpectedly.');
+      return;
+    }
+    // The player chose Exit inside the game. Without this the window stays open
+    // on the last frame it drew and they have to quit a second time, from the
+    // menu, to close a game that has already ended. The host takes it from here
+    // — including writing the files out, which is why this is a request to
+    // terminate rather than a close.
+    status('Closing…');
+    fetch('__quit', {
+      method: 'POST',
+      headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
+    }).catch(() => {});
   },
 };
 
@@ -507,9 +538,12 @@ function appendGlue() {
 
   try {
     const [
-      graphics, filesystem, image, sockets, platform, input, templates, prefs, start, metrics,
+      graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
+      start, metrics,
     ] = await Promise.all([
       import('./graphics.js'),
+      import('./audio.js'),
+      import('./memory.js'),
       import('./filesystem.js'),
       import('./image.js'),
       import('./sockets.js'),
@@ -522,6 +556,8 @@ function appendGlue() {
     ]);
     host = {
       ...graphics,
+      ...audio,
+      ...memory,
       ...filesystem,
       ...image,
       ...sockets,
@@ -597,6 +633,11 @@ function appendGlue() {
   // Two namespaces the client dereferences after deciding they are missing.
   // See platform-capabilities.js — neither is implemented, both must exist.
   Object.assign(Module, host.unavailablePlatformCapabilities(log));
+
+  // Before the glue exists, which is the whole requirement: it reads
+  // window.AudioContext when the client first opens a device, and this has to
+  // be what it finds there.
+  window.gwAudio = host.installGameAudio();
 
   // preRun, so it only has to precede the glue that appendGlue() loads below.
   host.installGameFilesystem({
@@ -707,14 +748,28 @@ function appendGlue() {
     log(`keyboard reaching the page (target=${event.target?.id || event.target?.nodeName})`);
   }, true);
 
-  // Audio contexts start suspended until a gesture; the client never asks.
-  const resumeAudio = () => {
-    const ctx = Module.SDL2?.audioContext || Module.audioContext;
-    if (ctx?.state === 'suspended') ctx.resume().catch(() => {});
-  };
+  // Audio contexts start suspended until a gesture, and the client asks only
+  // once — the glue's own auto-resume listeners are `{once: true}`, so after
+  // they have fired nothing in the client will resume a context again.
   for (const event of ['pointerdown', 'keydown']) {
-    window.addEventListener(event, resumeAudio, true);
+    window.addEventListener(event, () => host.resumeGameAudio(), true);
   }
+
+  // Match the Electron build, where selecting another window silences the
+  // game. That is not something either host implements: it is the client's own
+  // blur callback, registered on the canvas, and Chromium blurs the focused
+  // element when its window resigns key while WKWebView only fires blur on the
+  // window. So the client never hears about it here and keeps playing.
+  //
+  // The native side is the source of truth — see `src/commands.rs` for why
+  // AppKit sees deactivations the page does not — and these are the fallback
+  // for anything that reaches the page first. Both are gain ramps, so which of
+  // them arrives, and how often, does not matter.
+  window.addEventListener('blur', () => host.setGameAudioMuted(true));
+  window.addEventListener('focus', () => {
+    host.setGameAudioMuted(false);
+    host.resumeGameAudio();
+  });
 
   status('Starting the game…');
   appendGlue();

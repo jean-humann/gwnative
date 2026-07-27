@@ -43,3 +43,18 @@ window.addEventListener('gw:command', (event) => {
 onCommand('input-reset', () => {
   window.dispatchEvent(new Event('gw:input-reset'));
 });
+
+// Go quiet while another application is frontmost, which is what the Electron
+// build does. `harness.js` is a classic script and cannot be imported, so the
+// control surface is published on the window rather than reached directly —
+// see the note there about why `var Module` forces that.
+//
+// Both are safe to receive out of order or more than once: they set a target
+// the gain ramps towards, so a repeat is a no-op and the last one wins.
+onCommand('audio-mute', () => window.gwAudio?.setGameAudioMuted(true));
+onCommand('audio-unmute', () => {
+  window.gwAudio?.setGameAudioMuted(false);
+  // Coming back to the game is also the moment to recover a context the system
+  // parked while we were away — an interruption WebKit never resumes by itself.
+  window.gwAudio?.resumeGameAudio();
+});
