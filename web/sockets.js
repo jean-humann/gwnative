@@ -12,7 +12,9 @@
 export function createDns({ log }) {
   return {
     async resolve(name) {
-      const response = await fetch(`__dns?name=${encodeURIComponent(name)}`);
+      const response = await fetch(`__dns?name=${encodeURIComponent(name)}`, {
+        headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
+      });
       const body = (await response.text()).trim();
       if (!response.ok) throw new Error(`dns ${name}: ${body}`);
       log('dns', name, '->', body);
@@ -35,6 +37,10 @@ export function createSockets({ log }) {
     const url = new URL('__socket', location.href);
     url.protocol = 'ws:';
     url.searchParams.set('to', destination);
+    // A WebSocket handshake carries no headers this side can set, so this one
+    // route takes its token in the query string. The host accepts it there for
+    // the same reason.
+    url.searchParams.set('token', window.__gwnativeToken ?? '');
 
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';

@@ -23,7 +23,11 @@ const forward = (line) => {
     flushTimer = 0;
     const body = pending.join('\n');
     pending.length = 0;
-    fetch('__report', { method: 'POST', body }).catch(() => {});
+    fetch('__report', {
+      method: 'POST',
+      headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
+      body,
+    }).catch(() => {});
   }, 50);
 };
 
