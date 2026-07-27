@@ -22,7 +22,7 @@ use std::thread;
 use crate::chunks::ChunkStore;
 use crate::patch::SNAPSHOT;
 use crate::sockets::{self, Registry};
-use crate::{net, ws};
+use crate::{keychain, net, proxy, ws};
 
 /// Largest span served from one request. The harness asks for far less; this
 /// only stops a stray `Range: bytes=0-` from trying to buffer the whole image.
@@ -36,16 +36,28 @@ struct Context {
     root: PathBuf,
     snapshot: Option<Arc<ChunkStore>>,
     sockets: Arc<Registry>,
+    token: String,
 }
 
 /// Serve `root` on 127.0.0.1:<ephemeral> until the process exits.
-pub fn spawn(root: PathBuf, snapshot: Option<Arc<ChunkStore>>) -> std::io::Result<Loopback> {
+///
+/// `token` gates the credential routes. Loopback is host-wide, not per-user, so
+/// without it any process on the machine could ask this server for the saved
+/// password — which would make the keychain's own access control decorative.
+/// The page receives the token through an injected script, never over this
+/// socket, so reading the traffic does not yield it.
+pub fn spawn(
+    root: PathBuf,
+    snapshot: Option<Arc<ChunkStore>>,
+    token: String,
+) -> std::io::Result<Loopback> {
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
     let addr = listener.local_addr()?;
     let context = Arc::new(Context {
         root,
         snapshot,
         sockets: Arc::default(),
+        token,
     });
 
     thread::Builder::new()
@@ -73,6 +85,10 @@ struct Request {
     content_length: usize,
     upgrade: Option<String>,
     websocket_key: Option<String>,
+    token: Option<String>,
+    /// Every header, lower-cased, in arrival order. Only the proxy needs them:
+    /// it has to forward what the page sent rather than a reconstruction of it.
+    headers: Vec<(String, String)>,
 }
 
 impl Request {
@@ -132,6 +148,8 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
     let mut content_length = 0usize;
     let mut upgrade = None;
     let mut websocket_key = None;
+    let mut token = None;
+    let mut headers = Vec::new();
     let mut header = String::new();
     loop {
         header.clear();
@@ -141,14 +159,17 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
         let Some((name, value)) = header.split_once(':') else {
             continue;
         };
+        let name = name.to_ascii_lowercase();
         let value = value.trim().to_owned();
-        match name.to_ascii_lowercase().as_str() {
-            "range" => range = Some(value),
+        match name.as_str() {
+            "range" => range = Some(value.clone()),
             "content-length" => content_length = value.parse().unwrap_or(0),
-            "upgrade" => upgrade = Some(value),
-            "sec-websocket-key" => websocket_key = Some(value),
+            "upgrade" => upgrade = Some(value.clone()),
+            "sec-websocket-key" => websocket_key = Some(value.clone()),
+            "x-gwnative-token" => token = Some(value.clone()),
             _ => {}
         }
+        headers.push((name, value));
     }
 
     let mut parts = line.split_whitespace();
@@ -167,7 +188,23 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
         content_length,
         upgrade,
         websocket_key,
+        token,
+        headers,
     })
+}
+
+/// Compare in time that does not depend on how many bytes matched, so a caller
+/// cannot recover the token one byte at a time by measuring the reply.
+fn token_matches(expected: &str, offered: Option<&str>) -> bool {
+    let Some(offered) = offered else { return false };
+    if offered.len() != expected.len() {
+        return false;
+    }
+    expected
+        .bytes()
+        .zip(offered.bytes())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }
 
 fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
@@ -211,6 +248,83 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
                     &[],
                 )
             }
+        };
+    }
+
+    // Saved login. Gated on the injected token; see `spawn`.
+    if request.path == "__credentials" {
+        if !token_matches(&context.token, request.token.as_deref()) {
+            eprintln!(
+                "[credentials] refused an untokened {} request",
+                request.method
+            );
+            return respond(
+                &mut stream,
+                403,
+                "Forbidden",
+                "text/plain",
+                b"forbidden",
+                &[],
+            );
+        }
+        return match request.method.as_str() {
+            "GET" => match keychain::load() {
+                Some(credentials) => {
+                    let body = serde_json::to_vec(&credentials).unwrap_or_default();
+                    eprintln!("[credentials] read from the keychain");
+                    respond(&mut stream, 200, "OK", "application/json", &body, &[])
+                }
+                // Not an error: a first launch has nothing saved, and the client
+                // treats "none" as "ask the player".
+                None => {
+                    eprintln!("[credentials] nothing saved yet");
+                    respond(
+                        &mut stream,
+                        404,
+                        "Not Found",
+                        "text/plain",
+                        b"no stored credentials",
+                        &[],
+                    )
+                }
+            },
+            "PUT" => {
+                let mut body = vec![0u8; request.content_length.min(64 * 1024)];
+                reader.read_exact(&mut body)?;
+                let stored = serde_json::from_slice(&body)
+                    .map_err(|e| e.to_string())
+                    .and_then(|c: keychain::Credentials| keychain::store(&c));
+                match stored {
+                    Ok(()) => {
+                        eprintln!("[credentials] saved to the keychain");
+                        respond(&mut stream, 204, "No Content", "text/plain", b"", &[])
+                    }
+                    Err(e) => {
+                        eprintln!("[credentials] not saved: {e}");
+                        respond(
+                            &mut stream,
+                            400,
+                            "Bad Request",
+                            "text/plain",
+                            e.as_bytes(),
+                            &[],
+                        )
+                    }
+                }
+            }
+            "DELETE" => {
+                keychain::clear();
+                eprintln!("[credentials] cleared");
+                respond(&mut stream, 204, "No Content", "text/plain", b"", &[])
+            }
+            _ => respond(
+                &mut stream,
+                405,
+                "Method Not Allowed",
+                "text/plain",
+                b"use GET, PUT or DELETE",
+                &[("Allow", "GET, PUT, DELETE".into())],
+            ),
         };
     }
 
@@ -263,10 +377,85 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
         );
     }
 
+    // Full download: POST starts or stops the background sweep, GET polls it.
+    // The launcher offers this as the alternative to streaming on demand.
+    if request.path == "__prefetch"
+        && let Some(store) = &context.snapshot
+    {
+        if request.method == "POST" {
+            if request.query == "stop" {
+                store.stop_full_download();
+            } else {
+                store.start_full_download();
+            }
+        }
+        let (done, total, running) = store.prefetch_progress();
+        let body = format!(r#"{{"done":{done},"total":{total},"running":{running}}}"#);
+        return respond(
+            &mut stream,
+            200,
+            "OK",
+            "application/json",
+            body.as_bytes(),
+            &[],
+        );
+    }
+
     if request.path == SNAPSHOT
         && let Some(store) = &context.snapshot
     {
         return serve_snapshot(&mut stream, &request, store);
+    }
+
+    // The client's own web requests, which it addressed to this origin because
+    // its glue rewrote them. See `proxy` for why, and why the table is closed.
+    let (route, tail) = match request.path.split_once('/') {
+        Some((route, tail)) => (route, format!("/{tail}")),
+        None => (request.path.as_str(), "/".to_owned()),
+    };
+    if proxy::host(route).is_some() {
+        let mut body = Vec::new();
+        if request.method != "GET" {
+            if request.content_length > proxy::MAX_BODY {
+                return respond(
+                    &mut stream,
+                    413,
+                    "Payload Too Large",
+                    "text/plain",
+                    b"request body too large",
+                    &[],
+                );
+            }
+            body.resize(request.content_length, 0);
+            reader.read_exact(&mut body)?;
+        }
+        return match proxy::forward(
+            route,
+            &tail,
+            &request.query,
+            &request.method,
+            &request.headers,
+            body,
+        ) {
+            Ok(reply) => {
+                eprintln!(
+                    "[proxy] {} /{route}{tail} -> {}",
+                    request.method, reply.status
+                );
+                respond_proxy(&mut stream, &reply)
+            }
+            Err(e) => {
+                eprintln!("[proxy] {} /{route}{tail}: {e}", request.method);
+                respond(
+                    &mut stream,
+                    502,
+                    "Bad Gateway",
+                    "text/plain",
+                    b"proxy error",
+                    &[],
+                )
+            }
+        };
     }
 
     match resolve(&context.root, &request.path) {
@@ -451,6 +640,35 @@ fn respond(
     );
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
+    stream.flush()
+}
+
+/// Relay a proxied reply with upstream's own status and headers.
+///
+/// It does not go through `respond`: that one speaks for this host and states a
+/// caching and cross-origin policy of its own, and neither is ours to assert on
+/// behalf of an answer that came from somewhere else. Only the framing headers
+/// are this hop's to write.
+fn respond_proxy(stream: &mut TcpStream, reply: &proxy::Reply) -> std::io::Result<()> {
+    // Clients key off the status code; the phrase is decoration and HTTP has
+    // never required it to be the registered one.
+    let mut head = format!(
+        "HTTP/1.1 {} Proxied\r\nContent-Length: {}\r\nConnection: close\r\n",
+        reply.status,
+        reply.body.len()
+    );
+    for (name, value) in &reply.headers {
+        // A header value carrying CRLF would let upstream inject headers of its
+        // own choosing, or a whole second response, into this one.
+        if value.contains(['\r', '\n']) {
+            eprintln!("[proxy] dropped a header with embedded newlines: {name}");
+            continue;
+        }
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(&reply.body)?;
     stream.flush()
 }
 

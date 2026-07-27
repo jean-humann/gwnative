@@ -20,6 +20,18 @@ pub const PATCH_ROOT: &str = "https://patching.1.arenanetworks.com";
 /// Identifies this client to ArenaNet. Kept honest on purpose.
 const USER_AGENT: &str = "gwnative (Guild Wars interoperability client)";
 
+/// The published client access key.
+///
+/// It identifies the official Guild Wars client, not a player: it carries no
+/// account, grants nothing a public download does not, and is the same value for
+/// every installation. That is why it can sit in the source — a player
+/// credential never could. `GWNATIVE_ACCESS_KEY` overrides it if ArenaNet
+/// rotates the value before this constant catches up.
+///
+/// Because every installation shares it, request volume is the thing to be
+/// careful with; see `PREFETCH_JOBS`.
+const ACCESS_KEY: &str = "2043FE79-F32D-4FD7-8C27-0D47231C4F03";
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ATTEMPTS: u32 = 4;
@@ -43,13 +55,11 @@ pub struct Client {
 }
 
 impl Client {
-    /// The access key is read from the environment so it never lands in a
-    /// committed file. See the README for how to supply it.
+    /// Both endpoint and key can be overridden from the environment; neither has
+    /// to be, so a clean checkout runs without setup. See [`ACCESS_KEY`].
     pub fn from_env() -> Result<Self> {
-        let access_key = std::env::var("GWNATIVE_ACCESS_KEY").map_err(|_| Error::Transport {
-            url: PATCH_ROOT.into(),
-            detail: "GWNATIVE_ACCESS_KEY is not set".into(),
-        })?;
+        let access_key =
+            std::env::var("GWNATIVE_ACCESS_KEY").unwrap_or_else(|_| ACCESS_KEY.to_owned());
         let root = std::env::var("GWNATIVE_PATCH_ROOT").unwrap_or_else(|_| PATCH_ROOT.to_owned());
         Ok(Self::new(root, access_key))
     }

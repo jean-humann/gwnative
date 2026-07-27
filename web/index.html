@@ -42,6 +42,19 @@
     #bar-fill { transition: none; }
     #bar.busy #bar-fill { animation: none; width: 100%; opacity: .5; }
   }
+  /* Text-entry proxies, parked behind the canvas rather than hidden: the client
+     calls focus() and gives up on text entirely if it does not take, and
+     display:none cannot be focused. */
+  .osk-container {
+    position: absolute; top: 0; left: 0; width: 100%; height: 40vh;
+    padding-bottom: 60vh; z-index: -1;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .osk-input {
+    width: 80%; font-size: 1.5rem; color: #fff;
+    background: #404040; border: 2px solid #666; border-radius: 4px;
+    outline: none; resize: none;
+  }
   #log {
     position: fixed; inset: 0 0 auto 0; max-height: 60%;
     margin: 0; padding: 10px 14px; overflow: auto;
@@ -57,6 +70,36 @@
   <span id="status-label">Starting…</span>
   <span id="status-detail"></span>
 </div>
+<!-- The client probes for Module.oskInput and concludes it cannot accept text at
+     all if these are missing — which is why the login fields ignored every key.
+     It focuses them itself, hence tabindex=-1. The game owns editing, so the
+     browser's writing assistance must not rewrite its input event stream. -->
+<div class="osk-container">
+  <input type="text" id="osk-input-text" class="osk-input" tabindex="-1"
+         enterkeyhint="enter" autocomplete="off" autocorrect="off"
+         autocapitalize="off" spellcheck="false" writingsuggestions="false">
+</div>
+<div class="osk-container">
+  <input type="email" id="osk-input-email" class="osk-input" tabindex="-1"
+         enterkeyhint="enter" autocomplete="off" autocorrect="off"
+         autocapitalize="off" spellcheck="false" writingsuggestions="false">
+</div>
+<div class="osk-container">
+  <input type="password" id="osk-input-password" class="osk-input" tabindex="-1"
+         autocomplete="off" autocorrect="off" autocapitalize="off"
+         spellcheck="false" writingsuggestions="false">
+</div>
+<div class="osk-container">
+  <input type="number" id="osk-input-number" class="osk-input" tabindex="-1"
+         enterkeyhint="enter" autocomplete="off" autocorrect="off"
+         autocapitalize="off" spellcheck="false" writingsuggestions="false">
+</div>
+<div class="osk-container">
+  <textarea id="osk-input-multiline" class="osk-input" rows="3" tabindex="-1"
+            autocomplete="off" autocorrect="off" autocapitalize="off"
+            spellcheck="false" writingsuggestions="false"></textarea>
+</div>
+
 <pre id="log"></pre>
 
 <!-- Classic script, not a module: the generated glue declares `var Module`, so

@@ -91,6 +91,23 @@ const remaining = (seconds) => {
   return `${Math.ceil(seconds)} s`;
 };
 
+const credentials = (method, body) => {
+  // Without the injected token the host answers 403, which reaches the client
+  // as "saved login unavailable" with nothing to distinguish a broken keychain
+  // from a script that never ran. Name the actual cause instead.
+  if (!window.__gwnativeToken) {
+    return Promise.reject(new Error('the host did not inject a credential token'));
+  }
+  return fetch('__credentials', {
+    method,
+    headers: {
+      'X-Gwnative-Token': window.__gwnativeToken ?? '',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+};
+
 const STARTUP_LABELS = {
   connecting: 'Starting Guild Wars',
   downloading: 'Preparing files needed to start',
@@ -165,14 +182,25 @@ Module = {
 
   // All three must exist: the glue's missing-method branches call their
   // fallback without returning.
+  // Backed by a keychain item on the host. The token comes from a script the
+  // host injects, not from anything served over the loopback origin, so a local
+  // process that can reach the same port still cannot read the saved password.
   secureStorage: {
     async getCredentials() {
-      throw new Error('no stored credentials');
+      const response = await credentials('GET');
+      // The client's contract for "nothing saved" is a rejection, and a first
+      // launch legitimately has nothing.
+      if (response.status === 404) throw new Error('no stored credentials');
+      if (!response.ok) throw new Error(`credential read failed: ${response.status}`);
+      return response.json();
     },
-    async storeCredentials() {
-      throw new Error('credential storage is not wired up yet');
+    async storeCredentials(username, password) {
+      const response = await credentials('PUT', { username, password });
+      if (!response.ok) throw new Error(await response.text());
     },
-    async clearCredentials() {},
+    async clearCredentials() {
+      await credentials('DELETE');
+    },
   },
 
   // No federated auth: reporting no providers falls back to email/password.
@@ -259,6 +287,38 @@ function appendGlue() {
     return fail('This WebView lacks WebAssembly JSPI (WebAssembly.Suspending).');
   }
 
+  // ArenaNet's glue never dials its own API hosts. Outside Capacitor it folds
+  // every request onto this origin, under a path equal to the first label of the
+  // host it meant to reach — `https://webgate.ncplatform.net/x` becomes
+  // `https://<location.hostname>/webgate/x`. That drops our port, so the URL
+  // lands on :443 of the loopback address where nothing is listening. Putting it
+  // back on this origin is what lets logging in reach NCSoft's gateway at all:
+  // the login request is this XHR, not a packet on the game socket.
+  const PROXY_LABELS = new Set(['webgate', 'account', 'help', 'store', 'www']);
+  const open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    try {
+      const target = new URL(url, location.href);
+      const routed = target.pathname.replace(/^\/+/, '').split('/')[0] ?? '';
+      const label = target.hostname.split('.')[0] ?? '';
+      // Root-relative, so it resolves against this origin — port included.
+      if (PROXY_LABELS.has(routed)) {
+        log(`api: ${method} ${target.pathname}`);
+        return open.call(this, method, `${target.pathname}${target.search}`, ...rest);
+      }
+      // A request the glue left alone because it was handed an explicit proxy
+      // host. Same five names, so it belongs on the same route.
+      if (PROXY_LABELS.has(label) && target.hostname !== location.hostname) {
+        log(`api: ${method} /${label}${target.pathname}`);
+        return open.call(
+          this, method, `/${label}${target.pathname}${target.search}`, ...rest);
+      }
+    } catch {
+      // Not a URL this can classify, so it is not one of the five.
+    }
+    return open.call(this, method, url, ...rest);
+  };
+
   Module.dns = host.createDns({ log });
   Module.socket = host.createSockets({ log });
 
@@ -291,6 +351,55 @@ function appendGlue() {
   sizeCanvasToWindow(canvas);
   canvas.focus();
   window.addEventListener('resize', () => sizeCanvasToWindow(canvas));
+
+  // Text entry does not run through keydown on the canvas: the client focuses
+  // one of these fields and reads the composed result back. Without them it
+  // reports it cannot accept text and every login keystroke is dropped.
+  Module.oskInput = {
+    text: document.getElementById('osk-input-text'),
+    email: document.getElementById('osk-input-email'),
+    password: document.getElementById('osk-input-password'),
+    number: document.getElementById('osk-input-number'),
+    multiline: document.getElementById('osk-input-multiline'),
+  };
+  // Modal means "show the field and let it own the keys", which is for an
+  // on-screen keyboard. A Mac has a real one, so the proxy stays out of sight
+  // and the client keeps reading composition events from it.
+  Module.oskIsModal = false;
+  const oskFields = new Set(Object.values(Module.oskInput).filter(Boolean));
+
+  // Focus moving to a text proxy is part of the game, not a loss of game focus;
+  // letting the client's canvas-blur handler see it mutes audio mid-chat.
+  canvas.addEventListener('blur', (event) => {
+    if (oskFields.has(event.relatedTarget)) event.stopImmediatePropagation();
+  }, true);
+
+  // A field that took focus without the client asking would swallow keys meant
+  // for the game, so bounce it back — after a microtask, because the client
+  // sets oskActiveInput immediately after its own focus() call.
+  for (const [type, field] of Object.entries(Module.oskInput)) {
+    if (!field) {
+      log(`[warn] missing text-entry field for "${type}"`);
+      continue;
+    }
+    field.addEventListener('focus', () => {
+      queueMicrotask(() => {
+        if (Module.oskActiveInput !== field && document.activeElement === field) {
+          field.blur();
+        }
+      });
+    });
+  }
+
+  // Keyboard delivery has two failure points outside this file — the window may
+  // never make the web view first responder, or focus may sit somewhere the
+  // client is not listening. One line on the first key press tells the two
+  // apart; after that the channel is proven and silence is correct.
+  window.addEventListener('keydown', function first(event) {
+    if (!event.isTrusted) return;
+    window.removeEventListener('keydown', first, true);
+    log(`keyboard reaching the page (target=${event.target?.id || event.target?.nodeName})`);
+  }, true);
 
   // Audio contexts start suspended until a gesture; the client never asks.
   const resumeAudio = () => {
