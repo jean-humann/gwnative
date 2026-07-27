@@ -76,7 +76,25 @@ pub fn write_boot_list(path: &Path, list: &BootList) -> std::io::Result<()> {
 /// Read the boot list, or `None` if there is not a usable one. Every failure is
 /// the same answer — warm nothing — so none of them is worth distinguishing.
 pub fn read_boot_list(path: &Path) -> Option<BootList> {
-    let raw: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    parse_boot_list(&fs::read(path).ok()?)
+}
+
+/// The boot list an install starts with, before it has recorded its own.
+///
+/// The chunks that gate a first frame are a property of the game build, not of
+/// the player — every blank install walks the same startup file set — so the
+/// one boot no recorded list can ever cover, the very first, does not have to
+/// go in cold. This is a list recorded from a real cold boot of the current
+/// build. When ArenaNet patches, the indices drift and the warm-up fetches
+/// some chunks the boot no longer needs — which is the standing contract for
+/// every boot list: being wrong costs bandwidth, never latency, and the first
+/// frame of that session records a fresh list that replaces this one.
+pub fn built_in_boot_list() -> Option<BootList> {
+    parse_boot_list(include_bytes!("boot-chunks.json"))
+}
+
+fn parse_boot_list(bytes: &[u8]) -> Option<BootList> {
+    let raw: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     Some(BootList {
         chunk_size: raw.get("chunkSize")?.as_u64()?,
         chunks: raw

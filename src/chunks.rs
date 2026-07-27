@@ -24,32 +24,57 @@ use crate::patch::Client;
 
 /// ArenaNet sees at most this many concurrent requests from us, no matter how
 /// many reads the client has in flight.
-const MAX_CONCURRENT_FETCHES: usize = 8;
+///
+/// On HTTP/2 these are streams on one connection, not connections of their
+/// own — the transport pays no handshake for them, and the CDN advertises
+/// room for 128. Depth is what buys throughput on this path: a 256 KiB chunk
+/// costs one round trip, so at the ~150 ms a cold CloudFront edge answers in,
+/// each stream moves under 2 MiB/s and only the number in flight multiplies
+/// it. Measured on a blank install against a cold edge, sixteen in flight
+/// sustained 13 MiB/s — the arithmetic of that latency, not of the pipe.
+/// Eight was tuned for the HTTP/1.1 client this replaced, where every slot
+/// cost a socket; forty-eight is a third of what the server offers.
+const MAX_CONCURRENT_FETCHES: usize = 48;
 
 /// Background prefetch never claims more than this share of
 /// [`MAX_CONCURRENT_FETCHES`], so a full download always leaves slots free for
 /// the reads the game is actually blocked on. Without the reserve a sweep of
 /// 16000 chunks would sit in front of every demand read and stall rendering —
 /// which is the whole reason gwonmac splits its queue by priority.
-const MAX_PREFETCH_FETCHES: usize = 3;
+///
+/// Two thirds of the pool, because during the boot warm-up the guesses *are*
+/// the demand: the list being replayed is the very set of chunks the client
+/// is about to read, so a demand read for a listed chunk coalesces onto the
+/// prefetch already carrying it rather than queueing behind it. Sixteen slots
+/// still exist that prefetch can never occupy, for the reads no list
+/// predicted.
+const MAX_PREFETCH_FETCHES: usize = 32;
+
+/// Threads that service the demand readahead window.
+///
+/// Its own number rather than [`MAX_PREFETCH_FETCHES`], which counts permits:
+/// the warm-up and the full download size their worker pools to their permit
+/// share because their work is a list known up front, but the readahead
+/// window rarely holds more than a few chunks nothing else is already
+/// fetching, and a thread parked on a condvar for each permit would be
+/// twenty-four threads waiting for work that arrives eight at a time.
+const READAHEAD_WORKERS: usize = 8;
 
 /// How far ahead of the client's read cursor to fetch, in chunks.
 ///
 /// [`warm_boot`](ChunkStore::warm_boot) overlaps the round trips a boot spends
 /// on the snapshot, but it can only replay a list some earlier session left
 /// behind — so the very first launch, the one a new player actually judges the
-/// app on, gets nothing from it. Measured from a blank install, that launch
-/// reached its first frame somewhere between 94 s and 144 s across runs,
-/// against the Electron build's 15 to 21 — a spread too wide to quote a figure
-/// from, but never near the other build. The shape underneath it is the part
-/// worth fixing: one round trip per read, each waiting for the last, at ten
-/// chunk fetches a second, against a transport that does 22 MiB/s when eight
-/// requests are in flight.
+/// app on, gets nothing from it. Without readahead that launch was one round
+/// trip per read, each waiting for the last; with it, the reads the client is
+/// about to issue are already in flight.
 ///
-/// 24 chunks is 6 MiB — enough to keep the pool busy through the client's walk
-/// of the snapshot, small enough that it is still streaming rather than the
-/// full download the player did not ask for.
-const READAHEAD_CHUNKS: usize = 24;
+/// 48 chunks is 12 MiB — two full fetch pools of work queued ahead of the
+/// cursor, so a pool of sixteen never drains between the client's reads, and
+/// still streaming rather than the full download the player did not ask for.
+/// Sized with [`MAX_CONCURRENT_FETCHES`]: a window smaller than the pool
+/// would idle the slots the pool was widened to fill.
+const READAHEAD_CHUNKS: usize = 48;
 
 /// The window of chunks readahead workers are allowed to fetch.
 ///
@@ -559,7 +584,7 @@ impl ChunkStore {
     /// what comes next must never sit in front of a read the game is blocked
     /// on. Being wrong costs bandwidth, never latency.
     pub fn start_readahead(self: &Arc<Self>) {
-        for _ in 0..MAX_PREFETCH_FETCHES {
+        for _ in 0..READAHEAD_WORKERS {
             let store = Arc::clone(self);
             thread::spawn(move || {
                 crate::qos::set(crate::qos::Class::Utility);
@@ -595,10 +620,23 @@ impl ChunkStore {
         if !self.recording.swap(false, Ordering::SeqCst) {
             return;
         }
-        let chunks: Vec<usize> = self.touched.lock().unwrap().iter().copied().collect();
+        let mut chunks: BTreeSet<usize> = self.touched.lock().unwrap().clone();
         if chunks.is_empty() {
             return;
         }
+        // Union with what is already recorded, never replace. A warm session
+        // reaches its first frame from cache having touched a fraction of the
+        // real boot set — measured, a 1,389-chunk list shrank to 102 after one
+        // warm boot — and a list overwritten down to that fraction warms
+        // almost nothing for whoever next loses the cache. Chunks the set no
+        // longer needs age out when a patch changes the chunk size and the
+        // whole list is discarded.
+        if let Some(existing) = read_boot_list(&self.boot_list_path())
+            && existing.chunk_size == self.chunk_size()
+        {
+            chunks.extend(existing.chunks);
+        }
+        let chunks: Vec<usize> = chunks.into_iter().collect();
         let count = chunks.len();
         // The indices only mean the byte ranges they meant if the chunks are
         // still the same size. Chunk *count* deliberately is not recorded: the
@@ -624,8 +662,16 @@ impl ChunkStore {
     /// wrong about the list costs bandwidth and never latency.
     pub fn warm_boot(self: &Arc<Self>) {
         let path = self.boot_list_path();
-        let Some(list) = read_boot_list(&path) else {
-            return;
+        // A blank install has recorded nothing, which used to mean the first
+        // boot — the one a new player judges the app by — was the only boot
+        // this could not help. The built-in list recorded from a real cold
+        // boot stands in; see `built_in_boot_list` for why that is sound.
+        let list = match read_boot_list(&path) {
+            Some(list) => list,
+            None => match cache::built_in_boot_list() {
+                Some(list) => list,
+                None => return,
+            },
         };
         if list.chunk_size != self.chunk_size() {
             eprintln!(
