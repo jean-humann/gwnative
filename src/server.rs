@@ -598,15 +598,6 @@ fn handle(
         return Ok(Flow::Bridge(destination));
     }
 
-    if request.path == "__stats"
-        && let Some(store) = &context.snapshot
-    {
-        let (cache, net, coalesced) = store.stats();
-        let body = format!(r#"{{"fromCache":{cache},"fetched":{net},"coalesced":{coalesced}}}"#);
-        respond(stream, 200, "OK", "application/json", body.as_bytes(), &[])?;
-        return Ok(flow);
-    }
-
     if request.path == "__resident"
         && let Some(store) = &context.snapshot
     {
@@ -631,11 +622,27 @@ fn handle(
                 Ok(body) => diagnostics::absorb(&context.recorder.metrics, &body),
                 Err(e) => eprintln!("[diag] ignoring a malformed batch: {e}"),
             }
+            // Nothing back. The page posts a batch every second and never reads
+            // the reply, so answering with the full snapshot meant serializing
+            // every metric the host holds once a second and handing the page a
+            // response body it would never drain — one more each second, all of
+            // them growing, for the life of the session.
+            respond(stream, 204, "No Content", "text/plain", b"", &[])?;
+            return Ok(flow);
         }
         let usage = diagnostics::usage().unwrap_or_default();
+        // The chunk store's own tally rides along rather than living on a route
+        // of its own. It used to be `__stats`, which nothing ever called: a
+        // second endpoint to remember, answering a question this one is already
+        // the place to ask.
+        let (from_cache, fetched, coalesced) = context
+            .snapshot
+            .as_ref()
+            .map_or((0, 0, 0), |store| store.stats());
         let body = serde_json::json!({
             "footprintMiB": usage.footprint as f64 / 1048576.0,
             "cpuSeconds": usage.cpu().as_secs_f64(),
+            "chunks": { "fromCache": from_cache, "fetched": fetched, "coalesced": coalesced },
             "metrics": context.recorder.metrics.snapshot(),
         });
         respond(
