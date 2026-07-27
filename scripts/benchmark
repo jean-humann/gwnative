@@ -1,0 +1,951 @@
+#!/usr/bin/env python3
+"""Run both builds from a blank install and print what each one costs.
+
+The comparison this repo exists to make has been argued from readings taken at
+different times, on different machines, against caches in different states. This
+takes both readings in one go, on one machine, minutes apart, from the same
+starting point — which is the only version of the measurement worth quoting.
+
+A blank install is simulated rather than performed, by different means for each,
+because the two find their data directories in different places.
+
+Everything gwnative writes hangs off `$HOME`:
+
+    ~/Library/Application Support/gwnative        settings, chunk cache
+    ~/Library/Caches/gwnative                     derived clients
+    ~/Library/Logs/gwnative                       diagnostics
+    ~/Library/WebKit/<bundle id>                  page storage
+
+so `HOME=<empty dir>` gives it a machine it has never seen. Chromium does not
+read `HOME` on macOS — it asks the password database — so the same trick does
+nothing to gwonmac, which silently keeps using the real profile. Its equivalent
+is `--user-data-dir`, which every path it writes derives from, and which carries
+the single-instance lock with it: without that, a copy already open on the real
+profile makes the launch exit immediately, successfully, and without a word.
+
+Neither deletes anything. Both leave the real profiles untouched.
+
+The launcher's one question — stream the game image or download all 4.2 GB of
+it — is asked before either build renders anything, and a benchmark cannot
+click. Both are seeded with `dataStrategy: "quick"`, which is the answer that
+measures a first launch rather than a download.
+
+What is measured, and by whom:
+
+    from outside, symmetric      peak and final RSS across the whole process
+                                 tree, CPU seconds across the whole process
+                                 tree, process count, bytes written into the
+                                 scratch home, wall clock to each stage
+    from the build's own logs    everything each one instruments, quoted as it
+                                 reports it and not translated
+
+The outside numbers are the comparison. The inside numbers are each build's own
+account of itself, and the two builds do not instrument the same things — that
+asymmetry is reported, not hidden.
+
+Usage:
+
+    scripts/benchmark                    both builds, 90 seconds each
+    scripts/benchmark --seconds 180      longer window
+    scripts/benchmark --only gwnative    one of them
+    scripts/benchmark --keep             leave the scratch homes on disk
+    scripts/benchmark --json out.json    also write the raw readings
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+GWONMAC = REPO.parent / "gwonmac"
+
+# How often the process tree is walked. `ps` over every process on the machine
+# costs a few milliseconds; twice a second is frequent enough to catch the peak
+# of a boot that takes tens of seconds and cheap enough not to be in the way.
+SAMPLE_SECONDS = 0.5
+
+MIB = 1024 * 1024
+
+
+# --------------------------------------------------------------------------
+# Reading the machine
+# --------------------------------------------------------------------------
+
+
+def cpu_seconds(field: str) -> float:
+    """Seconds from `ps`'s cumulative CPU column.
+
+    It arrives as `MM:SS.ss`, or `HH:MM:SS.ss` once a process has been running
+    for an hour. Parsing from the right handles both without asking which.
+    """
+    parts = field.split(":")
+    try:
+        seconds = float(parts[-1])
+    except ValueError:
+        return 0.0
+    if len(parts) > 1:
+        seconds += int(parts[-2]) * 60
+    if len(parts) > 2:
+        seconds += int(parts[-3]) * 3600
+    return seconds
+
+
+@dataclass
+class Process:
+    """One process, as `ps` last described it."""
+
+    rss_bytes: int
+    cpu_seconds: float
+    name: str
+
+
+@dataclass
+class Sample:
+    """One reading, per process, of everything the run is thought to own."""
+
+    at: float
+    processes: dict[int, Process] = field(default_factory=dict)
+
+
+# The XPC services WebKit launches on an app's behalf. They are started by
+# launchd rather than forked by the app, so their parent is pid 1 and no walk
+# down from the host will ever reach them — which is exactly why a host-only
+# reading of this build is worthless. The names are matched against the full
+# command line because `comm` truncates them all to the same thing.
+WEBKIT_SERVICE = re.compile(r"com\.apple\.WebKit\.(WebContent|GPU|Networking)")
+
+
+def process_table() -> dict[int, tuple[int, Process, bool]]:
+    """Every process on the machine: pid → (ppid, reading, is a WebKit service)."""
+    try:
+        out = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid=,rss=,time=,args="],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return {}
+
+    table: dict[int, tuple[int, Process, bool]] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        try:
+            pid, ppid, rss_kb = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        args = parts[4]
+        service = WEBKIT_SERVICE.search(args)
+        if service:
+            # `com.apple.WebKit.WebContent` → `WebContent`.
+            name = service.group(0).rsplit(".", 1)[-1]
+        else:
+            # Everything up to the first switch is the executable — splitting on
+            # whitespace would cut `Electron Helper (Renderer)` in half, and the
+            # parenthesis is the only thing that says which helper it is.
+            name = args.split(" --", 1)[0].strip().rsplit("/", 1)[-1][:48]
+        table[pid] = (ppid, Process(rss_kb * 1024, cpu_seconds(parts[3]), name), bool(service))
+    return table
+
+
+def webkit_pids() -> set[int]:
+    """The WebKit services already running, before we add any of our own."""
+    return {pid for pid, (_, _, service) in process_table().items() if service}
+
+
+def take_sample(root_pid: int, baseline: set[int], at: float) -> Sample | None:
+    """Everything descended from `root_pid`, plus the WebKit services it caused.
+
+    Descent covers Electron, whose helpers really are its children. It does not
+    cover WebKit's, so those are attributed by appearance: a WebKit service that
+    was not running before the launch is a candidate. Candidates that outlive
+    the run are dropped afterwards, in [`Run.attribute`] — a service belonging to
+    some other app that happened to start mid-run is still running when ours are
+    gone, and that is what tells them apart.
+    """
+    table = process_table()
+    if root_pid not in table:
+        return None
+
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _, _) in table.items():
+        children.setdefault(ppid, []).append(pid)
+
+    sample = Sample(at)
+    stack = [root_pid]
+    seen: set[int] = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen or pid not in table:
+            continue
+        seen.add(pid)
+        sample.processes[pid] = table[pid][1]
+        stack.extend(children.get(pid, []))
+
+    for pid, (_, reading, service) in table.items():
+        if service and pid not in baseline:
+            sample.processes[pid] = reading
+
+    return sample
+
+
+# `vmmap --summary` ends with two lines the kernel has been keeping all along:
+#
+#     Physical footprint:         34.4M
+#     Physical footprint (peak):  76.9M
+#
+# The peak is why this is worth the seconds it costs. Everything else here is
+# sampled, and a sampler can walk straight past a spike; this one cannot, because
+# nothing is sampling it — the kernel has been holding the high-water mark since
+# the process started.
+FOOTPRINT = re.compile(r"^Physical footprint:\s+([\d.]+)\s*([KMGB])", re.M)
+FOOTPRINT_PEAK = re.compile(r"^Physical footprint \(peak\):\s+([\d.]+)\s*([KMGB])", re.M)
+SCALE = {"B": 1, "K": 1024, "M": 1024**2, "G": 1024**3}
+
+
+def phys_footprint(pid: int) -> tuple[int, int] | None:
+    """Physical footprint now, and the largest it has ever been, in bytes.
+
+    This is the figure to compare one application against another, and resident
+    size is not: resident size counts shared clean pages — the system frameworks,
+    mapped once and charged to everybody — which a process did not cause to exist
+    and would not free by exiting. Ranking two GUI applications by resident size
+    is how you conclude that whichever one linked more of macOS is the heavier.
+    """
+    try:
+        out = subprocess.run(
+            ["/usr/bin/vmmap", "--summary", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return None
+    now, peak = FOOTPRINT.search(out), FOOTPRINT_PEAK.search(out)
+    if not now:
+        return None
+    scaled = lambda m: int(float(m.group(1)) * SCALE.get(m.group(2), 1))
+    return scaled(now), scaled(peak) if peak else scaled(now)
+
+
+def directory_bytes(path: Path) -> int:
+    """Bytes on disk under `path`, as the filesystem counts them."""
+    try:
+        out = subprocess.run(
+            ["du", "-sk", str(path)], capture_output=True, text=True, timeout=120
+        ).stdout
+        return int(out.split()[0]) * 1024
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError):
+        return 0
+
+
+# --------------------------------------------------------------------------
+# Running one build
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Stage:
+    name: str
+    pattern: re.Pattern[str]
+
+
+@dataclass
+class Run:
+    """Everything one launch of one build produced."""
+
+    app: str
+    home: Path
+    argv: list[str]
+    stages: dict[str, float] = field(default_factory=dict)
+    samples: list[Sample] = field(default_factory=list)
+    lines: list[tuple[float, str]] = field(default_factory=list)
+    inside: dict = field(default_factory=dict)
+    disk_bytes: int = 0
+    notes: list[str] = field(default_factory=list)
+    exit_code: int | None = None
+    disowned: set[int] = field(default_factory=set)
+    user_data: Path | None = None
+    footprints: dict[int, tuple[str, int, int]] = field(default_factory=dict)
+
+    @property
+    def footprint_now(self) -> int:
+        return sum(now for _, now, _ in self.footprints.values())
+
+    @property
+    def footprint_peak(self) -> int:
+        # A sum of per-process high-water marks, which is an upper bound on the
+        # tree's true simultaneous peak: nothing says the renderer was at its
+        # largest in the same instant the GPU process was. Quoted as a ceiling.
+        return sum(peak for _, _, peak in self.footprints.values())
+
+    @property
+    def first_frame_ms(self) -> float | None:
+        """From the page being running to the first frame it submitted.
+
+        The one number both builds measure, and measure the same way. Neither
+        reports it against the process starting — one counts from the page
+        navigating and the other from the renderer loading, which are the same
+        moment — so this is what the two can be held against each other on.
+        """
+        value = self.inside.get("firstFrameFromPageLoadMs")
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def attribute(self, survivors: set[int]) -> None:
+        """Disown the WebKit services that were somebody else's all along.
+
+        Called once the run has been stopped: anything still running belonged to
+        another app. Dropping them here rather than at sampling time is what
+        makes the peak trustworthy — the peak has to be read while the run is
+        alive, and which processes were ours can only be known once it is not.
+        """
+        self.disowned = survivors
+        for sample in self.samples:
+            for pid in survivors:
+                sample.processes.pop(pid, None)
+        for pid in survivors:
+            self.footprints.pop(pid, None)
+
+    def _total(self, sample: Sample) -> int:
+        return sum(p.rss_bytes for p in sample.processes.values())
+
+    @property
+    def peak_sample(self) -> Sample | None:
+        return max(self.samples, key=self._total, default=None)
+
+    @property
+    def peak_rss(self) -> int:
+        return self._total(self.peak_sample) if self.peak_sample else 0
+
+    @property
+    def final_rss(self) -> int:
+        return self._total(self.samples[-1]) if self.samples else 0
+
+    @property
+    def cpu(self) -> float:
+        # Per process, the largest reading of a counter that only goes up; then
+        # summed. `ps` reports CPU cumulatively, so the final sample already
+        # holds everything a still-running process has spent — but a helper that
+        # exited before the end is absent from it, and its seconds were still
+        # spent. Taking each process's own maximum keeps them.
+        spent: dict[int, float] = {}
+        for sample in self.samples:
+            for pid, process in sample.processes.items():
+                spent[pid] = max(spent.get(pid, 0.0), process.cpu_seconds)
+        return sum(spent.values())
+
+    @property
+    def peak_processes(self) -> int:
+        return max((len(s.processes) for s in self.samples), default=0)
+
+    @property
+    def by_command(self) -> dict[str, int]:
+        """What the run looked like at its largest, biggest process first."""
+        if not self.peak_sample:
+            return {}
+        totals: dict[str, int] = {}
+        for process in self.peak_sample.processes.values():
+            totals[process.name] = totals.get(process.name, 0) + process.rss_bytes
+        return dict(sorted(totals.items(), key=lambda kv: -kv[1]))
+
+
+def scratch_home(root: Path, app: str, settings_dir: str) -> Path:
+    """An empty home, with the launcher's one question already answered."""
+    home = root / app
+    for part in (
+        "Library/Application Support",
+        "Library/Caches",
+        "Library/Logs",
+        "Library/Preferences",
+        "Library/WebKit",
+    ):
+        (home / part).mkdir(parents=True, exist_ok=True)
+    settings = home / "Library/Application Support" / settings_dir
+    settings.mkdir(parents=True, exist_ok=True)
+    (settings / "settings.json").write_text(
+        json.dumps({"formatVersion": 1, "dataStrategy": "quick"}) + "\n"
+    )
+    return home
+
+
+def launch(
+    run: Run,
+    cwd: Path,
+    env: dict[str, str],
+    stages: list[Stage],
+    seconds: float,
+    before_stop=None,
+) -> None:
+    """Start the build, watch it for `seconds`, then stop it.
+
+    Output is merged into one stream because the interleaving is the timeline:
+    both builds put some of their boot on stdout and some on stderr, and two
+    separately-timestamped streams would have to be merged back anyway.
+    """
+    baseline = webkit_pids()
+    started = time.monotonic()
+    process = subprocess.Popen(
+        run.argv,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        # Its own group, so one signal reaches every helper it spawned. A build
+        # that leaves a web content process behind would keep holding the
+        # scratch home open, and the disk reading would be taken mid-write.
+        start_new_session=True,
+    )
+
+    def read() -> None:
+        assert process.stdout is not None
+        for line in process.stdout:
+            at = time.monotonic() - started
+            line = line.rstrip("\n")
+            run.lines.append((at, line))
+            for stage in stages:
+                if stage.name not in run.stages and stage.pattern.search(line):
+                    run.stages[stage.name] = at * 1000
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+
+    deadline = started + seconds
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            run.notes.append(
+                f"exited after {time.monotonic() - started:.1f}s with code {process.returncode}"
+            )
+            break
+        sample = take_sample(process.pid, baseline, time.monotonic() - started)
+        if sample:
+            run.samples.append(sample)
+        time.sleep(SAMPLE_SECONDS)
+
+    if process.poll() is None:
+        final = take_sample(process.pid, baseline, time.monotonic() - started)
+        if final:
+            run.samples.append(final)
+            # Every process still alive, asked what it has actually cost. This
+            # takes a second or two each, which is why it happens once, at the
+            # end, rather than on the sampling loop.
+            for pid, reading in final.processes.items():
+                measured = phys_footprint(pid)
+                if measured:
+                    run.footprints[pid] = (reading.name, measured[0], measured[1])
+        # Anything that has to be asked of a living process is asked here: the
+        # loopback port closes with the host, and a diagnostics endpoint read
+        # after the shutdown is a connection refused.
+        if before_stop:
+            before_stop()
+        # Ask first. Both builds flush on the way out — one from
+        # `applicationShouldTerminate:`, the other from `before-quit` — and a
+        # SIGKILL would throw away the diagnostics this reads next.
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            run.notes.append("did not stop on SIGTERM within 15s; killed")
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            process.wait(timeout=10)
+
+    run.exit_code = process.returncode
+    reader.join(timeout=5)
+
+    # Give launchd a moment to reap the services the host was holding open, then
+    # ask which of the candidates are still there. Those were never ours.
+    time.sleep(2.0)
+    still_running = webkit_pids()
+    claimed = {pid for sample in run.samples for pid in sample.processes}
+    survivors = (claimed & still_running) - baseline
+    if survivors:
+        run.notes.append(
+            f"{len(survivors)} WebKit service(s) started during the run outlived it "
+            "and were attributed to another app"
+        )
+    run.attribute(survivors)
+
+
+# --------------------------------------------------------------------------
+# gwnative
+# --------------------------------------------------------------------------
+
+GWNATIVE_STAGES = [
+    Stage("client on disk", re.compile(r"\[generation\] ")),
+    Stage("snapshot sized", re.compile(r"\[gwnative\] snapshot:")),
+    Stage("host listening", re.compile(r"\[gwnative\] serving ")),
+    Stage("keychain answered", re.compile(r"\[credentials\] ")),
+    Stage("page running", re.compile(r"\[report\] settings:")),
+    Stage("client fetch started", re.compile(r"loading Gw\.jspi\.js")),
+    Stage("wasm instantiated", re.compile(r"wasm instantiated")),
+    Stage("filesystem ready", re.compile(r"persistent filesystem ready")),
+    Stage("runtime initialised", re.compile(r"runtime initialised")),
+    Stage("first game socket", re.compile(r"\[socket\] \S+: connected")),
+    Stage("client downloading", re.compile(r"\[startup\] downloading")),
+]
+
+# `[gwnative] serving <root> at http://127.0.0.1:38112/index.html`, and on the
+# next line `[gwnative] session token <hex>`. Both are stderr, and the token one
+# only appears when a benchmark has asked for it.
+ADDRESS = re.compile(r"serving .* at (https?://[^/]+)/")
+TOKEN = re.compile(r"session token ([0-9a-f]{16,})")
+
+
+def read_diag(run: Run) -> None:
+    """Ask the host for its own account of the session.
+
+    `__diag` is behind the session token, which is how a loopback port on a
+    machine-wide address stays private. `GWNATIVE_PRINT_TOKEN` is the deliberate
+    hole for exactly this, and nothing but a benchmark ever sets it.
+    """
+    origin = token = None
+    for _, line in run.lines:
+        origin = origin or (ADDRESS.search(line).group(1) if ADDRESS.search(line) else None)
+        token = token or (TOKEN.search(line).group(1) if TOKEN.search(line) else None)
+    if not origin or not token:
+        run.notes.append("no address or token was printed; __diag not read")
+        return
+
+    request = urllib.request.Request(f"{origin}/__diag", headers={"X-Gwnative-Token": token})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            run.inside = json.loads(response.read())
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        run.notes.append(f"__diag unreachable: {error}")
+        return
+
+    # Deliberately not folded into the stage timeline. The stages are wall clock
+    # from the moment the process started; these are the page's own clock, which
+    # starts when the page navigates, and one of them is a duration rather than a
+    # point. Putting them on one axis would produce a first frame that appeared
+    # to arrive before the host was listening.
+    metrics = run.inside.get("metrics") or {}
+    if isinstance(metrics, list):
+        metrics = {m.get("name"): m.get("value") for m in metrics if isinstance(m, dict)}
+    if not isinstance(metrics, dict):
+        return
+    first_frame = metrics.get("gw.boot.first-frame.ms")
+    if isinstance(first_frame, (int, float)):
+        # `performance.now()` at the first submit, so the page navigating is
+        # zero — the same origin the Electron build's renderer.loaded gives it.
+        run.inside["firstFrameFromPageLoadMs"] = round(float(first_frame))
+    else:
+        run.notes.append(
+            "no first frame within the window — the client was still in its own "
+            "startup download. A longer --seconds reaches one."
+        )
+
+
+def run_gwnative(root: Path, seconds: float) -> Run:
+    binary = REPO / "target/release/gwnative"
+    if not binary.exists():
+        raise SystemExit(
+            f"{binary} is missing — run `cargo build --release` first.\n"
+            "The build is deliberately not run from here: compiling under a "
+            "scratch home would measure cargo, and the binary is the same one "
+            "either way."
+        )
+
+    home = scratch_home(root, "gwnative", "gwnative")
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["GWNATIVE_PRINT_TOKEN"] = "1"
+
+    run = Run("gwnative", home, [str(binary)])
+    launch(run, REPO, env, GWNATIVE_STAGES, seconds, before_stop=lambda: read_diag(run))
+    run.disk_bytes = directory_bytes(home)
+    return run
+
+
+# --------------------------------------------------------------------------
+# gwonmac
+# --------------------------------------------------------------------------
+
+# It prints nothing to a terminal — every stage it knows about it records as a
+# structured event instead. The timeline is read from the file afterwards, and
+# these are the events worth putting on it, in no particular order: they are
+# sorted by when they happened.
+GWONMAC_TIMELINE = {
+    "electron.ready": "electron ready",
+    "protocol.installed": "protocol installed",
+    "window.created": "window created",
+    "renderer.loaded": "page running",
+    "window.shown": "window shown",
+    "enhancement.clientPrepared": "client prepared",
+    "wasm.instantiate.end": "wasm instantiated",
+    "runtime.initialized": "runtime initialised",
+    "socket.open": "first game socket",
+    "startup.complete": "client startup complete",
+    "frame.firstSubmit": "first frame",
+}
+
+
+def read_events(run: Run) -> None:
+    """Fold the session's own JSONL into a timeline and a set of readings.
+
+    It records structured events rather than lines, into
+    `<userData>/diagnostics/session-<uuid>.jsonl`. Every event carries `tsUs`,
+    microseconds since the process started, which is the same clock the samples
+    outside are on — so its stages and ours can go on one axis without either
+    being translated.
+    """
+    diagnostics = run.user_data / "diagnostics"
+    files = sorted(diagnostics.glob("session-*.jsonl")) if diagnostics.exists() else []
+    if not files:
+        run.notes.append("no session JSONL was written")
+        return
+
+    events: list[dict] = []
+    for path in files:
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue
+
+    counts: dict[str, int] = {}
+    first: dict[str, float] = {}
+    peak_main = 0
+    peak_chromium = 0
+    for event in events:
+        name = str(event.get("name") or "?")
+        stamp = event.get("tsUs")
+        counts[name] = counts.get(name, 0) + 1
+        if isinstance(stamp, (int, float)) and name not in first:
+            first[name] = float(stamp)
+        fields = event.get("fields") or {}
+        # Its own memory readings, kept apart from the ones taken outside:
+        # Electron reports working set and `ps` reports resident set, and the
+        # two are not required to agree.
+        if name == "process.main":
+            peak_main = max(peak_main, int(fields.get("rssBytes") or 0))
+        elif name == "process.chromium":
+            peak_chromium = max(peak_chromium, int(fields.get("rssBytes") or 0))
+
+    for name, label in GWONMAC_TIMELINE.items():
+        if name in first:
+            run.stages[label] = first[name] / 1000
+
+    run.inside = {
+        "events": len(events),
+        "sessions": len(files),
+        "process.main.peakRssBytes": peak_main,
+        "process.chromium.peakRssBytes": peak_chromium,
+        "kinds": dict(sorted(counts.items(), key=lambda kv: -kv[1])[:12]),
+    }
+
+    # From the page being running to the first frame it put on screen. This is
+    # the one number both builds measure the same way, and the only one the two
+    # are compared on directly — see [`first_frame_ms`].
+    if "renderer.loaded" in first and "frame.firstSubmit" in first:
+        run.inside["firstFrameFromPageLoadMs"] = round(
+            (first["frame.firstSubmit"] - first["renderer.loaded"]) / 1000
+        )
+    else:
+        run.notes.append("no first frame within the window")
+
+
+def run_gwonmac(root: Path, seconds: float) -> Run:
+    electron = GWONMAC / "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+    if not electron.exists():
+        raise SystemExit(f"{electron} is missing — run `pnpm install` in {GWONMAC}.")
+    if not (GWONMAC / "build/main").exists():
+        raise SystemExit(f"{GWONMAC}/build is missing — run `pnpm build` there first.")
+
+    # Not a scratch `HOME`, which this build never reads: Chromium takes the
+    # home directory from the password database rather than the environment, so
+    # `HOME=…` reaches the Rust build and is ignored by this one. `--user-data-dir`
+    # is the switch that does what the scratch home does — everything it writes
+    # is under `app.getPath("userData")`, and pointing that somewhere empty is a
+    # blank install. It also gives the run its own single-instance lock, so a
+    # copy already open on the real profile does not turn this launch into an
+    # immediate, silent, successful exit.
+    home = root / "gwonmac"
+    user_data = home / "Guild Wars"
+    user_data.mkdir(parents=True, exist_ok=True)
+    (user_data / "settings.json").write_text(
+        json.dumps({"formatVersion": 1, "dataStrategy": "quick"}) + "\n"
+    )
+
+    run = Run("gwonmac", home, [str(electron), ".", f"--user-data-dir={user_data}"])
+    run.user_data = user_data
+    launch(run, GWONMAC, dict(os.environ), [], seconds)
+    read_events(run)
+    run.disk_bytes = directory_bytes(user_data)
+    return run
+
+
+# --------------------------------------------------------------------------
+# The report
+# --------------------------------------------------------------------------
+
+
+def mib(value: float) -> str:
+    return f"{value / MIB:,.0f}"
+
+
+def table(rows: list[tuple[str, str, str]]) -> str:
+    widths = [max(len(row[i]) for row in rows) for i in range(3)]
+    out = []
+    for index, row in enumerate(rows):
+        out.append(
+            f"  {row[0].ljust(widths[0])}   {row[1].rjust(widths[1])}   {row[2].rjust(widths[2])}"
+        )
+        if index == 0:
+            out.append("  " + "-" * (sum(widths) + 6))
+    return "\n".join(out)
+
+
+def report(runs: dict[str, Run], seconds: float) -> str:
+    native = runs.get("gwnative")
+    electron = runs.get("gwonmac")
+    out: list[str] = []
+
+    out.append("")
+    out.append(f"Blank install, {seconds:.0f} seconds of runtime each, same machine, same hour.")
+    out.append("")
+
+    def pair(label: str, a, b, fmt=str) -> tuple[str, str, str]:
+        return (
+            label,
+            fmt(a) if native else "—",
+            fmt(b) if electron else "—",
+        )
+
+    def frame(run: Run | None) -> str:
+        if not run:
+            return "—"
+        value = run.first_frame_ms
+        return f"{value:,.0f}" if value is not None else "not reached"
+
+    rows = [("", "gwnative", "gwonmac")]
+    rows.append(("page load to first frame (ms)", frame(native), frame(electron)))
+    rows.append(
+        pair(
+            "phys footprint, whole tree (MiB)",
+            native.footprint_now if native else 0,
+            electron.footprint_now if electron else 0,
+            mib,
+        )
+    )
+    rows.append(
+        pair(
+            "  its peak, summed (MiB)",
+            native.footprint_peak if native else 0,
+            electron.footprint_peak if electron else 0,
+            mib,
+        )
+    )
+    rows.append(
+        pair(
+            "resident, whole tree (MiB)",
+            native.final_rss if native else 0,
+            electron.final_rss if electron else 0,
+            mib,
+        )
+    )
+    rows.append(
+        pair(
+            "  its peak (MiB)",
+            native.peak_rss if native else 0,
+            electron.peak_rss if electron else 0,
+            mib,
+        )
+    )
+    rows.append(
+        pair(
+            "CPU seconds, whole tree",
+            native.cpu if native else 0,
+            electron.cpu if electron else 0,
+            lambda v: f"{v:.1f}",
+        )
+    )
+    rows.append(
+        pair(
+            "processes at peak",
+            native.peak_processes if native else 0,
+            electron.peak_processes if electron else 0,
+        )
+    )
+    rows.append(
+        pair(
+            # The scratch home for one, the scratch user-data-dir for the other:
+            # each is the whole of what that build writes.
+            "written to a blank profile (MiB)",
+            native.disk_bytes if native else 0,
+            electron.disk_bytes if electron else 0,
+            mib,
+        )
+    )
+    out.append(table(rows))
+    out.append("")
+    out.append("  Physical footprint is the row to compare, and resident is printed under it")
+    out.append("  only so that the gap between them is visible. Resident counts shared clean")
+    out.append("  pages — system frameworks, mapped once and charged to every process that")
+    out.append("  touches them — which neither build caused to exist and neither would give")
+    out.append("  back by exiting. Ranked on resident, the winner is whichever one linked")
+    out.append("  less of macOS. Footprint comes from `vmmap --summary`, and its peak is a")
+    out.append("  high-water mark the kernel has kept since each process started rather than")
+    out.append("  anything this script sampled.")
+    out.append("")
+    out.append("  Every figure covers the whole process tree. Both builds keep most of their")
+    out.append("  memory outside the process that was launched, so a reading of that process")
+    out.append("  alone describes neither of them.")
+    out.append("")
+
+    for run in runs.values():
+        out.append(f"{run.app}")
+        out.append("")
+        if run.stages:
+            for name, at in sorted(run.stages.items(), key=lambda kv: kv[1]):
+                out.append(f"  {at / 1000:8.2f}s  {name}")
+        else:
+            out.append("  (nothing it printed matched a known stage)")
+        out.append("")
+        if run.footprints:
+            out.append("  where the memory was, per process (footprint now / its peak):")
+            for name, now, peak in sorted(run.footprints.values(), key=lambda f: -f[1]):
+                out.append(f"    {mib(now).rjust(6)} / {mib(peak).rjust(6)} MiB  {name}")
+            out.append("")
+        largest = list(run.by_command.items())[:6]
+        if largest:
+            out.append("  resident at its largest, by process:")
+            for name, value in largest:
+                out.append(f"    {mib(value).rjust(6)} MiB  {name}")
+            out.append("")
+        if run.inside:
+            out.append("  its own account of the session:")
+            for line in json.dumps(run.inside, indent=2, sort_keys=True).splitlines():
+                out.append(f"    {line}")
+            out.append("")
+        for note in run.notes:
+            out.append(f"  note: {note}")
+        if run.notes:
+            out.append("")
+
+    out.append("What these numbers do not cover:")
+    out.append("")
+    out.append("  * The two are given a blank install by different means, because they take")
+    out.append("    the home directory from different places. gwnative reads $HOME and gets a")
+    out.append("    scratch one. Chromium reads the password database and ignores $HOME, so")
+    out.append("    gwonmac is given --user-data-dir instead — everything it writes lives")
+    out.append("    under it, and it also takes the single-instance lock with it, so a copy")
+    out.append("    already open on the real profile cannot turn the launch into a silent")
+    out.append("    successful exit.")
+    out.append("  * Saved logins are not comparable and are not compared. gwnative reads the")
+    out.append("    login keychain, which is per-user and does not follow $HOME, so it finds")
+    out.append("    a login a blank machine would not have. gwonmac passes use-mock-keychain")
+    out.append("    when it is not packaged and keeps its own encrypted file under userData,")
+    out.append("    which the blank profile does not have. One starts at character select,")
+    out.append("    the other at a login box. Neither downloads anything on the strength of")
+    out.append("    it, so what this costs is a keychain read against a file read.")
+    out.append("  * Both were seeded with dataStrategy=quick, because the launcher asks that")
+    out.append("    question before either renders anything and a benchmark cannot answer it.")
+    out.append("    A first launch that chose the full 4.2 GB download is a different, and")
+    out.append("    network-bound, measurement.")
+    out.append("  * Only the first-frame row is a like-for-like comparison of a moment. Both")
+    out.append("    builds time it themselves, from the page load, and both are quoted as")
+    out.append("    they report it. The stage timelines below it are each build's own, on")
+    out.append("    each build's own clock, and the two do not have all the same stages.")
+    out.append("  * Bytes written are a function of how far the client got, not a fixed cost of")
+    out.append("    installing. Both stream the game image on demand, so a longer window writes")
+    out.append("    more. The figure is comparable between the two only because they were given")
+    out.append("    the same window on the same network.")
+    out.append("  * The summed peak footprint is a ceiling, not a reading. Nothing says the")
+    out.append("    renderer was at its largest in the instant the GPU process was, and the")
+    out.append("    kernel keeps one high-water mark per process rather than one for a tree.")
+    out.append("  * gwnative's own `footprintMiB` is the host process alone. The wasm heap, the")
+    out.append("    GL resources and every JS object live in the web content process, which")
+    out.append("    that figure cannot see. The tree readings above can.")
+    out.append("  * WebKit keys its storage root by bundle identifier, so a run of the bare")
+    out.append("    binary and a run of the signed bundle do not share one:")
+    out.append("    ~/Library/WebKit/gwnative and ~/Library/WebKit/com.gwnative.app. This")
+    out.append("    measures the binary.")
+    out.append("")
+    return "\n".join(out)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--seconds", type=float, default=90.0)
+    parser.add_argument("--only", choices=["gwnative", "gwonmac"])
+    parser.add_argument("--keep", action="store_true", help="leave the scratch homes on disk")
+    parser.add_argument("--json", type=Path, help="also write the raw readings here")
+    args = parser.parse_args()
+
+    root = Path(tempfile.mkdtemp(prefix="gw-benchmark-"))
+    runs: dict[str, Run] = {}
+    try:
+        wanted = [args.only] if args.only else ["gwnative", "gwonmac"]
+        for app in wanted:
+            print(f"[benchmark] {app}: {args.seconds:.0f}s from a blank home", file=sys.stderr)
+            runs[app] = (run_gwnative if app == "gwnative" else run_gwonmac)(root, args.seconds)
+
+        print(report(runs, args.seconds))
+
+        if args.json:
+            args.json.write_text(
+                json.dumps(
+                    {
+                        app: {
+                            "argv": run.argv,
+                            "home": str(run.home),
+                            "stages": run.stages,
+                            "firstFrameFromPageLoadMs": run.first_frame_ms,
+                            "footprintBytes": run.footprint_now,
+                            "footprintPeakBytes": run.footprint_peak,
+                            "footprintByProcess": {
+                                str(pid): {"name": name, "now": now, "peak": peak}
+                                for pid, (name, now, peak) in run.footprints.items()
+                            },
+                            "peakRssBytes": run.peak_rss,
+                            "finalRssBytes": run.final_rss,
+                            "cpuSeconds": run.cpu,
+                            "peakProcesses": run.peak_processes,
+                            "byCommand": run.by_command,
+                            "diskBytes": run.disk_bytes,
+                            "inside": run.inside,
+                            "notes": run.notes,
+                            "exitCode": run.exit_code,
+                            "output": [[round(at, 3), text] for at, text in run.lines],
+                        }
+                        for app, run in runs.items()
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            print(f"[benchmark] raw readings in {args.json}", file=sys.stderr)
+    finally:
+        if args.keep:
+            print(f"[benchmark] scratch homes left in {root}", file=sys.stderr)
+        else:
+            shutil.rmtree(root, ignore_errors=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
