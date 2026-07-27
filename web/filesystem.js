@@ -43,6 +43,26 @@ function installPathNormalization(fs) {
 }
 
 /**
+ * IDBFS persists a file when the client closes it, so anything still open when
+ * the window goes away — the account record in `Gw.dat` above all — is only in
+ * memory. One last sync on the way out costs nothing on a quit and is the
+ * difference between remembering a login and asking for it again.
+ *
+ * `pagehide` over `beforeunload`: it is the event macOS actually delivers when
+ * the window closes, and it also fires when the app is backgrounded on the way
+ * to being killed. The sync cannot be awaited here, but IndexedDB commits a
+ * transaction that has already been opened, so starting it is what counts.
+ */
+function installShutdownFlush(sync, log) {
+  let flushed = false;
+  globalThis.addEventListener('pagehide', () => {
+    if (flushed) return;
+    flushed = true;
+    sync(false).catch((error) => log('fs: the closing sync did not finish:', error));
+  });
+}
+
+/**
  * @param {{
  *   module: { addRunDependency(name: string): void,
  *             removeRunDependency(name: string): void,
@@ -96,6 +116,7 @@ export function installGameFilesystem({ module, failed, log }) {
       // screenshot, or chat log beneath it.
       await sync(false);
       installPathNormalization(fs);
+      installShutdownFlush(sync, log);
       ready();
     })().catch(stop);
   };

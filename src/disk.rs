@@ -10,7 +10,9 @@
 
 use std::path::Path;
 
-use objc2_foundation::{NSArray, NSNumber, NSString, NSURL, NSURLVolumeAvailableCapacityForImportantUsageKey};
+use objc2_foundation::{
+    NSArray, NSNumber, NSString, NSURL, NSURLVolumeAvailableCapacityForImportantUsageKey,
+};
 
 /// Bytes that could be written under `path` if it mattered, or `None` when the
 /// volume declines to say.

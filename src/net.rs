@@ -54,9 +54,7 @@ impl std::fmt::Display for NetError {
 /// and `file1.arenanetworks.com` are the same name — but not to a suffix check,
 /// which is exactly the difference an allowlist bypass is made of.
 pub fn normalize(name: &str) -> String {
-    name.trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
+    name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// Whether a normalised name is inside one of the allowed zones.
@@ -428,10 +426,7 @@ mod tests {
             "evil.com",
             "",
         ] {
-            assert!(
-                !allowed_name(&normalize(name)),
-                "{name:?} must be refused"
-            );
+            assert!(!allowed_name(&normalize(name)), "{name:?} must be refused");
         }
 
         // The same rule reaches the dial, where a name would otherwise slip

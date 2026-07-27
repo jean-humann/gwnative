@@ -227,6 +227,38 @@ const credentials = (method, body) => {
   });
 };
 
+/// The saved login, read once and held, or null when there is none.
+///
+/// The read is started when this file loads rather than when the client asks
+/// for it, because the client does not wait: it asks for the saved login during
+/// a startup step and builds the login screen when that step completes,
+/// whichever of the two happens first. The Electron host answered from a
+/// decrypted file over IPC in a couple of milliseconds and so always won that
+/// race by accident. This one has to cross the loopback origin and open a
+/// keychain item, whose first read costs about 150 ms — long enough to lose it,
+/// and the symptom is a login screen with "Remember Account Name" ticked and
+/// nothing in the field. Started at load it is minutes early instead.
+let saved = null;
+
+const readSaved = () => {
+  saved ??= credentials('GET').then((response) => {
+    // Distinguished from a failure here rather than at the call: "nothing
+    // saved" is a value worth caching, and a first launch legitimately has it.
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`credential read failed: ${response.status}`);
+    return response.json();
+  });
+  return saved;
+};
+
+// Dropped on failure so the client's own call retries rather than inheriting a
+// rejection from a fetch that ran before the origin was ready. Nothing is
+// reported here: at this point no one has asked for a login, and a message
+// about one would arrive before the window does.
+readSaved().catch(() => {
+  saved = null;
+});
+
 const STARTUP_LABELS = {
   connecting: 'Starting Guild Wars',
   downloading: 'Preparing files needed to start',
@@ -344,19 +376,43 @@ Module = {
   // process that can reach the same port still cannot read the saved password.
   secureStorage: {
     async getCredentials() {
-      const response = await credentials('GET');
+      const asked = performance.now();
+      let stored;
+      try {
+        stored = await readSaved();
+      } catch (error) {
+        saved = null;
+        throw error;
+      }
       // The client's contract for "nothing saved" is a rejection, and a first
       // launch legitimately has nothing.
-      if (response.status === 404) throw new Error('no stored credentials');
-      if (!response.ok) throw new Error(`credential read failed: ${response.status}`);
-      return response.json();
+      if (!stored) {
+        log('secureStorage: nothing saved — the client should ask');
+        throw new Error('no stored credentials');
+      }
+      // Said on this side as well as the host's, because "the keychain
+      // answered" and "the client took the answer in time" are different facts
+      // and only the second one puts an account on the login screen. The delay
+      // is the one that matters, so it is on the line. Presence, never the
+      // fields: this goes to a log the player can open.
+      log(
+        `secureStorage: returning the saved login (account ${stored.username ? 'set' : 'empty'},`,
+        `password ${stored.password ? 'set' : 'empty'}) after`,
+        `${Math.round(performance.now() - asked)} ms`,
+      );
+      return stored;
     },
     async storeCredentials(username, password) {
       const response = await credentials('PUT', { username, password });
       if (!response.ok) throw new Error(await response.text());
+      // Held rather than re-read: the host now has exactly this, and a client
+      // that signs out and back in within one session should not pay for the
+      // keychain twice.
+      saved = Promise.resolve({ username, password });
     },
     async clearCredentials() {
       await credentials('DELETE');
+      saved = Promise.resolve(null);
     },
   },
 

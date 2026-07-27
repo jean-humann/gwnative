@@ -140,13 +140,33 @@ impl ChunkStore {
     pub fn open(client: Client, manifest: Manifest, cache_dir: PathBuf) -> Result<Self> {
         let snapshot = manifest.require_unique(crate::patch::SNAPSHOT)?.to_owned();
         fs::create_dir_all(&cache_dir)?;
+        // Every hash this manifest can ever ask for, across every file in it —
+        // not just the snapshot's. Collected here, on the manifest that was
+        // just fetched and is about to become the live one, because that is
+        // what makes everything else in the cache provably dead.
+        //
+        // Owned strings rather than borrowed `Hex`, which is a stack type with
+        // no identity: this crosses onto another thread and has to outlive the
+        // manifest reference it came from. A 4.2 GB snapshot is ~16k hashes, so
+        // the set is about a megabyte and it is dropped as soon as it is used.
+        let live: HashSet<String> = manifest
+            .files
+            .values()
+            .flat_map(|file| {
+                file.chunk_hashes
+                    .iter()
+                    .map(|hash| hash.hex().as_str().to_owned())
+            })
+            .collect();
+
         // Off the launch path: this walks 256 directories and the game has
         // nothing to gain by waiting for it.
         thread::spawn({
             let cache_dir = cache_dir.clone();
             move || {
                 crate::qos::set(crate::qos::Class::Utility);
-                sweep_orphans(&cache_dir)
+                sweep_orphans(&cache_dir);
+                prune(&cache_dir, &live);
             }
         });
         Ok(Self {
@@ -824,6 +844,69 @@ fn sweep_orphans(cache_dir: &Path) {
     }
 }
 
+/// Drop every cached chunk the live manifest can no longer name.
+///
+/// The cache is content-addressed, which is what makes deduplication free and
+/// what makes this necessary: when ArenaNet patches, the chunks whose contents
+/// changed get new hashes and the old files are never asked for again. Nothing
+/// overwrites them, because nothing writes to those names any more. Before this
+/// the cache was a union of every snapshot the machine had ever seen — a second
+/// 4.2 GB after the first patch, and another after the next.
+///
+/// Safe against a fetch happening right now, because the set to keep comes from
+/// the manifest rather than from a listing: a chunk being written this instant
+/// is one this manifest named, so it is in `live` whether or not it is yet on
+/// disk. Anything that is not a chunk file — the boot list at the top level, a
+/// `.tmp` a live writer still owns — fails the name test and is left alone.
+///
+/// Runs at Utility QoS behind the orphan sweep, so it yields to the boot it is
+/// sharing a disk with.
+fn prune(cache_dir: &Path, live: &HashSet<String>) {
+    // A manifest with no chunks in it is a manifest that failed to parse into
+    // anything useful, and treating it as authority would empty the cache.
+    if live.is_empty() {
+        return;
+    }
+    let Ok(buckets) = fs::read_dir(cache_dir) else {
+        return;
+    };
+    let (mut removed, mut bytes) = (0usize, 0u64);
+    for bucket in buckets.flatten() {
+        let Ok(entries) = fs::read_dir(bucket.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // Only ever a name this cache could have written itself: the hex
+            // form of a hash, and nothing else in the directory.
+            if !is_chunk_name(name) || live.contains(name) {
+                continue;
+            }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+                bytes += size;
+            }
+        }
+    }
+    if removed > 0 {
+        eprintln!(
+            "[gwnative] dropped {removed} chunks ({:.2} GB) the current build no longer uses",
+            bytes as f64 / 1e9
+        );
+    }
+}
+
+/// Whether `name` is one this cache writes: lowercase hex, and as long as one
+/// of the digests [`ContentHash`] produces.
+fn is_chunk_name(name: &str) -> bool {
+    matches!(name.len(), 40 | 64)
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// A chunk fetch that several readers may be waiting on.
 struct Slot {
     state: Mutex<Option<std::result::Result<Arc<Vec<u8>>, String>>>,
@@ -1018,6 +1101,57 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_patch_takes_the_chunks_it_replaced_with_it() {
+        let temp = TempDir::new("prune");
+        let cache = temp.0.join("chunks");
+
+        // Two chunks the new manifest still names, one it does not, and three
+        // things that live in the cache but are not chunks.
+        let kept = "11".to_owned() + &"a".repeat(62);
+        let also_kept = "22".to_owned() + &"b".repeat(62);
+        let stale = "33".to_owned() + &"c".repeat(62);
+        // A short digest, to prove the length test admits both forms.
+        let short_kept = "44".to_owned() + &"d".repeat(38);
+
+        for name in [&kept, &also_kept, &stale, &short_kept] {
+            let bucket = cache.join(&name[..2]);
+            fs::create_dir_all(&bucket).unwrap();
+            fs::write(bucket.join(name), vec![0u8; 1000]).unwrap();
+        }
+        // A write in flight, and something with a name this cache never writes.
+        let bucket = cache.join("33");
+        fs::write(bucket.join("in-flight.9999.tmp"), b"half a chunk").unwrap();
+        fs::write(bucket.join("notes.txt"), b"by hand").unwrap();
+        // The boot list, which lives at the top level and describes this cache.
+        fs::write(cache.join(BOOT_LIST), b"[1,2,3]").unwrap();
+
+        let live: HashSet<String> = [kept.clone(), also_kept.clone(), short_kept.clone()].into();
+        prune(&cache, &live);
+
+        assert!(cache.join(&kept[..2]).join(&kept).exists(), "still named");
+        assert!(cache.join(&also_kept[..2]).join(&also_kept).exists());
+        assert!(cache.join(&short_kept[..2]).join(&short_kept).exists());
+        assert!(
+            !cache.join(&stale[..2]).join(&stale).exists(),
+            "a chunk no manifest names is dead weight"
+        );
+        assert!(
+            bucket.join("in-flight.9999.tmp").exists(),
+            "a live writer's file is not a chunk and is not touched"
+        );
+        assert!(bucket.join("notes.txt").exists());
+        assert!(
+            cache.join(BOOT_LIST).exists(),
+            "the boot list is not a chunk"
+        );
+
+        // And a manifest that named nothing is a manifest to disbelieve, not an
+        // instruction to empty the cache.
+        prune(&cache, &HashSet::new());
+        assert!(cache.join(&kept[..2]).join(&kept).exists());
     }
 
     #[test]
