@@ -13,6 +13,7 @@ mod manifest;
 mod net;
 mod patch;
 mod proxy;
+mod qos;
 mod server;
 mod sockets;
 mod ws;

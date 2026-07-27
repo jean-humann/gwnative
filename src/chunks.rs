@@ -83,7 +83,10 @@ impl ChunkStore {
         // nothing to gain by waiting for it.
         thread::spawn({
             let cache_dir = cache_dir.clone();
-            move || sweep_orphans(&cache_dir)
+            move || {
+                crate::qos::set(crate::qos::Class::Utility);
+                sweep_orphans(&cache_dir)
+            }
         });
         Ok(Self {
             client,
@@ -363,6 +366,14 @@ impl ChunkStore {
             let store = Arc::clone(self);
             let outstanding = Arc::clone(&outstanding);
             thread::spawn(move || {
+                // The sweep decompresses and hashes its way through 4 GB, and
+                // nobody is waiting on any particular chunk of it. At the
+                // default class the scheduler puts that on performance cores
+                // beside WebContent and the GPU process; utility puts it on
+                // efficiency cores, where a throughput job with a progress bar
+                // belongs. `prefetch_permits` rations these threads' share of
+                // the network; this rations their share of the package.
+                crate::qos::set(crate::qos::Class::Utility);
                 let total = store.chunk_count();
                 let mut index = worker;
                 while index < total {

@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use crate::net;
+use crate::qos;
 use crate::ws::{self, BINARY, Message, Sink, TEXT};
 
 /// Read size for the game→page direction. Guild Wars packets are far smaller;
@@ -170,6 +171,9 @@ pub fn bridge(
         let counter = Arc::clone(&downstream);
         let destination = destination.to_owned();
         thread::spawn(move || {
+            // This carries the game's own traffic to and from ArenaNet; a frame
+            // of added latency here is a frame the player waits.
+            qos::set(qos::Class::UserInitiated);
             let mut buffer = vec![0u8; READ_BUFFER];
             loop {
                 match game.read(&mut buffer) {

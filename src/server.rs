@@ -26,7 +26,7 @@ use std::thread;
 use crate::chunks::ChunkStore;
 use crate::patch::SNAPSHOT;
 use crate::sockets::{self, Registry};
-use crate::{keychain, net, proxy, ws};
+use crate::{keychain, net, proxy, qos, ws};
 
 /// Largest span served from one request. The harness asks for far less; this
 /// only stops a stray `Range: bytes=0-` from walking the whole image in one go.
@@ -93,12 +93,16 @@ pub fn spawn(
     thread::Builder::new()
         .name("gwnative-loopback".into())
         .spawn(move || {
+            // Everything the page is blocked on arrives through this loop, so
+            // it and the threads it makes are the interactive path.
+            qos::set(qos::Class::UserInitiated);
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let context = Arc::clone(&context);
                 // One thread per connection. Snapshot reads block on the chunk
                 // store, so they must not share a thread with the page load.
                 thread::spawn(move || {
+                    qos::set(qos::Class::UserInitiated);
                     let _ = serve(stream, &context);
                 });
             }
