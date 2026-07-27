@@ -113,6 +113,45 @@
     transition: width .3s ease;
   }
   @media (prefers-reduced-motion: reduce) { #launcher-rail-fill { transition: none; } }
+  /* Settings panel. Same overlay shape as #launcher and #failure, but this one
+     covers a game that is still running, so it is dimmer rather than opaque and
+     Escape gives focus back to the canvas. */
+  #settings {
+    position: fixed; inset: 0; z-index: 3;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px;
+    padding: 40px; background: rgba(0, 0, 0, .8);
+  }
+  #settings[hidden] { display: none; }
+  #settings-title { margin: 0; font-size: 20px; font-weight: 500; }
+  #settings-rows {
+    display: grid; grid-template-columns: auto 1fr; gap: 12px 16px;
+    align-items: baseline;
+    width: min(38em, 80vw); padding: 20px 22px;
+    background: rgba(24, 24, 37, .92);
+    border: 1px solid #313244; border-radius: 10px;
+  }
+  .settings-row { display: contents; }
+  .settings-row label { justify-self: end; color: #cdd6f4; }
+  .settings-row select {
+    font: inherit; color: #cdd6f4; padding: 4px 8px; border-radius: 6px;
+    background: #313244; border: 1px solid #45475a;
+  }
+  /* Spans both columns under the row it explains, so a long note does not
+     stretch the control column. */
+  .settings-hint {
+    grid-column: 2; color: #9399b2; font-size: 12px; margin: -6px 0 4px;
+  }
+  .settings-hint:empty { display: none; }
+  #settings-note { color: #f38ba8; min-height: 1.5em; max-width: 38em; text-align: center; }
+  #settings-actions { display: flex; gap: 10px; }
+  #settings button {
+    padding: 7px 16px; border-radius: 6px; cursor: pointer;
+    font: inherit; color: #cdd6f4;
+    background: #313244; border: 1px solid #45475a;
+  }
+  #settings button:hover { background: #45475a; }
+  #settings button.primary { border-color: #d9b25c; }
   #log {
     position: fixed; inset: 0 0 auto 0; max-height: 60%;
     margin: 0; padding: 10px 14px; overflow: auto;
@@ -144,6 +183,15 @@
   <div id="launcher-rail" hidden><div id="launcher-rail-fill"></div></div>
   <div id="launcher-detail"></div>
   <div id="launcher-actions"></div>
+</div>
+<!-- Filled in by settings-panel.js, opened from the Settings… menu item. The
+     rows are built rather than written out because the panel's contents are a
+     table in that file, and two lists that have to agree is one list too many. -->
+<div id="settings" hidden>
+  <h1 id="settings-title">Settings</h1>
+  <div id="settings-rows"></div>
+  <div id="settings-note"></div>
+  <div id="settings-actions"></div>
 </div>
 <!-- The client probes for Module.oskInput and concludes it cannot accept text at
      all if these are missing — which is why the login fields ignored every key.

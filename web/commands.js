@@ -63,3 +63,9 @@ onCommand('audio-unmute', () => {
   // parked while we were away — an interruption WebKit never resumes by itself.
   window.gwAudio?.resumeGameAudio();
 });
+
+// The Settings… menu item. The panel lives in the page rather than in AppKit
+// because every setting in it is one the page owns the effect of — and because
+// a native panel would have to be told when the page's idea of a setting
+// changed, which is a second copy of the same four values.
+onCommand('settings-open', () => window.gwOpenSettings?.());
