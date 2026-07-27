@@ -27,42 +27,115 @@ pub struct FileEntry {
     pub chunk_hashes: Vec<ContentHash>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HashAlgo {
     Md5,
     Sha1,
     Sha256,
 }
 
-/// A lowercase hex content hash whose length selects the algorithm.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ContentHash(String);
+impl HashAlgo {
+    /// Digest length in bytes, which is also what selects the algorithm: the
+    /// manifest names no algorithm, only a hex string, and 32, 40 and 64
+    /// characters can mean nothing else.
+    const fn length(self) -> usize {
+        match self {
+            Self::Md5 => 16,
+            Self::Sha1 => 20,
+            Self::Sha256 => 32,
+        }
+    }
+}
+
+/// A content hash, kept as its bytes rather than as the hex it arrived in.
+///
+/// The snapshot alone contributes 16167 chunk references, and a `String` for
+/// each is 24 bytes of struct plus a 64-byte allocation plus the allocator's
+/// header — about a hundred bytes, every one of them behind a pointer, and one
+/// trip through malloc per chunk while parsing. The widest digest in use is 32
+/// bytes, so the whole thing fits inline with room left to say which algorithm
+/// it is, the parse fills a flat run of memory, and comparing two hashes is a
+/// fixed-width byte compare rather than a string one.
+///
+/// Hex is what the cache filenames are made of, so it is still reachable — see
+/// [`hex`](Self::hex), which renders onto the stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ContentHash {
+    algo: HashAlgo,
+    /// Only `algo.length()` bytes are meaningful; the tail stays zero so that
+    /// the derived `Eq` and `Hash` can read the whole array.
+    digest: [u8; 32],
+}
 
 impl ContentHash {
     pub fn parse(value: &str) -> Result<Self> {
-        let known_length = matches!(value.len(), 32 | 40 | 64);
-        if !known_length || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(Error::HashFormat(value.to_owned()));
-        }
-        Ok(Self(value.to_ascii_lowercase()))
+        let algo = match value.len() {
+            32 => HashAlgo::Md5,
+            40 => HashAlgo::Sha1,
+            64 => HashAlgo::Sha256,
+            _ => return Err(Error::HashFormat(value.to_owned())),
+        };
+        let mut digest = [0u8; 32];
+        hex::decode_to_slice(value, &mut digest[..algo.length()])
+            .map_err(|_| Error::HashFormat(value.to_owned()))?;
+        Ok(Self { algo, digest })
     }
 
     pub fn algo(&self) -> HashAlgo {
-        match self.0.len() {
-            32 => HashAlgo::Md5,
-            40 => HashAlgo::Sha1,
-            _ => HashAlgo::Sha256,
-        }
+        self.algo
     }
 
+    /// The digest itself, trimmed to the algorithm's width.
+    pub fn bytes(&self) -> &[u8] {
+        &self.digest[..self.algo.length()]
+    }
+
+    /// The lowercase hex form, on the stack.
+    pub fn hex(&self) -> Hex {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut text = [0u8; 64];
+        for (byte, pair) in self.bytes().iter().zip(text.chunks_exact_mut(2)) {
+            pair[0] = DIGITS[usize::from(byte >> 4)];
+            pair[1] = DIGITS[usize::from(byte & 0xf)];
+        }
+        Hex {
+            text,
+            length: self.algo.length() * 2,
+        }
+    }
+}
+
+/// A [`ContentHash`] rendered as hex, borrowable as `&str` and never allocated.
+pub struct Hex {
+    text: [u8; 64],
+    length: usize,
+}
+
+impl Hex {
     pub fn as_str(&self) -> &str {
-        &self.0
+        // Only the sixteen ASCII hex digits are ever written here, so this
+        // cannot fail; it is a length check over at most 64 bytes rather than
+        // an `unsafe` for something that costs nothing.
+        std::str::from_utf8(&self.text[..self.length]).expect("hex digits are ascii")
+    }
+}
+
+impl std::ops::Deref for Hex {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for Hex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
 impl std::fmt::Display for ContentHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.hex())
     }
 }
 
@@ -170,7 +243,7 @@ impl Manifest {
                         )));
                     }
                     _ => {
-                        hash_lengths.insert(hash.clone(), length);
+                        hash_lengths.insert(hash, length);
                     }
                 }
                 chunk_hashes.push(hash);
@@ -401,5 +474,41 @@ mod tests {
         );
         assert!(ContentHash::parse(&"a".repeat(31)).is_err());
         assert!(ContentHash::parse(&"z".repeat(32)).is_err());
+    }
+
+    /// The hex is what the cache filenames are made of, so a hash that decoded
+    /// and rendered back to anything but the manifest's own text would look for
+    /// its chunks in the wrong place — silently, and only on a real manifest.
+    #[test]
+    fn hex_round_trips_at_every_width() {
+        for text in [
+            "0123456789abcdef".repeat(2),
+            "fe".repeat(20),
+            "9c".repeat(32),
+        ] {
+            let hash = ContentHash::parse(&text).unwrap();
+            assert_eq!(hash.hex().as_str(), text);
+            assert_eq!(hash.bytes().len() * 2, text.len());
+        }
+    }
+
+    /// Storing bytes rather than text is what makes this true for free; the
+    /// `to_ascii_lowercase` it replaces had to be remembered.
+    #[test]
+    fn case_does_not_make_a_different_hash() {
+        let lower = ContentHash::parse(&"ab".repeat(16)).unwrap();
+        let upper = ContentHash::parse(&"AB".repeat(16)).unwrap();
+        assert_eq!(lower, upper);
+        assert_eq!(upper.hex().as_str(), "ab".repeat(16));
+    }
+
+    /// The unused tail of a short digest has to stay zero, or two equal MD5s
+    /// would hash and compare as different once the derived `Eq` read all 32
+    /// bytes — and the chunk cache keys on exactly that.
+    #[test]
+    fn a_short_digest_leaves_no_junk_behind_it() {
+        let md5 = ContentHash::parse(&"7f".repeat(16)).unwrap();
+        assert_eq!(md5.bytes(), [0x7f; 16]);
+        assert_eq!(md5, ContentHash::parse(&"7F".repeat(16)).unwrap());
     }
 }

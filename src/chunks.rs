@@ -201,7 +201,7 @@ impl ChunkStore {
         self.manifest.files[&self.snapshot]
             .chunk_hashes
             .get(index)
-            .cloned()
+            .copied()
             .ok_or_else(|| Error::ManifestFormat(format!("chunk {index} out of range")))
     }
 
@@ -246,7 +246,7 @@ impl ChunkStore {
                 Some(existing) => (Arc::clone(existing), false),
                 None => {
                     let slot = Arc::new(Slot::new());
-                    inflight.insert(hash.clone(), Arc::clone(&slot));
+                    inflight.insert(hash, Arc::clone(&slot));
                     (slot, true)
                 }
             }
@@ -277,7 +277,7 @@ impl ChunkStore {
                     // what just landed on disk is known good and later reads can
                     // go straight to the pread window.
                     Ok(()) => {
-                        self.verified.lock().unwrap().insert(hash.clone());
+                        self.verified.lock().unwrap().insert(hash);
                     }
                     Err(e) => eprintln!("[gwnative] chunk cache write failed: {e}"),
                 }
@@ -300,10 +300,12 @@ impl ChunkStore {
 
         // One directory listing per fan-out bucket rather than one `stat` per
         // chunk: 256 syscalls instead of 16167, over the same directory blocks.
-        let buckets: HashSet<&str> = hashes.iter().map(|h| &h.as_str()[..2]).collect();
+        // Gathered as the leading byte, so only the buckets that exist are ever
+        // rendered rather than a name per chunk.
+        let buckets: HashSet<u8> = hashes.iter().map(|h| h.bytes()[0]).collect();
         let mut present: HashSet<String> = HashSet::new();
         for bucket in buckets {
-            let Ok(entries) = fs::read_dir(self.cache_dir.join(bucket)) else {
+            let Ok(entries) = fs::read_dir(self.cache_dir.join(format!("{bucket:02x}"))) else {
                 continue;
             };
             present.extend(
@@ -317,7 +319,7 @@ impl ChunkStore {
         for (i, hash) in hashes.iter().enumerate() {
             // A `.tmp` left by a write in flight is in the listing too, and does
             // not match a bare hash, which is the answer wanted anyway.
-            if present.contains(hash.as_str()) {
+            if present.contains(hash.hex().as_str()) {
                 bits[i / 8] |= 1 << (i % 8);
             }
         }
@@ -409,8 +411,8 @@ impl ChunkStore {
     fn cache_path(&self, hash: &ContentHash) -> PathBuf {
         // Two-level fan-out: 16k files in one directory is fine on APFS, but
         // this keeps directory listings usable when debugging by hand.
-        let hex = hash.as_str();
-        self.cache_dir.join(&hex[..2]).join(hex)
+        let hex = hash.hex();
+        self.cache_dir.join(&hex[..2]).join(hex.as_str())
     }
 
     /// The size of the cached file for `hash`, if there is one.
@@ -440,7 +442,7 @@ impl ChunkStore {
             let _ = fs::remove_file(&path);
             return None;
         }
-        self.verified.lock().unwrap().insert(hash.clone());
+        self.verified.lock().unwrap().insert(*hash);
         Some(bytes)
     }
 
@@ -470,7 +472,7 @@ impl ChunkStore {
         // a blend of the two, which then failed its hash on the next read.
         let tmp = parent.join(format!(
             "{}.{}.{:08x}.tmp",
-            hash.as_str(),
+            hash.hex(),
             std::process::id(),
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         ));
