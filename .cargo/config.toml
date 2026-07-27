@@ -1,0 +1,3 @@
+# Sign before running. See scripts/signed-run for why the keychain needs it.
+[target.aarch64-apple-darwin]
+runner = "scripts/signed-run"
