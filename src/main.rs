@@ -37,8 +37,8 @@ mod ws;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use objc2::MainThreadOnly;
 use objc2::rc::Retained;
+use objc2::{MainThreadOnly, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
     NSRunningApplication,
@@ -408,6 +408,100 @@ unsafe extern "C" {
     fn libc_getentropy(buffer: *mut u8, length: usize) -> i32;
 }
 
+/// WebKit feature flags this host turns off, because each one is a behaviour
+/// Chromium does not have and the Electron build therefore never suffers.
+///
+/// The first is the frame-rate cap: WebKit prefers rendering updates near
+/// 60 Hz even on displays that refresh faster, and the game's main loop is
+/// `requestAnimationFrame`, so this one flag is the difference between 60 and
+/// 120 FPS on a ProMotion display.
+///
+/// The rest are what happens to a hidden page. WebKit does not merely stop
+/// frames for an occluded window — it throttles the page's timers and then
+/// suppresses the web content process outright, which freezes networking,
+/// the session, everything. Measured twice from a blank install: the boot
+/// download stalled mid-flight (at 2,093 and at 1,485 of ~6,000 chunks) the
+/// moment the machine went unattended, and never resumed — the harness's
+/// timer fallback could not save it, because the process its timers lived in
+/// was itself suspended. The Electron build downloads from its main process
+/// and throttles nothing, so a player who starts the download and walks away
+/// comes back to a finished install; these flags buy the same contract.
+const DISABLED_WEBKIT_FEATURES: [&str; 5] = [
+    "PreferPageRenderingUpdatesNear60FPSEnabled",
+    "PageVisibilityBasedProcessSuppressionEnabled",
+    "HiddenPageDOMTimerThrottlingEnabled",
+    "HiddenPageDOMTimerThrottlingAutoIncreases",
+    "BackgroundWebContentRunningBoardThrottlingEnabled",
+];
+
+/// Turn off every feature in [`DISABLED_WEBKIT_FEATURES`].
+///
+/// There is no supported API for any of them — the direct setter SPIs of past
+/// years (`_setPreferPageRenderingUpdatesNear60FPSEnabled:` and kin) are gone
+/// from current WebKit — so the flags are looked up by key in the feature
+/// lists WebKit publishes for its own debug menus, which is as close to a
+/// stable name as an unstable surface offers. Every step is guarded by a
+/// responds-to check, and a key that has vanished is reported rather than
+/// crashed on: each of these degrades to WebKit's default behaviour, never to
+/// a broken app.
+fn disable_webkit_features(preferences: &objc2_web_kit::WKPreferences) {
+    use objc2::runtime::AnyObject;
+    let class = objc2::class!(WKPreferences);
+    let mut remaining: Vec<&str> = DISABLED_WEBKIT_FEATURES.to_vec();
+    // (feature list class method, matching setter taking that feature kind)
+    let surfaces: [(objc2::runtime::Sel, objc2::runtime::Sel); 3] = [
+        (
+            objc2::sel!(_features),
+            objc2::sel!(_setEnabled:forFeature:),
+        ),
+        (
+            objc2::sel!(_internalDebugFeatures),
+            objc2::sel!(_setEnabled:forInternalDebugFeature:),
+        ),
+        (
+            objc2::sel!(_experimentalFeatures),
+            objc2::sel!(_setEnabled:forExperimentalFeature:),
+        ),
+    ];
+    for (list, set) in surfaces {
+        if remaining.is_empty() {
+            break;
+        }
+        let listed: bool = unsafe { msg_send![class, respondsToSelector: list] };
+        let settable: bool = unsafe { msg_send![preferences, respondsToSelector: set] };
+        if !listed || !settable {
+            continue;
+        }
+        let features: Option<Retained<objc2_foundation::NSArray<AnyObject>>> =
+            unsafe { msg_send![class, performSelector: list] };
+        let Some(features) = features else { continue };
+        for feature in features.iter() {
+            let key: Option<Retained<NSString>> = unsafe { msg_send![&*feature, key] };
+            let Some(key) = key.map(|key| key.to_string()) else {
+                continue;
+            };
+            let Some(position) = remaining.iter().position(|name| **name == key) else {
+                continue;
+            };
+            let () = match set {
+                s if s == objc2::sel!(_setEnabled:forFeature:) => unsafe {
+                    msg_send![preferences, _setEnabled: false, forFeature: &*feature]
+                },
+                s if s == objc2::sel!(_setEnabled:forInternalDebugFeature:) => unsafe {
+                    msg_send![preferences, _setEnabled: false, forInternalDebugFeature: &*feature]
+                },
+                _ => unsafe {
+                    msg_send![preferences, _setEnabled: false, forExperimentalFeature: &*feature]
+                },
+            };
+            remaining.remove(position);
+        }
+    }
+    for name in remaining {
+        eprintln!("[gwnative] WebKit no longer lists {name}; its default behaviour stands");
+    }
+}
+
 fn make_webview(
     mtm: MainThreadMarker,
     frame: NSRect,
@@ -416,6 +510,11 @@ fn make_webview(
     settings: &settings::Settings,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
+
+    // See DISABLED_WEBKIT_FEATURES: the 60 FPS cap and the hidden-page
+    // throttling ladder, both of which Chromium-based rivals never had.
+    let preferences = unsafe { config.preferences() };
+    disable_webkit_features(&preferences);
 
     // Hand the page its token out of band. Serving it over the loopback origin
     // instead would put it where any local process could simply ask for it,
