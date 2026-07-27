@@ -35,8 +35,16 @@ async function poll() {
   return response.json();
 }
 
-/** Start or stop the background sweep. Returns the same progress shape. */
-async function sweep(action) {
+/**
+ * Start or stop the background sweep. Returns the same progress shape.
+ *
+ * Exported because the settings panel drives the same sweep after boot: the
+ * launcher asks the question once, and changing the answer later has to reach
+ * the same route with the same token rather than a second copy of both.
+ *
+ * @param {'start' | 'stop'} action
+ */
+export async function sweepSnapshot(action) {
   const response = await fetch(action === 'stop' ? '__prefetch?stop' : '__prefetch', {
     method: 'POST',
     headers: headers(),
@@ -169,7 +177,7 @@ export async function resolveDataStrategy(snapshotBytes, { log, save, strategy }
   show(info);
 
   try {
-    info = await sweep('start');
+    info = await sweepSnapshot('start');
     show(info);
     log(`launcher: downloading, ${info.cached}/${info.total} chunks already cached`);
   } catch (error) {
@@ -215,7 +223,7 @@ export async function resolveDataStrategy(snapshotBytes, { log, save, strategy }
 
   if ((await Promise.race([pressed, watched])) === 'stop') {
     log('launcher: download stopped; streaming on demand from here');
-    await sweep('stop').catch((error) => log(`[warn] launcher: ${error}`));
+    await sweepSnapshot('stop').catch((error) => log(`[warn] launcher: ${error}`));
     await remember('quick');
   }
   done();
