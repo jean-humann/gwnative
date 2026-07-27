@@ -145,6 +145,7 @@ dependencies = [
 name = "gwnative"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "flate2",
  "hex",
  "md-5",

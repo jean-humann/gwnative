@@ -21,6 +21,8 @@ use std::thread;
 
 use crate::chunks::ChunkStore;
 use crate::patch::SNAPSHOT;
+use crate::sockets::{self, Registry};
+use crate::{net, ws};
 
 /// Largest span served from one request. The harness asks for far less; this
 /// only stops a stray `Range: bytes=0-` from trying to buffer the whole image.
@@ -33,13 +35,18 @@ pub struct Loopback {
 struct Context {
     root: PathBuf,
     snapshot: Option<Arc<ChunkStore>>,
+    sockets: Arc<Registry>,
 }
 
 /// Serve `root` on 127.0.0.1:<ephemeral> until the process exits.
 pub fn spawn(root: PathBuf, snapshot: Option<Arc<ChunkStore>>) -> std::io::Result<Loopback> {
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
     let addr = listener.local_addr()?;
-    let context = Arc::new(Context { root, snapshot });
+    let context = Arc::new(Context {
+        root,
+        snapshot,
+        sockets: Arc::default(),
+    });
 
     thread::Builder::new()
         .name("gwnative-loopback".into())
@@ -61,8 +68,60 @@ pub fn spawn(root: PathBuf, snapshot: Option<Arc<ChunkStore>>) -> std::io::Resul
 struct Request {
     method: String,
     path: String,
+    query: String,
     range: Option<String>,
     content_length: usize,
+    upgrade: Option<String>,
+    websocket_key: Option<String>,
+}
+
+impl Request {
+    /// First value for `name` in the query string, percent-decoded.
+    fn param(&self, name: &str) -> Option<String> {
+        self.query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == name).then(|| percent_decode(value))
+        })
+    }
+
+    fn wants_websocket(&self) -> bool {
+        self.upgrade
+            .as_deref()
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+            && self.websocket_key.is_some()
+    }
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                match u8::from_str_radix(&value[i + 1..i + 3], 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    // A stray '%' is data, not a broken escape.
+                    Err(_) => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
@@ -71,6 +130,8 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
 
     let mut range = None;
     let mut content_length = 0usize;
+    let mut upgrade = None;
+    let mut websocket_key = None;
     let mut header = String::new();
     loop {
         header.clear();
@@ -84,6 +145,8 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
         match name.to_ascii_lowercase().as_str() {
             "range" => range = Some(value),
             "content-length" => content_length = value.parse().unwrap_or(0),
+            "upgrade" => upgrade = Some(value),
+            "sec-websocket-key" => websocket_key = Some(value),
             _ => {}
         }
     }
@@ -91,18 +154,19 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or("GET").to_owned();
     let target = parts.next().unwrap_or("/");
-    let path = target
-        .split(['?', '#'])
-        .next()
-        .unwrap_or("/")
-        .trim_start_matches('/')
-        .to_owned();
+    let (path, query) = match target.split_once('?') {
+        Some((path, rest)) => (path, rest.split('#').next().unwrap_or("")),
+        None => (target.split('#').next().unwrap_or("/"), ""),
+    };
 
     Ok(Request {
         method,
-        path,
+        path: path.trim_start_matches('/').to_owned(),
+        query: query.to_owned(),
         range,
         content_length,
+        upgrade,
+        websocket_key,
     })
 }
 
@@ -120,6 +184,56 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
         return respond(&mut stream, 204, "No Content", "text/plain", b"", &[]);
     }
 
+    // The game asks for an address before it dials. Answering here keeps name
+    // resolution on the host, where the public-unicast policy lives.
+    if request.path == "__dns" {
+        let name = request.param("name").unwrap_or_default();
+        return match net::resolve(&name) {
+            Ok(address) => {
+                eprintln!("[dns] {name} -> {address}");
+                respond(
+                    &mut stream,
+                    200,
+                    "OK",
+                    "text/plain",
+                    address.to_string().as_bytes(),
+                    &[],
+                )
+            }
+            Err(e) => {
+                eprintln!("[dns] {name}: {e}");
+                respond(
+                    &mut stream,
+                    502,
+                    "Bad Gateway",
+                    "text/plain",
+                    e.to_string().as_bytes(),
+                    &[],
+                )
+            }
+        };
+    }
+
+    if request.path == "__socket" {
+        if !request.wants_websocket() {
+            return respond(
+                &mut stream,
+                426,
+                "Upgrade Required",
+                "text/plain",
+                b"__socket is a websocket endpoint",
+                &[("Upgrade", "websocket".into())],
+            );
+        }
+        let destination = request.param("to").unwrap_or_default();
+        ws::accept(&mut stream, request.websocket_key.as_deref().unwrap_or(""))?;
+        // bridge() owns the connection from here — it is no longer HTTP. The
+        // reader goes with it: anything the peer sent after the request head is
+        // already inside its buffer, and a fresh reader would drop those bytes.
+        sockets::bridge(reader, stream, &destination, &context.sockets);
+        return Ok(());
+    }
+
     if request.path == "__stats"
         && let Some(store) = &context.snapshot
     {
@@ -132,6 +246,20 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
             "application/json",
             body.as_bytes(),
             &[],
+        );
+    }
+
+    if request.path == "__resident"
+        && let Some(store) = &context.snapshot
+    {
+        let bits = store.resident_bitmap();
+        return respond(
+            &mut stream,
+            200,
+            "OK",
+            "application/octet-stream",
+            &bits,
+            &[("X-Chunk-Size", store.chunk_size().to_string())],
         );
     }
 
