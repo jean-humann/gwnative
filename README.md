@@ -226,6 +226,83 @@ why.
 what the output device actually is: sample rate, state, base and output latency,
 context creation and close, and every mute transition.
 
+## Measuring both, from nothing
+
+`scripts/benchmark` runs this build and the Electron one from a blank install,
+one after the other, on the same machine within the same few minutes, and prints
+what each cost. The comparison this repository exists to make had until now been
+argued from readings taken on different days against caches in different states,
+which is not a comparison.
+
+A blank install is simulated, never performed — nothing in that script deletes
+anything. Everything this build writes hangs off `$HOME`, so `HOME=<empty dir>`
+is a machine it has never seen. The same trick does nothing to the Electron
+build: Chromium takes the home directory from the password database and ignores
+the environment, so it goes on quietly using the real profile. Its equivalent is
+`--user-data-dir`, which every path it writes derives from — and which carries
+the single-instance lock with it, without which a copy already open on the real
+profile turns the launch into an immediate, silent, successful exit. That one
+cost an hour.
+
+Physical footprint is what the table leads with, per the reasoning above, and
+it is summed over the whole process tree. Both builds keep most of their memory
+outside the process that was launched, and they hide it in different places: the
+Electron build's helpers are its own children and a walk down from it finds
+them, while WebKit's `WebContent`, `GPU` and `Networking` services are started
+by launchd, so their parent is pid 1 and no walk will ever reach them. They are
+attributed by appearance instead — a WebKit service that was not running before
+the launch is a candidate, and candidates still running after the run has been
+stopped belonged to some other application and are dropped. On this machine the
+difference that makes is between a host holding 33 MiB and a tree holding 554.
+
+One row is a like-for-like comparison of a moment: page load to first frame.
+Both builds time it themselves and time it the same way — `performance.now()` at
+the first submit here, `frame.firstSubmit` against `renderer.loaded` there — so
+both are quoted as they report it. The stage timelines under it are each build's
+own account of itself, on each build's own clock, and the two do not have all
+the same stages.
+
+What the script cannot make equal, it says out loud rather than papering over:
+the saved login is not comparable (this build reads the login keychain, which is
+per-user and does not follow `$HOME`; the Electron build passes
+`use-mock-keychain` when it is not packaged and keeps its own file under
+`userData`), the launcher's one question is pre-answered with `quick` because a
+benchmark cannot click, and bytes written measure how far the client got rather
+than a fixed cost of installing.
+
+### What it said, 300 seconds each, same machine, same hour
+
+|                                        | gwnative | Electron |
+| -------------------------------------- | -------: | -------: |
+| page load to first frame (ms)          |  144,487 |   14,602 |
+| physical footprint, whole tree (MiB)   |      554 |      998 |
+| its peak, summed over the tree (MiB)   |    1,913 |    1,306 |
+| resident, whole tree (MiB)             |    1,854 |    1,204 |
+| CPU seconds, whole tree                |     44.1 |    148.6 |
+| processes at peak                      |        4 |        5 |
+| written to a blank profile (MiB)       |      366 |      771 |
+
+Two of those are the result this app was written for. It settles a third of a
+gigabyte lighter and spends a third of the CPU, which is the whole argument, and
+it is not close.
+
+The first row is the argument against it, and it is worse than the ratio looks.
+Both builds submit their first frame only once the client's own startup download
+finishes, so that row is a download time wearing a rendering label: this build
+took ten times as long to fetch **half as much** — 366 MiB against 771 — across
+5,176 range requests whose slowest took 1.36 s. `gw.frame.ms` of 413 ms in the
+same run is a frame time measured while that fetch was still saturating
+everything, not a rendering cost. The chunk fetch path is the next thing to fix,
+and until it is fixed this app is materially slower to start than the thing it
+replaces.
+
+The other unflattering number is the summed peak: 1,913 MiB against 1,306. Most
+of it is one high-water mark, `WebContent` at 1,536 MiB, against a wasm heap of
+256. Something transient is four times the size of the heap it serves. A summed
+peak is a ceiling rather than a reading — the kernel keeps one high-water mark
+per process and they need not have coincided — but a ceiling that far above the
+554 MiB steady state is worth finding.
+
 ## When booting fails, and what the host pushes
 
 A failed boot used to end at one line of red text, leaving the player nothing to

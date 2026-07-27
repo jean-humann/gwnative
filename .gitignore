@@ -8,3 +8,6 @@
 /web/Gw.jspi.*
 /web/version.json
 *.dat
+
+# Python bytecode from running the scripts in `scripts/`.
+__pycache__/
