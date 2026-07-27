@@ -7,13 +7,17 @@
 //! spec, is not clamped, and — with COOP/COEP — is cross-origin isolated, so
 //! SharedArrayBuffer stays available if the client ever wants threads.
 //!
-//! Bound to 127.0.0.1 on an ephemeral port, so nothing is reachable off-host.
+//! Bound to 127.0.0.1 on a fixed port, so nothing is reachable off-host. The
+//! port has to be fixed rather than ephemeral because it is part of the origin,
+//! and WebKit keys IndexedDB by origin: an ephemeral port gives the page a new,
+//! empty store on every launch, so nothing the client writes there — skill
+//! templates, settings, chat logs — ever survives a restart.
 //!
 //! `Gw.snapshot` is served from here too, as a virtual ranged file. It is 4.2 GB
 //! and the client reads a small fraction of it per session, so the bytes come
 //! from the chunk store on demand rather than from disk.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -28,8 +32,29 @@ use crate::{keychain, net, proxy, ws};
 /// only stops a stray `Range: bytes=0-` from trying to buffer the whole image.
 const MAX_RANGE_BYTES: u64 = 32 * 1024 * 1024;
 
+/// The origin's port. Any constant would do; this one is unassigned by IANA and
+/// sits below macOS's ephemeral floor of 49152, so the kernel will not hand it
+/// to somebody else's outbound socket while we are not listening.
+///
+/// `GWNATIVE_PORT` overrides it, which is also how a second instance gets its
+/// own private store rather than fighting over this one.
+const PORT: u16 = 38112;
+
 pub struct Loopback {
     pub addr: SocketAddr,
+}
+
+/// Per-request tracing, off unless `GWNATIVE_TRACE_HTTP` is set, matching
+/// `GWNATIVE_TRACE_SOCKETS` in [`crate::sockets`].
+///
+/// A boot issues a couple of hundred range requests and the client keeps asking
+/// while it streams content, so writing a line per request is not free: stderr
+/// is line-buffered and unbuffered against a terminal, which makes every one of
+/// these a synchronous write on the thread serving the read.
+fn tracing() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("GWNATIVE_TRACE_HTTP").is_some())
 }
 
 struct Context {
@@ -51,7 +76,7 @@ pub fn spawn(
     snapshot: Option<Arc<ChunkStore>>,
     token: String,
 ) -> std::io::Result<Loopback> {
-    let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
+    let listener = bind()?;
     let addr = listener.local_addr()?;
     let context = Arc::new(Context {
         root,
@@ -77,6 +102,30 @@ pub fn spawn(
     Ok(Loopback { addr })
 }
 
+/// Take [`PORT`], or an ephemeral port if something else already holds it.
+///
+/// Falling back keeps the app launchable, but it is worth saying out loud: the
+/// page will come up on a different origin and so will not find anything it
+/// stored on previous launches.
+fn bind() -> std::io::Result<TcpListener> {
+    let port = std::env::var("GWNATIVE_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(PORT);
+
+    match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
+        Ok(listener) => Ok(listener),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!(
+                "[loopback] port {port} is taken, falling back to an ephemeral one; \
+                 saved page state will not be found this session"
+            );
+            TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 struct Request {
     method: String,
     path: String,
@@ -89,6 +138,12 @@ struct Request {
     /// Every header, lower-cased, in arrival order. Only the proxy needs them:
     /// it has to forward what the page sent rather than a reconstruction of it.
     headers: Vec<(String, String)>,
+    /// Read up front rather than by whichever handler wants it. On a kept-alive
+    /// connection a body left unread is not merely ignored — it sits in the
+    /// stream and gets parsed as the next request line.
+    body: Vec<u8>,
+    /// The peer asked to close after this exchange.
+    close: bool,
 }
 
 impl Request {
@@ -140,10 +195,20 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
+/// Largest body accepted on this server. Everything posted here is a log line,
+/// a credential blob or a proxied API call; anything larger is a mistake, and on
+/// a kept-alive connection an oversized body cannot simply be truncated.
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+/// Read one request, or `None` if the peer closed the connection first — which
+/// on a kept-alive connection is the ordinary way an exchange ends, not a fault.
+fn read_request(reader: &mut impl BufRead) -> std::io::Result<Option<Request>> {
+    let mut line = String::new();
+    if reader.read_line(&mut line)? == 0 {
+        return Ok(None);
+    }
+
+    let mut close = false;
     let mut range = None;
     let mut content_length = 0usize;
     let mut upgrade = None;
@@ -167,6 +232,7 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
             "upgrade" => upgrade = Some(value.clone()),
             "sec-websocket-key" => websocket_key = Some(value.clone()),
             "x-gwnative-token" => token = Some(value.clone()),
+            "connection" => close = value.eq_ignore_ascii_case("close"),
             _ => {}
         }
         headers.push((name, value));
@@ -180,7 +246,15 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
         None => (target.split('#').next().unwrap_or("/"), ""),
     };
 
-    Ok(Request {
+    // A body larger than the cap cannot be drained safely — reading it is the
+    // denial of service it would be refusing — so the caller closes instead.
+    let mut body = Vec::new();
+    if content_length > 0 && content_length <= MAX_BODY_BYTES {
+        body.resize(content_length, 0);
+        reader.read_exact(&mut body)?;
+    }
+
+    Ok(Some(Request {
         method,
         path: path.trim_start_matches('/').to_owned(),
         query: query.to_owned(),
@@ -190,7 +264,9 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Request> {
         websocket_key,
         token,
         headers,
-    })
+        body,
+        close,
+    }))
 }
 
 /// Compare in time that does not depend on how many bytes matched, so a caller
@@ -207,48 +283,130 @@ fn token_matches(expected: &str, offered: Option<&str>) -> bool {
         == 0
 }
 
+/// What to do with the connection once a request has been answered.
+enum Flow {
+    /// Wait for another request on the same connection.
+    Keep,
+    Close,
+    /// The page upgraded this connection to a socket bridge. It has stopped
+    /// being HTTP, so [`serve`] hands both halves to `sockets` and stops.
+    Bridge(String),
+}
+
+/// How long a kept-alive connection may sit idle before it is reclaimed.
+///
+/// Keeping connections open is the point of this change, but it means a peer
+/// that goes quiet now holds a thread that would previously have been released
+/// when the response was written. The client loads continuously while it
+/// streams content, so anything this side of a few seconds is generous.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// A write that cannot make progress this long is not going to. Without it a
+/// peer that stops reading mid-body parks a thread in `sendto` forever.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
+    // A 472-byte snapshot range is the commonest request here, and the peer is
+    // on the other end of loopback waiting for it. There is no congestion to
+    // protect against, so there is nothing for Nagle to buy by holding the
+    // reply back for a full segment.
+    let _ = stream.set_nodelay(true);
+    stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
+    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+
     let mut reader = BufReader::new(stream.try_clone()?);
-    let request = read_request(&mut reader)?;
+    loop {
+        match handle(&mut reader, &mut stream, context)? {
+            Flow::Keep => {}
+            Flow::Close => return Ok(()),
+            Flow::Bridge(destination) => {
+                // A game socket is idle for long stretches by design, so the
+                // HTTP idle timeout must not follow it across the upgrade.
+                stream.set_read_timeout(None)?;
+                stream.set_write_timeout(None)?;
+                // The reader goes too: anything the peer sent after the request
+                // head is already inside its buffer, and a fresh reader over the
+                // same socket would drop those bytes.
+                sockets::bridge(reader, stream, &destination, &context.sockets);
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn handle(
+    reader: &mut BufReader<TcpStream>,
+    stream: &mut TcpStream,
+    context: &Context,
+) -> std::io::Result<Flow> {
+    let Some(request) = read_request(reader)? else {
+        return Ok(Flow::Close);
+    };
+
+    if request.content_length > MAX_BODY_BYTES {
+        respond(
+            stream,
+            413,
+            "Payload Too Large",
+            "text/plain",
+            b"too large",
+            &[],
+        )?;
+        return Ok(Flow::Close);
+    }
+
+    // Whether this connection survives is decided once, here, so that every
+    // `respond` below can stay a tail call that says nothing about framing.
+    let flow = if request.close {
+        Flow::Close
+    } else {
+        Flow::Keep
+    };
+
+    if tracing() {
+        eprintln!("[loopback] -> {} /{}", request.method, request.path);
+    }
 
     // Diagnostic channel for the bring-up harness. Real host calls will go over
     // WKScriptMessageHandlerWithReply; this only exists so a page can report
     // results without a UI.
     if request.method == "POST" && request.path == "__report" {
-        let mut body = vec![0u8; request.content_length.min(1 << 20)];
-        reader.read_exact(&mut body)?;
-        eprintln!("[report] {}", String::from_utf8_lossy(&body));
-        return respond(&mut stream, 204, "No Content", "text/plain", b"", &[]);
+        eprintln!("[report] {}", String::from_utf8_lossy(&request.body));
+        respond(stream, 204, "No Content", "text/plain", b"", &[])?;
+        return Ok(flow);
     }
 
     // The game asks for an address before it dials. Answering here keeps name
     // resolution on the host, where the public-unicast policy lives.
     if request.path == "__dns" {
         let name = request.param("name").unwrap_or_default();
-        return match net::resolve(&name) {
+        match net::resolve(&name) {
             Ok(address) => {
-                eprintln!("[dns] {name} -> {address}");
+                if tracing() {
+                    eprintln!("[dns] {name} -> {address}");
+                }
                 respond(
-                    &mut stream,
+                    stream,
                     200,
                     "OK",
                     "text/plain",
                     address.to_string().as_bytes(),
                     &[],
-                )
+                )?;
             }
             Err(e) => {
                 eprintln!("[dns] {name}: {e}");
                 respond(
-                    &mut stream,
+                    stream,
                     502,
                     "Bad Gateway",
                     "text/plain",
                     e.to_string().as_bytes(),
                     &[],
-                )
+                )?;
             }
-        };
+        }
+        return Ok(flow);
     }
 
     // Saved login. Gated on the injected token; see `spawn`.
@@ -258,94 +416,77 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
                 "[credentials] refused an untokened {} request",
                 request.method
             );
-            return respond(
-                &mut stream,
-                403,
-                "Forbidden",
-                "text/plain",
-                b"forbidden",
-                &[],
-            );
+            respond(stream, 403, "Forbidden", "text/plain", b"forbidden", &[])?;
+            return Ok(flow);
         }
-        return match request.method.as_str() {
+        match request.method.as_str() {
             "GET" => match keychain::load() {
                 Some(credentials) => {
                     let body = serde_json::to_vec(&credentials).unwrap_or_default();
                     eprintln!("[credentials] read from the keychain");
-                    respond(&mut stream, 200, "OK", "application/json", &body, &[])
+                    respond(stream, 200, "OK", "application/json", &body, &[])?;
                 }
                 // Not an error: a first launch has nothing saved, and the client
                 // treats "none" as "ask the player".
                 None => {
                     eprintln!("[credentials] nothing saved yet");
                     respond(
-                        &mut stream,
+                        stream,
                         404,
                         "Not Found",
                         "text/plain",
                         b"no stored credentials",
                         &[],
-                    )
+                    )?;
                 }
             },
             "PUT" => {
-                let mut body = vec![0u8; request.content_length.min(64 * 1024)];
-                reader.read_exact(&mut body)?;
-                let stored = serde_json::from_slice(&body)
+                let stored = serde_json::from_slice(&request.body)
                     .map_err(|e| e.to_string())
                     .and_then(|c: keychain::Credentials| keychain::store(&c));
                 match stored {
                     Ok(()) => {
                         eprintln!("[credentials] saved to the keychain");
-                        respond(&mut stream, 204, "No Content", "text/plain", b"", &[])
+                        respond(stream, 204, "No Content", "text/plain", b"", &[])?;
                     }
                     Err(e) => {
                         eprintln!("[credentials] not saved: {e}");
-                        respond(
-                            &mut stream,
-                            400,
-                            "Bad Request",
-                            "text/plain",
-                            e.as_bytes(),
-                            &[],
-                        )
+                        respond(stream, 400, "Bad Request", "text/plain", e.as_bytes(), &[])?;
                     }
                 }
             }
             "DELETE" => {
                 keychain::clear();
                 eprintln!("[credentials] cleared");
-                respond(&mut stream, 204, "No Content", "text/plain", b"", &[])
+                respond(stream, 204, "No Content", "text/plain", b"", &[])?;
             }
             _ => respond(
-                &mut stream,
+                stream,
                 405,
                 "Method Not Allowed",
                 "text/plain",
                 b"use GET, PUT or DELETE",
                 &[("Allow", "GET, PUT, DELETE".into())],
-            ),
-        };
+            )?,
+        }
+        return Ok(flow);
     }
 
     if request.path == "__socket" {
         if !request.wants_websocket() {
-            return respond(
-                &mut stream,
+            respond(
+                stream,
                 426,
                 "Upgrade Required",
                 "text/plain",
                 b"__socket is a websocket endpoint",
                 &[("Upgrade", "websocket".into())],
-            );
+            )?;
+            return Ok(flow);
         }
         let destination = request.param("to").unwrap_or_default();
-        ws::accept(&mut stream, request.websocket_key.as_deref().unwrap_or(""))?;
-        // bridge() owns the connection from here — it is no longer HTTP. The
-        // reader goes with it: anything the peer sent after the request head is
-        // already inside its buffer, and a fresh reader would drop those bytes.
-        sockets::bridge(reader, stream, &destination, &context.sockets);
-        return Ok(());
+        ws::accept(stream, request.websocket_key.as_deref().unwrap_or(""))?;
+        return Ok(Flow::Bridge(destination));
     }
 
     if request.path == "__stats"
@@ -353,28 +494,23 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
     {
         let (cache, net, coalesced) = store.stats();
         let body = format!(r#"{{"fromCache":{cache},"fetched":{net},"coalesced":{coalesced}}}"#);
-        return respond(
-            &mut stream,
-            200,
-            "OK",
-            "application/json",
-            body.as_bytes(),
-            &[],
-        );
+        respond(stream, 200, "OK", "application/json", body.as_bytes(), &[])?;
+        return Ok(flow);
     }
 
     if request.path == "__resident"
         && let Some(store) = &context.snapshot
     {
         let bits = store.resident_bitmap();
-        return respond(
-            &mut stream,
+        respond(
+            stream,
             200,
             "OK",
             "application/octet-stream",
             &bits,
             &[("X-Chunk-Size", store.chunk_size().to_string())],
-        );
+        )?;
+        return Ok(flow);
     }
 
     // Full download: POST starts or stops the background sweep, GET polls it.
@@ -391,20 +527,15 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
         }
         let (done, total, running) = store.prefetch_progress();
         let body = format!(r#"{{"done":{done},"total":{total},"running":{running}}}"#);
-        return respond(
-            &mut stream,
-            200,
-            "OK",
-            "application/json",
-            body.as_bytes(),
-            &[],
-        );
+        respond(stream, 200, "OK", "application/json", body.as_bytes(), &[])?;
+        return Ok(flow);
     }
 
     if request.path == SNAPSHOT
         && let Some(store) = &context.snapshot
     {
-        return serve_snapshot(&mut stream, &request, store);
+        serve_snapshot(stream, &request, store)?;
+        return Ok(flow);
     }
 
     // The client's own web requests, which it addressed to this origin because
@@ -414,80 +545,69 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
         None => (request.path.as_str(), "/".to_owned()),
     };
     if proxy::host(route).is_some() {
-        let mut body = Vec::new();
-        if request.method != "GET" {
-            if request.content_length > proxy::MAX_BODY {
-                return respond(
-                    &mut stream,
-                    413,
-                    "Payload Too Large",
-                    "text/plain",
-                    b"request body too large",
-                    &[],
-                );
-            }
-            body.resize(request.content_length, 0);
-            reader.read_exact(&mut body)?;
+        if request.body.len() > proxy::MAX_BODY {
+            respond(
+                stream,
+                413,
+                "Payload Too Large",
+                "text/plain",
+                b"request body too large",
+                &[],
+            )?;
+            return Ok(flow);
         }
-        return match proxy::forward(
+        match proxy::forward(
             route,
             &tail,
             &request.query,
             &request.method,
             &request.headers,
-            body,
+            request.body,
         ) {
             Ok(reply) => {
                 eprintln!(
                     "[proxy] {} /{route}{tail} -> {}",
                     request.method, reply.status
                 );
-                respond_proxy(&mut stream, &reply)
+                respond_proxy(stream, &reply)?;
+                // `respond_proxy` relays upstream's headers, and upstream's
+                // framing is not ours to reinterpret, so this hop ends here.
+                return Ok(Flow::Close);
             }
             Err(e) => {
                 eprintln!("[proxy] {} /{route}{tail}: {e}", request.method);
                 respond(
-                    &mut stream,
+                    stream,
                     502,
                     "Bad Gateway",
                     "text/plain",
                     b"proxy error",
                     &[],
-                )
+                )?;
+                return Ok(flow);
             }
-        };
+        }
     }
 
     match resolve(&context.root, &request.path) {
         Some(file) => match std::fs::read(&file) {
             Ok(body) => {
-                eprintln!("[loopback] 200 /{} ({} bytes)", request.path, body.len());
-                respond(&mut stream, 200, "OK", mime(&file), &body, &[])
+                if tracing() {
+                    eprintln!("[loopback] 200 /{} ({} bytes)", request.path, body.len());
+                }
+                respond(stream, 200, "OK", mime(&file), &body, &[])?;
             }
             Err(_) => {
                 eprintln!("[loopback] 404 /{}", request.path);
-                respond(
-                    &mut stream,
-                    404,
-                    "Not Found",
-                    "text/plain",
-                    b"not found",
-                    &[],
-                )
+                respond(stream, 404, "Not Found", "text/plain", b"not found", &[])?;
             }
         },
         None => {
             eprintln!("[loopback] 403 /{}", request.path);
-            respond(
-                &mut stream,
-                403,
-                "Forbidden",
-                "text/plain",
-                b"forbidden",
-                &[],
-            )
+            respond(stream, 403, "Forbidden", "text/plain", b"forbidden", &[])?;
         }
     }
+    Ok(flow)
 }
 
 fn serve_snapshot(
@@ -519,10 +639,12 @@ fn serve_snapshot(
     match store.read(start, length) {
         Ok(body) => {
             let last = start + body.len() as u64 - 1;
-            eprintln!(
-                "[loopback] 206 /{SNAPSHOT} bytes {start}-{last}/{total} ({} bytes)",
-                body.len()
-            );
+            if tracing() {
+                eprintln!(
+                    "[loopback] 206 /{SNAPSHOT} bytes {start}-{last}/{total} ({} bytes)",
+                    body.len()
+                );
+            }
             respond(
                 stream,
                 206,
@@ -609,6 +731,12 @@ fn mime(path: &Path) -> &'static str {
 /// Headers every response carries. COOP/COEP are what make the origin
 /// cross-origin isolated; CORP lets the page embed its own subresources under
 /// that policy.
+///
+/// There is deliberately no `Connection` header: HTTP/1.1 keeps the connection
+/// open unless told otherwise, and every response written through here is
+/// framed by its Content-Length, so the peer can find the next one. A boot
+/// issues a couple of hundred range requests, and closing after each meant a
+/// fresh handshake and a fresh 2 MiB-stack thread for every one of them.
 fn common_headers(content_type: &str, length: u64, extra: &[(&str, String)]) -> String {
     let mut head = format!(
         "Content-Type: {content_type}\r\n\
@@ -616,8 +744,7 @@ fn common_headers(content_type: &str, length: u64, extra: &[(&str, String)]) -> 
          Cache-Control: no-store\r\n\
          Cross-Origin-Opener-Policy: same-origin\r\n\
          Cross-Origin-Embedder-Policy: require-corp\r\n\
-         Cross-Origin-Resource-Policy: same-origin\r\n\
-         Connection: close\r\n"
+         Cross-Origin-Resource-Policy: same-origin\r\n"
     );
     for (name, value) in extra {
         head.push_str(&format!("{name}: {value}\r\n"));

@@ -27,10 +27,73 @@ const forward = (line) => {
   }, 50);
 };
 
+// The glue and the client log through console directly; mirror those, or the
+// host terminal sees only the harness's own half of the story. Installed here,
+// above the first caller, so `log` below can just use console and not forward a
+// second copy of its own.
+for (const level of ['log', 'warn', 'error']) {
+  const original = console[level].bind(console);
+  console[level] = (...values) => {
+    original(...values);
+    forward(level === 'log' ? values.map(String).join(' ')
+                            : `[${level}] ${values.map(String).join(' ')}`);
+  };
+}
+window.addEventListener('error', (e) => forward(`[uncaught] ${e.message} @ ${e.filename}:${e.lineno}`));
+window.addEventListener('unhandledrejection', (e) => forward(`[unhandled] ${e.reason}`));
+
+// Keep the main loop turning when the window is not on screen.
+//
+// WKWebView stops delivering requestAnimationFrame entirely while its window is
+// fully occluded — not throttled, stopped. The client drives everything from
+// that callback, so a covered window does not merely stop painting: networking,
+// timers and the session all stop with it, and the server eventually drops the
+// connection. It also applies before the first paint, so launching the app
+// behind another window leaves it wedged just after `runtime initialised`,
+// having loaded the runtime and then never taken a single frame.
+//
+// So arm a timer alongside the frame request and let whichever arrives first
+// win, then get out of the way: the moment a real frame lands, put the native
+// function back. From then on the client sees stock frame timing exactly, which
+// matters because the timestamp requestAnimationFrame hands its callback is the
+// clock the client drives animation and audio from — substituting
+// performance.now() for it on every frame is audible.
+//
+// So this only rescues the boot, and deliberately does not throttle a running
+// game. Slowing the loop while the window is covered does save CPU, but it
+// starves the same audio clock and stutters the sound, which is a bad trade for
+// idle watts. A covered window therefore freezes exactly as it does under
+// Chromium, which is what the Electron build does too.
+//
+// The glue re-reads globalThis.requestAnimationFrame on every call rather than
+// capturing it, so both the swap in and the swap back reach the client without
+// touching any vendored code. The handle returned while the timer is armed is
+// not a usable frame id, which is safe only because the client never cancels a
+// frame — cancelAnimationFrame appears nowhere in Gw.jspi.js.
+const BOOT_FRAME_MS = 250;
+{
+  const raf = window.requestAnimationFrame.bind(window);
+  window.requestAnimationFrame = (callback) => {
+    let taken = false;
+    const run = (timestamp) => {
+      if (taken) return;
+      taken = true;
+      callback(timestamp);
+    };
+    const timer = setTimeout(() => run(performance.now()), BOOT_FRAME_MS);
+    raf((timestamp) => {
+      clearTimeout(timer);
+      // Frames are flowing; nothing above needs to intercept them any more.
+      window.requestAnimationFrame = raf;
+      run(timestamp);
+    });
+    return 0;
+  };
+}
+
 const statusEl = () => document.getElementById('status');
 const log = (...values) => {
   console.log(...values);
-  forward(values.map(String).join(' '));
   logBuf.push(values.map(String).join(' '));
   if (logBuf.length > LOG_LINES) logBuf.splice(0, logBuf.length - LOG_LINES);
   const el = document.getElementById('log');
@@ -123,12 +186,6 @@ let renderScale = 1;
 // instantiateWasm is called synchronously by the glue and cannot await.
 // Reading `host` before boot() assigns it is a TypeError, not a silent skip.
 let host;
-
-function sizeCanvasToWindow(canvas) {
-  const ratio = window.devicePixelRatio || 1;
-  canvas.width = Math.round(canvas.clientWidth * ratio * renderScale);
-  canvas.height = Math.round(canvas.clientHeight * ratio * renderScale);
-}
 
 Module = {
   canvas: document.getElementById('canvas'),
@@ -347,10 +404,12 @@ function appendGlue() {
     return fail(`Game data could not be prepared: ${error}`);
   }
 
+  // The canvas is sized by the client, not here. It owns the drawing buffer —
+  // it asks for the pixel ratio through emscripten_get_device_pixel_ratio and
+  // sets width/height itself — and writing those from the host as well forces
+  // WebGL to reallocate and clear the buffer on every resize event.
   const canvas = Module.canvas;
-  sizeCanvasToWindow(canvas);
   canvas.focus();
-  window.addEventListener('resize', () => sizeCanvasToWindow(canvas));
 
   // Text entry does not run through keydown on the canvas: the client focuses
   // one of these fields and reads the composed result back. Without them it
@@ -413,18 +472,5 @@ function appendGlue() {
   status('Starting the game…');
   appendGlue();
 })();
-
-// The glue and the client log through console directly; mirror those too, or
-// the host terminal sees only the harness's own half of the story.
-for (const level of ['log', 'warn', 'error']) {
-  const original = console[level].bind(console);
-  console[level] = (...values) => {
-    original(...values);
-    forward(level === 'log' ? values.map(String).join(' ')
-                            : `[${level}] ${values.map(String).join(' ')}`);
-  };
-}
-window.addEventListener('error', (e) => forward(`[uncaught] ${e.message} @ ${e.filename}:${e.lineno}`));
-window.addEventListener('unhandledrejection', (e) => forward(`[unhandled] ${e.reason}`));
 
 })();
