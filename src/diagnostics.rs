@@ -35,6 +35,23 @@ pub enum Kind {
     Peak,
 }
 
+/// How many distinct metric names the host will hold, not counting the overflow
+/// counter it adds on top.
+///
+/// Generous — the page and the host together name about sixty — but finite. The
+/// batch endpoint is reachable by any process on the machine that has the token,
+/// and the names in a batch are whatever the caller wrote.
+const MAX_NAMES: usize = 512;
+
+/// The longest name that will be stored. A name is a fixed label in the source
+/// on both sides; anything approaching this is a value that got concatenated
+/// into one by mistake.
+const MAX_NAME_LEN: usize = 128;
+
+/// Where refused names are counted, so a full table says so rather than just
+/// quietly missing the metric somebody is looking for.
+const OVERFLOW: &str = "gw.metrics.dropped";
+
 /// A name-to-number registry, shared by the host and the page.
 ///
 /// Deliberately `BTreeMap` rather than `HashMap`: the records go into a file a
@@ -52,7 +69,19 @@ impl Metrics {
         if !value.is_finite() {
             return;
         }
+        if name.len() > MAX_NAME_LEN {
+            return;
+        }
         let mut values = self.values.lock().unwrap();
+        // A name that is already here always lands. A new one only lands while
+        // there is room: this map is never cleared, so a caller that derives
+        // names from something unbounded — a socket, an address, a file — would
+        // otherwise grow it for the life of the process, and every `snapshot`
+        // clones the whole thing.
+        if values.len() >= MAX_NAMES && !values.contains_key(name) {
+            *values.entry(OVERFLOW.to_owned()).or_insert(0.0) += 1.0;
+            return;
+        }
         let slot = values.entry(name.to_owned()).or_insert(0.0);
         *slot = match kind {
             Kind::Count => *slot + value,
@@ -324,6 +353,41 @@ mod tests {
         // everything, so a poisoned peak stops rising and reads as calm.
         m.peak("p", 20.0);
         assert_eq!(m.snapshot()["p"], 20.0);
+    }
+
+    #[test]
+    fn the_name_table_stops_growing() {
+        let m = Metrics::default();
+        for i in 0..MAX_NAMES + 50 {
+            m.count(&format!("name.{i}"), 1.0);
+        }
+        let snapshot = m.snapshot();
+        // The cap, plus the one slot the overflow counter takes for itself.
+        assert_eq!(snapshot.len(), MAX_NAMES + 1);
+        assert_eq!(
+            snapshot[OVERFLOW], 50.0,
+            "and it says how many were refused"
+        );
+    }
+
+    #[test]
+    fn a_full_table_still_records_the_names_it_knows() {
+        let m = Metrics::default();
+        m.count("gw.frames", 1.0);
+        for i in 0..MAX_NAMES * 2 {
+            m.count(&format!("name.{i}"), 1.0);
+        }
+        // The whole point of the cap: a flood of new names must not stop the
+        // metrics that were already being kept from moving.
+        m.count("gw.frames", 4.0);
+        assert_eq!(m.snapshot()["gw.frames"], 5.0);
+    }
+
+    #[test]
+    fn an_absurd_name_is_refused() {
+        let m = Metrics::default();
+        m.count(&"x".repeat(MAX_NAME_LEN + 1), 1.0);
+        assert!(m.snapshot().is_empty());
     }
 
     #[test]

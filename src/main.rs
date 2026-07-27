@@ -262,6 +262,14 @@ fn main() {
     .expect("bind loopback");
     let url = format!("http://{}/index.html", loopback.addr);
     eprintln!("[gwnative] serving {} at {}", root.display(), url);
+    // The windowed app keeps its token to itself — it reaches the page over the
+    // injection channel and nowhere else. But every measurement worth taking
+    // lives behind that gate on `__diag`, and a benchmark that cannot read it
+    // is a benchmark of nothing. So: on request, and only on request.
+    if std::env::var_os("GWNATIVE_PRINT_TOKEN").is_some() {
+        eprintln!("[gwnative] session token {token}");
+    }
+
     if headless {
         // Address and session token on one line, because every route worth
         // exercising is behind the gate and there is otherwise no way to get
