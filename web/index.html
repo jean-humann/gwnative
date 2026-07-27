@@ -58,6 +58,27 @@
     background: #404040; border: 2px solid #666; border-radius: 4px;
     outline: none; resize: none;
   }
+  /* Failure overlay. A boot that has failed is over, so unlike #status this
+     takes pointer events and covers the canvas — there is nothing behind it
+     worth clicking. */
+  #failure {
+    position: fixed; inset: 0; z-index: 2;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px;
+    padding: 40px; text-align: center;
+    background: rgba(0, 0, 0, .92);
+  }
+  #failure[hidden] { display: none; }
+  #failure-text { max-width: 46em; color: #f38ba8; }
+  #failure-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #failure button {
+    padding: 7px 16px; border-radius: 6px; cursor: pointer;
+    font: inherit; color: #cdd6f4;
+    background: #313244; border: 1px solid #45475a;
+  }
+  #failure button:hover { background: #45475a; }
+  #failure button.danger { color: #f38ba8; }
+  #failure-note { color: #9399b2; max-width: 46em; min-height: 1.5em; }
   #log {
     position: fixed; inset: 0 0 auto 0; max-height: 60%;
     margin: 0; padding: 10px 14px; overflow: auto;
@@ -72,6 +93,13 @@
   <div id="bar" class="busy"><div id="bar-fill"></div></div>
   <span id="status-label">Starting…</span>
   <span id="status-detail"></span>
+</div>
+<!-- Filled in by loading.js. Present in the markup rather than built at failure
+     time because the failure may well be that a module could not be loaded. -->
+<div id="failure" hidden>
+  <div id="failure-text"></div>
+  <div id="failure-actions"></div>
+  <div id="failure-note"></div>
 </div>
 <!-- The client probes for Module.oskInput and concludes it cannot accept text at
      all if these are missing — which is why the login fields ignored every key.
