@@ -373,11 +373,63 @@ impl Drop for Permit<'_> {
     }
 }
 
-/// `~/Library/Caches/gwnative/chunks`, the conventional home for data that is
-/// expensive to refetch but safe to lose.
+/// `~/Library/Application Support/gwnative/chunks`.
+///
+/// Not `~/Library/Caches`, where this used to live. That directory is the
+/// conventional home for data that is expensive to refetch but safe to lose,
+/// and the second half of that is false here: macOS purges it under disk
+/// pressure without asking, and what it would be purging is up to 4 GB of game
+/// data over a metered connection. The name says cache, but the durability
+/// required is that of user data.
+///
+/// The old location is moved rather than abandoned, so nobody re-downloads what
+/// they already have.
 pub fn default_cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
-    Path::new(&home).join("Library/Caches/gwnative/chunks")
+    let home = Path::new(&home);
+    let current = home.join("Library/Application Support/gwnative/chunks");
+    let legacy = home.join("Library/Caches/gwnative/chunks");
+    migrate_cache(&legacy, &current);
+    current
+}
+
+/// Move a pre-existing cache to its durable home, once.
+///
+/// A rename, so several gigabytes cost one directory entry and no copy — both
+/// paths are under `~/Library` and so on one volume. Everything here is
+/// best-effort: a failure leaves the old directory where it is and costs a
+/// re-download, which is the same outcome as never having tried, so nothing is
+/// worth aborting a launch over.
+fn migrate_cache(legacy: &Path, current: &Path) {
+    if current.exists() || !legacy.exists() {
+        return;
+    }
+    let Some(parent) = current.parent() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        eprintln!("[chunks] could not prepare {}: {e}", parent.display());
+        return;
+    }
+    match std::fs::rename(legacy, current) {
+        Ok(()) => {
+            eprintln!(
+                "[chunks] moved the cache out of ~/Library/Caches, which macOS may purge, \
+                 to {}",
+                current.display()
+            );
+            // Tidy the directory that held it, but only if the move emptied
+            // it: WebKit keeps its own cache for this executable under the
+            // same name, and that one belongs where it is. `remove_dir`
+            // refuses a non-empty directory, which is exactly the test wanted.
+            if let Some(old) = legacy.parent() {
+                let _ = std::fs::remove_dir(old);
+            }
+        }
+        Err(e) => {
+            eprintln!("[chunks] could not move the existing cache ({e}); leaving it in place")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -424,5 +476,68 @@ mod tests {
         let slot = Slot::new();
         slot.fulfil(Err("boom".into()));
         assert!(slot.wait().is_err());
+    }
+
+    /// A temporary directory that removes itself, so a failing assertion cannot
+    /// leave one behind.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "gwnative-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn migration_carries_an_existing_cache_across() {
+        let temp = TempDir::new("migrate");
+        let legacy = temp.0.join("Caches/gwnative/chunks");
+        let current = temp.0.join("Application Support/gwnative/chunks");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("abc"), b"a cached chunk").unwrap();
+
+        migrate_cache(&legacy, &current);
+
+        assert_eq!(fs::read(current.join("abc")).unwrap(), b"a cached chunk");
+        assert!(!legacy.exists(), "the old cache should not be left behind");
+    }
+
+    #[test]
+    fn migration_never_overwrites_a_cache_already_there() {
+        let temp = TempDir::new("keep");
+        let legacy = temp.0.join("Caches/gwnative/chunks");
+        let current = temp.0.join("Application Support/gwnative/chunks");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&current).unwrap();
+        fs::write(legacy.join("abc"), b"stale").unwrap();
+        fs::write(current.join("abc"), b"in use").unwrap();
+
+        migrate_cache(&legacy, &current);
+
+        assert_eq!(fs::read(current.join("abc")).unwrap(), b"in use");
+    }
+
+    #[test]
+    fn migration_is_silent_when_there_is_nothing_to_move() {
+        let temp = TempDir::new("absent");
+        let legacy = temp.0.join("Caches/gwnative/chunks");
+        let current = temp.0.join("Application Support/gwnative/chunks");
+
+        migrate_cache(&legacy, &current);
+
+        assert!(!current.exists(), "nothing to move should create nothing");
     }
 }
