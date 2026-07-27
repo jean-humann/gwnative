@@ -16,6 +16,14 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
 objc2-web-kit = "0.3"
+ureq = "3.3.0"
+serde_json = { version = "1.0.151", features = ["std"] }
+flate2 = "1.1.9"
+sha2 = "0.11.0"
+sha1 = "0.11.0"
+md-5 = "0.11.0"
+hex = "0.4.3"
+serde = { version = "1.0.229", features = ["derive"] }
 
 [profile.release]
 opt-level = 3
