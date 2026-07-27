@@ -135,6 +135,8 @@ struct Request {
     upgrade: Option<String>,
     websocket_key: Option<String>,
     token: Option<String>,
+    /// The validator the page already holds for a static file, if any.
+    if_none_match: Option<String>,
     /// Every header, lower-cased, in arrival order. Only the proxy needs them:
     /// it has to forward what the page sent rather than a reconstruction of it.
     headers: Vec<(String, String)>,
@@ -225,6 +227,7 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Option<Request>> {
     let mut upgrade = None;
     let mut websocket_key = None;
     let mut token = None;
+    let mut if_none_match = None;
     let mut headers = Vec::new();
     let mut header = String::new();
     loop {
@@ -243,6 +246,7 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Option<Request>> {
             "upgrade" => upgrade = Some(value.clone()),
             "sec-websocket-key" => websocket_key = Some(value.clone()),
             "x-gwnative-token" => token = Some(value.clone()),
+            "if-none-match" => if_none_match = Some(value.clone()),
             "connection" => close = value.eq_ignore_ascii_case("close"),
             _ => {}
         }
@@ -274,6 +278,7 @@ fn read_request(reader: &mut impl BufRead) -> std::io::Result<Option<Request>> {
         upgrade,
         websocket_key,
         token,
+        if_none_match,
         headers,
         body,
         close,
@@ -612,18 +617,32 @@ fn handle(
     }
 
     match resolve(&context.root, &request.path) {
-        Some(file) => match std::fs::read(&file) {
-            Ok(body) => {
+        Some(file) => {
+            let tag = std::fs::metadata(&file).ok().as_ref().and_then(etag);
+            // Answer the validator before reading the file, not after: skipping
+            // the 8.2 MB read is half of what the validator is for.
+            if let Some(tag) = &tag
+                && request.if_none_match.as_deref() == Some(tag.as_str())
+            {
                 if tracing() {
-                    eprintln!("[loopback] 200 /{} ({} bytes)", request.path, body.len());
+                    eprintln!("[loopback] 304 /{}", request.path);
                 }
-                respond(stream, 200, "OK", mime(&file), &body, &[])?;
+                respond_not_modified(stream, tag)?;
+                return Ok(flow);
             }
-            Err(_) => {
-                eprintln!("[loopback] 404 /{}", request.path);
-                respond(stream, 404, "Not Found", "text/plain", b"not found", &[])?;
+            match std::fs::read(&file) {
+                Ok(body) => {
+                    if tracing() {
+                        eprintln!("[loopback] 200 /{} ({} bytes)", request.path, body.len());
+                    }
+                    respond_static(stream, mime(&file), &body, tag.as_deref())?;
+                }
+                Err(_) => {
+                    eprintln!("[loopback] 404 /{}", request.path);
+                    respond(stream, 404, "Not Found", "text/plain", b"not found", &[])?;
+                }
             }
-        },
+        }
         None => {
             eprintln!("[loopback] 403 /{}", request.path);
             respond(stream, 403, "Forbidden", "text/plain", b"forbidden", &[])?;
@@ -759,11 +778,16 @@ fn mime(path: &Path) -> &'static str {
 /// framed by its Content-Length, so the peer can find the next one. A boot
 /// issues a couple of hundred range requests, and closing after each meant a
 /// fresh handshake and a fresh 2 MiB-stack thread for every one of them.
-fn common_headers(content_type: &str, length: u64, extra: &[(&str, String)]) -> String {
+fn common_headers(
+    content_type: &str,
+    length: u64,
+    cache: &str,
+    extra: &[(&str, String)],
+) -> String {
     let mut head = format!(
         "Content-Type: {content_type}\r\n\
          Content-Length: {length}\r\n\
-         Cache-Control: no-store\r\n\
+         Cache-Control: {cache}\r\n\
          Cross-Origin-Opener-Policy: same-origin\r\n\
          Cross-Origin-Embedder-Policy: require-corp\r\n\
          Cross-Origin-Resource-Policy: same-origin\r\n"
@@ -785,11 +809,69 @@ fn respond(
 ) -> std::io::Result<()> {
     let head = format!(
         "HTTP/1.1 {code} {reason}\r\n{}",
-        common_headers(content_type, body.len() as u64, extra)
+        common_headers(content_type, body.len() as u64, "no-store", extra)
     );
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()
+}
+
+/// A static file, stored by the page but revalidated before reuse.
+///
+/// The blanket `no-store` this replaces was costing a recompile per launch:
+/// WebKit keeps the compiled form of a script or WASM module alongside the
+/// cached response, and a response it is forbidden to store has nothing to keep
+/// it alongside. `Gw.jspi.wasm` is 8.2 MB, and it was re-fetched, re-buffered
+/// and re-compiled on every single boot.
+///
+/// `no-cache` rather than a long `max-age`, because these URLs are not
+/// versioned: `patch::sync` rewrites `Gw.jspi.wasm` and `Gw.jspi.js` in place
+/// whenever ArenaNet patches, under the same names. An `immutable` year would
+/// pin a player to whichever client they first ran. `no-cache` permits the
+/// store and requires the revalidation, which is exactly the pair wanted here —
+/// and a revalidation that answers 304 keeps the compiled code.
+fn respond_static(
+    stream: &mut TcpStream,
+    content_type: &str,
+    body: &[u8],
+    tag: Option<&str>,
+) -> std::io::Result<()> {
+    let extra: Vec<(&str, String)> = tag.map(|t| ("ETag", t.to_owned())).into_iter().collect();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\n{}",
+        common_headers(content_type, body.len() as u64, "no-cache", &extra)
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+/// The page already holds this exact file. A 304 carries no body by definition,
+/// so the 8.2 MB stays on disk and so does its compiled form.
+fn respond_not_modified(stream: &mut TcpStream, tag: &str) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 304 Not Modified\r\n\
+         Cache-Control: no-cache\r\n\
+         ETag: {tag}\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.flush()
+}
+
+/// A validator for a static file, from its length and modification time.
+///
+/// Not a digest of the contents: the point of the exercise is to stop reading
+/// 8.2 MB on every launch, and hashing it to decide that would read it anyway.
+/// Length and mtime both change when `patch::sync` replaces a file, which is
+/// the only thing that ever changes one.
+fn etag(meta: &std::fs::Metadata) -> Option<String> {
+    let stamp = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(format!("\"{:x}-{:x}\"", meta.len(), stamp.as_nanos()))
 }
 
 /// Relay a proxied reply with upstream's own status and headers.
@@ -828,7 +910,7 @@ fn respond_head(
 ) -> std::io::Result<()> {
     let head = format!(
         "HTTP/1.1 200 OK\r\n{}",
-        common_headers("application/octet-stream", length, extra)
+        common_headers("application/octet-stream", length, "no-store", extra)
     );
     stream.write_all(head.as_bytes())?;
     stream.flush()
