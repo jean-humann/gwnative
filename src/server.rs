@@ -549,6 +549,16 @@ fn handle(
         return Ok(flow);
     }
 
+    // The harness says the first frame is up. Everything the store read before
+    // now is what booting costs, so that is the list worth warming next time.
+    if request.path == "__booted"
+        && let Some(store) = &context.snapshot
+    {
+        store.seal_boot_list();
+        respond(stream, 204, "No Content", "text/plain", b"", &[])?;
+        return Ok(flow);
+    }
+
     // Full download: POST starts or stops the background sweep, GET polls it.
     // The launcher offers this as the alternative to streaming on demand.
     if request.path == "__prefetch"
