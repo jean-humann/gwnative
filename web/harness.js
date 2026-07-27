@@ -233,6 +233,7 @@ let renderScale = 1;
 // instantiateWasm is called synchronously by the glue and cannot await.
 // Reading `host` before boot() assigns it is a TypeError, not a silent skip.
 let host;
+let diag;
 
 Module = {
   canvas: document.getElementById('canvas'),
@@ -249,6 +250,9 @@ Module = {
         performance.mark('gw.frame.first-submit');
         status(null);
         log('first frame presented');
+        // Time to first frame, from the page's own origin rather than from
+        // process start — the one launch number a change can be judged by.
+        diag?.gauge('gw.boot.first-frame.ms', performance.now());
         // Everything the chunk store served up to here is what booting costs.
         // Telling the host now, rather than at some later milestone, is what
         // keeps the recorded list to the chunks that gate the first frame.
@@ -274,6 +278,17 @@ Module = {
         );
       }
       performance.mark('gw.wasm.instantiate.end');
+      // 8.2 MB to fetch and compile, and the largest single item in a launch.
+      // Worth its own gauge: it is what a code cache would move, so a claim
+      // about caching is checkable against this number rather than argued.
+      diag?.gauge(
+        'gw.boot.wasm.ms',
+        performance.measure(
+          'gw.wasm.instantiate',
+          'gw.wasm.instantiate.begin',
+          'gw.wasm.instantiate.end',
+        ).duration,
+      );
       log('wasm instantiated');
       success(result.instance, result.module);
     })().catch((error) => fail(`The game client could not start: ${error}`));
@@ -393,15 +408,19 @@ function appendGlue() {
 (async function boot() {
   status('Loading host…');
   try {
-    const [graphics, filesystem, image, sockets, platform, input] = await Promise.all([
+    const [graphics, filesystem, image, sockets, platform, input, metrics] = await Promise.all([
       import('./graphics.js'),
       import('./filesystem.js'),
       import('./image.js'),
       import('./sockets.js'),
       import('./platform-capabilities.js'),
       import('./input.js'),
+      import('./diagnostics.js'),
     ]);
     host = { ...graphics, ...filesystem, ...image, ...sockets, ...platform, ...input };
+    // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
+    // contract could plausibly want for something else.
+    diag = metrics;
   } catch (error) {
     return fail(`The game host contract could not be loaded: ${error}`);
   }
