@@ -315,15 +315,21 @@ fn decode_chunk(encoded: &[u8], expected_len: u64, compression: Compression) -> 
 
 pub fn verify(bytes: &[u8], hash: &ContentHash) -> Result<()> {
     use md5::Digest as _;
-    let actual = match hash.algo() {
-        HashAlgo::Md5 => hex::encode(md5::Md5::digest(bytes)),
-        HashAlgo::Sha1 => hex::encode(sha1::Sha1::digest(bytes)),
-        HashAlgo::Sha256 => hex::encode(sha2::Sha256::digest(bytes)),
-    };
-    if actual != hash.as_str() {
+    // Compared as bytes, in a buffer the width of the widest digest. This runs
+    // once per chunk over the whole 4.2 GB snapshot, so the hex round trip it
+    // replaces was 16167 allocations to answer a question about 32 bytes.
+    let mut actual = [0u8; 32];
+    let width = hash.bytes().len();
+    let actual = &mut actual[..width];
+    match hash.algo() {
+        HashAlgo::Md5 => actual.copy_from_slice(&md5::Md5::digest(bytes)[..]),
+        HashAlgo::Sha1 => actual.copy_from_slice(&sha1::Sha1::digest(bytes)[..]),
+        HashAlgo::Sha256 => actual.copy_from_slice(&sha2::Sha256::digest(bytes)[..]),
+    }
+    if actual != hash.bytes() {
         return Err(Error::HashMismatch {
             expected: hash.to_string(),
-            actual,
+            actual: hex::encode(actual),
         });
     }
     Ok(())
