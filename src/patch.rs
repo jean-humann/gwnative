@@ -255,29 +255,34 @@ impl Client {
     }
 }
 
-/// Which client artifacts are absent from `dest`.
-pub fn missing_artifacts(dest: &Path) -> Vec<&'static str> {
+/// Every artifact a sync writes, in the order it writes them.
+pub fn artifacts() -> Vec<&'static str> {
     CLIENT_ARTIFACTS
         .iter()
         .chain(COMMON_ARTIFACTS.iter())
         .copied()
-        .filter(|name| !dest.join(name).is_file())
         .collect()
 }
 
-/// Fetch the current manifest and write every client artifact into `dest`,
-/// returning each name with its byte size.
-pub fn sync(dest: &Path) -> Result<Vec<(&'static str, u64)>> {
-    let client = Client::from_env()?;
-    let manifest = client.fetch_manifest()?;
-
+/// Write every client artifact described by `manifest` into `dest`, returning
+/// each name with its byte size.
+///
+/// The manifest is a parameter rather than something fetched here because the
+/// caller has a decision to make from it before any of this runs — see
+/// `generation::identify`, which needs to know which build is on offer while
+/// declining it is still cheap.
+pub fn sync_with(
+    client: &Client,
+    manifest: &Manifest,
+    dest: &Path,
+) -> Result<Vec<(&'static str, u64)>> {
     let mut written = Vec::new();
-    for name in CLIENT_ARTIFACTS.iter().chain(COMMON_ARTIFACTS.iter()) {
+    for name in artifacts() {
         // The manifest is a tree; these artifacts must resolve to exactly one
         // path in it, or we would be guessing which copy the client wants.
         let path = manifest.require_unique(name)?.to_owned();
-        client.download(&manifest, &path, &dest.join(name))?;
-        written.push((*name, manifest.files[&path].size));
+        client.download(manifest, &path, &dest.join(name))?;
+        written.push((name, manifest.files[&path].size));
     }
     Ok(written)
 }

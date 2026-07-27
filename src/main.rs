@@ -9,6 +9,7 @@ mod chunks;
 mod commands;
 mod diagnostics;
 mod error;
+mod generation;
 mod keychain;
 mod layout;
 mod manifest;
@@ -121,9 +122,21 @@ fn main() {
     // be exercised from curl or a test.
     let headless = command.as_deref() == Some("serve");
 
-    let missing = patch::missing_artifacts(&root);
+    // Before anything reads the web root: a client installed last launch that
+    // never reported a first frame is one this build cannot run, and the set it
+    // replaced is still stashed. See `generation` for why presence was never
+    // enough on its own.
+    let generations = Arc::new(generation::Store::open(support_dir().join("generations")));
+    if let Some(refused) = generations.roll_back(&root) {
+        eprintln!(
+            "[gwnative] client build {refused} never reached a first frame; \
+             restored the one before it"
+        );
+    }
+
+    let missing = generations.unsound(&root, &patch::artifacts());
     if (force_sync || !missing.is_empty())
-        && let Err(e) = sync(&root, &missing)
+        && let Err(e) = sync(&root, &missing, &generations)
     {
         // A stale-but-complete web root still boots, so a failed refresh is
         // only fatal when the client is not on disk at all.
@@ -135,6 +148,10 @@ fn main() {
     if force_sync {
         return;
     }
+    // Nothing was downloaded, so nothing was recorded — and a client with no
+    // record is only ever checked for existence. Hash it once here and every
+    // later launch gets a real check. No-op after the first time.
+    generations.adopt(&root, &patch::artifacts());
 
     // Gw.snapshot is 4.2 GB and a session touches a fraction of it, so it is
     // served as a virtual ranged file rather than downloaded. Without a store
@@ -204,6 +221,7 @@ fn main() {
         recorder,
         derived_wasm,
         settings,
+        generations,
         token.clone(),
     )
     .expect("bind loopback");
@@ -245,19 +263,54 @@ fn open_snapshot() -> error::Result<Arc<chunks::ChunkStore>> {
     Ok(Arc::new(store))
 }
 
-fn sync(root: &Path, missing: &[&'static str]) -> error::Result<()> {
-    if missing.is_empty() {
+/// Fetch the client, unless the only thing on offer is a build that has already
+/// failed here.
+///
+/// Returns whether anything was written. The rejection check is the reason this
+/// fetches the manifest itself rather than letting `patch::sync_with` do it: the
+/// identity of the build being offered has to be known while declining it still
+/// costs nothing.
+fn sync(
+    root: &Path,
+    unsound: &[&'static str],
+    generations: &generation::Store,
+) -> error::Result<()> {
+    if unsound.is_empty() {
         eprintln!("[gwnative] refreshing client artifacts");
     } else {
         eprintln!(
             "[gwnative] fetching client artifacts: {}",
-            missing.join(", ")
+            unsound.join(", ")
         );
     }
-    let fetched = patch::sync(root)?;
+    let client = patch::Client::from_env()?;
+    let manifest = client.fetch_manifest()?;
+    let names = patch::artifacts();
+    let offered = generation::identify(&manifest, &names)?;
+
+    if generations.rejected(&offered) {
+        if unsound.is_empty() {
+            eprintln!(
+                "[gwnative] the service still offers client build {offered}, which never reached \
+                 a first frame here; keeping the one on disk"
+            );
+            return Ok(());
+        }
+        // The alternative to a build that did not work is no client at all, so
+        // it gets another try — loudly, because if it fails the same way the
+        // line above is the one that explains why nothing changed.
+        eprintln!(
+            "[gwnative] client build {offered} never reached a first frame here, but the client \
+             on disk is incomplete, so there is nothing else to run"
+        );
+    }
+
+    generations.stash(root, &names);
+    let fetched = patch::sync_with(&client, &manifest, root)?;
     for (name, bytes) in fetched {
         eprintln!("[gwnative]   {name} ({bytes} bytes)");
     }
+    generations.record(&offered, root, &names);
     Ok(())
 }
 
