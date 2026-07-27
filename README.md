@@ -66,13 +66,41 @@ port; nothing is reachable off-host.
 - The renderer string is masked to `Apple GPU` rather than Chromium's full ANGLE
   string, so GPU diagnostics lose fidelity.
 
+## Occluding the window is already WebKit's job
+
+Do not add host-side throttling for a covered window. WKWebView observes
+`NSWindowDidChangeOcclusionStateNotification` itself and applies the strongest
+throttle there is.
+
+Measured with a probe that raises an opaque cover window from the same process
+on the same `NSScreen` — the only way to be sure what is covering what on a
+multi-display machine, and the reason an earlier measurement claiming the
+opposite was wrong:
+
+```
+HOST: cover on
+HOST: occlusionState=0x2000 visible=NO
+PAGE: t=14s rAF=9.5 fps hidden=true  vis=hidden
+PAGE: t=16s rAF=0.0 fps hidden=true  vis=hidden
+HOST: cover off
+HOST: occlusionState=0x2002 visible=YES
+PAGE: t=26s rAF=60.0 fps hidden=false vis=visible
+```
+
+`requestAnimationFrame` goes to zero within two seconds and `document.hidden`
+follows, which is what the client's own main loop already tests. A host
+override that rescheduled those callbacks onto a timer would not save power; it
+would restart a loop WebKit had stopped, and drive the client's animation and
+audio off `performance.now()` instead of the frame clock — which is audible.
+`web/harness.js` says the same thing at the one place that is tempted to do it.
+
 ## Status
 
-Bring-up. The shell opens a window, serves the harness over loopback, and the
-capability probe passes end to end. The patch client works against the live
-service: it fetches and verifies `Gw.jspi.js`, `Gw.jspi.wasm`, and
-`version.json` (currently 1.1.7 build 38735). Still to come: chunk store,
-ArenaNet sockets, host-call bridge, Keychain credentials.
+Playable. The window opens, the harness and the client boot over loopback, the
+patch client fetches and verifies `Gw.jspi.js`, `Gw.jspi.wasm` and
+`version.json` against the live service, the 4.2 GB snapshot is served on
+demand out of the chunk store, the ArenaNet sockets bridge through to the game,
+and the login is kept in the Keychain.
 
 ## Build
 
