@@ -244,6 +244,10 @@ let renderScale = 1;
 let host;
 let diag;
 let recovery;
+// The client's own allocator, reached through the instance rather than through
+// `Module.wasmExports`: this build's glue does not export that name, and asking
+// for it does not return undefined — it aborts.
+let gameInstance;
 
 Module = {
   canvas: document.getElementById('canvas'),
@@ -274,6 +278,19 @@ Module = {
       log,
     });
 
+    // Answer the derived client's file bridge. Must be in place before the
+    // module is instantiated, since the forwarders are reached through an
+    // import the instance binds once.
+    host.installTemplateSave({
+      imports,
+      module: Module,
+      // The directory listing hands the client a block it frees itself, so it
+      // has to come from the client's own allocator, which only exists once
+      // instantiation below resolves.
+      exports: () => gameInstance?.exports ?? null,
+      log,
+    });
+
     const url = 'Gw.jspi.wasm';
     performance.mark('gw.wasm.instantiate.begin');
     (async () => {
@@ -300,6 +317,7 @@ Module = {
         ).duration,
       );
       log('wasm instantiated');
+      gameInstance = result.instance;
       success(result.instance, result.module);
     })().catch((error) => fail(`The game client could not start: ${error}`));
 
@@ -429,16 +447,26 @@ function appendGlue() {
   }
 
   try {
-    const [graphics, filesystem, image, sockets, platform, input, metrics] = await Promise.all([
-      import('./graphics.js'),
-      import('./filesystem.js'),
-      import('./image.js'),
-      import('./sockets.js'),
-      import('./platform-capabilities.js'),
-      import('./input.js'),
-      import('./diagnostics.js'),
-    ]);
-    host = { ...graphics, ...filesystem, ...image, ...sockets, ...platform, ...input };
+    const [graphics, filesystem, image, sockets, platform, input, templates, metrics] =
+      await Promise.all([
+        import('./graphics.js'),
+        import('./filesystem.js'),
+        import('./image.js'),
+        import('./sockets.js'),
+        import('./platform-capabilities.js'),
+        import('./input.js'),
+        import('./template-save.js'),
+        import('./diagnostics.js'),
+      ]);
+    host = {
+      ...graphics,
+      ...filesystem,
+      ...image,
+      ...sockets,
+      ...platform,
+      ...input,
+      ...templates,
+    };
     // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
     // contract could plausibly want for something else.
     diag = metrics;

@@ -157,6 +157,38 @@ including the times `blur` does not fire. It is observed through
 `NSNotificationCenter`'s default — bridged — so no Objective-C class has to be
 declared just to own a selector.
 
+## Saving a skill template, which the shipped client cannot do
+
+Four `Base/Os` file routines are unimplemented in ArenaNet's build — creating a
+directory always fails, enumerating one does nothing, deriving a name from an
+entry writes nothing, and deleting a file is `assert("not implemented")`
+followed by `unreachable`, so it takes the client down with it. A fifth is
+implemented but wrong: `File::Open` mode 1 is meant to open an existing file and
+instead opens `O_RDWR | O_CREAT`, so the client's own "is this name taken?"
+probe creates the file it is testing for, and every rename is refused.
+
+`src/wasm.rs` rewrites the module at launch. It appends one forwarder per broken
+routine, each calling `__syscall_newfstatat` behind a negative dirfd marker
+(-70001…-70005) that no real call can produce, and repoints the call sites at
+them. Call indices are overwritten in place using LLVM's 5-byte padded encoding,
+so nothing after them shifts. `web/template-save.js` recognises the markers and
+answers against the mounted IDBFS; every other dirfd falls through to the real
+syscall untouched.
+
+The transform is gated on the exact input hash and asserts the exact output
+hash, both pinned in the build table. Reproducing 8.2 MB byte for byte proves
+the LEB128 encoders, the section split and re-encode, all five forwarder bodies
+and every call-site offset in a single assertion — that is what
+`the_real_client_transforms_to_the_certified_output` checks, and it skips rather
+than fails when the client is not downloaded yet. An unrecognised input is
+simply not transformed: the day ArenaNet patches the client, template save stops
+working and the game still launches.
+
+The derived module is cached under `Application Support/gwnative/derived` and
+served under the base module's own name, so the glue's `locateFile` needs no
+special case. Two log lines say it took: `template save: serving the derived
+client` from the host, `template save bridge installed` from the page.
+
 ## Status
 
 Playable. The window opens, the harness and the client boot over loopback, the

@@ -18,6 +18,7 @@ mod proxy;
 mod qos;
 mod server;
 mod sockets;
+mod wasm;
 mod ws;
 
 use std::path::{Path, PathBuf};
@@ -41,6 +42,17 @@ use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebVie
 fn support_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
     PathBuf::from(home).join("Library/Application Support/gwnative")
+}
+
+/// Where derived clients live. Owned outright by the transform, which empties it
+/// whenever it cannot serve the input — an entry is ~8.2 MB, so keeping one per
+/// build the machine has ever seen adds up quickly.
+///
+/// Deliberately not inside the web root: that directory is what the loopback
+/// origin serves, and the derived module is reachable only through the one path
+/// the server maps to it.
+fn derived_dir() -> PathBuf {
+    support_dir().join("derived")
 }
 
 /// The directory the loopback origin serves, and the one `patch::sync` fills.
@@ -159,9 +171,34 @@ fn main() {
         }
     });
 
+    // Derive the client that can save a template, if this is a build we have
+    // certified. A failure here is never fatal: the untransformed module still
+    // plays, it just cannot save, list or delete a build — which is where the
+    // client started. See `wasm` for what the derived module changes.
+    let derived_wasm = match wasm::prepare(&root.join("Gw.jspi.wasm"), &derived_dir()) {
+        Ok(Some(path)) => {
+            println!("[gwnative] template save: serving the derived client");
+            Some(path)
+        }
+        Ok(None) => {
+            println!("[gwnative] template save: unavailable, this client build is not certified");
+            None
+        }
+        Err(reason) => {
+            eprintln!("[gwnative] template save unavailable: {reason}");
+            None
+        }
+    };
+
     let token = session_token();
-    let loopback =
-        server::spawn(root.clone(), snapshot, recorder, token.clone()).expect("bind loopback");
+    let loopback = server::spawn(
+        root.clone(),
+        snapshot,
+        recorder,
+        derived_wasm,
+        token.clone(),
+    )
+    .expect("bind loopback");
     let url = format!("http://{}/index.html", loopback.addr);
     eprintln!("[gwnative] serving {} at {}", root.display(), url);
 
@@ -255,9 +292,11 @@ fn make_webview(
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
             WKUserScript::alloc(mtm),
             &NSString::from_str(&format!(
-                "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};",
+                "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
+                 window.__gwnativeBridgeMarkers = {};",
                 serde_json::Value::from(token),
-                layout::as_json()
+                layout::as_json(),
+                wasm::markers_json()
             )),
             WKUserScriptInjectionTime::AtDocumentStart,
             true,

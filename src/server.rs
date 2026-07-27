@@ -68,6 +68,9 @@ struct Context {
     snapshot: Option<Arc<ChunkStore>>,
     sockets: Arc<Registry>,
     recorder: Arc<Recorder>,
+    /// The derived client, served in place of the one on disk. See `crate::wasm`
+    /// for what it changes and why the base module is kept untouched.
+    derived_wasm: Option<PathBuf>,
     token: String,
 }
 
@@ -82,6 +85,7 @@ pub fn spawn(
     root: PathBuf,
     snapshot: Option<Arc<ChunkStore>>,
     recorder: Arc<Recorder>,
+    derived_wasm: Option<PathBuf>,
     token: String,
 ) -> std::io::Result<Loopback> {
     let listener = bind()?;
@@ -91,6 +95,7 @@ pub fn spawn(
         snapshot,
         sockets: Arc::default(),
         recorder,
+        derived_wasm,
         token,
     });
 
@@ -682,7 +687,14 @@ fn handle(
         }
     }
 
-    match resolve(&context.root, &request.path) {
+    // The derived client answers to the base module's own name, so the page
+    // asks for one thing and the glue's `locateFile` needs no special case.
+    let derived = context
+        .derived_wasm
+        .as_ref()
+        .filter(|_| request.path == "Gw.jspi.wasm")
+        .cloned();
+    match derived.or_else(|| resolve(&context.root, &request.path)) {
         Some(file) => {
             let tag = std::fs::metadata(&file).ok().as_ref().and_then(etag);
             // Answer the validator before reading the file, not after: skipping
