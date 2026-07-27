@@ -94,10 +94,6 @@ impl Metrics {
         self.record(Kind::Count, name, value);
     }
 
-    pub fn gauge(&self, name: &str, value: f64) {
-        self.record(Kind::Gauge, name, value);
-    }
-
     pub fn peak(&self, name: &str, value: f64) {
         self.record(Kind::Peak, name, value);
     }
@@ -333,7 +329,7 @@ mod tests {
         let m = Metrics::default();
         for value in [3.0, 1.0, 2.0] {
             m.count("c", value);
-            m.gauge("g", value);
+            m.record(Kind::Gauge, "g", value);
             m.peak("p", value);
         }
         let snapshot = m.snapshot();
