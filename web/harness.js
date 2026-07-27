@@ -154,6 +154,49 @@ const remaining = (seconds) => {
   return `${Math.ceil(seconds)} s`;
 };
 
+// The client's estimate of the seconds left, measured against the largest
+// estimate it has yet given. That estimate falls to zero across the transfer,
+// so the ratio starts at nothing and ends at everything; and a transfer that
+// slows down revises the estimate up, which raises the ceiling rather than
+// pulling the rail backwards. Monotonic on both counts, which a progress bar
+// has to be to be worth showing.
+let etaCeiling = 0;
+let etaFraction = 0;
+const downloadProgress = (seconds) => {
+  etaCeiling = Math.max(etaCeiling, seconds);
+  etaFraction = Math.max(etaFraction, 1 - seconds / etaCeiling);
+  return etaFraction;
+};
+
+// A stage with nothing to divide by sweeps the rail, and a sweeping rail is
+// indistinguishable from a stalled one in a screenshot — which is how a
+// perfectly healthy boot came to be reported as a hang. Elapsed time tells the
+// two apart, but the client calls in only when something changes, so a stage
+// that is quiet for a minute would leave a frozen number sitting there. Drive
+// it from here instead, so the one stage that cannot show progress can at
+// least show that it is still running.
+let stageClock = null;
+let stageLabel = null;
+
+const releaseStage = () => {
+  clearInterval(stageClock);
+  stageClock = null;
+  stageLabel = null;
+};
+
+const holdStage = (label) => {
+  // Re-entering the same stage keeps its clock; restarting would reset the
+  // count on every call and never read higher than zero.
+  if (label === stageLabel) return;
+  releaseStage();
+  stageLabel = label;
+  const started = performance.now();
+  const tick = () =>
+    status(label, null, `${Math.round((performance.now() - started) / 1000)} s`);
+  tick();
+  stageClock = setInterval(tick, 1000);
+};
+
 const credentials = (method, body) => {
   // Without the injected token the host answers 403, which reaches the client
   // as "saved login unavailable" with nothing to distinguish a broken keychain
@@ -272,17 +315,27 @@ Module = {
   setStartupProgress(stage, a, b, c, d) {
     log(`[startup] ${stage}`, [a, b, c, d].filter((v) => v !== undefined).join(' '));
     const s = String(stage || '').toLowerCase();
-    if (s === 'complete') return status(null);
-    // The client's own argument contract for `downloading`: percent, an opaque
-    // counter, bytes per second, seconds remaining. Only the first, third and
-    // fourth are meaningful to a person.
-    if (s === 'downloading' && typeof a === 'number') {
-      const parts = [`${a.toFixed(0)}%`];
-      if (typeof c === 'number' && c > 0) parts.push(rate(c));
-      if (typeof d === 'number' && d > 0) parts.push(`${remaining(d)} remaining`);
-      return status('Preparing files needed to start', a / 100, parts.join(' · '));
+    if (s === 'complete') {
+      releaseStage();
+      return status(null);
     }
-    status(STARTUP_LABELS[s] ?? 'Loading…');
+    // The client's four arguments for `downloading` are not what their shape
+    // suggests. The first looks like a percent and is not one: over a complete
+    // transfer it takes the values 0, 1, 2, 3, stepping once per ~1353 units of
+    // the second, so it counts finished parts. Read as a percent it pins the
+    // rail near zero for the entire ninety minutes and reads exactly like a
+    // stall. The second is a rising count with no published total, so it cannot
+    // be turned into a fraction either. The third and fourth — bytes per second
+    // and seconds left — are what they appear to be, and the fourth is the only
+    // one that describes the whole job, so progress comes from it.
+    if (s === 'downloading' && typeof d === 'number' && d > 0) {
+      releaseStage();
+      const parts = [];
+      if (typeof c === 'number' && c > 0) parts.push(rate(c));
+      parts.push(`${remaining(d)} remaining`);
+      return status('Preparing files needed to start', downloadProgress(d), parts.join(' · '));
+    }
+    holdStage(STARTUP_LABELS[s] ?? 'Loading…');
   },
 
   handleFatalReadError() {
