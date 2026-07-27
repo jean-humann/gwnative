@@ -8,6 +8,7 @@
 mod chunks;
 mod error;
 mod keychain;
+mod layout;
 mod manifest;
 mod net;
 mod patch;
@@ -21,7 +22,7 @@ use std::sync::Arc;
 
 use objc2::rc::Retained;
 use objc2::runtime::Sel;
-use objc2::{MainThreadOnly, sel};
+use objc2::{MainThreadOnly, Message, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEventModifierFlags, NSMenu,
     NSMenuItem, NSWindow, NSWindowStyleMask,
@@ -109,9 +110,46 @@ fn main() {
     let webview = make_webview(mtm, frame, &url, &token);
     let window = make_window(mtm, frame, &webview);
 
+    watch_keyboard_layout(&webview);
+
     window.makeKeyAndOrderFront(None);
     app.activate();
     app.run();
+}
+
+thread_local! {
+    /// The live web view, for the handful of host events that have to reach the
+    /// page outside a request. Main-thread-only by WebKit's rules, which is
+    /// exactly what a thread-local on the main thread enforces.
+    static PAGE: std::cell::RefCell<Option<Retained<WKWebView>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Keep `window.__gwnativeLayout` current when the player switches input source.
+///
+/// The injected copy is correct at document start and stale the moment somebody
+/// presses ⌃Space. Switching layout mid-session is ordinary on a Mac — this
+/// user runs French AZERTY — and a stale table would restate an Option-held key
+/// as the character some *other* layout puts on it, which is worse than not
+/// restating it at all.
+fn watch_keyboard_layout(webview: &WKWebView) {
+    PAGE.with(|page| *page.borrow_mut() = Some(webview.retain()));
+    layout::watch(|json| {
+        let script = format!(
+            "window.__gwnativeLayout = {json}; \
+             window.dispatchEvent(new Event('gw:layout-changed'));"
+        );
+        PAGE.with(|page| {
+            if let Some(webview) = page.borrow().as_ref() {
+                // SAFETY: delivered on the main thread — see `layout::watch`,
+                // which documents why that holds.
+                unsafe {
+                    webview
+                        .evaluateJavaScript_completionHandler(&NSString::from_str(&script), None);
+                }
+            }
+        });
+    });
 }
 
 fn open_snapshot() -> error::Result<Arc<chunks::ChunkStore>> {
@@ -172,12 +210,17 @@ fn make_webview(
     // Hand the page its token out of band. Serving it over the loopback origin
     // instead would put it where any local process could simply ask for it,
     // which is the exposure the token exists to close.
+    //
+    // The keyboard layout rides the same channel for a different reason: it has
+    // to be in place before the page can see a keydown, and a fetch at boot
+    // would not be. See `layout` for what the page does with it.
     unsafe {
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
             WKUserScript::alloc(mtm),
             &NSString::from_str(&format!(
-                "window.__gwnativeToken = {};",
-                serde_json::Value::from(token)
+                "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};",
+                serde_json::Value::from(token),
+                layout::as_json()
             )),
             WKUserScriptInjectionTime::AtDocumentStart,
             true,
