@@ -129,6 +129,34 @@ count accumulates, a gauge keeps the last value, a peak keeps the largest. The
 page posts increments to `__diag` once a second and `GET /__diag` reads
 everything back, host figures included.
 
+## When booting fails, and what the host pushes
+
+A failed boot used to end at one line of red text, leaving the player nothing to
+try but the relaunch they had already tried. Most of these failures are
+transient — a range request that lost its connection, a module fetch that raced
+the server coming up — so `web/loading.js` puts an overlay over the canvas
+offering **Try again**, **Reset game data…** and **Show log**. Its markup lives
+in `index.html` rather than being built in JavaScript, because one of the
+failures it has to survive is a module failing to load.
+
+Reset is two steps with the warning on screen rather than a `confirm()` dialog:
+a native modal over the canvas blocks the whole WebView until it is answered. It
+deletes this origin's IndexedDB databases, enumerated rather than named, because
+emscripten derives the name from the mount point and hardcoding it would strand
+data the day either side changes. Downloaded game files are kept — those live in
+the chunk store, not in IndexedDB.
+
+Separately, `src/commands.rs` pushes the few things only AppKit knows about into
+the page, by evaluating a one-line dispatch into its realm; `web/commands.js`
+holds the vocabulary. The one that matters is the window resigning key. The
+page's own `blur` handler covers most of it, but not ⌘Tab away mid-stride: the
+keyup goes to whatever took focus, so the client walks into a wall until the key
+is pressed again. AppKit sees `NSWindowDidResignKeyNotification` every time,
+including the times `blur` does not fire. It is observed through
+`CFNotificationCenterGetLocalCenter()`, which is the same centre as
+`NSNotificationCenter`'s default — bridged — so no Objective-C class has to be
+declared just to own a selector.
+
 ## Status
 
 Playable. The window opens, the harness and the client boot over loopback, the

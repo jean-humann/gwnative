@@ -127,9 +127,18 @@ const status = (text, fraction = null, detail = '') => {
   }
 };
 
+/**
+ * A boot that cannot continue, and what the player can do about it.
+ *
+ * Most of these are transient — a range request that lost its connection, a
+ * module fetch that raced the server coming up — so the overlay's first offer
+ * is simply to try again. Before `loading.js` has loaded there is only the
+ * status line, which is what this used to be in every case.
+ */
 const fail = (text) => {
   status(text);
   log('[err]', text);
+  recovery?.showFailure(text, log);
 };
 
 window.gwLog = (on = true) => {
@@ -234,6 +243,7 @@ let renderScale = 1;
 // Reading `host` before boot() assigns it is a TypeError, not a silent skip.
 let host;
 let diag;
+let recovery;
 
 Module = {
   canvas: document.getElementById('canvas'),
@@ -407,6 +417,17 @@ function appendGlue() {
 
 (async function boot() {
   status('Loading host…');
+
+  // Loaded on its own, and first, because "the host contract could not be
+  // loaded" is one of the failures it has to be able to report. Its own
+  // failure is the one case left with nothing but the status line, which is
+  // what every failure had before it existed.
+  try {
+    [recovery] = await Promise.all([import('./loading.js'), import('./commands.js')]);
+  } catch (error) {
+    log('[warn] no recovery UI:', error);
+  }
+
   try {
     const [graphics, filesystem, image, sockets, platform, input, metrics] = await Promise.all([
       import('./graphics.js'),
