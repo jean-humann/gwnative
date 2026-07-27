@@ -307,6 +307,54 @@ player who wants the cheaper picture can have it; that is what the setting is
 for. Which one a session paid is in its log: `settings: render scale 2, touch
 mode off`.
 
+## The one question asked before the client exists
+
+The snapshot is 4.2 GB and only a fraction of it is touched in a session, so
+streaming it on demand is the default worth having. It is not the only one worth
+offering: on a slow or metered link, paying the whole cost once and never
+touching the network for game data again is a real preference. So the launcher
+asks, once, and records the answer in `dataStrategy` — where `null` is a third
+state distinct from either answer, meaning nobody has been asked yet.
+
+It is asked after the snapshot's size is known and before `appendGlue()`, which
+is the last moment there is anywhere to ask: once the client is built it owns
+the canvas and the keyboard. The overlay is the `#failure` overlay's twin for
+the same reason that one covers everything — there is no client behind it yet.
+
+What the progress bar shows is **residency**, not the sweep's own counter, and
+the difference is not cosmetic. `GET /__prefetch` reports both, and six seconds
+into a sweep over a half-full cache they read:
+
+```
+{"cached":8480,"total":16023,"fetched":5376,"running":true,"chunkSize":262144}
+```
+
+`fetched` had passed five thousand because the sweep counts the chunks it walks
+past and already has; `cached` had moved by 245, which is what was actually
+downloaded. A bar driven by the first would leap to a third full and then crawl.
+`cached` also survives a restart, which `fetched` cannot: it comes from the same
+directory scan that builds the residency bitmap — 256 listings, not 16023
+`stat`s — and a test asserts the count and the bitmap agree, because two answers
+to "what is on disk" that could disagree eventually will.
+
+**Play now** does not cancel the download. The sweep is host-side, runs at
+Utility QoS, and holds at most three of the eight fetch permits, so it yields to
+the reads the game is blocked on rather than queueing in front of them; letting
+it continue under a session that has started playing is the whole point of
+having built it that way. **Stop downloading** is the one that ends it, and it
+rewrites the setting so the question is not asked again.
+
+Nothing here can prevent a boot. A missing progress route, three failed polls in
+a row, a sweep that ends early, a setting that will not save — every path ends
+in the client starting, because streaming works whether or not any of it does.
+
+Measured on a half-populated cache: `launcher: downloading, 8485/16023 chunks
+already cached`, and thirty seconds later the cache held 9458 chunk files rather
+than 8486 — 243 MB, with the client correctly still unbuilt behind the overlay.
+`./target/release/gwnative serve` prints the loopback address and the session
+token on one line so these routes can be exercised from curl, which is the only
+way past the gate from outside the page.
+
 ## Status
 
 Playable. The window opens, the harness and the client boot over loopback, the

@@ -357,16 +357,15 @@ impl ChunkStore {
         }
     }
 
-    /// Bitmap of which snapshot chunks are already on disk, LSB first. The
-    /// harness seeds `image.isCached` from this so a restart does not re-prefetch
-    /// what a previous session already paid for.
-    pub fn resident_bitmap(&self) -> Vec<u8> {
+    /// Every chunk file name the cache holds, across the buckets this snapshot
+    /// draws from.
+    ///
+    /// One directory listing per fan-out bucket rather than one `stat` per
+    /// chunk: 256 syscalls instead of 16167, over the same directory blocks.
+    /// The buckets are gathered as the leading byte, so only the ones this
+    /// snapshot could occupy are ever listed.
+    fn resident_names(&self) -> HashSet<String> {
         let hashes = &self.manifest.files[&self.snapshot].chunk_hashes;
-
-        // One directory listing per fan-out bucket rather than one `stat` per
-        // chunk: 256 syscalls instead of 16167, over the same directory blocks.
-        // Gathered as the leading byte, so only the buckets that exist are ever
-        // rendered rather than a name per chunk.
         let buckets: HashSet<u8> = hashes.iter().map(|h| h.bytes()[0]).collect();
         let mut present: HashSet<String> = HashSet::new();
         for bucket in buckets {
@@ -379,7 +378,15 @@ impl ChunkStore {
                     .filter_map(|e| e.file_name().into_string().ok()),
             );
         }
+        present
+    }
 
+    /// Bitmap of which snapshot chunks are already on disk, LSB first. The
+    /// harness seeds `image.isCached` from this so a restart does not re-prefetch
+    /// what a previous session already paid for.
+    pub fn resident_bitmap(&self) -> Vec<u8> {
+        let hashes = &self.manifest.files[&self.snapshot].chunk_hashes;
+        let present = self.resident_names();
         let mut bits = vec![0u8; hashes.len().div_ceil(8)];
         for (i, hash) in hashes.iter().enumerate() {
             // A `.tmp` left by a write in flight is in the listing too, and does
@@ -389,6 +396,21 @@ impl ChunkStore {
             }
         }
         bits
+    }
+
+    /// How many of this snapshot's chunks are already on disk.
+    ///
+    /// Distinct from [`Self::prefetch_progress`], which counts what the *current*
+    /// sweep has fetched and so resets to zero each time one starts. The launcher
+    /// needs the other question — how much of the game is already paid for —
+    /// which only the cache itself can answer, and which survives restarts.
+    pub fn resident_count(&self) -> usize {
+        let present = self.resident_names();
+        self.manifest.files[&self.snapshot]
+            .chunk_hashes
+            .iter()
+            .filter(|hash| present.contains(hash.hex().as_str()))
+            .count()
     }
 
     /// How many chunks the snapshot is made of.
@@ -1031,6 +1053,70 @@ mod tests {
         migrate_cache(&legacy, &current);
 
         assert!(!current.exists(), "nothing to move should create nothing");
+    }
+
+    /// A store over a five-chunk snapshot, with no network behind it: every test
+    /// here asks what is on disk, which is a question the client never answers.
+    fn store_of_five(cache_dir: PathBuf) -> ChunkStore {
+        let hashes = ["00", "11", "22", "33", "44"]
+            .iter()
+            .enumerate()
+            .map(|(i, bucket)| {
+                format!(
+                    r#""{bucket}{}""#,
+                    char::from(b'1' + i as u8).to_string().repeat(30)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let manifest = Manifest::parse(
+            format!(
+                r#"{{"compressionMode":"none","chunkSize":1024,
+                     "files":[{{"name":"Gw.snapshot","size":5120,
+                                "chunkHashes":[{hashes}]}}]}}"#
+            )
+            .as_bytes(),
+        )
+        .expect("the synthetic manifest should parse");
+        ChunkStore::open(
+            Client::new(String::new(), String::new()),
+            manifest,
+            cache_dir,
+        )
+        .expect("the store should open over an empty cache")
+    }
+
+    #[test]
+    fn residency_is_counted_from_the_same_scan_it_is_drawn_from() {
+        let temp = TempDir::new("residency");
+        let cache = temp.0.join("chunks");
+        let store = store_of_five(cache.clone());
+        let hashes = &store.manifest.files["Gw.snapshot"].chunk_hashes;
+
+        assert_eq!(store.resident_count(), 0, "an empty cache holds nothing");
+        assert_eq!(store.resident_bitmap(), vec![0u8]);
+
+        for index in [0, 2, 4] {
+            let hash = &hashes[index];
+            let bucket = cache.join(format!("{:02x}", hash.bytes()[0]));
+            fs::create_dir_all(&bucket).unwrap();
+            fs::write(bucket.join(hash.hex().as_str()), vec![0u8; 1024]).unwrap();
+        }
+        // A write in flight leaves one of these beside the chunk it will become.
+        // It is in the listing and is not the chunk, and the count has to agree
+        // with the bitmap about that rather than each deciding for itself.
+        let pending = &hashes[1];
+        let bucket = cache.join(format!("{:02x}", pending.bytes()[0]));
+        fs::create_dir_all(&bucket).unwrap();
+        fs::write(
+            bucket.join(format!("{}.7.tmp", pending.hex())),
+            vec![0u8; 512],
+        )
+        .unwrap();
+
+        assert_eq!(store.resident_count(), 3);
+        assert_eq!(store.resident_bitmap(), vec![0b0001_0101]);
+        assert_eq!(store.chunk_count(), 5);
     }
 
     #[test]

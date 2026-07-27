@@ -211,7 +211,11 @@ fn main() {
     eprintln!("[gwnative] serving {} at {}", root.display(), url);
 
     if headless {
-        println!("{}", loopback.addr);
+        // Address and session token on one line, because every route worth
+        // exercising is behind the gate and there is otherwise no way to get
+        // past it from outside the page. Only ever printed here: in the app the
+        // token reaches the page over the injection channel and nowhere else.
+        println!("{} {token}", loopback.addr);
         loop {
             std::thread::park();
         }
