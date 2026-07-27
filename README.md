@@ -69,8 +69,10 @@ port; nothing is reachable off-host.
 ## Status
 
 Bring-up. The shell opens a window, serves the harness over loopback, and the
-capability probe passes end to end. The host services — patching, chunk store,
-ArenaNet sockets, Keychain credentials — are not written yet.
+capability probe passes end to end. The patch client works against the live
+service: it fetches and verifies `Gw.jspi.js`, `Gw.jspi.wasm`, and
+`version.json` (currently 1.1.7 build 38735). Still to come: chunk store,
+ArenaNet sockets, host-call bridge, Keychain credentials.
 
 ## Build
 
@@ -79,7 +81,16 @@ cargo build
 cargo run
 ```
 
-`GWNATIVE_WEB_ROOT` overrides the harness directory.
+Missing client artifacts are fetched on first launch; `cargo run -- sync`
+refreshes them without opening a window. Both need the patch service access
+key, which this repository does not carry:
+
+```sh
+export GWNATIVE_ACCESS_KEY=...
+```
+
+`GWNATIVE_WEB_ROOT` overrides the harness directory and `GWNATIVE_PATCH_ROOT`
+the patch endpoint.
 
 ## Licence
 
