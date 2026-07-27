@@ -52,32 +52,52 @@ window.addEventListener('unhandledrejection', (e) => forward(`[unhandled] ${e.re
 // fully occluded — not throttled, stopped. The client drives everything from
 // that callback, so a covered window does not merely stop painting: networking,
 // timers and the session all stop with it, and the server eventually drops the
-// connection. It also applies before the first paint, so launching the app
-// behind another window leaves it wedged just after `runtime initialised`,
-// having loaded the runtime and then never taken a single frame.
+// connection. It applies before the first paint, so launching the app behind
+// another window would wedge it just after `runtime initialised` — and it
+// applies mid-boot, so a first launch left to download while the player walks
+// away froze the moment the screen locked. Measured: a blank-install boot
+// stalled at 2,093 of 6,075 chunks, host idle in accept, the moment user input
+// stopped; it never resumed. The Electron build does not have this failure,
+// because its chunk store downloads from the main process no matter what the
+// renderer is doing.
 //
-// So arm a timer alongside the frame request and let whichever arrives first
-// win, then get out of the way: the moment a real frame lands, put the native
-// function back. From then on the client sees stock frame timing exactly, which
-// matters because the timestamp requestAnimationFrame hands its callback is the
-// clock the client drives animation and audio from — substituting
-// performance.now() for it on every frame is audible.
+// So until the first frame has been presented, arm a timer alongside every
+// frame request and let whichever arrives first win. While the window is
+// visible the real frame wins every race and the client sees stock timing;
+// while it is covered, the timer keeps the loop — and with it the whole
+// download — turning at frame rate. A frame, not something gentler, because
+// the loop is what pulls the download: at 250 ms a covered first launch
+// moved four beats a second and took twice as long as a visible one. Not
+// something faster, either — 8 ms beats were tried and the covered boot got
+// no quicker, so the pace of the walk under cover is set somewhere below the
+// beat rate, and doubling the wake-ups just doubles their cost. Nothing
+// audible is running before the first frame, so the substitute clock costs
+// nothing here. The rescue ends at first frame, not at first callback: a
+// boot is not survived until there is something on screen to come back to.
 //
-// So this only rescues the boot, and deliberately does not throttle a running
-// game. Slowing the loop while the window is covered does save CPU, but it
-// starves the same audio clock and stutters the sound, which is a bad trade for
-// idle watts. A covered window therefore freezes exactly as it does under
-// Chromium, which is what the Electron build does too.
+// After that, stock behaviour, deliberately: the timestamp
+// requestAnimationFrame hands its callback is the clock the client drives
+// animation and audio from, and substituting performance.now() for it on every
+// frame is audible. Slowing the loop while a running game is covered would
+// starve that same clock, so a covered *game* freezes exactly as it does under
+// Chromium — the download is the phase that has to survive, and does.
 //
 // The glue re-reads globalThis.requestAnimationFrame on every call rather than
 // capturing it, so both the swap in and the swap back reach the client without
-// touching any vendored code. The handle returned while the timer is armed is
+// touching any vendored code. The handle returned while the wrapper is armed is
 // not a usable frame id, which is safe only because the client never cancels a
 // frame — cancelAnimationFrame appears nowhere in Gw.jspi.js.
-const BOOT_FRAME_MS = 250;
+const BOOT_FRAME_MS = 16;
+let bootRescueActive = true;
 {
   const raf = window.requestAnimationFrame.bind(window);
   window.requestAnimationFrame = (callback) => {
+    if (!bootRescueActive) {
+      // First frame has been presented; hand the native function back for good.
+      window.requestAnimationFrame = raf;
+      raf(callback);
+      return 0;
+    }
     let taken = false;
     const run = (timestamp) => {
       if (taken) return;
@@ -87,8 +107,6 @@ const BOOT_FRAME_MS = 250;
     const timer = setTimeout(() => run(performance.now()), BOOT_FRAME_MS);
     raf((timestamp) => {
       clearTimeout(timer);
-      // Frames are flowing; nothing above needs to intercept them any more.
-      window.requestAnimationFrame = raf;
       run(timestamp);
     });
     return 0;
@@ -299,6 +317,9 @@ Module = {
       renderScale: () => renderScale,
       firstFrame: () => {
         performance.mark('gw.frame.first-submit');
+        // The boot is survived; frame delivery goes back to stock. See the
+        // requestAnimationFrame wrapper above.
+        bootRescueActive = false;
         status(null);
         // Nothing is loading any more, and the startup clock has no reason to
         // keep ticking. The client does send `complete`, which already does
