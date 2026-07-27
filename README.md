@@ -252,6 +252,61 @@ served under the base module's own name, so the glue's `locateFile` needs no
 special case. Two log lines say it took: `template save: serving the derived
 client` from the host, `template save bridge installed` from the page.
 
+## Settings, and the render scale they revealed
+
+`Application Support/gwnative/settings.json` holds four fields, and every one of
+them is read by something that already exists here: `renderScale` is what the
+client asks for through `emscripten_get_device_pixel_ratio`, `touchMode` selects
+the gesture translation `web/input.js` installs, `showDiagnostics` opens the log
+pane at boot, and `dataStrategy` records the answer to the launcher's question.
+Nothing is stored for a feature this app does not have — the Electron build
+carries five more fields, and each of them belongs to something that is not
+here.
+
+The host owns the file; `GET /__settings` reads it back and `PUT /__settings`
+takes a patch and answers with the merged whole, so the page never has to guess
+what its change turned into. Both are behind the session token with every other
+`__` route. But the page does **not** fetch them at boot: the current values are
+injected as `window.__gwnativeSettings` at document start, beside the token and
+the keyboard layout, because the render scale is read by the client's first call
+into the graphics host and the touch mode decides which listeners are installed
+before anything the page could await. A boot that fetched its settings would
+either add a round trip in front of every launch or draw one frame at the wrong
+scale and correct it in front of the player.
+
+The reader is deliberately lopsided: an unknown **field** is ignored, an unknown
+**value** is refused. A file written by a later build should still yield
+everything this build understands, but a `touchMode` of `"maybe"` means the file
+cannot be trusted about touch, and quietly substituting a default there would
+leave input behaving in a way no setting of theirs explains. A patch is stricter
+still — a misspelled name is a 400, because answering 200 would hide a page bug
+behind a control that silently never works. A `formatVersion` this build cannot
+read is refused rather than reinterpreted, and the file is then moved aside
+intact as `settings.json.corrupt-<epoch>` (three kept) rather than overwritten.
+
+Wiring this up turned up something worth stating plainly. `renderScale` began
+life here as a multiplier the harness applied while it sized the canvas itself;
+when that sizing was removed the variable became the device pixel ratio handed
+straight to the client, and its value was left at `1`. So this app had been
+rendering at 1x on a Retina panel while the Electron build renders at 2x — the
+same import, the same semantics, a different default — which means every
+resource comparison made between the two until now had this one drawing a
+quarter of the pixels. The default is now `2`, matching. Measured at the login
+screen, 30 samples a second apart, host plus its three WebKit helpers:
+
+| render scale | CPU | RSS |
+| --- | --- | --- |
+| 1 | 24.2 % | 559.9 MiB |
+| 2 | 26.0 % | 608.5 MiB |
+
+That is a smaller gap than four times the pixels suggests, and the reason is
+that the login screen is not drawing much: the 48.6 MiB is where the difference
+is honest — a 2560×1600 RGBA drawing buffer against a 1280×800 one, plus the GPU
+process's share. Under a loaded zone the CPU column would separate further. A
+player who wants the cheaper picture can have it; that is what the setting is
+for. Which one a session paid is in its log: `settings: render scale 2, touch
+mode off`.
+
 ## Status
 
 Playable. The window opens, the harness and the client boot over loopback, the

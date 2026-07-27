@@ -26,6 +26,7 @@ use std::thread;
 use crate::chunks::ChunkStore;
 use crate::diagnostics::{self, Recorder};
 use crate::patch::SNAPSHOT;
+use crate::settings;
 use crate::sockets::{self, Registry};
 use crate::{keychain, net, proxy, qos, ws};
 
@@ -48,6 +49,9 @@ const PORT: u16 = 38112;
 
 pub struct Loopback {
     pub addr: SocketAddr,
+    /// The same store the `__settings` route answers from, so the host can read
+    /// what the player chose without a second copy that could disagree.
+    pub settings: Arc<settings::Store>,
 }
 
 /// Per-request tracing, off unless `GWNATIVE_TRACE_HTTP` is set, matching
@@ -71,6 +75,7 @@ struct Context {
     /// The derived client, served in place of the one on disk. See `crate::wasm`
     /// for what it changes and why the base module is kept untouched.
     derived_wasm: Option<PathBuf>,
+    settings: Arc<settings::Store>,
     token: String,
 }
 
@@ -86,6 +91,7 @@ pub fn spawn(
     snapshot: Option<Arc<ChunkStore>>,
     recorder: Arc<Recorder>,
     derived_wasm: Option<PathBuf>,
+    settings: Arc<settings::Store>,
     token: String,
 ) -> std::io::Result<Loopback> {
     let listener = bind()?;
@@ -96,6 +102,7 @@ pub fn spawn(
         sockets: Arc::default(),
         recorder,
         derived_wasm,
+        settings: Arc::clone(&settings),
         token,
     });
 
@@ -117,7 +124,7 @@ pub fn spawn(
             }
         })?;
 
-    Ok(Loopback { addr })
+    Ok(Loopback { addr, settings })
 }
 
 /// Take [`PORT`], or an ephemeral port if something else already holds it.
@@ -512,6 +519,45 @@ fn handle(
                 "text/plain",
                 b"use GET, PUT or DELETE",
                 &[("Allow", "GET, PUT, DELETE".into())],
+            )?,
+        }
+        return Ok(flow);
+    }
+
+    // What the player chose. GET is the authoritative read — the page is handed
+    // a copy at document start, but a settings window opened an hour later must
+    // not show what was true at launch. PUT takes a patch and answers with the
+    // whole, so the page never has to guess what its change merged into.
+    if request.path == "__settings" {
+        match request.method.as_str() {
+            "GET" => {
+                let body = serde_json::to_vec(&context.settings.get()).unwrap_or_default();
+                respond(stream, 200, "OK", "application/json", &body, &[])?;
+            }
+            "PUT" => {
+                let applied = serde_json::from_slice(&request.body)
+                    .map_err(|e| e.to_string())
+                    .and_then(|raw| context.settings.apply(&raw));
+                match applied {
+                    Ok(settings) => {
+                        let body = serde_json::to_vec(&settings).unwrap_or_default();
+                        respond(stream, 200, "OK", "application/json", &body, &[])?;
+                    }
+                    // A refused patch is a bug in the page, not a player error,
+                    // so it is said out loud rather than only answered with 400.
+                    Err(e) => {
+                        eprintln!("[settings] refused a patch: {e}");
+                        respond(stream, 400, "Bad Request", "text/plain", e.as_bytes(), &[])?;
+                    }
+                }
+            }
+            _ => respond(
+                stream,
+                405,
+                "Method Not Allowed",
+                "text/plain",
+                b"use GET or PUT",
+                &[("Allow", "GET, PUT".into())],
             )?,
         }
         return Ok(flow);
@@ -1060,5 +1106,123 @@ mod tests {
         let root = std::env::temp_dir();
         assert!(resolve(&root, "../etc/passwd").is_none());
         assert!(resolve(&root, "/etc/passwd").is_none());
+    }
+
+    /// A scratch directory that is this test's alone, named for it.
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("gwnative-server-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// One request, one answer: `(status, body)`.
+    ///
+    /// A fresh connection per call rather than a kept one, because what this
+    /// exercises is the route rather than the keep-alive loop, and a test that
+    /// shared a connection would make a failure to answer look like a hang.
+    fn request(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: &str,
+    ) -> (u16, String) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let auth = match token {
+            Some(token) => format!("X-Gwnative-Token: {token}\r\n"),
+            None => String::new(),
+        };
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             {auth}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut reply = String::new();
+        std::io::Read::read_to_string(&mut stream, &mut reply).unwrap();
+        let (head, body) = reply.split_once("\r\n\r\n").unwrap_or((reply.as_str(), ""));
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(0);
+        (status, body.to_owned())
+    }
+
+    /// The settings route end to end, over a real socket.
+    ///
+    /// Worth a wire test rather than only unit tests of `settings::patch`: the
+    /// token gate, the method table and the file that outlives the process all
+    /// live here, and none of them is reachable from a test of the parser. This
+    /// is also the only place the gate can be shown to cover `__settings` — it
+    /// is written once, for every `__` route, so a route added later inherits
+    /// it silently and nothing else would notice if that stopped being true.
+    ///
+    /// It takes the origin port if that is free, exactly as a second instance
+    /// would, and reads the address back from the listener rather than assuming
+    /// it — so a test run while the app is up still passes, and the app's own
+    /// fallback covers the other order.
+    #[test]
+    fn the_settings_route_is_gated_typed_and_durable() {
+        let dir = scratch("settings");
+        let file = dir.join("settings.json");
+        let token = "test-token";
+        let loopback = spawn(
+            dir.clone(),
+            None,
+            Recorder::open(dir.join("diagnostics")),
+            None,
+            Arc::new(settings::Store::open(file.clone())),
+            token.to_owned(),
+        )
+        .unwrap();
+        let addr = loopback.addr;
+        let auth = Some(token);
+
+        // Loopback is host-wide, so an untokened caller is any other process on
+        // this machine.
+        assert_eq!(request(addr, "GET", "/__settings", None, "").0, 403);
+
+        let (status, body) = request(addr, "GET", "/__settings", auth, "");
+        assert_eq!(status, 200);
+        assert!(body.contains(r#""dataStrategy":null"#), "{body}");
+
+        let (status, body) = request(
+            addr,
+            "PUT",
+            "/__settings",
+            auth,
+            r#"{"dataStrategy":"full"}"#,
+        );
+        assert_eq!(status, 200);
+        // The answer is the merged whole, not an acknowledgement: the page has
+        // to be able to render the result without a second read.
+        assert!(body.contains(r#""dataStrategy":"full""#), "{body}");
+        assert!(body.contains(r#""renderScale":2"#), "{body}");
+
+        // A misspelled name is refused rather than quietly ignored.
+        assert_eq!(
+            request(addr, "PUT", "/__settings", auth, r#"{"renderscale":1}"#).0,
+            400,
+        );
+        assert_eq!(
+            request(addr, "DELETE", "/__settings", None, "").0,
+            403,
+            "the gate comes before the method table",
+        );
+        assert_eq!(request(addr, "DELETE", "/__settings", auth, "").0, 405);
+
+        // A refused patch must leave what was already saved alone.
+        let (_, body) = request(addr, "GET", "/__settings", auth, "");
+        assert!(body.contains(r#""renderScale":2"#), "{body}");
+
+        // What a later launch reads is the point of the whole route.
+        assert_eq!(
+            settings::Store::open(file).get().data_strategy,
+            Some(settings::DataStrategy::Full),
+        );
     }
 }
