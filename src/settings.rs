@@ -318,14 +318,16 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::TempDir;
     use serde_json::json;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("gwnative-settings-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir.join("settings.json")
+    /// The guard comes back with the path: dropping it removes the directory,
+    /// so a test that binds only the path would delete its own scratch space
+    /// before touching it.
+    fn scratch(name: &str) -> (TempDir, PathBuf) {
+        let dir = TempDir::new(&format!("settings-{name}"));
+        let path = dir.0.join("settings.json");
+        (dir, path)
     }
 
     #[test]
@@ -397,7 +399,7 @@ mod tests {
 
     #[test]
     fn what_was_saved_is_what_the_next_launch_reads() {
-        let path = scratch("roundtrip");
+        let (_dir, path) = scratch("roundtrip");
         let store = Store::open(path.clone());
         assert_eq!(store.get(), Settings::default());
 
@@ -410,7 +412,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_file_is_kept_rather_than_overwritten() {
-        let path = scratch("corrupt");
+        let (_dir, path) = scratch("corrupt");
         fs::write(&path, b"{not json").unwrap();
 
         let store = Store::open(path.clone());
@@ -432,7 +434,7 @@ mod tests {
 
     #[test]
     fn only_the_newest_corrupt_backups_are_kept() {
-        let path = scratch("prune");
+        let (_dir, path) = scratch("prune");
         for stamp in [1u64, 5, 3, 4, 2] {
             fs::write(with_suffix(&path, &format!("corrupt-{stamp}")), b"x").unwrap();
         }
