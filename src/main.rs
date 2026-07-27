@@ -5,6 +5,7 @@
 //! and WebGL. On macOS 27 that is WKWebView. Everything outside that realm
 //! (patching, chunk storage, sockets, credentials, windowing) is Rust.
 
+mod app;
 mod chunks;
 mod commands;
 mod diagnostics;
@@ -261,7 +262,6 @@ fn main() {
     .expect("bind loopback");
     let url = format!("http://{}/index.html", loopback.addr);
     eprintln!("[gwnative] serving {} at {}", root.display(), url);
-
     if headless {
         // Address and session token on one line, because every route worth
         // exercising is behind the gate and there is otherwise no way to get
@@ -290,6 +290,9 @@ fn main() {
     // After the load has been asked for, which is fine: the delegate is
     // consulted when the navigation is decided, not when it is requested.
     renderer::guard(mtm, &webview, &format!("http://{}", loopback.addr));
+    // Before `run`, because the first thing it decides — whether closing the
+    // window quits — can be asked the moment the window appears.
+    app::own_lifecycle(mtm, &webview);
 
     window.makeKeyAndOrderFront(None);
     app.activate();
