@@ -358,10 +358,17 @@ strategy do apply immediately, and the overlay is switched from what the host
 answered with rather than from what was asked for, so a patch the host clamped
 cannot leave the screen disagreeing with the file.
 
+The game image is the one that gained a behaviour rather than a control. The
+launcher asks its question before the client exists and then never again, which
+left "download the rest of it" as something a player could only decide at a
+launch they had already got past. Changing it in the panel starts or stops the
+same host-side sweep the launcher drives — the same `POST /__prefetch` and the
+same refusal when the volume cannot take it, which the panel shows rather than
+swallowing. `null` remains neither answer: it is the request to be asked again,
+and asking is the launcher's job at the next boot.
+
 Only what moved is written. A panel opened and closed sends no patch, which
-matters because the host persists on every patch it accepts — and `null` for
-`dataStrategy` is compared as a value rather than as an absence, since it is
-how the launcher's question gets asked again.
+matters because the host persists on every patch it accepts.
 
 ## The one question asked before the client exists
 

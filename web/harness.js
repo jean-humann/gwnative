@@ -600,6 +600,7 @@ function appendGlue() {
     read: host.currentSettings,
     save: host.saveSettings,
     showLog: (on) => window.gwLog(on),
+    sweep: host.sweepSnapshot,
     log,
   });
 

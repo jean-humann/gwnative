@@ -116,16 +116,29 @@ export function needsRelaunch(keys) {
 /**
  * Do the part of a saved change that can be done now.
  *
- * Only the overlay, currently. It is separated from the save because the two
- * fail independently: a page that showed the overlay and could not write the
- * file has still done what was asked for this session.
+ * Separated from the save because the two fail independently: a page that
+ * showed the overlay and could not write the file has still done what was asked
+ * for this session.
+ *
+ * The game image is the interesting one. The launcher asks the question before
+ * the client exists and then never again, which left "download the rest of it"
+ * as something a player could only decide at a launch they had already got
+ * past. Changing it here starts or stops the same host-side sweep the launcher
+ * drives, so the setting is a switch rather than a note for next time. `null`
+ * is neither: it is the request to be asked again, and asking is the launcher's
+ * job at the next boot.
  *
  * @param {string[]} keys
  * @param {Record<string, unknown>} settings
- * @param {{ showLog: (on: boolean) => void }} page
+ * @param {{ showLog: (on: boolean) => void,
+ *           sweep: (action: 'start' | 'stop') => Promise<unknown> }} page
  */
-export function applyLive(keys, settings, page) {
+export async function applyLive(keys, settings, page) {
   if (keys.includes('showDiagnostics')) page.showLog(Boolean(settings.showDiagnostics));
+  if (keys.includes('dataStrategy')) {
+    if (settings.dataStrategy === 'full') await page.sweep('start');
+    if (settings.dataStrategy === 'quick') await page.sweep('stop');
+  }
 }
 
 /**
@@ -135,11 +148,12 @@ export function applyLive(keys, settings, page) {
  *   read: () => Record<string, unknown>,
  *   save: (patch: object) => Promise<Record<string, unknown>>,
  *   showLog: (on: boolean) => void,
+ *   sweep: (action: 'start' | 'stop') => Promise<unknown>,
  *   log: (...args: unknown[]) => void,
  * }} deps
  * @returns {() => void} opens the panel
  */
-export function installSettingsPanel({ read, save, showLog, log }) {
+export function installSettingsPanel({ read, save, showLog, sweep, log }) {
   const overlay = document.getElementById('settings');
   const rows = document.getElementById('settings-rows');
   const note = document.getElementById('settings-note');
@@ -217,7 +231,10 @@ export function installSettingsPanel({ read, save, showLog, log }) {
     const patch = Object.fromEntries(keys.map((key) => [key, after[key]]));
     try {
       const saved = await save(patch);
-      applyLive(keys, saved, { showLog });
+      // Awaited inside the same try: a sweep the host refuses for want of disk
+      // space says so in the body, and that refusal is the one the player most
+      // needs to see rather than a silent no-op.
+      await applyLive(keys, saved, { showLog, sweep });
       diagnostics.count('gw.settings.saved');
       for (const key of keys) diagnostics.count(`gw.settings.changed.${key}`);
       if (needsRelaunch(keys)) {
