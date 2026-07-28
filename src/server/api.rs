@@ -340,25 +340,32 @@ fn prefetch(
     // price before the player agrees to it — asking for 4.2 GB and then filling
     // the disk is the failure this exists to avoid.
     let outstanding = (store.chunk_count() - store.resident_count()) as u64 * store.chunk_size();
+    // Two numbers, because they answer different questions: `outstanding` is
+    // what the download would write and belongs in the prose, `needed` is what
+    // the volume must have and is what the refusal below compares. Taken once,
+    // so the figure the refusal reports and the figure it decided on cannot
+    // come to be written differently.
+    let needed = outstanding + DISK_HEADROOM;
     let free = disk::available(store.cache_dir());
 
     if request.method == "POST" {
         if request.query == "stop" {
             store.stop_full_download();
-        } else if let Some(free) = free.filter(|free| *free < outstanding + DISK_HEADROOM) {
+        } else if let Some(free) = free.filter(|free| *free < needed) {
             // Refused rather than started-and-abandoned: a sweep that runs
             // until the volume fills takes the rest of the machine down with
             // it, and the client streams perfectly well without it.
             note!(
                 "[prefetch] refused: {:.1} GB free, {:.1} GB needed",
                 free as f64 / 1e9,
-                (outstanding + DISK_HEADROOM) as f64 / 1e9
+                needed as f64 / 1e9
             );
-            let body = format!(
-                r#"{{"error":"not enough room","free":{free},"needed":{}}}"#,
-                outstanding + DISK_HEADROOM
-            );
-            return json(stream, 507, body.as_bytes());
+            let body = serde_json::json!({
+                "error": "not enough room",
+                "free": free,
+                "needed": needed,
+            });
+            return json(stream, 507, body.to_string().as_bytes());
         } else if store.start_full_download() {
             // Only on the start that actually started something: the icon
             // follows the sweep, and a second POST while one is running is
@@ -375,18 +382,26 @@ fn prefetch(
     let cached = store.resident_count();
     let total = store.chunk_count();
     let chunk_size = store.chunk_size();
-    // `null` rather than a guess when the volume will not say: the page treats
-    // not knowing as no reason to stop, which is the same thing it does when
-    // this whole route is missing.
-    let free = free.map_or("null".to_owned(), |free| free.to_string());
-    // Two numbers, because they answer different questions: `outstanding` is
-    // what the download would write and belongs in the prose, `needed` is what
-    // the volume must have and is what the refusal above compares.
-    let needed = outstanding + DISK_HEADROOM;
-    let body = format!(
-        r#"{{"cached":{cached},"total":{total},"fetched":{fetched},"running":{running},"chunkSize":{chunk_size},"outstanding":{outstanding},"needed":{needed},"free":{free}}}"#
-    );
-    json(stream, 200, body.as_bytes())
+    // Built by the encoder rather than spelled out, like [`diag`] above it and
+    // every other JSON body in this crate. Nothing in here is a string today,
+    // so writing the braces by hand was not wrong — it was one field away from
+    // being wrong, and a second hand-rolled encoder is how the first one gets
+    // copied into a third place that does carry a string.
+    let body = serde_json::json!({
+        "cached": cached,
+        "total": total,
+        "fetched": fetched,
+        "running": running,
+        "chunkSize": chunk_size,
+        "outstanding": outstanding,
+        "needed": needed,
+        // `null` rather than a guess when the volume will not say: the page
+        // treats not knowing as no reason to stop, which is the same thing it
+        // does when this whole route is missing. `None` encodes as `null` with
+        // nothing here having to say so.
+        "free": free,
+    });
+    json(stream, 200, body.to_string().as_bytes())
 }
 
 /// The right method exists; this was not it. `Allow` is the only part a client
