@@ -23,6 +23,8 @@ use objc2_app_kit::{NSBackingStoreType, NSWindow, NSWindowCollectionBehavior, NS
 use objc2_foundation::{MainThreadMarker, NSObjectNSDelayedPerforming, NSString};
 use objc2_web_kit::WKWebView;
 
+use crate::notify::{self, Callback, CenterRef};
+
 use state::{Bounds, Mode, State, default_state, fit, load, save, work_areas};
 
 /// At most one write per second while a drag is in progress.
@@ -225,43 +227,15 @@ fn touch() {
     });
 }
 
-type CFNotificationCenterRef = *const c_void;
-
-type CFNotificationCallback = extern "C" fn(
-    center: CFNotificationCenterRef,
-    observer: *mut c_void,
-    name: *const c_void,
-    object: *const c_void,
-    user_info: *const c_void,
-);
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFNotificationCenterGetLocalCenter() -> CFNotificationCenterRef;
-    fn CFNotificationCenterAddObserver(
-        center: CFNotificationCenterRef,
-        observer: *const c_void,
-        callback: CFNotificationCallback,
-        name: *const c_void,
-        object: *const c_void,
-        suspension_behavior: i32,
-    );
-}
-
 /// Follow the window without owning a delegate.
 ///
-/// AppKit posts window notifications to the default `NSNotificationCenter`,
-/// which is Core Foundation's local centre — the two are bridged. Reading them
-/// this way is the same trick `commands` uses, and for the same reason: none of
-/// these needs an object, only a function.
+/// None of these needs an object, only a function, so they are read as C
+/// callbacks — see [`crate::notify`].
 fn watch() {
     // Moves and live resizes arrive continuously and are coalesced; the rest
     // are the moments a gesture ends, and each writes.
     for (name, callback) in [
-        (
-            "NSWindowDidMoveNotification",
-            moved as CFNotificationCallback,
-        ),
+        ("NSWindowDidMoveNotification", moved as Callback),
         ("NSWindowDidResizeNotification", moved),
         ("NSWindowDidEndLiveResizeNotification", settled),
         ("NSWindowDidEnterFullScreenNotification", settled),
@@ -269,29 +243,13 @@ fn watch() {
         ("NSWindowDidResignKeyNotification", settled),
         ("NSApplicationWillTerminateNotification", settled),
     ] {
-        let name = NSString::from_str(name);
-        // SAFETY: `NSString` is toll-free bridged to `CFStringRef`. The name is
-        // deliberately leaked: the observer is never removed, because it is
-        // wanted for as long as the process runs, so the name has to outlive
-        // it. The observer pointer is null and is handed back only to callbacks
-        // that ignore it.
-        unsafe {
-            let name = Retained::into_raw(name).cast::<c_void>();
-            CFNotificationCenterAddObserver(
-                CFNotificationCenterGetLocalCenter(),
-                std::ptr::null(),
-                callback,
-                name,
-                std::ptr::null(),
-                0,
-            );
-        }
+        notify::local(name, callback);
     }
 }
 
 /// Delivered on the main thread: AppKit posts window notifications there.
 extern "C" fn moved(
-    _center: CFNotificationCenterRef,
+    _center: CenterRef,
     _observer: *mut c_void,
     _name: *const c_void,
     _object: *const c_void,
@@ -301,7 +259,7 @@ extern "C" fn moved(
 }
 
 extern "C" fn settled(
-    _center: CFNotificationCenterRef,
+    _center: CenterRef,
     _observer: *mut c_void,
     _name: *const c_void,
     _object: *const c_void,
@@ -316,7 +274,7 @@ extern "C" fn settled(
 /// answers to five other notifications and a pending frame must be spent on
 /// exactly the one it was queued for.
 extern "C" fn left_full_screen(
-    _center: CFNotificationCenterRef,
+    _center: CenterRef,
     _observer: *mut c_void,
     _name: *const c_void,
     _object: *const c_void,

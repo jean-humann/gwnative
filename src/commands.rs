@@ -17,6 +17,7 @@ use objc2_foundation::NSString;
 use objc2_web_kit::WKWebView;
 
 use crate::layout;
+use crate::notify::{self, Callback, CenterRef};
 
 thread_local! {
     /// The live web view. Main-thread-only by WebKit's rules, which is exactly
@@ -75,31 +76,6 @@ fn watch_keyboard_layout() {
     });
 }
 
-type CFNotificationCenterRef = *const c_void;
-
-type CFNotificationCallback = extern "C" fn(
-    center: CFNotificationCenterRef,
-    observer: *mut c_void,
-    name: *const c_void,
-    object: *const c_void,
-    user_info: *const c_void,
-);
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    /// This process's own notifications. Distinct from the distributed centre
-    /// `layout` watches, which carries notifications between applications.
-    fn CFNotificationCenterGetLocalCenter() -> CFNotificationCenterRef;
-    fn CFNotificationCenterAddObserver(
-        center: CFNotificationCenterRef,
-        observer: *const c_void,
-        callback: CFNotificationCallback,
-        name: *const c_void,
-        object: *const c_void,
-        suspension_behavior: i32,
-    );
-}
-
 /// Tell the page when focus moves — the window's key status, and the
 /// application's own.
 ///
@@ -135,43 +111,18 @@ unsafe extern "C" {
 /// Registered in matched pairs, deliberately: a mute with no matching unmute is
 /// a game that is silent until relaunch.
 fn watch_focus() {
-    // AppKit posts to the default `NSNotificationCenter`, which is the same
-    // centre as Core Foundation's local one — the two are bridged. Reading it
-    // this way avoids declaring an Objective-C class purely to own a selector.
     for (name, callback) in [
-        (
-            "NSWindowDidResignKeyNotification",
-            resigned_key as CFNotificationCallback,
-        ),
+        ("NSWindowDidResignKeyNotification", resigned_key as Callback),
         ("NSApplicationDidResignActiveNotification", resigned_active),
         ("NSApplicationDidBecomeActiveNotification", became_active),
     ] {
-        let name = NSString::from_str(name);
-        // SAFETY: `NSString` is toll-free bridged to `CFStringRef`. The name is
-        // deliberately leaked: the observer is never removed, because it is
-        // wanted for as long as the process runs, so the name has to outlive
-        // it. The observer pointer is null and is only ever handed back to the
-        // callbacks, which ignore it.
-        unsafe {
-            let name = Retained::into_raw(name).cast::<c_void>();
-            CFNotificationCenterAddObserver(
-                CFNotificationCenterGetLocalCenter(),
-                std::ptr::null(),
-                callback,
-                name,
-                std::ptr::null(),
-                // Local notifications are not suspended, so the behaviour is
-                // moot; 0 is `CFNotificationSuspensionBehaviorDrop`, which the
-                // local centre ignores.
-                0,
-            );
-        }
+        notify::local(name, callback);
     }
 }
 
 /// Delivered on the main thread: AppKit posts window notifications there.
 extern "C" fn resigned_key(
-    _center: CFNotificationCenterRef,
+    _center: CenterRef,
     _observer: *mut c_void,
     _name: *const c_void,
     _object: *const c_void,
@@ -182,7 +133,7 @@ extern "C" fn resigned_key(
 
 /// The player switched to another application. Delivered on the main thread.
 extern "C" fn resigned_active(
-    _center: CFNotificationCenterRef,
+    _center: CenterRef,
     _observer: *mut c_void,
     _name: *const c_void,
     _object: *const c_void,
@@ -192,7 +143,7 @@ extern "C" fn resigned_active(
 }
 
 extern "C" fn became_active(
-    _center: CFNotificationCenterRef,
+    _center: CenterRef,
     _observer: *mut c_void,
     _name: *const c_void,
     _object: *const c_void,

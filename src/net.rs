@@ -8,7 +8,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 6112 is the Guild Wars game/login port; 80 and 443 cover the file and web
 /// services. Nothing else is a legitimate destination for this client.
@@ -63,7 +63,7 @@ pub fn normalize(name: &str) -> String {
 /// domain: `arenanetworks.com.evil.com` ends with neither `.arenanetworks.com`
 /// nor the domain itself, and `notarenanetworks.com` is refused because the
 /// boundary dot is required.
-pub fn allowed_name(host: &str) -> bool {
+fn allowed_name(host: &str) -> bool {
     !host.is_empty()
         && ALLOWED_DOMAINS
             .iter()
@@ -71,7 +71,7 @@ pub fn allowed_name(host: &str) -> bool {
 }
 
 /// Split `host:port`, accepting the bracketed form for IPv6 literals.
-pub fn parse_destination(destination: &str) -> Result<(String, u16), NetError> {
+fn parse_destination(destination: &str) -> Result<(String, u16), NetError> {
     let bad = || NetError::BadDestination(destination.to_owned());
     let (host, port) = match destination.strip_prefix('[') {
         Some(rest) => {
@@ -96,7 +96,7 @@ pub fn parse_destination(destination: &str) -> Result<(String, u16), NetError> {
 /// Reject anything that is not routable on the public internet. This is what
 /// keeps a connect from reaching the loopback host, the local network, link
 /// local metadata services, or a multicast group.
-pub fn is_public_unicast(ip: IpAddr) -> bool {
+fn is_public_unicast(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             !(v4.is_private()
