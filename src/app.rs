@@ -20,6 +20,7 @@
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use block2::{DynBlock, RcBlock};
 use objc2::Message;
@@ -244,6 +245,15 @@ extern "C" fn terminate_on_main(_context: *mut c_void) {
     NSApplication::sharedApplication(mtm).terminate(None);
 }
 
+/// Whether AppKit has the main thread, and so whether there is anything on the
+/// far end of the main queue to hear a quit.
+static RUN_LOOP: AtomicBool = AtomicBool::new(false);
+
+/// Said once, immediately before the main thread is handed to AppKit.
+pub fn about_to_run() {
+    RUN_LOOP.store(true, Ordering::Relaxed);
+}
+
 /// Quit, from any thread.
 ///
 /// The client's own Exit is a clean `onExit(0)` in the page, and until now it
@@ -253,8 +263,16 @@ extern "C" fn terminate_on_main(_context: *mut c_void) {
 /// request hops to the main queue before it touches AppKit.
 ///
 /// Routed through `terminate:` rather than `exit` so it goes through the
-/// delegate above and the game's files are written like any other quit.
+/// delegate above and the game's files are written like any other quit — but
+/// only where there is a run loop to route it through. A headless run parks its
+/// main thread instead of running one, so the same hop would enqueue a
+/// `terminate:` that nothing ever drains and the app would answer the request
+/// and then go on running. There is nothing to flush in that case: headless has
+/// no page, no client and no `Gw.dat`, and the chunk store commits by rename.
 pub fn request_quit() {
+    if !RUN_LOOP.load(Ordering::Relaxed) {
+        std::process::exit(0);
+    }
     // SAFETY: the work function takes no context, so there is nothing to own.
     unsafe { to_main(std::ptr::null_mut(), terminate_on_main) };
 }

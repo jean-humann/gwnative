@@ -24,6 +24,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 mod api;
 mod content;
@@ -33,6 +34,7 @@ use crate::diagnostics::Recorder;
 use crate::generation;
 use crate::http::{MAX_BODY_BYTES, POLICY, Request, policy, read_request, text};
 use crate::qos;
+use crate::relaunch;
 use crate::settings;
 use crate::sockets::{self, Registry};
 
@@ -43,6 +45,13 @@ use crate::sockets::{self, Registry};
 /// `GWNATIVE_PORT` overrides it, which is also how a second instance gets its
 /// own private store rather than fighting over this one.
 const PORT: u16 = 38112;
+
+/// How long a relaunched app waits for its predecessor to close the port, and
+/// how often it looks. Short: the wait is for a descriptor already on its way
+/// out, not for a process, and anything longer than this means something else
+/// on the machine has the port and no amount of waiting will help.
+const PORT_PATIENCE: Duration = Duration::from_millis(500);
+const PORT_POLL: Duration = Duration::from_millis(10);
 
 pub struct Loopback {
     pub addr: SocketAddr,
@@ -142,17 +151,31 @@ fn bind() -> std::io::Result<TcpListener> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(PORT);
 
-    match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
-        Ok(listener) => Ok(listener),
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            note!(
-                "[loopback] port {port} is taken, falling back to an ephemeral one; \
-                 saved page state will not be found this session"
-            );
-            TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
+    let deadline = Instant::now() + PORT_PATIENCE;
+    loop {
+        match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() != std::io::ErrorKind::AddrInUse => return Err(e),
+            Err(_) => {}
         }
-        Err(e) => Err(e),
+        // Taken — and only a relaunch is willing to wait for it. It waited for
+        // the instance lock already, but the lock is let go first: a process
+        // exits by closing its descriptors in order and the lock was opened
+        // before this socket, so a successor can get this far while its
+        // predecessor's listener is still a moment from closing. The gap is
+        // microseconds wide and it is the difference between a relaunch that
+        // keeps everything the page stored and one that quietly loses it.
+        if !relaunch::is_successor() || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(PORT_POLL);
     }
+
+    note!(
+        "[loopback] port {port} is taken, falling back to an ephemeral one; \
+         saved page state will not be found this session"
+    );
+    TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
 }
 
 /// What to do with the connection once a request has been answered.

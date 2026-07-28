@@ -79,6 +79,24 @@ export async function readSettings() {
  * @param {Partial<Settings>} patch
  * @returns {Promise<Settings>}
  */
+/**
+ * Ask the host to quit and come back.
+ *
+ * The two settings that only take effect on the boot path are saved long before
+ * this is called; this is only the launch that reads them. It resolves when the
+ * host has started the successor and is about to go, which is a moment before
+ * this page stops existing — so there is nothing useful to do with the answer
+ * beyond not treating a failure as a success.
+ *
+ * @returns {Promise<void>}
+ */
+export async function relaunchApp() {
+  const response = await fetch('__relaunch', { method: 'POST', headers: headers() });
+  if (!response.ok) {
+    throw new Error((await response.text()) || `the app did not restart (${response.status})`);
+  }
+}
+
 export async function saveSettings(patch) {
   const response = await fetch('__settings', {
     method: 'PUT',

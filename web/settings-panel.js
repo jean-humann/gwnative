@@ -11,8 +11,12 @@
 // import it reads when it recomputes the canvas, and the gesture translation is
 // a set of listeners installed once at boot around a mode that was captured by
 // value. Both are fixable — and both are a change to the boot path to fix,
-// which is not a change worth making inside a settings panel. Saying "next
-// launch" is honest, and a relaunch is one ⌘Q away.
+// which is not a change worth making inside a settings panel.
+//
+// So the panel offers the launch instead. Saying "next launch" and leaving the
+// player to arrange one was honest but not much use: the setting they just
+// asked for is on disk and inert, and the only thing standing between them and
+// it is a quit they have to think of themselves.
 
 import * as diagnostics from './diagnostics.js';
 
@@ -186,15 +190,20 @@ export async function applyLive(keys, settings, page) {
  *   save: (patch: object) => Promise<Record<string, unknown>>,
  *   showLog: (on: boolean) => void,
  *   sweep: (action: 'start' | 'stop') => Promise<unknown>,
+ *   relaunch: () => Promise<void>,
  *   log: (...args: unknown[]) => void,
  * }} deps
  * @returns {() => void} opens the panel
  */
-export function installSettingsPanel({ read, save, showLog, sweep, log }) {
+export function installSettingsPanel({ read, save, showLog, sweep, relaunch, log }) {
   const overlay = document.getElementById('settings');
   const rows = document.getElementById('settings-rows');
   const note = document.getElementById('settings-note');
   const actions = document.getElementById('settings-actions');
+  // Not required: a page without it loses the restart offer and keeps every
+  // other thing the panel does, which is the right way round for a line of
+  // explanatory text.
+  const pending = document.getElementById('settings-pending');
   if (!overlay || !rows || !note || !actions) {
     log('[warn] settings: the panel is not in this page');
     return () => {};
@@ -241,6 +250,12 @@ export function installSettingsPanel({ read, save, showLog, sweep, log }) {
     rows.append(row);
   }
 
+  const say = (sentence) => {
+    if (!pending) return;
+    pending.textContent = sentence;
+    pending.hidden = sentence === '';
+  };
+
   const show = () => {
     const settings = read();
     for (const control of CONTROLS) {
@@ -251,6 +266,8 @@ export function installSettingsPanel({ read, save, showLog, sweep, log }) {
       fields.get(control.key).selectedIndex = index;
     }
     note.textContent = '';
+    say('');
+    offerSaving();
     overlay.hidden = false;
     fields.get(CONTROLS[0].key).focus();
     diagnostics.count('gw.settings.opened');
@@ -282,7 +299,11 @@ export function installSettingsPanel({ read, save, showLog, sweep, log }) {
       diagnostics.count('gw.settings.saved');
       for (const key of keys) diagnostics.count(`gw.settings.changed.${key}`);
       if (needsRelaunch(keys)) {
-        log('settings: saved; the render scale and gestures apply at the next launch');
+        // Deliberately not closed. The change is saved and doing nothing, and
+        // the panel is where the player is looking; closing it and mentioning
+        // the restart in the log would be telling the one place they are not.
+        offerRestart();
+        return;
       }
       close();
     } catch (error) {
@@ -301,7 +322,44 @@ export function installSettingsPanel({ read, save, showLog, sweep, log }) {
     element.addEventListener('click', run);
     return element;
   };
-  actions.append(button('Cancel', close), button('Save', apply, true));
+
+  const offerSaving = () => {
+    actions.replaceChildren(button('Cancel', close), button('Save', apply, true));
+  };
+
+  /**
+   * What is offered once a saved setting is waiting for a launch to read it.
+   *
+   * "Later" is not "Cancel": there is nothing left to cancel, the file is
+   * written either way, and the only question still open is when it starts
+   * counting.
+   */
+  const offerRestart = () => {
+    say('Saved. The render scale and gestures take effect when the app restarts.');
+    actions.replaceChildren(button('Later', close), button('Restart Now', restart, true));
+  };
+
+  const restart = async () => {
+    actions.replaceChildren();
+    say('Restarting…');
+    try {
+      await relaunch();
+      // The host answers before it goes, so this page has a moment left and
+      // nothing to do in it. Leaving "Restarting…" up is the honest frame to
+      // spend it on.
+      diagnostics.count('gw.settings.relaunched');
+    } catch (error) {
+      say('');
+      note.textContent = `Not restarted: ${error}`;
+      diagnostics.count('gw.settings.relaunch-failed');
+      log(`[warn] settings: ${error}`);
+      // Back to the offer rather than to Save: the setting is still saved and
+      // still waiting, which is exactly the state this was reached from.
+      offerRestart();
+    }
+  };
+
+  offerSaving();
 
   // Escape closes and Return saves, which is what every other panel on the
   // system does. Scoped to the overlay so neither reaches the client.

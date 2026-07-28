@@ -19,7 +19,7 @@ use std::sync::Arc;
 use super::{Context, Flow, tracing};
 use crate::chunks::ChunkStore;
 use crate::http::{Request, json, no_content, respond, text, token_matches};
-use crate::{app, diagnostics, disk, dock, keychain, net, ws};
+use crate::{app, diagnostics, disk, dock, keychain, net, relaunch, ws};
 
 /// Room to leave behind after a full download.
 ///
@@ -104,6 +104,21 @@ pub(super) fn serve(
             app::request_quit();
             return Ok(Some(Flow::Close));
         }
+        // The same quit, with something to come back to. Deliberately two
+        // routes and not one with a flag: quitting is unconditional and this
+        // one is not, and a caller that asked to come back and did not needs to
+        // be told so rather than left looking at a closing app.
+        "__relaunch" if request.method == "POST" => match relaunch::start() {
+            Ok(()) => {
+                no_content(stream)?;
+                app::request_quit();
+                return Ok(Some(Flow::Close));
+            }
+            Err(reason) => {
+                note!("[relaunch] {reason}");
+                text(stream, 500, &reason)?;
+            }
+        },
         // An unknown `__` name, or a known one asked with a method it does not
         // answer. Said plainly rather than left to fall through to the static
         // file server, which would refuse it with a bare 403 and no hint that
