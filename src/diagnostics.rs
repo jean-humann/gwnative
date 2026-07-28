@@ -323,6 +323,7 @@ pub fn absorb(metrics: &Metrics, body: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::TempDir;
 
     #[test]
     fn each_kind_keeps_a_different_thing() {
@@ -424,26 +425,9 @@ mod tests {
         );
     }
 
-    struct TempDir(PathBuf);
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn temp(tag: &str) -> TempDir {
-        let path = std::env::temp_dir().join(format!(
-            "gwnative-diag-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&path);
-        TempDir(path)
-    }
-
     #[test]
     fn records_land_one_per_line() {
-        let dir = temp("lines");
+        let dir = TempDir::new("diag-lines");
         let recorder = Recorder::open(dir.0.clone());
         recorder.write(&serde_json::json!({"n": 1}));
         recorder.write(&serde_json::json!({"n": 2}));
@@ -458,7 +442,7 @@ mod tests {
 
     #[test]
     fn rotation_keeps_the_last_five_files_and_no_more() {
-        let dir = temp("rotate");
+        let dir = TempDir::new("diag-rotate");
         let recorder = Recorder::open(dir.0.clone());
         // One oversized record per rotation is enough; the check is on the
         // file's length, not on how many records made it that long.
@@ -488,8 +472,7 @@ mod tests {
 
     #[test]
     fn a_file_left_large_by_a_previous_run_is_rotated_not_extended() {
-        let dir = temp("inherited");
-        fs::create_dir_all(&dir.0).unwrap();
+        let dir = TempDir::new("diag-inherited");
         fs::write(
             dir.0.join("gwnative.jsonl"),
             vec![b'\n'; MAX_BYTES as usize],

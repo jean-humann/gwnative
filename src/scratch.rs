@@ -1,7 +1,7 @@
 //! A temporary directory that removes itself.
 //!
-//! Test-only, and shared rather than copied into each test module: three of
-//! them want the same thing, and a helper that exists in three places is one
+//! Test-only, and shared rather than copied into each test module: eight of
+//! them want the same thing, and a helper that exists in eight places is one
 //! that gets fixed in one of them.
 
 use std::fs;
