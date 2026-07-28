@@ -5,6 +5,12 @@
 //! web content process exists is not read; and the injected script, because
 //! what it carries — the token, the keyboard layout, the settings — is needed by
 //! code that runs at document start and could not await a fetch.
+//!
+//! Almost every call here is `unsafe` only because objc2 marks every message
+//! send that way; they are ordinary calls on live objects, made on the main
+//! thread, and are not commented one by one. The exception is
+//! [`disable_features`], where the selectors are SPI and the return types are
+//! declared by hand — that one carries its argument.
 
 use objc2::rc::Retained;
 use objc2::{MainThreadOnly, msg_send};
@@ -65,6 +71,14 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences) {
             objc2::sel!(_setEnabled:forExperimentalFeature:),
         ),
     ];
+    // SAFETY: `respondsToSelector:` is `NSObject`'s and always answerable; the
+    // pair at the head of the loop is what makes the rest of the sends safe,
+    // since a WebKit that has dropped one of these SPIs skips the surface
+    // instead of being sent to. What is left is the return types, which are
+    // declared rather than inferred because the compiler has no header to read
+    // them from and a wrong one is undefined behaviour: `BOOL` from
+    // `respondsToSelector:`, an `NSArray` of feature objects from the list
+    // method, `NSString` from `key`, `void` from the setters.
     for (list, set) in surfaces {
         if remaining.is_empty() {
             break;
@@ -173,7 +187,8 @@ pub fn make(
         )));
     }
 
-    let nsurl = NSURL::URLWithString(&NSString::from_str(url)).expect("url");
+    let nsurl = NSURL::URLWithString(&NSString::from_str(url))
+        .expect("the caller builds this from the loopback address, so it always parses");
     let request = NSURLRequest::requestWithURL(&nsurl);
     unsafe { webview.loadRequest(&request) };
 

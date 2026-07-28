@@ -116,6 +116,8 @@ pub fn open(mtm: MainThreadMarker, webview: &WKWebView, path: PathBuf) -> Retain
         // screen, and asking it to before `makeKeyAndOrderFront` silently does
         // nothing. `perform` runs it once the run loop turns, by which time it
         // is.
+        // SAFETY: `window` is live and this is the main thread, which is where
+        // `performSelector:` schedules the send.
         Mode::Fullscreen => unsafe {
             window.performSelector_withObject_afterDelay(objc2::sel!(toggleFullScreen:), None, 0.0);
         },

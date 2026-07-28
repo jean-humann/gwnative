@@ -25,6 +25,10 @@ pub fn available(path: &Path) -> Option<u64> {
         probe = probe.parent()?;
     }
 
+    // SAFETY: `probe` exists, so it names a real file URL, and the key is
+    // Foundation's own constant. Every value that comes back is checked before
+    // it is used — including the downcast, which is what makes a volume that
+    // answers with something other than a number a `None` rather than a crash.
     unsafe {
         let url = NSURL::fileURLWithPath(&NSString::from_str(&probe.to_string_lossy()));
         let key = NSURLVolumeAvailableCapacityForImportantUsageKey;

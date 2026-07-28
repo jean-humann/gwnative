@@ -43,7 +43,7 @@ pub fn web_root() -> PathBuf {
     if let Ok(dir) = std::env::var("GWNATIVE_WEB_ROOT") {
         return PathBuf::from(dir);
     }
-    let exe = std::env::current_exe().expect("current_exe");
+    let exe = std::env::current_exe().expect("a running process has a path on macOS");
     let seed = exe
         .parent()
         .and_then(Path::parent)

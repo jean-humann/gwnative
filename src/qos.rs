@@ -74,6 +74,9 @@ impl Following {
 /// default class — which is exactly where it started, so there is nothing to
 /// recover and nothing worth telling the player.
 pub fn set(class: Class) {
+    // SAFETY: both arguments are plain integers and the call touches no memory
+    // of ours. `Class` is `repr(u32)` over the four `QOS_CLASS_*` constants, so
+    // there is no value it can hold that the kernel has not defined.
     unsafe {
         pthread_set_qos_class_self_np(class as u32, 0);
     }
