@@ -94,7 +94,7 @@ define_class!(
         fn terminated(&self, webview: &WKWebView) {
             if self.ivars().recovered.replace(true) {
                 note!("[renderer] the web content process died again; not reloading");
-                self.explain();
+                explain();
                 return;
             }
             note!("[renderer] the web content process died; reloading");
@@ -136,21 +136,26 @@ impl Guard {
             && url.as_bytes()[origin.len()] == b'/'
     }
 
-    /// Say, once, that the game stopped — because the second crash leaves a
-    /// blank window and no other explanation of it exists.
-    fn explain(&self) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        let alert = NSAlert::new(mtm);
-        alert.setAlertStyle(NSAlertStyle::Critical);
-        alert.setMessageText(&NSString::from_str("Guild Wars stopped unexpectedly"));
-        alert.setInformativeText(&NSString::from_str(
-            "The game's renderer closed twice in a row, so it was not restarted \
-             again. Quit and reopen Guild Wars to try once more.",
-        ));
-        alert.runModal();
-    }
+}
+
+/// Say, once, that the game stopped — because the second crash leaves a blank
+/// window and no other explanation of it exists.
+///
+/// Nothing about the guard is involved: which crash this is has already been
+/// decided by the caller, and what is left is a modal that belongs to the
+/// application.
+fn explain() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let alert = NSAlert::new(mtm);
+    alert.setAlertStyle(NSAlertStyle::Critical);
+    alert.setMessageText(&NSString::from_str("Guild Wars stopped unexpectedly"));
+    alert.setInformativeText(&NSString::from_str(
+        "The game's renderer closed twice in a row, so it was not restarted \
+         again. Quit and reopen Guild Wars to try once more.",
+    ));
+    alert.runModal();
 }
 
 thread_local! {

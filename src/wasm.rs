@@ -564,7 +564,7 @@ const STAMP: &str = "derived.json";
 /// caller serves the untransformed module and template save goes back to being
 /// broken — which is where it started, and much better than refusing to launch.
 pub fn prepare(base: &Path, cache_root: &Path) -> Outcome<Option<PathBuf>> {
-    let input = fs::read(base).map_err(|e| format!("template-save: {base:?}: {e}"))?;
+    let input = fs::read(base).map_err(|e| format!("template-save: {}: {e}", base.display()))?;
     let input_hash = digest(&input);
     let Some(build) = find_build(&input_hash) else {
         // Nothing here can serve this input, and the entries are ~8 MB each.
@@ -583,7 +583,7 @@ pub fn prepare(base: &Path, cache_root: &Path) -> Outcome<Option<PathBuf>> {
     // Only after a successful transform: a failing one must leave whatever the
     // last good build published exactly where it is.
     let _ = fs::remove_dir_all(cache_root);
-    fs::create_dir_all(&dir).map_err(|e| format!("template-save: {dir:?}: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("template-save: {}: {e}", dir.display()))?;
     write_atomic(&derived, &output)?;
     write_atomic(
         &dir.join(STAMP),
@@ -620,8 +620,8 @@ fn usable(dir: &Path, build: &KnownBuild) -> bool {
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Outcome<()> {
     let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes).map_err(|e| format!("template-save: {temporary:?}: {e}"))?;
-    fs::rename(&temporary, path).map_err(|e| format!("template-save: {path:?}: {e}"))
+    fs::write(&temporary, bytes).map_err(|e| format!("template-save: {}: {e}", temporary.display()))?;
+    fs::rename(&temporary, path).map_err(|e| format!("template-save: {}: {e}", path.display()))
 }
 
 /// `{ ensureDirectory: -70001, … }`, for injection into the page.

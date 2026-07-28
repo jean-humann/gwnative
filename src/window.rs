@@ -290,7 +290,11 @@ struct Tracker {
     /// The last frame the window had while it was neither zoomed nor full
     /// screen. What gets written, whatever the window looks like now.
     normal: Bounds,
-    written: Instant,
+    /// When this window's state last reached disk, or `None` if it never has.
+    /// `None` rather than an instant far enough in the past to look stale:
+    /// there is no such instant on a machine that booted a moment ago, and
+    /// subtracting one from `Instant::now()` panics there.
+    written: Option<Instant>,
 }
 
 /// Build the window, restoring wherever the last one was left.
@@ -362,9 +366,9 @@ pub fn open(mtm: MainThreadMarker, webview: &WKWebView, path: PathBuf) -> Retain
             window: window.clone(),
             path,
             normal: state.bounds,
-            // Far enough in the past that the first move writes rather than
-            // being coalesced away.
-            written: Instant::now() - WRITE_INTERVAL,
+            // Never written, so the first move writes rather than being
+            // coalesced away.
+            written: None,
         });
     });
     watch();
@@ -442,7 +446,7 @@ pub fn flush() {
         if let Some(tracker) = tracked.borrow_mut().as_mut() {
             let state = observe(tracker);
             save(&tracker.path, state);
-            tracker.written = Instant::now();
+            tracker.written = Some(Instant::now());
         }
     });
 }
@@ -452,9 +456,12 @@ fn touch() {
     TRACKED.with(|tracked| {
         if let Some(tracker) = tracked.borrow_mut().as_mut() {
             let state = observe(tracker);
-            if tracker.written.elapsed() >= WRITE_INTERVAL {
+            if tracker
+                .written
+                .is_none_or(|at| at.elapsed() >= WRITE_INTERVAL)
+            {
                 save(&tracker.path, state);
-                tracker.written = Instant::now();
+                tracker.written = Some(Instant::now());
             }
         }
     });

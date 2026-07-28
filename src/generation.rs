@@ -196,14 +196,21 @@ impl Store {
     /// re-downloading a good client because we forgot what it looked like would
     /// be the worse answer.
     pub fn unsound(&self, root: &Path, names: &[&'static str]) -> Vec<&'static str> {
-        let state = self.state.lock().unwrap();
-        let recorded = state.current.as_ref().map(|g| &g.artifacts);
+        // A copy, so the lock is released before the hashing starts. `check`
+        // reads whole artifacts — 9 MB for the wasm — and this runs on the
+        // launch path, where holding the state lock for the length of a hash
+        // stalls every other caller behind it. The record is a handful of
+        // names and digests, so copying it costs nothing worth measuring.
+        let recorded = {
+            let state = self.state.lock().unwrap();
+            state.current.as_ref().map(|g| g.artifacts.clone())
+        };
         names
             .iter()
             .copied()
             .filter(|name| {
                 let path = root.join(name);
-                let Some(expected) = recorded.and_then(|a| a.get(*name)) else {
+                let Some(expected) = recorded.as_ref().and_then(|a| a.get(*name)) else {
                     return !path.is_file();
                 };
                 match check(&path, expected) {
@@ -503,7 +510,7 @@ mod tests {
         // What adoption buys: same-length corruption, which existence checks
         // cannot see, is caught from the very next launch.
         drop(store);
-        let store = Store::open(state.clone());
+        let store = Store::open(state);
         fs::write(root.join("Gw.jspi.js"), "xxxxxxxxxxxxxxxxx:Gw.jspi.js").unwrap();
         assert_eq!(store.unsound(&root, &NAMES), vec!["Gw.jspi.js"]);
 
