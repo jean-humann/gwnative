@@ -67,7 +67,7 @@ impl Request {
     }
 }
 
-pub fn percent_decode(value: &str) -> String {
+fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -304,7 +304,7 @@ pub fn policy(addr: SocketAddr) -> String {
 /// framed by its Content-Length, so the peer can find the next one. A boot
 /// issues a couple of hundred range requests, and closing after each meant a
 /// fresh handshake and a fresh 2 MiB-stack thread for every one of them.
-pub fn common_headers(
+fn common_headers(
     content_type: &str,
     length: u64,
     cache: &str,
@@ -328,21 +328,77 @@ pub fn common_headers(
     head
 }
 
+/// The reason phrase for a status code this server sends.
+///
+/// Clients key off the number and no browser has read the phrase in twenty
+/// years, so this exists for whoever is reading a packet capture. Derived here
+/// rather than passed in because a call site that spells its own phrase is a
+/// call site that can answer 403 with "Not Found" — there were thirty-two of
+/// them, and nothing would have caught the pair drifting apart.
+fn reason(code: u16) -> &'static str {
+    match code {
+        200 => "OK",
+        204 => "No Content",
+        206 => "Partial Content",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        416 => "Range Not Satisfiable",
+        426 => "Upgrade Required",
+        502 => "Bad Gateway",
+        507 => "Insufficient Storage",
+        _ => "Status",
+    }
+}
+
 pub fn respond(
     stream: &mut TcpStream,
     code: u16,
-    reason: &str,
     content_type: &str,
     body: &[u8],
     extra: &[(&str, String)],
 ) -> std::io::Result<()> {
     let head = format!(
-        "HTTP/1.1 {code} {reason}\r\n{}",
+        "HTTP/1.1 {code} {}\r\n{}",
+        reason(code),
         common_headers(content_type, body.len() as u64, "no-store", extra)
     );
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()
+}
+
+/// The head of a response whose body is written separately. Used where the body
+/// is streamed as it is produced rather than assembled first.
+pub fn respond_streaming(
+    stream: &mut TcpStream,
+    code: u16,
+    content_type: &str,
+    length: u64,
+    extra: &[(&str, String)],
+) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {code} {}\r\n{}",
+        reason(code),
+        common_headers(content_type, length, "no-store", extra)
+    );
+    stream.write_all(head.as_bytes())
+}
+
+/// A short plain-text answer, which is what most refusals here are.
+pub fn text(stream: &mut TcpStream, code: u16, message: &str) -> std::io::Result<()> {
+    respond(stream, code, "text/plain", message.as_bytes(), &[])
+}
+
+/// Done, with nothing to say about it.
+pub fn no_content(stream: &mut TcpStream) -> std::io::Result<()> {
+    respond(stream, 204, "text/plain", b"", &[])
+}
+
+pub fn json(stream: &mut TcpStream, code: u16, body: &[u8]) -> std::io::Result<()> {
+    respond(stream, code, "application/json", body, &[])
 }
 
 /// A static file, stored by the page but revalidated before reuse.
@@ -432,16 +488,13 @@ pub fn respond_proxy(stream: &mut TcpStream, reply: &proxy::Reply) -> std::io::R
     stream.flush()
 }
 
+/// A HEAD: the head a GET would have carried, and no body by definition.
 pub fn respond_head(
     stream: &mut TcpStream,
     length: u64,
     extra: &[(&str, String)],
 ) -> std::io::Result<()> {
-    let head = format!(
-        "HTTP/1.1 200 OK\r\n{}",
-        common_headers("application/octet-stream", length, "no-store", extra)
-    );
-    stream.write_all(head.as_bytes())?;
+    respond_streaming(stream, 200, "application/octet-stream", length, extra)?;
     stream.flush()
 }
 
