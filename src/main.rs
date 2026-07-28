@@ -10,6 +10,7 @@
 #[macro_use]
 mod log;
 
+mod alert;
 mod app;
 mod cache;
 mod chunks;
@@ -188,9 +189,18 @@ fn main() {
     {
         // A stale-but-complete web root still boots, so a failed refresh is
         // only fatal when the client is not on disk at all.
-        note!("[gwnative] patch sync failed: {e}");
-        if !missing.is_empty() {
-            std::process::exit(1);
+        if missing.is_empty() {
+            note!("[gwnative] patch sync failed: {e}");
+        } else {
+            alert::fatal(
+                !headless && !force_sync,
+                "Guild Wars could not be installed",
+                &format!(
+                    "The client files could not be downloaded, and there is no \
+                     complete copy on this Mac to fall back to. Check the network \
+                     connection and open Guild Wars again.\n\n{e}"
+                ),
+            );
         }
     }
     if force_sync {
@@ -263,7 +273,7 @@ fn main() {
     let settings = Arc::new(settings::Store::open(support_dir().join("settings.json")));
 
     let token = session_token();
-    let loopback = server::spawn(
+    let loopback = match server::spawn(
         root.clone(),
         snapshot,
         recorder,
@@ -271,8 +281,20 @@ fn main() {
         settings,
         generations,
         token.clone(),
-    )
-    .expect("bind loopback");
+    ) {
+        Ok(loopback) => loopback,
+        // Nothing downstream has an answer to this: the client is a page, and
+        // without an origin to serve it from there is no client. `force_sync`
+        // has already returned by here, so the only run with a terminal left is
+        // the headless one.
+        Err(e) => alert::fatal(
+            !headless,
+            "Guild Wars could not start",
+            &format!(
+                "The local address the game is served from could not be opened.\n\n{e}"
+            ),
+        ),
+    };
     let url = format!("http://{}/index.html", loopback.addr);
     note!("[gwnative] serving {} at {}", root.display(), url);
     // The windowed app keeps its token to itself — it reaches the page over the

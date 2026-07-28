@@ -24,9 +24,70 @@ const POLL_MS = 1000;
 // let the player play, not to hold the screen on a number that stopped moving.
 const POLL_FAILURES_TOLERATED = 3;
 
+// A rate is averaged over several seconds rather than taken from the last poll.
+// Chunks land in bursts of sixteen parallel fetches finishing at once, so a
+// one-second difference swings between 0 and 200 MB/s while the actual download
+// is steady — and a number that flickers like that is one nobody can read.
+const RATE_WINDOW_MS = 12_000;
+// Below this the window is too short for the burst pattern to average out, so
+// there is no honest rate to show yet.
+const RATE_FLOOR_MS = 3_000;
+
 const el = (id) => document.getElementById(id);
 const headers = () => ({ 'X-Gwnative-Token': window.__gwnativeToken ?? '' });
 const gb = (bytes) => (bytes / 1e9).toFixed(1);
+
+/**
+ * Bytes per second across a window of samples, or null when the samples cannot
+ * support a figure — too short a span, or nothing moved in it.
+ *
+ * A stall answers null rather than 0. Zero is a number, and a number invites
+ * dividing by it; "no rate" is the truth and it leaves the line alone.
+ *
+ * @param {{ at: number, bytes: number }[]} samples oldest first
+ */
+export function rate(samples) {
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  if (!first || !last) return null;
+  const span = last.at - first.at;
+  if (span < RATE_FLOOR_MS) return null;
+  const moved = last.bytes - first.bytes;
+  return moved > 0 ? (moved / span) * 1000 : null;
+}
+
+/**
+ * How long the rest will take, in the words a person would use.
+ *
+ * Rounded hard on purpose: an estimate from a rate that swings is accurate to
+ * a couple of minutes at best, and "about 12 minutes left" claims exactly that
+ * much where "11:47" would claim to the second and be wrong every second.
+ */
+export function remaining(bytesLeft, bytesPerSecond) {
+  if (!bytesPerSecond || bytesLeft <= 0) return null;
+  const minutes = Math.round(bytesLeft / bytesPerSecond / 60);
+  if (minutes < 1) return 'less than a minute left';
+  if (minutes === 1) return 'about a minute left';
+  if (minutes < 60) return `about ${minutes} minutes left`;
+  const hours = Math.round(minutes / 60);
+  return hours === 1 ? 'about an hour left' : `about ${hours} hours left`;
+}
+
+/**
+ * The line under the bar: how far along, how fast, how much longer.
+ *
+ * Everything after the first clause is dropped when it cannot be said honestly,
+ * so the line shortens at the start of a download and at a stall rather than
+ * showing a placeholder where a figure should be.
+ */
+export function progressLine(bytes, totalBytes, samples) {
+  const line = [`${gb(bytes)} of ${gb(totalBytes)} GB`];
+  const speed = rate(samples);
+  if (speed) line.push(`${(speed / 1e6).toFixed(0)} MB/s`);
+  const left = remaining(totalBytes - bytes, speed);
+  if (left) line.push(left);
+  return line.join(' · ');
+}
 
 /** `{ cached, total, fetched, running, chunkSize }`, or a throw. */
 async function poll() {
@@ -157,9 +218,12 @@ export async function resolveDataStrategy(snapshotBytes, { log, save, strategy }
     return;
   }
 
-  // Downloading. The sweep is a host-side background walk at Utility QoS, so it
-  // yields to whatever the client is doing — which is what makes "play now"
-  // honest rather than a way of quietly abandoning the download.
+  // Downloading. Nothing below this point boots the client until the player
+  // presses Play now or the sweep finishes, so for as long as this bar is the
+  // only thing on screen the host runs the sweep as the interactive path. The
+  // moment a first frame lands it drops to Utility and yields to the client —
+  // which is what makes "play now" honest rather than a way of quietly
+  // abandoning the download. See `ChunkStore::fetch_class`.
   el('launcher-title').textContent = 'Downloading Guild Wars';
   el('launcher-text').textContent =
     'This runs in the background. You can start playing at any point and it ' +
@@ -169,10 +233,17 @@ export async function resolveDataStrategy(snapshotBytes, { log, save, strategy }
 
   const fill = el('launcher-rail-fill');
   const detail = el('launcher-detail');
-  const show = (progress) => {
+  // Trimmed to the window on every sample, so the rate is always over the last
+  // few seconds of this download rather than over all of it: a player who
+  // walks into another room and comes back wants to know what the connection
+  // is doing now, not what it averaged while they were away.
+  const samples = [];
+  const show = (progress, at = performance.now()) => {
     const bytes = Math.min(progress.cached * progress.chunkSize, snapshotBytes);
+    samples.push({ at, bytes });
+    while (samples.length > 1 && at - samples[0].at > RATE_WINDOW_MS) samples.shift();
     fill.style.width = `${((progress.cached / progress.total) * 100).toFixed(1)}%`;
-    detail.textContent = `${gb(bytes)} of ${gb(snapshotBytes)} GB`;
+    detail.textContent = progressLine(bytes, snapshotBytes, samples);
   };
   show(info);
 
