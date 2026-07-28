@@ -25,6 +25,7 @@
 //! of a request the host made, and a page that could write it could tell this
 //! build a check had just happened and never be asked to make another.
 
+use std::cmp::Reverse;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -464,7 +465,8 @@ fn prune_backups(path: &Path) {
             Some((stamp, entry.path()))
         })
         .collect();
-    backups.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+    // Newest first, so `skip` below keeps the most recent and deletes the tail.
+    backups.sort_unstable_by_key(|(stamp, _)| Reverse(*stamp));
     for (_, stale) in backups.into_iter().skip(CORRUPT_BACKUPS_KEPT) {
         let _ = fs::remove_file(stale);
     }

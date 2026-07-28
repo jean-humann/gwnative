@@ -1,5 +1,12 @@
 [toolchain]
-channel = "stable"
+# An exact version, not "stable". A floating channel means the toolchain here
+# and the toolchain on a fresh runner are whatever each happened to install, and
+# the first CI run of this project failed on a clippy lint that did not exist in
+# the 1.90 this machine was still on — a red build about nothing anybody wrote.
+# Pinned, a compiler upgrade is a commit: it lands with whatever it newly
+# objects to already fixed, rather than arriving on a Tuesday because Rust
+# released. `rustup update` no longer moves it; editing this line does.
+channel = "1.97.1"
 components = ["rustfmt", "clippy"]
 # The second triple is the companion module `build.rs` compiles; see
 # `src/companion-kernel/lib.rs`. Listed here so a fresh checkout installs it
