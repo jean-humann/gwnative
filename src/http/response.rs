@@ -130,18 +130,14 @@ pub fn respond(
     body: &[u8],
     extra: &[(&str, String)],
 ) -> std::io::Result<()> {
-    let head = format!(
-        "HTTP/1.1 {code} {}\r\n{}",
-        reason(code),
-        common_headers(content_type, body.len() as u64, "no-store", extra)
-    );
-    stream.write_all(head.as_bytes())?;
+    respond_streaming(stream, code, content_type, body.len() as u64, extra)?;
     stream.write_all(body)?;
     stream.flush()
 }
 
 /// The head of a response whose body is written separately. Used where the body
-/// is streamed as it is produced rather than assembled first.
+/// is streamed as it is produced rather than assembled first — and by
+/// [`respond`], whose body simply happens to be ready.
 pub fn respond_streaming(
     stream: &mut TcpStream,
     code: u16,
