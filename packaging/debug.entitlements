@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Local builds only. scripts/bundle passes this file when GWNATIVE_RELEASE is
+  unset and passes nothing at all when it is set, so a published build carries
+  no entitlements whatsoever.
+
+  The hardened runtime is on for both, and one of the things it takes away is
+  the right of another process to attach to this one. That is correct for a
+  build someone downloads and wrong for the one on the machine it was built on:
+  `sample`, `leaks`, Instruments and lldb all need it, and they are how this
+  project's frame times and memory figures are arrived at.
+
+  Nothing else belongs here. There is no JIT entitlement because the JavaScript
+  that needs one runs in WebKit's WebContent process under Apple's signature,
+  and no keychain group because the saved login is this application's own item,
+  reached by a signature the hardened runtime does not change.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.get-task-allow</key>
+	<true/>
+</dict>
+</plist>

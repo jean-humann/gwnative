@@ -78,9 +78,39 @@ if [ -z "$identity" ]; then
 else
 	# --identifier is redundant with CFBundleIdentifier and passed anyway, so
 	# that a plist edit cannot silently change which application the keychain
-	# thinks is asking. No --options runtime: the hardened runtime buys nothing
-	# without notarization, and this is not distributed.
-	codesign --force --sign "$identity" --identifier com.gwnative.app "$app" 2>&1 |
+	# thinks is asking.
+	#
+	# --options runtime on every bundle, not only on the released one. The
+	# hardened runtime is a precondition for notarization, and it is also a set
+	# of things the process is no longer allowed to do — loading a library
+	# nobody signed, being attached to by a debugger, honouring DYLD_*. Turning
+	# it on only at release would mean the first build that runs under those
+	# rules is the one nobody gets to test. No entitlements go with it: the only
+	# hardened-runtime exception this application could want is JIT, and the
+	# JavaScript that needs one runs in WebKit's own WebContent process under
+	# Apple's signature rather than in this one.
+	#
+	# The two things that differ between a bundle for here and a bundle for
+	# other people, and they differ for the same reason: both are about who is
+	# allowed to look inside the process.
+	#
+	# --timestamp costs a round trip to Apple's server and fails outright
+	# without a network, so a local build does not ask for one; a notarized
+	# signature must have one, and must keep working after the certificate
+	# expires, which is the whole point of countersigning it.
+	#
+	# packaging/debug.entitlements is get-task-allow and nothing else — without
+	# it the hardened runtime refuses `sample`, `leaks` and Instruments, which
+	# is most of how this project is measured, and the dSYM copied out below
+	# would have nothing to symbolicate. Notarization rejects that entitlement,
+	# as it should: it is permission to be read by any process the user runs.
+	if [ -n "$GWNATIVE_RELEASE" ]; then
+		set -- --timestamp
+	else
+		set -- --timestamp=none --entitlements packaging/debug.entitlements
+	fi
+	codesign --force --sign "$identity" --identifier com.gwnative.app \
+		--options runtime "$@" "$app" 2>&1 |
 		sed 's/^/[bundle] /' >&2
 	codesign --verify --strict "$app"
 fi
