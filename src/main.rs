@@ -79,7 +79,11 @@ fn main() {
     keychain::check_identity();
 
     let root = paths::web_root();
-    let generations = install_client(&root, force_sync, windowed);
+    // One client and one manifest, for everything below that needs either.
+    let client = patch::Client::from_env();
+    let manifest = load_manifest(&client, force_sync);
+
+    let generations = install_client(&root, &client, manifest.as_ref(), force_sync, windowed);
     if force_sync {
         return;
     }
@@ -88,7 +92,15 @@ fn main() {
     // later launch gets a real check. No-op after the first time.
     generations.adopt(&root, &patch::artifacts());
 
-    let snapshot = open_and_warm_snapshot();
+    let snapshot = match manifest {
+        Ok(manifest) => open_and_warm_snapshot(client, manifest),
+        // Without a manifest there is no chunk list, so there is no snapshot —
+        // the same outcome as failing to open one, reported the same way.
+        Err(e) => {
+            note!("[gwnative] snapshot unavailable: {e}");
+            None
+        }
+    };
 
     // Started before the window so that whatever the shell costs to build is
     // in the record too.
@@ -210,6 +222,29 @@ fn hold_the_only_instance(windowed: bool) -> instance::Instance {
     }
 }
 
+/// The manifest this launch runs on, and the decision about how old it may be.
+///
+/// One manifest for the whole launch. Two things need one — [`install_client`],
+/// to know which build the service is offering, and the chunk store, for the
+/// snapshot's chunk list — and each used to fetch its own, so a launch that
+/// synced asked for the same 1.2 MB document twice.
+///
+/// A launch takes the copy on disk and checks it against the service afterwards,
+/// off the path to the window; see [`patch::Client::manifest`]. The `sync`
+/// command does not, because it is an explicit request for whatever is on offer
+/// now.
+fn load_manifest(client: &patch::Client, force_sync: bool) -> error::Result<manifest::Manifest> {
+    let dir = paths::support_dir();
+    if force_sync {
+        return client.fetch_manifest(&dir);
+    }
+    let (manifest, source) = client.manifest(&dir)?;
+    if source == patch::Source::Disk {
+        revalidate_manifest();
+    }
+    Ok(manifest)
+}
+
 /// Make the web root hold a client this build can run, and return the record
 /// that says so.
 ///
@@ -217,7 +252,19 @@ fn hold_the_only_instance(windowed: bool) -> instance::Instance {
 /// launch that never reported a first frame is one this build cannot run, and
 /// the set it replaced is still stashed. See `generation` for why presence was
 /// never enough on its own.
-fn install_client(root: &Path, force_sync: bool, windowed: bool) -> Arc<generation::Store> {
+///
+/// Three things ask for a sync, and until the manifest was in hand here only two
+/// could: the `sync` command, an artifact that is missing or has rotted, and the
+/// service offering a build that is not the one installed. Without that last one
+/// a published patch was picked up when a file *rotted* rather than when it
+/// *shipped*, which is to say by accident.
+fn install_client(
+    root: &Path,
+    client: &patch::Client,
+    manifest: Result<&manifest::Manifest, &error::Error>,
+    force_sync: bool,
+    windowed: bool,
+) -> Arc<generation::Store> {
     let generations = Arc::new(generation::Store::open(
         paths::support_dir().join("generations"),
     ));
@@ -228,14 +275,40 @@ fn install_client(root: &Path, force_sync: bool, windowed: bool) -> Arc<generati
         );
     }
 
+    // The build on offer, named before a byte of it is downloaded: `identify`
+    // works from the sizes and chunk hashes the manifest already carries, and on
+    // a warm launch that manifest came off the disk. So a launch with nothing to
+    // do learns there is nothing to do without making a request.
+    //
+    // Both ways of not having one collapse to a string, because both are only
+    // ever displayed: either there is no manifest, or there is one that does not
+    // describe this client, and either way what this launch has is the client on
+    // disk.
+    let plan = manifest.map_err(|e| e.to_string()).and_then(|manifest| {
+        generation::identify(manifest, &patch::artifacts())
+            .map(|offered| (manifest, offered))
+            .map_err(|e| e.to_string())
+    });
+
     let missing = generations.unsound(root, &patch::artifacts());
-    if (force_sync || !missing.is_empty())
-        && let Err(e) = sync(root, &missing, &generations)
-    {
+    let outdated = plan
+        .as_ref()
+        .is_ok_and(|(_, offered)| generations.stale(offered));
+    if !(force_sync || !missing.is_empty() || outdated) {
+        return generations;
+    }
+
+    let failure = match &plan {
+        Ok((manifest, offered)) => sync(root, &missing, &generations, client, manifest, offered)
+            .err()
+            .map(|e| e.to_string()),
+        Err(e) => Some(e.clone()),
+    };
+    if let Some(detail) = failure {
         // A stale-but-complete web root still boots, so a failed refresh is
         // only fatal when the client is not on disk at all.
         if missing.is_empty() {
-            note!("[gwnative] patch sync failed: {e}");
+            note!("[gwnative] patch sync failed: {detail}");
         } else {
             alert::fatal(
                 windowed,
@@ -243,7 +316,7 @@ fn install_client(root: &Path, force_sync: bool, windowed: bool) -> Arc<generati
                 &format!(
                     "The client files could not be downloaded, and there is no \
                      complete copy on this Mac to fall back to. Check the network \
-                     connection and open Guild Wars again.\n\n{e}"
+                     connection and open Guild Wars again.\n\n{detail}"
                 ),
             );
         }
@@ -256,8 +329,11 @@ fn install_client(root: &Path, force_sync: bool, windowed: bool) -> Arc<generati
 /// Gw.snapshot is 4.2 GB and a session touches a fraction of it, so it is served
 /// as a virtual ranged file rather than downloaded. Without a store the shell
 /// still opens; only the game data is unavailable.
-fn open_and_warm_snapshot() -> Option<Arc<chunks::ChunkStore>> {
-    match open_snapshot() {
+fn open_and_warm_snapshot(
+    client: patch::Client,
+    manifest: manifest::Manifest,
+) -> Option<Arc<chunks::ChunkStore>> {
+    match chunks::ChunkStore::open(client, manifest, cache::default_cache_dir()).map(Arc::new) {
         Ok(store) => {
             note!(
                 "[gwnative] snapshot: {:.1} GB in {} KiB chunks, on demand",
@@ -347,16 +423,6 @@ fn run_windowed(loopback: &server::Loopback, token: &str, template_save: &str) {
     window::flush();
 }
 
-fn open_snapshot() -> error::Result<Arc<chunks::ChunkStore>> {
-    let client = patch::Client::from_env();
-    let (manifest, source) = client.manifest(&paths::support_dir())?;
-    if source == patch::Source::Disk {
-        revalidate_manifest();
-    }
-    let store = chunks::ChunkStore::open(client, manifest, cache::default_cache_dir())?;
-    Ok(Arc::new(store))
-}
-
 /// Check the cached manifest against the service, behind the launch.
 ///
 /// Its own client and its own thread, because the point is that nothing waits
@@ -370,10 +436,13 @@ fn revalidate_manifest() {
         qos::set(qos::Class::Utility);
         let client = patch::Client::from_env();
         match client.revalidate(&paths::support_dir()) {
-            // Says what happened, not what it wishes had: the new manifest is
-            // stored and the next launch opens on it, but nothing here re-syncs
-            // the client artifacts. See [`patch::Client::revalidate`].
-            Ok(true) => note!("[gwnative] the service has published a new manifest; stored"),
+            // Storing it is what installs it: the next launch opens on this
+            // manifest, sees it offers a build that is not the one on disk, and
+            // fetches it. See [`patch::Client::revalidate`].
+            Ok(true) => note!(
+                "[gwnative] the service has published a new client build; \
+                 it will be installed at the next launch"
+            ),
             Ok(false) => {}
             // Not an error the player has anything to do about: the app is
             // running the client it already had, which is what it would have
@@ -386,28 +455,29 @@ fn revalidate_manifest() {
 /// Fetch the client, unless the only thing on offer is a build that has already
 /// failed here.
 ///
-/// The rejection check is the reason this fetches the manifest itself rather
-/// than letting `patch::sync_with` do it: the identity of the build being
-/// offered has to be known while declining it still costs nothing.
+/// The manifest and the id of the build it offers both belong to the caller:
+/// naming that build is how the caller decided this was worth calling, and the
+/// rejection check below needs the same name while declining still costs
+/// nothing. Nothing here fetches a manifest — see [`load_manifest`].
 fn sync(
     root: &Path,
     unsound: &[&'static str],
     generations: &generation::Store,
+    client: &patch::Client,
+    manifest: &manifest::Manifest,
+    offered: &str,
 ) -> error::Result<()> {
     if unsound.is_empty() {
-        note!("[gwnative] refreshing client artifacts");
+        note!("[gwnative] installing client build {offered}");
     } else {
         note!(
             "[gwnative] fetching client artifacts: {}",
             unsound.join(", ")
         );
     }
-    let client = patch::Client::from_env();
-    let manifest = client.fetch_manifest()?;
     let names = patch::artifacts();
-    let offered = generation::identify(&manifest, &names)?;
 
-    if generations.rejected(&offered) {
+    if generations.rejected(offered) {
         if unsound.is_empty() {
             note!(
                 "[gwnative] the service still offers client build {offered}, which never reached \
@@ -425,11 +495,12 @@ fn sync(
     }
 
     generations.stash(root, &names);
-    let fetched = patch::sync_with(&client, &manifest, root)?;
+    let fetched =
+        patch::sync_with(client, manifest, root).inspect_err(|_| generations.forget_stash())?;
     for (name, bytes) in fetched {
         note!("[gwnative]   {name} ({bytes} bytes)");
     }
-    generations.record(&offered, root, &names);
+    generations.record(offered, root, &names);
     Ok(())
 }
 
