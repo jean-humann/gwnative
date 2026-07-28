@@ -96,10 +96,23 @@ impl Client {
         )
     }
 
-    pub fn fetch_manifest(&self) -> Result<Manifest> {
-        let url = format!("{}/manifest.json", self.root);
-        let bytes = self.fetch(&url, MAX_MANIFEST_BYTES)?;
-        Manifest::parse(&bytes)
+    /// The manifest the service is offering now, stored for the next launch.
+    ///
+    /// What [`Client::manifest`] falls back to, and what the `sync` command
+    /// calls directly: an explicit request to install the client is a request
+    /// for whatever is on offer at that moment, so it is the one caller for
+    /// which reading the cache — being deliberately a launch behind, everywhere
+    /// else — would be the wrong answer. It still *writes* the cache, because
+    /// the artifacts it is about to install come from these bytes and the next
+    /// launch has to open on the manifest that describes them.
+    pub fn fetch_manifest(&self, dir: &Path) -> Result<Manifest> {
+        let fetched = self.fetch_with(&self.manifest_url(), MAX_MANIFEST_BYTES, None)?;
+        let bytes = fetched.body.expect("an unconditional GET returns a body");
+        // Parsed before it is stored: a body that cannot be read is not a copy
+        // worth booting the next launch from.
+        let manifest = Manifest::parse(&bytes)?;
+        write_cache(dir, &self.root, fetched.validator.as_deref(), &bytes);
+        Ok(manifest)
     }
 
     fn manifest_url(&self) -> String {
@@ -125,18 +138,12 @@ impl Client {
     ///
     /// The caller revalidates off the launch path. See [`Client::revalidate`].
     pub fn manifest(&self, dir: &Path) -> Result<(Manifest, Source)> {
-        if let Some((_, bytes)) = read_cache(dir)
+        if let Some((_, bytes)) = read_cache(dir, &self.root)
             && let Ok(manifest) = Manifest::parse(&bytes)
         {
             return Ok((manifest, Source::Disk));
         }
-        let fetched = self.fetch_with(&self.manifest_url(), MAX_MANIFEST_BYTES, None)?;
-        let bytes = fetched.body.expect("an unconditional GET returns a body");
-        // Parsed before it is stored: a body that cannot be read is not a copy
-        // worth booting the next launch from.
-        let manifest = Manifest::parse(&bytes)?;
-        write_cache(dir, fetched.validator.as_deref(), &bytes);
-        Ok((manifest, Source::Service))
+        Ok((self.fetch_manifest(dir)?, Source::Service))
     }
 
     /// Refresh the cached manifest if the service has a different one, and say
@@ -151,15 +158,15 @@ impl Client {
     /// chunk list underneath a live game would pair a running client with a
     /// snapshot it was not built against.
     ///
-    /// What it does *not* do is install anything. `main` syncs the client
-    /// artifacts only when one of them is missing or fails its hash, so a
-    /// manifest that changed leaves the next launch opening on the new chunk
-    /// list with the old artifacts still on disk — which is what every launch
-    /// did before this cache existed, since each one fetched a fresh manifest
-    /// and none of them re-synced either. Storing it here is what makes closing
-    /// that gap cheap; it does not close it.
+    /// What it does *not* do is install anything, and it does not have to:
+    /// storing the manifest is what installs it, one launch later. The next
+    /// launch opens on these bytes, `install_client` reads the build they offer
+    /// with [`crate::generation::identify`], and a build that is not the one on
+    /// disk is fetched then — with the whole comparison done from a file that
+    /// was already going to be read. That is why the check runs here, behind a
+    /// launch that is already serving, instead of in front of one that is not.
     pub fn revalidate(&self, dir: &Path) -> Result<bool> {
-        let Some((known, _)) = read_cache(dir) else {
+        let Some((known, _)) = read_cache(dir, &self.root) else {
             return Ok(false);
         };
         let fetched =
@@ -170,11 +177,11 @@ impl Client {
         // A service with no ETag answers every conditional request in full, so
         // compare the bytes rather than trusting the 200: without this, a
         // validator-less service would look like it patched on every launch.
-        if read_cache(dir).is_some_and(|(_, cached)| cached == bytes) {
+        if read_cache(dir, &self.root).is_some_and(|(_, cached)| cached == bytes) {
             return Ok(false);
         }
         Manifest::parse(&bytes)?;
-        write_cache(dir, fetched.validator.as_deref(), &bytes);
+        write_cache(dir, &self.root, fetched.validator.as_deref(), &bytes);
         Ok(true)
     }
 
@@ -383,44 +390,66 @@ pub enum Source {
     Disk,
 }
 
-/// The cached manifest: its validator, a newline, then the bytes that validator
-/// names.
+/// The cached manifest: the service it came from, its validator, then the bytes
+/// that validator names, each on its own line.
 ///
-/// One file rather than two, and that is the whole reason it has a format at
+/// One file rather than three, and that is the whole reason it has a format at
 /// all. Split across a body file and an ETag file, a crash between the two
 /// writes leaves a validator naming bytes that are no longer there — and the
 /// next launch would send it as `If-None-Match`, be told "still fresh", and keep
-/// a body the service never associated with that tag. Written together, the two
+/// a body the service never associated with that tag. Written together, they
 /// cannot disagree: either the rename lands or it does not.
 ///
-/// The validator is a header value and so cannot contain a newline; the split is
-/// on the first one only, which leaves the manifest's own bytes untouched.
+/// The root is there because everything after it is only true of that root. An
+/// ETag means nothing to a service that did not issue it, and `GWNATIVE_PATCH_ROOT`
+/// exists precisely so a run can be pointed somewhere else — without this, doing
+/// so would boot the app on the other service's manifest and offer the other
+/// service's ETag back to it.
+///
+/// Neither a URL nor a header value can contain a newline, so splitting on the
+/// first two leaves the manifest's own bytes untouched.
 const CACHE_FILE: &str = "manifest.cache";
 
-/// The cached validator — `None` if the service published none — and the bytes.
+/// The cached validator — `None` if the service published none — and the bytes,
+/// if what is stored was stored for `root`.
 ///
 /// Every failure here reads as "no cache": absent, truncated by a full disk,
-/// written by a version that spelled it differently. The caller's answer to all
-/// of those is the same, and it is the answer that was correct before this cache
-/// existed — fetch it.
-fn read_cache(dir: &Path) -> Option<(Option<String>, Vec<u8>)> {
+/// left by a run pointed at another service, written by a version that spelled
+/// it differently. The caller's answer to all of those is the same, and it is
+/// the answer that was correct before this cache existed — fetch it.
+fn read_cache(dir: &Path, root: &str) -> Option<(Option<String>, Vec<u8>)> {
     let raw = fs::read(dir.join(CACHE_FILE)).ok()?;
-    let split = raw.iter().position(|b| *b == b'\n')?;
-    let validator = std::str::from_utf8(&raw[..split]).ok()?;
-    let validator = (!validator.is_empty()).then(|| validator.to_owned());
-    Some((validator, raw[split + 1..].to_vec()))
+    let (stored, rest) = split_line(&raw)?;
+    if stored != root {
+        return None;
+    }
+    let (validator, bytes) = split_line(rest)?;
+    Some((
+        (!validator.is_empty()).then(|| validator.to_owned()),
+        bytes.to_vec(),
+    ))
 }
 
-/// Store `bytes` and the validator that names them, atomically.
+/// Everything before the first newline as text, and everything after it as
+/// bytes. `None` when there is no newline, or when what precedes it is not text.
+fn split_line(raw: &[u8]) -> Option<(&str, &[u8])> {
+    let split = raw.iter().position(|b| *b == b'\n')?;
+    Some((std::str::from_utf8(&raw[..split]).ok()?, &raw[split + 1..]))
+}
+
+/// Store `bytes`, the service they came from and the validator that names them,
+/// atomically.
 ///
 /// Failures are logged and dropped. What a failed write costs is one launch
 /// that fetches the manifest the old way, which is the behaviour this replaced
 /// and is not worth refusing to start over.
-fn write_cache(dir: &Path, validator: Option<&str>, bytes: &[u8]) {
+fn write_cache(dir: &Path, root: &str, validator: Option<&str>, bytes: &[u8]) {
     let path = dir.join(CACHE_FILE);
     let tmp = temp_path(&path);
     let write = || -> std::io::Result<()> {
         let mut file = fs::File::create(&tmp)?;
+        file.write_all(root.as_bytes())?;
+        file.write_all(b"\n")?;
         file.write_all(validator.unwrap_or_default().as_bytes())?;
         file.write_all(b"\n")?;
         file.write_all(bytes)?;
@@ -560,8 +589,8 @@ mod tests {
             (Some("\"leading\""), &b"\n{\"files\":{}}"[..]),
             (None, &b""[..]),
         ] {
-            write_cache(&dir.0, validator, body);
-            let (stored, bytes) = read_cache(&dir.0).expect("just written");
+            write_cache(&dir.0, PATCH_ROOT, validator, body);
+            let (stored, bytes) = read_cache(&dir.0, PATCH_ROOT).expect("just written");
             assert_eq!(stored.as_deref(), validator);
             assert_eq!(bytes, body);
         }
@@ -573,16 +602,35 @@ mod tests {
     #[test]
     fn an_unreadable_cache_is_no_cache() {
         let dir = TempDir::new("manifest-cache-bad");
-        assert!(read_cache(&dir.0).is_none());
+        assert!(read_cache(&dir.0, PATCH_ROOT).is_none());
+
+        // One newline where the format wants two: a root and no validator, so
+        // there is no body either.
+        fs::write(dir.0.join(CACHE_FILE), format!("{PATCH_ROOT}\n")).unwrap();
+        assert!(read_cache(&dir.0, PATCH_ROOT).is_none());
 
         // No newline anywhere: there is no validator and no body, only bytes.
         fs::write(dir.0.join(CACHE_FILE), b"no newline here").unwrap();
-        assert!(read_cache(&dir.0).is_none());
+        assert!(read_cache(&dir.0, PATCH_ROOT).is_none());
 
-        // A validator is a header value, so it is ASCII. Bytes that are not
-        // valid UTF-8 mean this file is not one of ours.
-        fs::write(dir.0.join(CACHE_FILE), b"\xff\xfe\n{}").unwrap();
-        assert!(read_cache(&dir.0).is_none());
+        // A URL is ASCII, and so is a validator. Bytes that are not valid UTF-8
+        // mean this file is not one of ours.
+        fs::write(dir.0.join(CACHE_FILE), b"\xff\xfe\n\n{}").unwrap();
+        assert!(read_cache(&dir.0, PATCH_ROOT).is_none());
+    }
+
+    /// The cache belongs to the service that filled it. `GWNATIVE_PATCH_ROOT`
+    /// exists so a run can be pointed at a local one, and without this the run
+    /// after it would boot on the local manifest and offer the local ETag back
+    /// to ArenaNet.
+    #[test]
+    fn a_cache_written_for_one_service_is_not_read_for_another() {
+        let dir = TempDir::new("manifest-cache-root");
+        write_cache(&dir.0, "http://127.0.0.1:8080", Some("\"local\""), b"{}");
+
+        assert!(read_cache(&dir.0, PATCH_ROOT).is_none());
+        assert!(read_cache(&dir.0, "http://127.0.0.1:8081").is_none());
+        assert!(read_cache(&dir.0, "http://127.0.0.1:8080").is_some());
     }
 
     #[test]

@@ -224,6 +224,30 @@ impl Store {
             .collect()
     }
 
+    /// Whether the build on offer is one this Mac has not installed.
+    ///
+    /// The patch check, and the only one that notices a build shipping rather
+    /// than a file rotting: [`Store::unsound`] compares the disk against the
+    /// record, so both agreeing on a client six patches old is a clean answer.
+    /// This compares the record against the service.
+    ///
+    /// True when there is no record at all, and true for the client [adopted]
+    /// from the disk — `ADOPTED` is not a build id, so that client is known to
+    /// be intact and not known to be current, and the way to make it current is
+    /// to install what is on offer. That is one download of three small files,
+    /// once, after which the record names a real build and this answers false
+    /// until the service publishes another.
+    ///
+    /// [adopted]: Store::adopt
+    pub fn stale(&self, offered: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .is_none_or(|current| current.id != offered)
+    }
+
     /// Whether this build has already failed to reach a first frame here.
     pub fn rejected(&self, id: &str) -> bool {
         self.state.lock().unwrap().rejected.iter().any(|r| r == id)
@@ -307,19 +331,63 @@ impl Store {
         self.save(&state);
     }
 
-    /// Record a freshly written set as current, unproven.
+    /// Drop the stash, after a sync that replaced nothing.
+    ///
+    /// [`Store::stash`] runs before the download, because afterwards there is
+    /// nothing left to copy — so a download that fails leaves a stashed copy of
+    /// the set that is still installed. Nothing can ever use it: [`Store::record`]
+    /// was not reached, so the current set is still proven, and [`Store::roll_back`]
+    /// only ever undoes an unproven one. What is left is the size of a client in
+    /// Application Support and a record claiming a rollback target that would
+    /// restore what is already there.
+    pub fn forget_stash(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.previous.is_none() {
+            return;
+        }
+        state.previous = None;
+        self.save(&state);
+        let _ = fs::remove_dir_all(self.dir.join("previous"));
+    }
+
+    /// Record a freshly written set as current, unproven — unless it is the set
+    /// that was already here.
+    ///
+    /// Writing the same build again is not a new build, and two ordinary things
+    /// do it: the `sync` command, and repairing an artifact that rotted. Calling
+    /// either of those unproven arms a rollback whose target is a copy of the
+    /// same set, so an app that then dies before its first frame restores what
+    /// was already on disk and refuses, by name, the build it just restored —
+    /// after which the service goes on offering it and nothing will install it.
+    /// A set that has booted here has not stopped having booted here.
     pub fn record(&self, id: &str, root: &Path, names: &[&'static str]) {
         let Some(artifacts) = weigh(root, names) else {
             return;
         };
         let mut state = self.state.lock().unwrap();
+        let same = state
+            .current
+            .as_ref()
+            .is_some_and(|current| current.id == id);
         state.current = Some(Generation {
             id: id.to_owned(),
             artifacts,
         });
-        state.proven = false;
+        state.proven = same && state.proven;
+        if state.proven {
+            // And with nothing to undo, nothing to undo it with. See
+            // [`Store::forget_stash`], which this is the other half of.
+            state.previous = None;
+        }
         self.save(&state);
-        note!("[generation] client build {id} installed, not yet proven");
+        if state.proven {
+            note!("[generation] client build {id} reinstalled; it had already booted here");
+        } else {
+            note!("[generation] client build {id} installed, not yet proven");
+        }
+        if state.previous.is_none() {
+            let _ = fs::remove_dir_all(self.dir.join("previous"));
+        }
     }
 
     /// Take an installation that predates the record as the current set.
@@ -441,6 +509,30 @@ mod tests {
         }
     }
 
+    /// A manifest offering [`NAMES`], each one chunk long.
+    ///
+    /// The two knobs are the two things [`identify`] reads besides the name: how
+    /// long each artifact is, and what its chunks hash to.
+    fn offering(sizes: [u64; 2], chunks: [char; 2]) -> Manifest {
+        let files: Vec<String> = NAMES
+            .iter()
+            .zip(sizes)
+            .zip(chunks)
+            .map(|((name, size), chunk)| {
+                let hash: String = std::iter::repeat_n(chunk, 64).collect();
+                format!(r#"{{"name":"{name}","size":{size},"chunkHashes":["{hash}"]}}"#)
+            })
+            .collect();
+        Manifest::parse(
+            format!(
+                r#"{{"compressionMode":"none","chunkSize":64,"files":[{}]}}"#,
+                files.join(",")
+            )
+            .as_bytes(),
+        )
+        .expect("a well-formed manifest")
+    }
+
     /// A store with `flavour` installed and proven, ready to be replaced.
     fn proven(dir: PathBuf, root: &Path, flavour: &str) -> Store {
         write_client(root, flavour);
@@ -560,6 +652,67 @@ mod tests {
         );
     }
 
+    /// The other half of that sequence: the sync that never gets past the
+    /// stash. A download can fail on any of the artifacts, and what it leaves
+    /// behind must not look like a build worth going back to.
+    #[test]
+    fn a_sync_that_downloads_nothing_leaves_nothing_stashed() {
+        let temp = TempDir::new("generation-failed-sync");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "old");
+
+        store.stash(&root, &NAMES);
+        assert!(state.join("previous").is_dir());
+
+        // The download failed here — nothing was overwritten and nothing was
+        // recorded, so the set on disk is still the proven one.
+        store.forget_stash();
+        assert!(
+            !state.join("previous").exists(),
+            "and nothing on disk either"
+        );
+
+        let store = Store::open(state);
+        assert_eq!(
+            store.roll_back(&root),
+            None,
+            "there was never anything to undo"
+        );
+        assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
+    /// Installing the build that is already here is not a new build. The `sync`
+    /// command does it, and so does repairing an artifact that rotted — and
+    /// both used to arm a rollback against a copy of the same set, which on the
+    /// next bad launch refused the build it had just restored.
+    #[test]
+    fn reinstalling_the_current_build_does_not_unprove_it() {
+        let temp = TempDir::new("generation-reinstall");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "shipped");
+
+        // Stash, write, record — with the id that is already current, because
+        // the service is offering exactly what is installed.
+        store.stash(&root, &NAMES);
+        write_client(&root, "shipped");
+        store.record("shipped", &root, &NAMES);
+        assert!(
+            !state.join("previous").exists(),
+            "a stash of the current set is not a rollback target"
+        );
+
+        // And now the app dies before ever reaching a frame.
+        let store = Store::open(state);
+        assert_eq!(store.roll_back(&root), None, "there is nothing to undo");
+        assert!(
+            !store.rejected("shipped"),
+            "this build booted here and has not stopped having booted here"
+        );
+        assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
     #[test]
     fn a_first_frame_settles_it() {
         let temp = TempDir::new("generation-prove");
@@ -664,6 +817,71 @@ mod tests {
             fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
             "keeper:Gw.jspi.js",
             "every rollback should land on the one build that ever worked"
+        );
+    }
+
+    /// A manifest names the build it offers from what it already carries, so a
+    /// patch is visible before a byte of it is downloaded. This is the whole
+    /// basis of the check: if two manifests offering different bytes could name
+    /// the same build, a patch would ship and nothing would install it.
+    #[test]
+    fn a_manifest_offering_different_bytes_offers_a_different_build() {
+        let shipped = identify(&offering([16, 16], ['a', 'b']), &NAMES).unwrap();
+
+        // The same manifest again — the ordinary launch, where nothing has
+        // changed and nothing should be fetched.
+        assert_eq!(
+            identify(&offering([16, 16], ['a', 'b']), &NAMES).unwrap(),
+            shipped
+        );
+
+        // Different content at the same length, which is what a patch to one
+        // artifact usually looks like and what a size check cannot see.
+        assert_ne!(
+            identify(&offering([16, 16], ['a', 'c']), &NAMES).unwrap(),
+            shipped
+        );
+
+        // And a different length behind the same chunk hash, which no service
+        // would publish but which must not collide either — the size is in the
+        // digest for exactly this reason.
+        assert_ne!(
+            identify(&offering([16, 32], ['a', 'b']), &NAMES).unwrap(),
+            shipped
+        );
+
+        // Sixteen hex characters, so it can never be mistaken for `ADOPTED`.
+        assert_eq!(shipped.len(), 16);
+        assert!(shipped.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// What turns that id into a download. Until a build has been recorded here,
+    /// the answer is that this Mac has not installed it — including for a client
+    /// that is on the disk and intact, because intact is not the same question.
+    #[test]
+    fn a_build_is_stale_until_it_is_installed() {
+        let temp = TempDir::new("generation-stale");
+        let root = temp.0.join("web");
+        write_client(&root, "shipped");
+        let store = Store::open(temp.0.join("state"));
+
+        // No record at all: the disk is fine and says nothing about provenance.
+        assert!(store.stale("shipped"));
+
+        // Adopting it does not say so either — that records the bytes that are
+        // there, not the build they came from.
+        store.adopt(&root, &NAMES);
+        assert!(
+            store.stale("shipped"),
+            "an adopted client is intact, not identified"
+        );
+        assert!(store.unsound(&root, &NAMES).is_empty());
+
+        store.record("shipped", &root, &NAMES);
+        assert!(!store.stale("shipped"));
+        assert!(
+            store.stale("patched"),
+            "the service published something new"
         );
     }
 }
