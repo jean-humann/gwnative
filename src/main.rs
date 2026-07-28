@@ -33,6 +33,7 @@ mod paths;
 mod proxy;
 mod qos;
 mod relaunch;
+mod release;
 mod renderer;
 #[cfg(test)]
 mod scratch;
