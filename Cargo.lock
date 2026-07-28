@@ -132,6 +132,7 @@ dependencies = [
  "block2",
  "flate2",
  "hex",
+ "libc",
  "md-5",
  "objc2",
  "objc2-app-kit",

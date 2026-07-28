@@ -290,7 +290,7 @@ will have.
 | first frame, worst of four (s)           |        27.8 |        31.1 |
 | CPU seconds, whole tree, 60 s window     |     24 – 40 |     29 – 34 |
 | footprint peak, summed over tree (MiB)   | 1999 – 2114 | 1370 – 1415 |
-| full 4.2 GB download, blank install (s)  |   105 – 106 |    90 – 346 |
+| full 4.2 GB download, blank install (s)  |     87 – 90 |    90 – 346 |
 
 The CPU row counts only runs that reached a frame and then rendered out the
 window, since a launch that never draws spends nothing on drawing — one such
@@ -326,13 +326,25 @@ HTTP/2 origin. What used to stand here, that CFNetwork throttled itself to
 retired it is cheap to repeat: `curl --parallel` over the same URL list, doing
 no hashing and writing to `/dev/null`, reaches 47.0 and 39.4 MiB/s at 8
 requests in flight, 48.3 and 47.7 at 24, and falls back to 36.4 and 41.0 at 48.
-The link underneath reports 529 Mbit/s and 18 ms idle latency, so the ceiling
-belongs to the path and not to either client — and this build already sits on
-it, at 41–46 MiB/s with hashing and disk writes on top. Alternating
-blank-install downloads say the same: 105 and 106 seconds here against 90 and
-346 there. The 346 is not a typo, it is the slow mode above landing on a
-transfer instead of a boot, and it is why that column is a range and not a
-verdict.
+The link underneath reports 529 Mbit/s and 18 ms idle latency, so 47–48 MiB/s
+is the path's own limit and there is no more to ask either client for.
+
+This build used to reach 38 of it, and the missing ten were its own doing.
+Every chunk was written with `File::sync_all`, which on macOS is `F_FULLFSYNC`
+— not "get these bytes to the device" but "device, empty your write cache" —
+and then the containing directory got the same treatment, so two full drive
+barriers per 256 KiB. Writing chunks back to back that costs 6.74 ms each, or
+37 MiB/s, which is exactly where the full download sat; plain `fsync` costs
+0.41 ms and no flush at all costs 0.36. The barrier was the ceiling, and the 48
+fetch threads were queueing at the drive behind it. It is gone. What it bought
+was a chunk surviving a power cut, which this store is the wrong place to pay
+for: chunks are content-addressed, every one is hashed the first time a session
+reads it, and one that fails is unlinked and refetched — so a chunk lost to a
+power cut costs a single 256 KiB request, and that is not worth 2.7× on every
+install. Blank-install downloads now finish in 87 and 90 seconds at 44–46
+MiB/s, against 90 and 346 for the Electron build. The 346 is not a typo; it is
+the slow mode above landing on a transfer instead of a boot, and it is why that
+column is a range rather than a verdict.
 
 **The summed peak** is the row this build loses on its own merits, and it is
 now measured rather than inferred. The client's linear memory is 256 MiB and
