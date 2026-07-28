@@ -273,51 +273,54 @@ than a fixed cost of installing.
 ### What it says, alternating runs, same machine, same hour
 
 Single runs of this benchmark are not quotable — first frame on this build has
-been measured anywhere from 8.7 to 27.8 seconds depending on conditions neither
+been measured anywhere from 8.5 to 15.4 seconds depending on conditions neither
 build controls — so what follows is samples taken alternately, one build then
 the other, never one build's night against the other's.
 
-Both builds have a fast mode and a slow one, they differ by a factor of three,
-and nothing in either decides which a launch gets: across eight interleaved
-runs the slow ones landed in the same ten minutes of wall clock on *both*
-builds, and the fast ones after it. Best and worst are therefore quoted
-separately, because an average over the two modes describes no launch anyone
-will have.
+Both builds have a fast mode and a slow one, and nothing in either decides
+which a launch gets: across four interleaved rounds the slow one landed on
+*both* builds in the same minute. Best, median and worst are therefore all
+quoted, because an average over the two modes describes no launch anyone will
+actually have.
 
-|                                          |    gwnative |    Electron |
-| ---------------------------------------- | ----------: | ----------: |
-| first frame, best of four (s)            |         8.7 |        10.8 |
-| first frame, worst of four (s)           |        27.8 |        31.1 |
-| CPU seconds, whole tree, 60 s window     |     24 – 40 |     29 – 34 |
-| footprint peak, summed over tree (MiB)   | 1999 – 2114 | 1370 – 1415 |
-| full 4.2 GB download, blank install (s)  |     87 – 90 |    90 – 346 |
+|                                          |         gwnative |           Electron |
+| ---------------------------------------- | ---------------: | -----------------: |
+| first frame, best · median · worst (s)   | 8.5 · 9.1 · 15.4 | 10.7 · 11.4 · 14.9 |
+| CPU seconds, whole tree, 60 s window     |          27 – 39 |            15 – 33 |
+| footprint peak, summed over tree (MiB)   |      2107 – 2112 |        1316 – 1412 |
+| full 4.2 GB download, blank install (s)  |          87 – 90 |         90 – 346   |
 
-The CPU row counts only runs that reached a frame and then rendered out the
-window, since a launch that never draws spends nothing on drawing — one such
-run flattered the Electron build with 15.5 seconds and is left out. Frame rate
-is this build's own counter: 6,258 frames in 53.9 seconds, or 116 fps, on a
-120 Hz display. The 60 Hz cap is gone. The Electron build exposes no frame
-counter to the harness, so its rate is not quoted here.
+The CPU row is the one that cannot be normalised, and it should be read that
+way. This build counts its own frames — 6,045 in 53.7 seconds, or 112 fps, on a
+120 Hz display, so the 60 Hz cap is gone — while the Electron build exposes no
+frame counter to the harness. Its lower seconds may be cheaper frames or simply
+fewer of them, and this benchmark cannot tell which.
 
 Where the columns disagree, each now has a measured reason rather than a
 guessed one.
 
-**First frame.** Best case now belongs to this build, 8.7 seconds against
-10.8, and the transport stopped being the story a while ago: fetching moved to
-the OS HTTP/2 stack, the boot set ships as a built-in chunk list the store
-warms before the client asks, and demand reads that once averaged 22 ms now
-average 1.4 ms against the warmed cache. What is left is the spread. A launch
-either walks its startup at roughly 2,200 files per second or at 215, with
-nothing in between, and the slow mode is not waiting on anything this build
-owns — range reads average 1–2 ms in *both* modes, retries are zero, and a slow
-launch records no frames at all. The two plausible culprits were tested rather
-than argued about: `-NSAppSleepDisabled YES` moved the median by 79 ms, and the
-slowest of six runs was the one held frontmost, so neither App Nap nor
-occlusion is it. Nor is the stall confined to boot — one launch reached its
-first frame in 9.0 seconds and then spent 23.4 seconds inside a single frame.
-What puts the cause outside both builds is that the Electron one has the same
-mode and wears it worse: its slowest of four was 31.1 seconds against this
-build's 27.8, in the same ten minutes of wall clock.
+**First frame.** This build now leads three of four interleaved rounds, on the
+best run and on the median alike: 8.5 seconds against 10.7 at best, 9.1 against
+11.4 in the middle. The transport stopped being the story a while ago —
+fetching moved to the OS HTTP/2 stack, the boot set ships as a built-in chunk
+list the store warms before the client asks, and demand reads that once
+averaged 22 ms now average 1.4 ms against the warmed cache — and the most
+recent gain was not in the network at all, but in the drive barrier the next
+paragraph is about. A quick launch writes some 1,800 chunks before it draws
+anything, and at 6.74 ms of cache flush apiece that was twelve seconds of boot
+spent waiting on the drive rather than on the game. Removing it took the worst
+of four runs from 27.8 seconds to 15.4.
+
+What survives is a slow mode both builds share, and round three is what it
+looks like: 15.4 seconds here against 14.9 there, in the same minute. A launch
+caught in it walks its startup at roughly 215 files per second instead of
+2,200, with nothing in between, and it is not waiting on anything either build
+owns — range reads average 1–2 ms in *both* modes, and retries are zero. The
+two plausible culprits were tested rather than argued about: `-NSAppSleepDisabled
+YES` moved the median by 79 ms, and the slowest of six runs was the one held
+frontmost, so it is neither App Nap nor occlusion. Nor is the stall confined to
+boot — one launch reached its first frame in 9.0 seconds and then spent 23.4
+seconds inside a single frame.
 
 **The full download.** Both builds sweep the same 16,167 chunks — every hash
 distinct, so neither gets a deduplication discount — from the same CloudFront
