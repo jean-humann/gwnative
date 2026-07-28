@@ -55,6 +55,32 @@ struct Tracker {
     /// there is no such instant on a machine that booted a moment ago, and
     /// subtracting one from `Instant::now()` panics there.
     written: Option<Instant>,
+    /// The refresh rate last reported for the display the window was on.
+    refresh_hz: Option<isize>,
+}
+
+/// Say what the display the window is on can actually do.
+///
+/// `PreferPageRenderingUpdatesNear60FPSEnabled` is off — see [`crate::webview`]
+/// — so the client's `requestAnimationFrame` loop runs at whatever the panel
+/// refreshes at. A built-in ProMotion display gives 120; nearly every external
+/// monitor gives 60. Which means "it is capped at 60 again" is usually a
+/// question about which screen the window was dragged to, and nothing in the
+/// game can answer it. So the window answers it: once at launch, and again
+/// whenever a drag lands it on a panel with a different ceiling.
+fn report_refresh_rate(tracker: &mut Tracker) {
+    // `None` while the window is off screen or in the middle of being placed.
+    // Nothing to report, and nothing to remember either — the next move asks
+    // again.
+    let Some(screen) = tracker.window.screen() else {
+        return;
+    };
+    let hz = screen.maximumFramesPerSecond();
+    if tracker.refresh_hz == Some(hz) {
+        return;
+    }
+    tracker.refresh_hz = Some(hz);
+    note!("[gwnative] this display refreshes at {hz} Hz, which is the frame rate ceiling");
 }
 
 /// Build the window, restoring wherever the last one was left.
@@ -124,14 +150,19 @@ pub fn open(mtm: MainThreadMarker, webview: &WKWebView, path: PathBuf) -> Retain
     }
 
     TRACKED.with(|tracked| {
-        *tracked.borrow_mut() = Some(Tracker {
+        let mut tracker = Tracker {
             window: window.clone(),
             path,
             normal: state.bounds,
             // Never written, so the first move writes rather than being
             // coalesced away.
             written: None,
-        });
+            refresh_hz: None,
+        };
+        // Before it is stored, so the report cannot be reading a window some
+        // notification has already moved.
+        report_refresh_rate(&mut tracker);
+        *tracked.borrow_mut() = Some(tracker);
     });
     watch();
 
@@ -217,6 +248,10 @@ pub fn flush() {
 fn touch() {
     TRACKED.with(|tracked| {
         if let Some(tracker) = tracked.borrow_mut().as_mut() {
+            // A move is the only notice a screen change gives — AppKit posts no
+            // "drag finished" — so the check rides the moves and is silent
+            // until the ceiling actually differs.
+            report_refresh_rate(tracker);
             let state = observe(tracker);
             if tracker
                 .written
