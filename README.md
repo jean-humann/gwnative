@@ -270,6 +270,11 @@ per-user and does not follow `$HOME`; the Electron build passes
 benchmark cannot click, and bytes written measure how far the client got rather
 than a fixed cost of installing.
 
+`--warm` runs the same comparison against the installs already on the machine
+instead of two blank ones. That is the launch every day after the first, and
+the only one of the two that can be re-measured on an afternoon when the CDN is
+slow — see [the warm route](#the-other-launch-scriptsbenchmark---warm).
+
 ### What it says, alternating runs, same machine, same hour
 
 Single runs of this benchmark are not quotable — first frame on this build has
@@ -361,12 +366,75 @@ one high-water mark per process and they need not have coincided — and steady
 state is kinder: one run finished holding 549 MiB against its own 1,881 MiB
 peak, where the Electron build finishes within 40 MiB of its peak every time.
 The ceiling is still 700 MiB above the other build's, and it is the one number
-in this table that has not moved.
+in this table that has not moved. It is also the one that does not survive
+leaving this table: measured warm, with nothing downloading, the ordering
+reverses and this build peaks 270 MiB *below* the other one at the median. The
+gap is a cost of the install, not of the game — see the warm route below.
 
 A blank install used to be the launch nothing could help, since the boot list
 that lets the store fetch ahead of demand was recorded by the launch before.
 It is now the launch the built-in list exists for; recording still happens,
 and a session's own list replaces the shipped one the moment it seals.
+
+### The other launch: `scripts/benchmark --warm`
+
+Everything above is a blank install, which happens once and is mostly the CDN.
+That makes it a poor thing to re-measure on demand: the numbers in the table
+were taken with the path running at 47 MiB/s, and on the afternoon this section
+was written the same probe — `curl --parallel`, 48 in flight, one chunk from
+each fan-out bucket — returned 18.6, 25.3 and 16.5 MiB/s on three consecutive
+samples. Nothing in either build changed between those readings. Re-running the
+blank-install table under them would not have refreshed it; it would have
+replaced a measurement of two clients with a measurement of one afternoon.
+
+So `--warm` measures the other launch, the one a player repeats. Both builds run
+against the profile actually on this machine, which is read and not written to,
+and each keeps its own single-instance lock so a copy the player already has
+open refuses the run rather than letting it time a process that exited. Neither
+cache moved by a byte across the eight runs below — 2.5 GB for this build, 385
+MB for the Electron one, unchanged before and after — so nothing here depends on
+the link at all.
+
+|                                        |         gwnative |          Electron |
+| -------------------------------------- | ---------------: | ----------------: |
+| page load to first frame, min · med · max (ms) | 745 · 821 · 898 | 1118 · 1260 · 1366 |
+| wall clock to first frame (ms)         | 1358 · 1496 · 1735 | 1715 · 1831 · 2124 |
+| footprint peak, summed over tree (MiB) |  767 · 773 · 783 | 1025 · 1043 · 1057 |
+| peak RSS, summed over tree (MiB)       |  571 · 572 · 592 |    847 · 848 · 855 |
+| CPU seconds, whole tree, 60 s window   | 18.5 · 19.2 · 19.8 |  10.1 · 22.0 · 26.4 |
+
+Four rounds, alternating, same machine, same hour. The first two rows are all
+four; the tree-wide rows below them are the three per build whose process
+accounting came out clean, and the discarded pair is the reason the row exists
+in this shape. WebKit services are launchd children rather than children of the
+process that caused them, so they are identified by having started just after
+it — and twice in eight runs that went wrong in a way worth naming: one gwnative
+round had eight of its own services outlive it and drop off the tree, which is
+why its CPU came out at 5.0 seconds against 18.5–19.8 everywhere else, and one
+Electron round was charged a `WebContent` process, which is a WebKit process
+that build has no way to spawn. Both are the harness miscounting, not either
+client behaving differently, and both runs are excluded rather than averaged in.
+
+**The footprint deficit belongs to installing, not to playing.** This is the row
+that inverts. Blank install has this build 700 MiB above the other one and that
+figure is real, but it is a cost of the download path: warm, the same tree peaks
+at 773 MiB against 1,043 at the median, and holds 572 resident against 848. The
+1.5 GiB
+`WebContent` high-water mark that the paragraph above attributes to WebKit's
+accounting is not steady state — it is what the renderer touches while 4.2 GB
+moves through it, and once nothing is moving through it the ordering reverses.
+
+**First frame is the clean win**, and it is the row both builds measure
+themselves, the same way. 821 ms against 1,260 at the median, and this build's
+worst round is still 220 ms faster than the other's best. Nothing about it is
+network: the whole boot set is already on disk for both.
+
+**CPU is still the row that cannot be normalised**, and warm does not fix it —
+the Electron column ranges over 10.1 to 26.4 seconds across three clean rounds
+of what should be identical work. This build counts its own frames and the other
+exposes no counter to the harness, so a lower number there may be cheaper frames
+or fewer of them, and a warm launch does not make that distinguishable. Read the
+range, not the middle.
 
 ## When booting fails, and what the host pushes
 
