@@ -27,6 +27,7 @@ use crate::app;
 use crate::chunks::ChunkStore;
 use crate::diagnostics::{self, Recorder};
 use crate::disk;
+use crate::dock;
 use crate::generation;
 use crate::http::{
     BODY_BUFFER, MAX_BODY_BYTES, POLICY, Request, common_headers, etag, mime, parse_range, policy,
@@ -559,8 +560,12 @@ fn handle(
                     &[],
                 )?;
                 return Ok(flow);
-            } else {
-                store.start_full_download();
+            } else if store.start_full_download() {
+                // Only on the start that actually started something: the icon
+                // follows the sweep, and a second POST while one is running is
+                // answered by the same progress the first one is already
+                // drawing.
+                dock::follow(store);
             }
         }
         // `cached` is residency, not sweep progress: the launcher's question is
