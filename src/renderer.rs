@@ -36,11 +36,8 @@ use objc2_web_kit::{
 };
 
 pub struct Ivars {
-    /// `http://127.0.0.1:38112`, scheme and authority and nothing else. Compared
-    /// as a prefix against the candidate URL, which is why it carries no
-    /// trailing slash: `http://127.0.0.1:38112/index.html` starts with it and
-    /// `http://127.0.0.1:381120/` does not, because the character after the
-    /// prefix must be `/`.
+    /// `http://127.0.0.1:38112`, scheme and authority and nothing else. See
+    /// [`permits`] for what the absent trailing slash is doing.
     origin: String,
     /// Whether the one automatic reload has been spent.
     recovered: Cell<bool>,
@@ -70,7 +67,9 @@ define_class!(
                 .and_then(|url| url.absoluteString())
                 .map(|url| url.to_string());
 
-            let allowed = url.as_deref().is_some_and(|url| self.permits(url));
+            let allowed = url
+                .as_deref()
+                .is_some_and(|url| permits(&self.ivars().origin, url));
             if !allowed {
                 // The URL is printed because the only way this fires is a bug or
                 // an attack, and neither is diagnosable from "a navigation was
@@ -120,21 +119,28 @@ impl Guard {
         // instance whose ivars are set.
         unsafe { msg_send![super(this), init] }
     }
+}
 
-    /// Whether `url` is on the origin this window was opened at.
-    ///
-    /// `about:blank` is permitted because WebKit navigates to it as part of
-    /// tearing a frame down, and refusing that would print a line on every
-    /// ordinary close.
-    fn permits(&self, url: &str) -> bool {
-        if url == "about:blank" {
-            return true;
-        }
-        let origin = &self.ivars().origin;
-        url.len() > origin.len()
-            && url.starts_with(origin.as_str())
-            && url.as_bytes()[origin.len()] == b'/'
+/// Whether `url` is on `origin` — scheme and authority, no trailing slash.
+///
+/// A free function rather than a method on the delegate, so that the rule the
+/// window enforces is the rule the tests below exercise. As a method it needed a
+/// main thread, a web view and an Objective-C runtime to call, none of which has
+/// anything to do with comparing two strings, so the tests carried a second copy
+/// of the body — and a copy of a security rule is a rule that can be tightened
+/// in one place and still pass.
+///
+/// `about:blank` is permitted because WebKit navigates to it as part of tearing
+/// a frame down, and refusing that would print a line on every ordinary close.
+///
+/// The length test is what the missing trailing slash buys: the character after
+/// the origin has to be `/`, so `http://127.0.0.1:381120/` is not on
+/// `http://127.0.0.1:38112` however much of it matches.
+fn permits(origin: &str, url: &str) -> bool {
+    if url == "about:blank" {
+        return true;
     }
+    url.len() > origin.len() && url.starts_with(origin) && url.as_bytes()[origin.len()] == b'/'
 }
 
 /// Say, once, that the game stopped — because the second crash leaves a blank
@@ -182,14 +188,7 @@ pub fn guard(mtm: MainThreadMarker, webview: &WKWebView, origin: &str) {
 
 #[cfg(test)]
 mod tests {
-    /// The same rule the delegate applies, extracted so it can be tested
-    /// without a main thread, a web view or an Objective-C runtime.
-    fn permits(origin: &str, url: &str) -> bool {
-        if url == "about:blank" {
-            return true;
-        }
-        url.len() > origin.len() && url.starts_with(origin) && url.as_bytes()[origin.len()] == b'/'
-    }
+    use super::permits;
 
     #[test]
     fn only_the_origin_the_window_was_opened_at() {
