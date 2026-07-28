@@ -101,6 +101,10 @@
   }
   #launcher button:hover { background: #45475a; }
   #launcher button.primary { border-color: #d9b25c; }
+  /* Same red as the failure overlay's. Stopping a download and clearing the
+     cache are the two buttons in this app that throw work away, and they should
+     not look like the ones beside them. */
+  #launcher button.danger { color: #f38ba8; }
   /* Wider than the status rail because here it is the subject, not a footnote. */
   #launcher-rail {
     width: min(32em, 70vw); height: 6px; border-radius: 3px;
@@ -150,6 +154,19 @@
   }
   #settings-compat[hidden], #settings-pending[hidden] { display: none; }
   #settings-note { color: #f38ba8; min-height: 1.5em; max-width: 38em; text-align: center; }
+  /* The game image sits in its own card below the form rather than as another
+     row in it: what it offers is not a preference and is not undone by Cancel. */
+  #settings-data {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    width: min(38em, 80vw); padding: 12px 22px;
+    background: rgba(24, 24, 37, .92);
+    border: 1px solid #313244; border-radius: 10px;
+  }
+  #settings-data[hidden] { display: none; }
+  #settings-data-line {
+    color: #9399b2; font-size: 13px; line-height: 1.5; font-variant-numeric: tabular-nums;
+  }
+  #settings-data-actions { display: flex; gap: 10px; flex: none; }
   #settings-actions { display: flex; gap: 10px; }
   #settings button {
     padding: 7px 16px; border-radius: 6px; cursor: pointer;
@@ -158,6 +175,33 @@
   }
   #settings button:hover { background: #45475a; }
   #settings button.primary { border-color: #d9b25c; }
+  #settings button.danger { color: #f38ba8; }
+  /* User guide. Reading rather than deciding, so it is the one overlay that
+     scrolls and the only one whose text is left-aligned. */
+  #guide {
+    position: fixed; inset: 0; z-index: 3;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px;
+    padding: 40px; background: rgba(0, 0, 0, .8);
+  }
+  #guide[hidden] { display: none; }
+  #guide-title { margin: 0; font-size: 20px; font-weight: 500; }
+  #guide-body {
+    width: min(44em, 86vw); max-height: min(60vh, 40em); overflow-y: auto;
+    padding: 4px 26px 18px; color: #cdd6f4;
+    background: rgba(24, 24, 37, .92);
+    border: 1px solid #313244; border-radius: 10px;
+  }
+  #guide-body h2 { margin: 22px 0 8px; font-size: 15px; font-weight: 500; color: #d9b25c; }
+  #guide-body p { margin: 0 0 10px; color: #9399b2; font-size: 13px; line-height: 1.6; }
+  #guide-actions { display: flex; gap: 10px; }
+  #guide button {
+    padding: 7px 16px; border-radius: 6px; cursor: pointer;
+    font: inherit; color: #cdd6f4;
+    background: #313244; border: 1px solid #45475a;
+  }
+  #guide button:hover { background: #45475a; }
+  #guide button.primary { border-color: #d9b25c; }
   #log {
     position: fixed; inset: 0 0 auto 0; max-height: 60%;
     margin: 0; padding: 10px 14px; overflow: auto;
@@ -197,9 +241,21 @@
   <h1 id="settings-title">Settings</h1>
   <div id="settings-compat" hidden></div>
   <div id="settings-rows"></div>
+  <div id="settings-data" hidden>
+    <div id="settings-data-line"></div>
+    <div id="settings-data-actions"></div>
+  </div>
   <div id="settings-pending" hidden></div>
   <div id="settings-note"></div>
   <div id="settings-actions"></div>
+</div>
+<!-- Filled in by guide.js, opened from Help → User Guide. In the app rather
+     than on a website because a Help menu that needs the network answers last
+     when it is needed most. -->
+<div id="guide" hidden>
+  <h1 id="guide-title">Guild Wars on this Mac</h1>
+  <div id="guide-body"></div>
+  <div id="guide-actions"></div>
 </div>
 <!-- The client probes for Module.oskInput and concludes it cannot accept text at
      all if these are missing — which is why the login fields ignored every key.

@@ -41,6 +41,10 @@ cp target/release/gwnative "$app/Contents/MacOS/gwnative"
 for path in web/*.js web/*.html; do
 	case ${path##*/} in
 	Gw.jspi.*) continue ;;
+	# Nothing at runtime imports these, and `paths::seed_web` copies whatever the
+	# bundle carries into the live web root, so shipping them would leave a
+	# player's Application Support directory holding this app's test suite.
+	*.test.js) continue ;;
 	esac
 	cp "$path" "$app/Contents/Resources/web/"
 done

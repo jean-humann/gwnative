@@ -15,7 +15,6 @@
 
 mod actions;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use objc2::MainThreadOnly;
@@ -26,9 +25,11 @@ use objc2_app_kit::{NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSString};
 use objc2_web_kit::WKWebView;
 
-use crate::{release, settings};
+use crate::{diagnostics, release, settings};
 
 use actions::Actions;
+
+pub use actions::at_launch as check_for_updates_at_launch;
 
 /// Whether this build can be compared against anything published.
 ///
@@ -51,9 +52,9 @@ pub fn install(
     mtm: MainThreadMarker,
     webview: &WKWebView,
     settings: Arc<settings::Store>,
-    log_dir: PathBuf,
+    recorder: Arc<diagnostics::Recorder>,
 ) -> Retained<NSMenu> {
-    let actions = Actions::new(mtm, webview, settings, log_dir);
+    let actions = Actions::new(mtm, webview, settings, recorder);
     let menu = build(mtm, &actions);
     std::mem::forget(actions);
     menu
@@ -229,20 +230,46 @@ fn view_menu(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenuItem> {
                 "",
                 None,
             ),
+            // ⌘⇧M, and here rather than in Help because it is pressed *during*
+            // a session rather than at the end of one — a player chasing a
+            // stutter presses it several times and never opens a menu to do it.
+            // The Help item that explains it is next door.
+            &ours(
+                mtm,
+                actions,
+                "Mark a Slowdown",
+                sel!(gwMarkSlowdown:),
+                "m",
+                Some(command | NSEventModifierFlags::Shift),
+            ),
             &ours(mtm, actions, "Reload Game", sel!(gwReloadGame:), "r", None),
         ],
     )
 }
 
+/// Four items, and only three of them always exist.
+///
+/// The guide, the report and the store are unconditional because none of them
+/// depends on this build knowing where it came from: the guide is a page inside
+/// the window, the report is a file next to the log, and the store has been at
+/// the same address for twenty years. The website is the one that is not, for
+/// the reason below.
 fn help_menu(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenuItem> {
-    let log = ours(
+    let guide = ours(mtm, actions, "User Guide", sel!(gwOpenGuide:), "?", None);
+    // This replaced an item that only revealed `gwnative.jsonl`. Revealing the
+    // raw log asked the player to attach several thousand unlabelled records
+    // about a Mac the file never names; the report is that log's tail under a
+    // cover sheet, written into the same folder, so the raw file is still one
+    // click away for anyone who wants it.
+    let report = ours(
         mtm,
         actions,
-        "Show Diagnostics Log…",
-        sel!(gwRevealDiagnostics:),
+        "Report a Problem…",
+        sel!(gwReportProblem:),
         "",
         None,
     );
+    let store = ours(mtm, actions, "Buy Guild Wars", sel!(gwOpenStore:), "", None);
     let website = ours(
         mtm,
         actions,
@@ -251,7 +278,8 @@ fn help_menu(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenuItem> {
         "",
         None,
     );
-    let mut items: Vec<&NSMenuItem> = vec![&log];
+    let rule = NSMenuItem::separatorItem(mtm);
+    let mut items: Vec<&NSMenuItem> = vec![&guide, &report, &rule, &store];
     // Constant, and meant to be: whether the item exists is decided by what
     // `Cargo.toml` declares, not by anything that happens at runtime. Clippy is
     // right that this folds away and wrong that folding away makes it pointless

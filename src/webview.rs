@@ -17,7 +17,7 @@ use objc2::{MainThreadOnly, msg_send};
 use objc2_foundation::{MainThreadMarker, NSRect, NSString, NSURL, NSURLRequest};
 use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration};
 
-use crate::{layout, settings, wasm};
+use crate::{layout, release, settings, wasm};
 
 /// WebKit feature flags this host turns off, because each one is a behaviour
 /// Chromium does not have and the Electron build therefore never suffers.
@@ -136,17 +136,32 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences) {
 ///
 /// The template-save state is settled before the page exists — it is which
 /// module the server is about to hand out — so it travels with the rest rather
-/// than costing the panel a round trip the first time it opens.
-fn preamble(token: &str, settings: &settings::Settings, template_save: &str) -> String {
+/// than costing the panel a round trip the first time it opens. The client build
+/// beside it is what the page compares against
+/// [`settings::Settings::compatibility_notice_seen_for`], and is `null` on the
+/// one launch where the module could not be read at all. The GWonMac Tools ride
+/// alongside for the same reason and one more: the page installs its tick from
+/// inside `instantiateWasm`, before anything it could await has happened, and a
+/// tick that arrived a round trip later would have missed the frames it exists
+/// to run in.
+fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -> String {
     format!(
         "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
-         window.__gwnativeTemplateSave = {};",
+         window.__gwnativeTemplateSave = {};\nwindow.__gwnativeClientBuild = {};\n\
+         window.__gwnativeUpdates = {};\nwindow.__gwnativeEnhancements = {};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
         serde_json::to_string(settings).unwrap_or_else(|_| "{}".to_owned()),
-        serde_json::Value::from(template_save),
+        serde_json::Value::from(module.template_save),
+        serde_json::Value::from(module.build.clone()),
+        // The same question the Help menu asks itself before offering "Check for
+        // Updates…", answered once and injected so the settings panel does not
+        // offer a switch for something this build cannot do. A page that guessed
+        // would offer it on every build, including the ones with nowhere to look.
+        serde_json::Value::from(release::repository().is_some()),
+        serde_json::Value::from(module.enhancements),
     )
 }
 
@@ -156,7 +171,7 @@ pub fn make(
     url: &str,
     token: &str,
     settings: &settings::Settings,
-    template_save: &str,
+    module: &wasm::Module,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
 
@@ -168,7 +183,7 @@ pub fn make(
     unsafe {
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
             WKUserScript::alloc(mtm),
-            &NSString::from_str(&preamble(token, settings, template_save)),
+            &NSString::from_str(&preamble(token, settings, module)),
             WKUserScriptInjectionTime::AtDocumentStart,
             true,
         );

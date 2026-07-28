@@ -6,6 +6,8 @@
 //! inverse of its decoder — which is what lets [`super::rewrite`] pin an output
 //! hash and have that mean something.
 
+use std::collections::HashSet;
+
 use super::Outcome;
 
 pub(super) const WASM_HEADER: [u8; 8] = [0, 97, 115, 109, 1, 0, 0, 0];
@@ -16,6 +18,32 @@ const PADDED_INDEX_BYTES: usize = 5;
 pub(super) struct Section {
     pub id: u8,
     pub body: Vec<u8>,
+}
+
+/// One entry of the type section, as the bytes that spell it.
+///
+/// The value types are kept raw rather than decoded into an enum because
+/// nothing here needs to know what an `f64` is — the only question ever asked
+/// is whether a signature is the one that was certified, and comparing the
+/// bytes answers it without a decode that could disagree with the encoder.
+pub(super) struct FunctionType {
+    pub params: Vec<u8>,
+    pub results: Vec<u8>,
+}
+
+/// `i32`, or `0x7b` for something this codec has no name for.
+///
+/// Only ever reached on the failure path, where the point is to say what was
+/// found rather than to recognise it: a build whose main loop grew a parameter
+/// should report the parameter, not "unsupported type form".
+pub(super) fn value_type_name(value: u8) -> String {
+    match value {
+        0x7f => "i32".to_owned(),
+        0x7e => "i64".to_owned(),
+        0x7d => "f32".to_owned(),
+        0x7c => "f64".to_owned(),
+        other => format!("0x{other:x}"),
+    }
 }
 
 pub(super) fn uleb(mut value: u64) -> Vec<u8> {
@@ -48,7 +76,7 @@ pub(super) fn sleb(mut value: i64) -> Vec<u8> {
 /// Deliberately capped at five bytes. This reads an 8 MB module we did not
 /// build; a wider read would silently accept a malformed index rather than
 /// reporting it.
-fn read_uleb(bytes: &[u8], cursor: &mut usize) -> Outcome<u32> {
+pub(super) fn read_uleb(bytes: &[u8], cursor: &mut usize) -> Outcome<u32> {
     let mut result = 0u32;
     let mut shift = 0;
     for _ in 0..PADDED_INDEX_BYTES {
@@ -61,6 +89,32 @@ fn read_uleb(bytes: &[u8], cursor: &mut usize) -> Outcome<u32> {
         shift += 7;
     }
     Err("wasm: oversized LEB128".to_owned())
+}
+
+/// The signed twin, capped the same way and for the same reason.
+///
+/// Only element-segment offsets are read through this, and those are `i32`
+/// constants — so the sign extension at the end is what makes a negative offset
+/// arrive as a negative number rather than as two billion.
+fn read_sleb(bytes: &[u8], cursor: &mut usize) -> Outcome<i32> {
+    let mut result: i32 = 0;
+    let mut shift = 0;
+    for _ in 0..PADDED_INDEX_BYTES {
+        let byte = *bytes.get(*cursor).ok_or("wasm: truncated signed LEB128")?;
+        *cursor += 1;
+        result |= i32::from(byte & 0x7f).wrapping_shl(shift);
+        if byte & 0x80 == 0 {
+            // The sign bit of the last group is bit 6, and everything above it
+            // is whatever that bit says. Skipped once the group already reaches
+            // the top of the word, where there is nothing left to extend into.
+            if shift + 7 < 32 && byte & 0x40 != 0 {
+                result |= (!0i32) << (shift + 7);
+            }
+            return Ok(result);
+        }
+        shift += 7;
+    }
+    Err("wasm: oversized signed LEB128".to_owned())
 }
 
 /// Fixed-width index, so a rewritten `call` stays byte-for-byte as long.
@@ -137,6 +191,125 @@ fn with_room<T>(count: u32, remaining: usize) -> Outcome<Vec<T>> {
         ));
     }
     Ok(Vec::with_capacity(count as usize))
+}
+
+pub(super) fn parse_types(bytes: &[u8]) -> Outcome<Vec<FunctionType>> {
+    let mut cursor = 0;
+    let count = read_uleb(bytes, &mut cursor)?;
+    // Three bytes minimum per entry: the `0x60` form and two empty counts.
+    let mut types = with_room(count, bytes.len() - cursor)?;
+    for _ in 0..count {
+        if bytes.get(cursor) != Some(&0x60) {
+            return Err("wasm: unsupported type form".to_owned());
+        }
+        cursor += 1;
+        let take = |cursor: &mut usize| -> Outcome<Vec<u8>> {
+            let count = read_uleb(bytes, cursor)? as usize;
+            let end = cursor
+                .checked_add(count)
+                .filter(|end| *end <= bytes.len())
+                .ok_or("wasm: truncated function type")?;
+            let taken = bytes[*cursor..end].to_vec();
+            *cursor = end;
+            Ok(taken)
+        };
+        let params = take(&mut cursor)?;
+        let results = take(&mut cursor)?;
+        types.push(FunctionType { params, results });
+    }
+    if cursor != bytes.len() {
+        return Err("wasm: malformed type section".to_owned());
+    }
+    Ok(types)
+}
+
+/// How many elements a vector declares, and the bytes holding them.
+///
+/// Used where a section is only being *appended to*: the globals and exports
+/// below gain one entry and two entries respectively, and every existing entry
+/// is copied through untouched. Re-encoding them would mean parsing shapes this
+/// codec has no other reason to know — an export is four kinds and a global is
+/// an arbitrary constant expression — and every one of those parsers would be a
+/// new way for a byte to change on its way through.
+pub(super) fn vector_payload(bytes: &[u8]) -> Outcome<(u32, &[u8])> {
+    let mut cursor = 0;
+    let count = read_uleb(bytes, &mut cursor)?;
+    Ok((count, &bytes[cursor..]))
+}
+
+/// The limits of the module's one function table.
+pub(super) struct TableLimits {
+    pub min: u32,
+    pub max: Option<u32>,
+}
+
+pub(super) fn parse_table(bytes: &[u8]) -> Outcome<TableLimits> {
+    let mut cursor = 0;
+    if read_uleb(bytes, &mut cursor)? != 1 {
+        return Err("wasm: expected exactly one table".to_owned());
+    }
+    if bytes.get(cursor) != Some(&0x70) {
+        return Err("wasm: expected a funcref table".to_owned());
+    }
+    cursor += 1;
+    let flags = read_uleb(bytes, &mut cursor)?;
+    let min = read_uleb(bytes, &mut cursor)?;
+    let max = if flags & 1 != 0 {
+        Some(read_uleb(bytes, &mut cursor)?)
+    } else {
+        None
+    };
+    Ok(TableLimits { min, max })
+}
+
+/// Every table slot some element segment already fills.
+///
+/// The one question this answers is whether the slot a hook wants to borrow is
+/// free. Slot 0 usually is — Emscripten reserves it for the null function
+/// pointer — but "usually" is not something to rewrite an 8 MB module on, so the
+/// segments are walked and asked.
+pub(super) fn occupied_table_slots(bytes: &[u8]) -> Outcome<HashSet<u32>> {
+    let mut cursor = 0;
+    let count = read_uleb(bytes, &mut cursor)?;
+    let mut occupied = HashSet::new();
+    for _ in 0..count {
+        let flags = read_uleb(bytes, &mut cursor)?;
+        if flags != 0 {
+            return Err(format!("wasm: unsupported element segment flags {flags}"));
+        }
+        if bytes.get(cursor) != Some(&0x41) {
+            return Err("wasm: expected an i32.const element offset".to_owned());
+        }
+        cursor += 1;
+        let base = read_sleb(bytes, &mut cursor)?;
+        if bytes.get(cursor) != Some(&0x0b) {
+            return Err("wasm: malformed element offset".to_owned());
+        }
+        cursor += 1;
+        let entries = read_uleb(bytes, &mut cursor)?;
+        for index in 0..entries {
+            read_uleb(bytes, &mut cursor)?;
+            // A segment based below zero, or one running past the top of the
+            // index space, cannot describe a slot — and silently dropping it
+            // would report the slot it covers as free.
+            let slot = i64::from(base) + i64::from(index);
+            let slot = u32::try_from(slot)
+                .map_err(|_| format!("wasm: element segment covers slot {slot}"))?;
+            occupied.insert(slot);
+        }
+    }
+    if cursor != bytes.len() {
+        return Err("wasm: malformed element section".to_owned());
+    }
+    Ok(occupied)
+}
+
+/// A length-prefixed name, the shape an export and a custom section both start
+/// with.
+pub(super) fn encode_name(name: &str) -> Vec<u8> {
+    let mut out = uleb(name.len() as u64);
+    out.extend_from_slice(name.as_bytes());
+    out
 }
 
 pub(super) fn parse_index_vector(bytes: &[u8]) -> Outcome<Vec<u32>> {
@@ -283,6 +456,64 @@ mod tests {
     fn something_that_is_not_wasm_is_refused() {
         assert!(split_sections(b"not a module at all").is_err());
         assert!(split_sections(&[]).is_err());
+    }
+
+    #[test]
+    fn a_signed_leb_reads_back_what_it_wrote() {
+        for value in [0i64, 1, -1, 63, -64, 64, -65, 8191, -70_001, i64::from(i32::MAX)] {
+            let encoded = sleb(value);
+            let mut cursor = 0;
+            assert_eq!(i64::from(read_sleb(&encoded, &mut cursor).unwrap()), value);
+            assert_eq!(cursor, encoded.len(), "{value} left bytes behind");
+        }
+        // The five-byte group: the sign has nowhere left to extend into, so the
+        // guard that would have written over the top of the word must not fire.
+        let mut cursor = 0;
+        assert_eq!(read_sleb(&sleb(i64::from(i32::MIN)), &mut cursor).unwrap(), i32::MIN);
+    }
+
+    #[test]
+    fn a_function_type_is_read_as_the_bytes_that_spell_it() {
+        // (i32, f64) -> i32, then () -> ().
+        let bytes = [0x02, 0x60, 0x02, 0x7f, 0x7c, 0x01, 0x7f, 0x60, 0x00, 0x00];
+        let types = parse_types(&bytes).unwrap();
+        assert_eq!(types.len(), 2);
+        assert_eq!(types[0].params, vec![0x7f, 0x7c]);
+        assert_eq!(types[0].results, vec![0x7f]);
+        assert!(types[1].params.is_empty() && types[1].results.is_empty());
+        assert_eq!(value_type_name(0x7f), "i32");
+        assert_eq!(value_type_name(0x70), "0x70");
+        // A form this codec does not know is refused rather than skipped.
+        assert!(parse_types(&[0x01, 0x5e, 0x7f, 0x00]).is_err());
+        // And trailing bytes are a malformed section, not a shorter one.
+        assert!(parse_types(&[0x01, 0x60, 0x00, 0x00, 0x00]).is_err());
+    }
+
+    #[test]
+    fn a_table_and_the_slots_its_segments_fill() {
+        // One funcref table, min 8, no maximum.
+        assert_eq!(parse_table(&[0x01, 0x70, 0x00, 0x08]).unwrap().min, 8);
+        let bounded = parse_table(&[0x01, 0x70, 0x01, 0x08, 0x10]).unwrap();
+        assert_eq!((bounded.min, bounded.max), (8, Some(16)));
+        assert!(parse_table(&[0x02, 0x70, 0x00, 0x08]).is_err(), "two tables");
+        assert!(parse_table(&[0x01, 0x6f, 0x00, 0x08]).is_err(), "externref");
+
+        // One segment at offset 1 holding three functions: 1, 2 and 3 are taken
+        // and 0 — the slot the hook wants — is not.
+        let occupied =
+            occupied_table_slots(&[0x01, 0x00, 0x41, 0x01, 0x0b, 0x03, 0x0a, 0x0b, 0x0c]).unwrap();
+        assert_eq!(occupied, HashSet::from([1, 2, 3]));
+        // A passive or declarative segment is a shape this cannot reason about,
+        // so it says so instead of reporting every slot free.
+        assert!(occupied_table_slots(&[0x01, 0x01, 0x00, 0x00]).is_err());
+    }
+
+    #[test]
+    fn a_vector_payload_hands_back_the_entries_untouched() {
+        let (count, entries) = vector_payload(&[0x03, 0xaa, 0xbb]).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(entries, &[0xaa, 0xbb]);
+        assert_eq!(encode_name("gw"), vec![0x02, b'g', b'w']);
     }
 
     #[test]

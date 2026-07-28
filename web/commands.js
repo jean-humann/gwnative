@@ -69,3 +69,24 @@ onCommand('audio-unmute', () => {
 // a native panel would have to be told when the page's idea of a setting
 // changed, which is a second copy of the same four values.
 onCommand('settings-open', () => window.gwOpenSettings?.());
+
+// Help → User Guide. In the page for the same reason as the panel, plus one of
+// its own: the guide describes this build's settings and this build's
+// limitations, and a link to whatever the website currently says would drift
+// from the app it is meant to explain.
+onCommand('guide-open', () => window.gwOpenGuide?.());
+
+// ⌘⇧M. The host has already written the mark; this is the page's half.
+//
+// Metrics here are batched on a one-second timer, so left alone the counters
+// describing the stutter would reach the host up to a second after the mark and
+// might belong to the second after the one the player pointed at. Flushing now
+// is what makes the mark and the numbers describe the same instant.
+//
+// The count goes in before the flush, deliberately: it is what lets a reader
+// tell a batch that was sent because a player pressed the key from the nine
+// hundred that were sent because a second went by.
+onCommand('diagnostics-mark', () => {
+  diagnostics.count('gw.mark');
+  diagnostics.flush();
+});

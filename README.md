@@ -175,13 +175,29 @@ Every run appends a JSON record per second to
 process and what the page has counted, on the same clock:
 
 ```json
-{"t":1753627543.6,"uptime":25.2,"footprintMiB":34.7,"residentMiB":109.7,
- "cpuPercent":3.6,"cpuSeconds":1.93,
+{"kind":"sample","t":1753627543.6,"uptime":25.2,"footprintMiB":34.7,
+ "residentMiB":109.7,"cpuPercent":3.6,"cpuSeconds":1.93,
  "host":{"fromCache":391,"fetched":0,"coalesced":0},
  "metrics":{"gw.boot.first-frame.ms":889.18,"gw.boot.wasm.ms":47.3,
             "gw.frame.ms":16.62,"gw.frame.ms.max":31.72,"gw.frames":1391,
             "gw.range.ms":0.26,"gw.range.ms.max":44.54,"gw.range.requests":226}}
 ```
+
+Every record carries a `kind`, so one file can hold four shapes and stay
+greppable. `session` is written once at launch and is the only record that says
+what machine this is — macOS version and build, hardware model, core count and
+memory, read straight out of `sysctl` — which the file went without for a long
+time and which is the first thing anyone reading someone else's log asks. `page`
+is a line the client or the harness printed: `console.log`, `warn` and `error`
+are wrapped in `harness.js` and posted to `__report`, which used to echo them to
+stderr and nowhere else — a terminal nobody running the app has. They are capped
+at 5,000 lines of 2,000 characters per session, with the overflow counted under
+`gw.pagelog.dropped`, because a client stuck in a failing loop would otherwise
+push every sample out of the rotation. `mark` is ⌘⇧M: the moment the player
+pointed at, plus the next hundred samples taken at 100 ms instead of a second.
+The honest limit is that it cannot make the seconds *before* the press finer,
+which is why the in-app guide says to press it while the game is misbehaving
+rather than afterwards.
 
 `footprintMiB` is the figure to compare between applications — it is what
 Activity Monitor's Memory column and `footprint` report. `residentMiB` is three
@@ -496,16 +512,86 @@ served under the base module's own name, so the glue's `locateFile` needs no
 special case. Two log lines say it took: `template save: serving the derived
 client` from the host, `template save bridge installed` from the page.
 
+## GWonMac Tools, and the second module that runs beside the client
+
+Two of them, and both only read. **Game cursor** draws the game's own pointer as
+the Mac's pointer — the game paints its cursor into the picture, so it arrives
+with the frame and lags the hand by however long the frame took, while the
+system's own pointer moves at pointer rate. **Target distance** shows how far
+away the current target is and which of the game's range bands that falls in.
+Neither writes a byte the client will read, and with both off nothing below
+happens at all.
+
+Reading it out is the part with a shape worth explaining. The values live in the
+client's heap and are only coherent at one point in its frame, so sampling them
+from the page on an animation frame would read a structure the game is halfway
+through updating. What is needed is a callback *inside* the client's own loop —
+and the client has exactly one place to hang it: `EmscriptenExeThreadMainLoop`,
+function 446 on the pinned build, which the browser drives.
+
+So a second transform runs on top of the template-save one, keyed on that
+module's output hash and asserting its own — `68c6e09c…` in, `903967df…` out. It
+clones function 446 to a fresh index, exports the clone as
+`enhancement_tick_original`, and overwrites 446's body with a dispatcher that
+reads a new mutable global, `enhancement_hook_slot`: zero calls the original and
+nothing else, and *n* calls table slot *n*−1 instead. Slot 0 is Emscripten's
+reserved null-function-pointer entry and is never filled, which is what makes it
+free to borrow. A manifest describing all of it — ABIs, block sizes, the table
+slot, and the 29 struct offsets the readings come from — is appended as a custom
+section, so the page learns the layout from the module it is actually running
+rather than from a constant compiled into the page months earlier.
+
+The callback itself is a separate wasm module, `src/companion-kernel/lib.rs`:
+dependency-free `no_std` Rust with no `Cargo.toml`, compiled to
+`wasm32-unknown-unknown` by `build.rs` and embedded in the host binary with
+`include_bytes!`, then served from memory at `/companion-kernel.wasm`. It is
+linked `--import-memory`, so `env.memory` is the *client's* memory rather than
+one of its own — it reads the game's heap directly, at the one moment in the
+frame when reading it is meaningful. Nothing in it can trap: every read is
+bounds-checked against the heap's length, every pointer chase returns an
+`Option`, and there is no allocator to fail. A trap here would abort the client.
+
+It publishes two fixed-size blocks under a seqlock — a 64-byte state snapshot
+and a 4160-byte cursor bitmap — and the page reads them on the animation frame
+with no lock, no message and no copy of the heap: a reader that sees the same
+even sequence before and after its copy knows nothing moved underneath it.
+`web/companion-snapshot.js` then re-checks every field the companion already
+checked, and answers `waiting` rather than rendering a coordinate it does not
+believe. The two halves are compiled separately and share nothing but that
+manifest, so the page treats the region as what it is — a span of a heap that
+anything in the client could in principle have written.
+
+The install order in `web/enhancements.js` is the other load-bearing part.
+Memory for the blocks comes from the *client's own* `malloc`, so it cannot land
+somewhere the client will later allocate over; the companion is instantiated
+over that memory; the table slot is filled; and only then is the global set. Set
+in that order there is no window in which 446 dispatches to a slot that is not
+yet a function.
+
+There is no master switch, and that is deliberate: "enhancements enabled" is
+derived from "is any tool on", because a stored third state can disagree with
+the two it governs. Both need a relaunch, and the panel says so rather than
+pretending — the module the page runs is chosen before the renderer exists. Both
+also need the same client recognition template save needs; on a build this
+release has not been checked against they stay off and say so, and the game
+launches exactly as ArenaNet shipped it.
+
 ## Settings, and the render scale they revealed
 
-`Application Support/gwnative/settings.json` holds four fields, and every one of
-them is read by something that already exists here: `renderScale` is what the
-client asks for through `emscripten_get_device_pixel_ratio`, `touchMode` selects
-the gesture translation `web/input.js` installs, `showDiagnostics` opens the log
-pane at boot, and `dataStrategy` records the answer to the launcher's question.
-Nothing is stored for a feature this app does not have — the Electron build
-carries five more fields, and each of them belongs to something that is not
-here.
+`Application Support/gwnative/settings.json` holds nine fields, and every one of
+them is read by something that already exists here. Four are what a player sets
+and a launch acts on: `renderScale` is what the client asks for through
+`emscripten_get_device_pixel_ratio`, `touchMode` selects the gesture translation
+`web/input.js` installs, `showDiagnostics` opens the log pane at boot, and
+`dataStrategy` records the answer to the launcher's question. Two are the
+GWonMac Tools above, `nativeCursor` and `targetReadout`, which between them
+decide whether the enhanced module is built at all. The last three are what the
+app has to remember rather than what anyone sits down to choose:
+`autoCheckUpdates` and the `lastUpdateCheckAt` that makes an opted-in launch ask
+once a day rather than once a launch, and `compatibilityNoticeSeenFor`, which
+holds the hash of the client build a warning was acknowledged for — a boolean
+there would either nag every launch or stay silent through every future patch.
+Nothing is stored for a feature this app does not have.
 
 The host owns the file; `GET /__settings` reads it back and `PUT /__settings`
 takes a patch and answers with the merged whole, so the page never has to guess
@@ -551,20 +637,22 @@ player who wants the cheaper picture can have it; that is what the setting is
 for. Which one a session paid is in its log: `settings: render scale 2, touch
 mode off`.
 
-Until now none of the four could be changed without a text editor. ⌘, opens a
+Until now none of them could be changed without a text editor. ⌘, opens a
 panel over the running game — the page's own, not AppKit's, because every one of
 these settings is one whose effect the page owns and a native panel would need
 a second copy of the same four values kept in step with the first. The controls
 are a table in `web/settings-panel.js`; the markup is built from it, and so are
 the tests, so a list that disagrees with itself is not a shape this can take.
 
-Two of the four cannot take effect until the next launch, and the panel says so
+Four of them cannot take effect until the next launch, and the panel says so
 instead of pretending. The render scale reaches the client through an import it
 reads when it recomputes the canvas, and the gesture translation is a set of
-listeners installed once at boot around a mode captured by value. Both are
+listeners installed once at boot around a mode captured by value; both are
 fixable, and both are a change to the boot path to fix — which is not a change
-worth making from inside a settings panel. The overlay and the download
-strategy do apply immediately, and the overlay is switched from what the host
+worth making from inside a settings panel. The two tools are not fixable in the
+same sense: which module the page is handed is settled before the renderer
+exists, and a client that is already running cannot be exchanged for a different
+one. The overlay and the download strategy do apply immediately, and the overlay is switched from what the host
 answered with rather than from what was asked for, so a patch the host clamped
 cannot leave the screen disagreeing with the file.
 
@@ -765,11 +853,20 @@ equivalent exists only because the item does, and the reload is the escape
 hatch for a client that has already stopped answering — which is exactly when a
 modal about sockets is in the way.
 
-**Show Diagnostics Log…** reveals `gwnative.jsonl` in the Finder rather than
-exporting a report. The Electron build has to build one because its diagnostics
-live in memory; here they have been a file on disk all along, a line a second
-for the whole session, so an export would be a copy of something the player can
-attach to an issue directly. **Project Website** is absent from this build on
+**Report a Problem…** writes `problem-report-<stamp>.txt` next to the log and
+reveals it in the Finder. This replaced an item that only revealed
+`gwnative.jsonl`, on the reasoning that the diagnostics were a file on disk
+already so an export would be a copy of something the player could attach
+directly. That was true and unhelpful: what it attached was thousands of
+unlabelled records about a Mac the file never named. The report is a cover sheet
+— machine, settings, and the last 400 records — in the same folder, so the raw
+file is still one click away for anyone who wants it. Anything shaped like an
+email address is replaced, because the account name is the one identifier the
+client is ever handed; the report says so in its own body rather than implying a
+general secret scrubber, and the password never reaches the page at all.
+**Mark a Slowdown** (⌘⇧M) is in the View menu rather than Help, because it is
+pressed repeatedly mid-session and never by opening a menu. **Project Website**
+is absent from this build on
 purpose: the item's URL comes from the package's `repository` field, and a Help
 menu that offers to open a website and then opens nothing — or opens someone
 else's repository because the URL was guessed — is worse than a Help menu with
@@ -798,6 +895,16 @@ and the login is kept in the Keychain.
 cargo build
 cargo run
 ```
+
+The build needs a second Rust target, `wasm32-unknown-unknown`: `build.rs`
+invokes `rustc` directly to compile the companion above, and embeds the result.
+`rust-toolchain.toml` lists it beside `aarch64-apple-darwin`, so a fresh
+checkout installs both with the toolchain rather than failing on the first
+build; `rustup target add wasm32-unknown-unknown` is the manual equivalent. It
+is not a Cargo dependency and there is no second crate — one `rustc` call on one
+`no_std` file, whose output has to be exactly the module the transform in the
+same binary wrote a manifest for, which is why the two are compiled together or
+not at all.
 
 Missing client artifacts are fetched on first launch; `cargo run -- sync`
 refreshes them without opening a window. Neither needs setting up: the patch

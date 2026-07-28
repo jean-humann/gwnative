@@ -276,6 +276,64 @@ fn migrate_cache(legacy: &Path, current: &Path) {
     }
 }
 
+/// The file that says "delete the game data before opening it".
+///
+/// A sentinel rather than a deletion, and that is the whole design. By the time
+/// a player can ask for this, the store has a readahead thread, a prefetch
+/// thread and up to 48 fetches in flight, all of them holding open descriptors
+/// into the directory about to be removed — so deleting it underneath them ends
+/// in a launch that half-refetches what it half-deleted. Asking the *next*
+/// launch to do it, before anything is opened, costs a restart and is correct by
+/// construction.
+///
+/// It lives beside the directory rather than inside it, because inside it would
+/// be deleted by the very sweep it asks for.
+fn clear_marker(cache_dir: &Path) -> PathBuf {
+    cache_dir.with_extension("clear")
+}
+
+/// Ask the next launch to start from an empty cache.
+///
+/// The caller relaunches; nothing here does. Failing to write the marker is
+/// reported and not fatal — what follows is a restart that keeps the game data,
+/// which is the state the player was already in.
+pub fn request_clear(cache_dir: &Path) -> std::io::Result<()> {
+    if let Some(parent) = clear_marker(cache_dir).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(clear_marker(cache_dir), b"")
+}
+
+/// Whether a clear was asked for, and take the request either way.
+///
+/// The marker is removed first and the directory second, so a launch that dies
+/// mid-delete comes back to a partly-emptied cache rather than to a request it
+/// will honour forever. A partly-emptied cache is a state the store already
+/// handles — every chunk is content-addressed and re-fetched when absent — and
+/// an unclearable request is not.
+///
+/// Called before anything opens the directory. Nothing else may call it: it
+/// consumes the request.
+pub fn take_clear_request(cache_dir: &Path) -> bool {
+    let marker = clear_marker(cache_dir);
+    if !marker.exists() {
+        return false;
+    }
+    if let Err(e) = fs::remove_file(&marker) {
+        // The request cannot be consumed, so honouring it would mean clearing
+        // the cache at this launch and at every launch after it.
+        note!("[chunks] the clear request could not be taken ({e}); leaving the cache alone");
+        return false;
+    }
+    match fs::remove_dir_all(cache_dir) {
+        Ok(()) => note!("[chunks] cleared {} as asked", cache_dir.display()),
+        // Including "it was not there", which is the same outcome asked for.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => note!("[chunks] could not clear {}: {e}", cache_dir.display()),
+    }
+    true
+}
+
 /// A name for a chunk that is still being written.
 ///
 /// The `.tmp` suffix is the contract with [`sweep_orphans`]: it is the whole of
@@ -295,6 +353,46 @@ pub fn temp_path(parent: &Path, hex: &str) -> PathBuf {
 mod tests {
     use super::*;
     use crate::scratch::TempDir;
+
+    /// The one thing the sentinel must do, and the one thing it must not: clear
+    /// the cache once, and never twice.
+    #[test]
+    fn a_clear_is_asked_for_once_and_honoured_once() {
+        let temp = TempDir::new("clear");
+        let cache = temp.0.join("chunks");
+        let bucket = cache.join("11");
+        fs::create_dir_all(&bucket).unwrap();
+        fs::write(bucket.join("11".to_owned() + &"a".repeat(62)), b"a chunk").unwrap();
+
+        // Nothing asked, so nothing happens — which is every ordinary launch.
+        assert!(!take_clear_request(&cache));
+        assert!(cache.exists(), "an unasked launch must keep the game data");
+
+        request_clear(&cache).unwrap();
+        // Beside the directory, not inside it: inside, the deletion below would
+        // take the request with it and the next launch would clear again.
+        assert!(!cache.join(".clear").exists());
+        assert!(cache.exists(), "arming is not deleting");
+
+        assert!(take_clear_request(&cache));
+        assert!(!cache.exists());
+
+        // The launch after the one that cleared. A request that survived it
+        // would mean a profile that can never keep game data again.
+        assert!(!take_clear_request(&cache));
+    }
+
+    /// A clear asked for and then interrupted before the store existed leaves a
+    /// directory that is not there. Re-asking has to be an ordinary success:
+    /// "already gone" is the outcome that was wanted.
+    #[test]
+    fn clearing_a_cache_that_is_not_there_is_not_a_failure() {
+        let temp = TempDir::new("clear-missing");
+        let cache = temp.0.join("never-opened");
+        request_clear(&cache).unwrap();
+        assert!(take_clear_request(&cache));
+        assert!(!cache.exists());
+    }
 
     #[test]
     fn a_patch_takes_the_chunks_it_replaced_with_it() {

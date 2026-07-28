@@ -18,6 +18,8 @@
  * or not any of this does.
  */
 
+import { snapshotProgress as poll, sweepSnapshot } from './game-data.js';
+
 const POLL_MS = 1000;
 // A poll that fails is usually a transient loopback hiccup. Three in a row is
 // something worse, and the response to "the download cannot be watched" is to
@@ -34,7 +36,6 @@ const RATE_WINDOW_MS = 12_000;
 const RATE_FLOOR_MS = 3_000;
 
 const el = (id) => document.getElementById(id);
-const headers = () => ({ 'X-Gwnative-Token': window.__gwnativeToken ?? '' });
 const gb = (bytes) => (bytes / 1e9).toFixed(1);
 
 /**
@@ -87,36 +88,6 @@ export function progressLine(bytes, totalBytes, samples) {
   const left = remaining(totalBytes - bytes, speed);
   if (left) line.push(left);
   return line.join(' · ');
-}
-
-/** `{ cached, total, fetched, running, chunkSize }`, or a throw. */
-async function poll() {
-  const response = await fetch('__prefetch', { headers: headers() });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
-}
-
-/**
- * Start or stop the background sweep. Returns the same progress shape.
- *
- * Exported because the settings panel drives the same sweep after boot: the
- * launcher asks the question once, and changing the answer later has to reach
- * the same route with the same token rather than a second copy of both.
- *
- * @param {'start' | 'stop'} action
- */
-export async function sweepSnapshot(action) {
-  const response = await fetch(action === 'stop' ? '__prefetch?stop' : '__prefetch', {
-    method: 'POST',
-    headers: headers(),
-  });
-  if (!response.ok) {
-    // The host explains a refusal in the body — "not enough room" is the one
-    // worth repeating to the player rather than reporting as a status code.
-    const detail = await response.json().catch(() => null);
-    throw new Error(detail?.error ?? `HTTP ${response.status}`);
-  }
-  return response.json();
 }
 
 /** Replace the action row, returning a promise for whichever button is pressed. */

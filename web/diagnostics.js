@@ -30,7 +30,7 @@ export const peak = (name, value) => {
   dirty = true;
 };
 
-const flush = () => {
+export const flush = () => {
   if (!dirty) return;
   const batch = pending;
   pending = { count: {}, gauge: {}, peak: {} };

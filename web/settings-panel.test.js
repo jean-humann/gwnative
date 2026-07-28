@@ -30,6 +30,9 @@ describe('settings panel', () => {
     dataStrategy: null,
   };
 
+  /** `dataLine` with the fields `__prefetch` always sends filled in. */
+  const dataFor = (info) => panel.dataLine(info && { running: false, ...info });
+
   it('writes nothing when nothing was touched', () => {
     assert.deepEqual(panel.changed(current, { ...current }), []);
   });
@@ -120,41 +123,107 @@ describe('settings panel', () => {
     );
   });
 
-  // The state the host injects is the only way the page can know, and the
-  // three values are the three outcomes of `wasm::prepare`. Anything else is a
-  // host and a page that have drifted, and saying nothing is the safe end of
-  // that: a sentence about a missing feature that is not missing is worse than
-  // no sentence at all.
-  it('speaks up about build templates only when they are actually unavailable', () => {
-    assert.equal(panel.templateSaveNotice('ready'), null);
-    assert.equal(panel.templateSaveNotice(undefined), null);
-    assert.equal(panel.templateSaveNotice('something later'), null);
-    assert.match(panel.templateSaveNotice('uncertified'), /cannot be saved/);
-    assert.match(panel.templateSaveNotice('failed'), /cannot be saved/);
-  });
-
-  // Both sentences have to say what still works, because "templates cannot be
-  // saved" on its own reads as "the game is broken" — which it is not.
-  it('says what is unaffected in the same breath', () => {
-    for (const state of ['uncertified', 'failed']) {
-      assert.match(panel.templateSaveNotice(state), /Everything else works/);
-    }
-  });
-
   // Every control's choices have to be reachable from the settings the host
-  // will accept, or the panel offers something that cannot be saved.
+  // will accept, or the panel offers something that cannot be saved. The list
+  // is `PATCHABLE` in src/settings.rs minus the ones with no sensible control —
+  // there is none of those yet, so it is the whole of it.
   it('offers only values the host declares patchable', () => {
     const keys = panel.CONTROLS.map((control) => control.key);
     assert.deepEqual(keys.sort(), [
+      'autoCheckUpdates',
       'dataStrategy',
+      'nativeCursor',
       'renderScale',
       'showDiagnostics',
+      'targetReadout',
       'touchMode',
     ]);
     for (const control of panel.CONTROLS) {
       assert.ok(control.choices.length >= 2, `${control.key} has nothing to choose between`);
       const values = control.choices.map((choice) => JSON.stringify(choice.value));
       assert.equal(new Set(values).size, values.length, `${control.key} repeats a value`);
+    }
+  });
+
+  // A build whose Cargo.toml declares no repository has nowhere to look, and
+  // `menu::updates_offered` already hides the menu item on exactly this. A
+  // switch the build cannot honour is a promise it cannot keep.
+  it('hides the update check on a build that cannot check', () => {
+    const keys = (host) => panel.offered(host).map((control) => control.key);
+    assert.ok(keys({ __gwnativeUpdates: true }).includes('autoCheckUpdates'));
+    assert.ok(!keys({ __gwnativeUpdates: false }).includes('autoCheckUpdates'));
+    // An injection that never happened — a page opened outside the app, or a
+    // host older than this file. Absent is not the same as true.
+    assert.ok(!keys({}).includes('autoCheckUpdates'));
+  });
+
+  // Everything without a `when` is unconditional, and has to stay that way:
+  // hiding a control the player has already set would leave the value in force
+  // with nothing to change it back.
+  it('keeps every other control on every build', () => {
+    const bare = panel.offered({}).map((control) => control.key);
+    assert.deepEqual(bare.sort(), [
+      'dataStrategy',
+      'nativeCursor',
+      'renderScale',
+      'showDiagnostics',
+      'targetReadout',
+      'touchMode',
+    ]);
+  });
+
+  // `changed` and `needsRelaunch` read the whole of CONTROLS on purpose. They
+  // are handed keys that were actually offered and saved, so a hidden control
+  // cannot reach them — and reading the filtered list would make them depend on
+  // what the host injected, which is not something a diff should care about.
+  it('reasons about a saved key whether or not this build offers it', () => {
+    assert.deepEqual(
+      panel.changed({ ...current, autoCheckUpdates: false }, { autoCheckUpdates: true }),
+      ['autoCheckUpdates'],
+    );
+    assert.equal(panel.needsRelaunch(['autoCheckUpdates']), false);
+  });
+
+  // The figure is what a player decides on before deleting several gigabytes,
+  // so it says the same thing at both ends rather than switching to a bare
+  // percentage when the download finishes.
+  it('says how much of the game image is on this Mac', () => {
+    const chunkSize = 262_144;
+    assert.match(dataFor({ cached: 0, total: 16_000, chunkSize }), /^0\.0 of 4\.2 GB/);
+    assert.match(dataFor({ cached: 8000, total: 16_000, chunkSize }), /2\.1 of 4\.2 GB on this Mac \(50%\)$/);
+    assert.match(dataFor({ cached: 16_000, total: 16_000, chunkSize }), /^All 4\.2 GB/);
+  });
+
+  // A running sweep is the difference between "this is all there will be" and
+  // "this is going up while you read it", and only one of those is worth
+  // clearing to get the disk space back.
+  it('says when the download is still moving', () => {
+    const info = { cached: 4000, total: 16_000, chunkSize: 262_144 };
+    assert.match(dataFor({ ...info, running: true }), /· downloading$/);
+    assert.doesNotMatch(dataFor({ ...info, running: false }), /downloading/);
+  });
+
+  // Both are ordinary: a launch with no snapshot store answers nothing at all,
+  // and a first launch that has fetched nothing answers zeroes. Neither should
+  // produce a division or a sentence with NaN in it.
+  it('does not invent a figure it was not given', () => {
+    assert.match(dataFor(null), /cannot be read/);
+    assert.match(dataFor({ cached: 0, total: 0, chunkSize: 0 }), /No game data/);
+  });
+
+  // Three of the four touch modes stop double-clicking from working, and one
+  // of those also withholds every mouse click from the game. That is fine for
+  // working out where a problem comes from and ruinous to land on by accident,
+  // which is what happened when the labels described touch events rather than
+  // consequences. Whatever the wording becomes, the working mode leads and the
+  // three that break something say so.
+  it('leads with the double-click mode and warns about the rest', () => {
+    const touch = panel.CONTROLS.find((control) => control.key === 'touchMode');
+    assert.equal(touch.choices[0].value, 'dbltap');
+    assert.match(touch.choices[0].label, /^On\b/);
+    for (const choice of touch.choices.slice(1)) {
+      assert.match(choice.label, /not work|withheld|together/,
+        `"${choice.label}" does not say what choosing it costs`);
     }
   });
 });

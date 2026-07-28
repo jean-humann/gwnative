@@ -35,6 +35,7 @@ mod qos;
 mod relaunch;
 mod release;
 mod renderer;
+mod report;
 #[cfg(test)]
 mod scratch;
 mod server;
@@ -106,6 +107,9 @@ fn main() {
     // Started before the window so that whatever the shell costs to build is
     // in the record too.
     let recorder = diagnostics::Recorder::open(diagnostics::default_log_dir());
+    // First line in the file, so a log sent on by a player says which Mac and
+    // which build it came from without anybody having to write back and ask.
+    recorder.session();
     diagnostics::spawn_sampler(Arc::clone(&recorder), {
         let snapshot = snapshot.clone();
         move || match &snapshot {
@@ -117,35 +121,72 @@ fn main() {
         }
     });
 
+    // Read before the window exists: the render scale the client is handed and
+    // the gesture translation the page installs are both settled before the
+    // first frame, so asking the page to fetch them later would mean booting
+    // once at the wrong scale and correcting it in front of the player. Which
+    // client module to derive is settled here too — see below.
+    let settings = Arc::new(settings::Store::open(
+        paths::support_dir().join("settings.json"),
+    ));
+
     // Derive the client that can save a template, if this is a build we have
-    // certified. A failure here is never fatal: the untransformed module still
-    // plays, it just cannot save, list or delete a build — which is where the
-    // client started. See `wasm` for what the derived module changes.
+    // certified, and layer the GWonMac Tools on top of it when the player has
+    // asked for one. A failure here is never fatal: the untransformed module
+    // still plays, it just cannot save, list or delete a build — which is where
+    // the client started. See `wasm` for what each derived module changes.
     //
     // The outcome is carried to the page as well as to the log. A player who
     // clicks Save in the client's template window and watches nothing happen is
     // owed a sentence about why, and the log is not where they will look for
     // it; `settings-panel.js` is what turns this into that sentence.
-    let (derived_wasm, template_save) =
-        match wasm::prepare(&root.join("Gw.jspi.wasm"), &paths::derived_dir()) {
-            Ok(Some(path)) => (Some(path), "ready"),
-            Ok(None) => {
-                note!("[gwnative] template save: unavailable, this client build is not certified");
-                (None, "uncertified")
-            }
-            Err(reason) => {
-                note!("[gwnative] template save unavailable: {reason}");
-                (None, "failed")
-            }
-        };
-
-    // Read before the window exists: the render scale the client is handed and
-    // the gesture translation the page installs are both settled before the
-    // first frame, so asking the page to fetch them later would mean booting
-    // once at the wrong scale and correcting it in front of the player.
-    let settings = Arc::new(settings::Store::open(
-        paths::support_dir().join("settings.json"),
-    ));
+    let (derived_wasm, module) = match wasm::prepare(
+        &root.join("Gw.jspi.wasm"),
+        &paths::derived_dir(),
+        settings.get().enhancements_enabled(),
+    ) {
+        Ok(wasm::Prepared {
+            client,
+            derived: Some(path),
+            enhancements,
+        }) => (
+            Some(path),
+            wasm::Module {
+                build: Some(client),
+                template_save: "ready",
+                enhancements,
+            },
+        ),
+        Ok(wasm::Prepared {
+            client,
+            derived: None,
+            enhancements,
+        }) => {
+            note!("[gwnative] template save: unavailable, this client build is not certified");
+            (
+                None,
+                wasm::Module {
+                    build: Some(client),
+                    template_save: "uncertified",
+                    enhancements,
+                },
+            )
+        }
+        Err(reason) => {
+            note!("[gwnative] template save unavailable: {reason}");
+            (
+                None,
+                wasm::Module {
+                    build: None,
+                    template_save: "failed",
+                    enhancements: wasm::enhancements::FAILED,
+                },
+            )
+        }
+    };
+    if module.enhancements != wasm::enhancements::OFF {
+        note!("[gwnative] GWonMac Tools: {}", module.enhancements);
+    }
 
     let token = session_token();
     let loopback = match server::spawn(
@@ -184,7 +225,7 @@ fn main() {
     if headless {
         park_headless(&loopback, &token);
     }
-    run_windowed(&loopback, &token, template_save);
+    run_windowed(&loopback, &token, &module);
 }
 
 /// Take the single-instance lock, or hand the running app the foreground.
@@ -334,7 +375,13 @@ fn open_and_warm_snapshot(
     client: patch::Client,
     manifest: manifest::Manifest,
 ) -> Option<Arc<chunks::ChunkStore>> {
-    match chunks::ChunkStore::open(client, manifest, cache::default_cache_dir()).map(Arc::new) {
+    let cache_dir = cache::default_cache_dir();
+    // Before the store opens, which is the only moment this is safe: from here
+    // on the directory has a readahead thread, a prefetch thread and up to
+    // forty-eight fetches holding descriptors into it. See `cache::request_clear`
+    // for why the deletion is a launch behind the button that asks for it.
+    cache::take_clear_request(&cache_dir);
+    match chunks::ChunkStore::open(client, manifest, cache_dir).map(Arc::new) {
         Ok(store) => {
             note!(
                 "[gwnative] snapshot: {:.1} GB in {} KiB chunks, on demand",
@@ -376,7 +423,7 @@ fn park_headless(loopback: &server::Loopback, token: &str) -> ! {
 
 /// Build the window and hand the thread to AppKit. Returns once the app has
 /// terminated.
-fn run_windowed(loopback: &server::Loopback, token: &str, template_save: &str) {
+fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module) {
     let mtm = MainThreadMarker::new().expect("main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -391,7 +438,7 @@ fn run_windowed(loopback: &server::Loopback, token: &str, template_save: &str) {
         &format!("http://{}/index.html", loopback.addr),
         token,
         &loopback.settings.get(),
-        template_save,
+        module,
     );
     let window = window::open(mtm, &webview, paths::support_dir().join("window.json"));
 
@@ -401,7 +448,7 @@ fn run_windowed(loopback: &server::Loopback, token: &str, template_save: &str) {
         mtm,
         &webview,
         loopback.settings.clone(),
-        diagnostics::default_log_dir(),
+        loopback.recorder.clone(),
     )));
 
     commands::attach(&webview);
@@ -411,6 +458,12 @@ fn run_windowed(loopback: &server::Loopback, token: &str, template_save: &str) {
     // Before `run`, because the first thing it decides — whether closing the
     // window quits — can be asked the moment the window appears.
     app::own_lifecycle(mtm, &webview);
+
+    // After the menu, because the answer is shown through the same alert its
+    // item uses, and off this thread — the request takes up to five seconds and
+    // the page is loading. A no-op unless the player asked to be told; see
+    // [`release::due`].
+    menu::check_for_updates_at_launch(&loopback.settings);
 
     window.makeKeyAndOrderFront(None);
     app.activate();

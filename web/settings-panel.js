@@ -18,7 +18,11 @@
 // asked for is on disk and inert, and the only thing standing between them and
 // it is a quit they have to think of themselves.
 
+import { templateSaveNotice } from './compatibility.js';
 import * as diagnostics from './diagnostics.js';
+
+/** How often the game-image figure is re-read while the panel is open. */
+const DATA_POLL_MS = 2000;
 
 /**
  * @typedef {{
@@ -30,6 +34,7 @@ import * as diagnostics from './diagnostics.js';
  *   label: string,
  *   note?: string,
  *   live: boolean,
+ *   when?: (host: Record<string, unknown>) => boolean,
  *   choices: Choice[],
  * }} Control
  */
@@ -55,16 +60,23 @@ export const CONTROLS = [
       { value: 2, label: '2×' },
     ],
   },
+  // Every label here used to describe the *mechanism* — "Double-tap to drag",
+  // "Instead of the mouse" — and a player choosing between them was choosing
+  // between four descriptions of touch events, none of which mentions the thing
+  // that changes: whether double clicking works. It reads as a trackpad
+  // preference, so picking the one that sounds most like "I use a trackpad"
+  // silently turns the mouse off. Each option now says what it costs.
   {
     key: 'touchMode',
-    label: 'Trackpad gestures',
-    note: 'The client was built for a mouse. This decides what a trackpad is turned into.',
+    label: 'Double-click',
+    note: 'The game has no double-click of its own; it is built from taps. '
+      + 'Leave this on unless you are working out where a problem comes from.',
     live: false,
     choices: [
-      { value: 'off', label: 'Off' },
-      { value: 'dbltap', label: 'Double-tap to drag' },
-      { value: 'translate', label: 'Instead of the mouse' },
-      { value: 'augment', label: 'Alongside the mouse' },
+      { value: 'dbltap', label: 'On (recommended)' },
+      { value: 'off', label: 'Off — double-clicking will not work' },
+      { value: 'translate', label: 'Touch only — mouse clicks are withheld' },
+      { value: 'augment', label: 'Touch and mouse together' },
     ],
   },
   {
@@ -88,43 +100,88 @@ export const CONTROLS = [
       { value: 'full', label: 'Download in full' },
     ],
   },
+  {
+    key: 'autoCheckUpdates',
+    label: 'Update check',
+    note: 'Asks once a day, at launch, and stays quiet unless there is a newer release.',
+    live: true,
+    // Not offered on a build with nowhere to look. The Help menu hides "Check
+    // for Updates…" on the same question — see `menu::updates_offered` — and a
+    // switch for a check that cannot happen is worse than no switch, because it
+    // is a promise the build cannot keep.
+    when: (host) => host.__gwnativeUpdates === true,
+    choices: [
+      { value: false, label: 'Only when I ask' },
+      { value: true, label: 'Once a day, at launch' },
+    ],
+  },
+  // The GWonMac Tools. Both are relaunch-required for the same reason and it
+  // is not a UI limitation: turning either on changes which client module the
+  // host builds and serves, and that is decided before this page exists. There
+  // is deliberately no master switch above them — "are the tools on" is
+  // derived from "is any tool on", so there is nothing that can disagree with
+  // the two controls it would be speaking for.
+  {
+    key: 'nativeCursor',
+    label: 'Game cursor',
+    note: 'Draws the game\'s own cursor as the pointer, so it moves with the '
+      + 'mouse instead of with the frame rate.',
+    live: false,
+    choices: [
+      { value: true, label: 'Follow the mouse (recommended)' },
+      { value: false, label: 'Leave it to the game' },
+    ],
+  },
+  {
+    key: 'targetReadout',
+    label: 'Target distance',
+    note: 'Shows how far away your target is, and which range band that is, '
+      + 'above the game.',
+    live: false,
+    choices: [
+      { value: false, label: 'Hidden' },
+      { value: true, label: 'Shown' },
+    ],
+  },
 ];
 
 /**
- * What to tell the player about build templates, or null when there is nothing
- * to tell.
+ * The controls this build can honestly offer.
  *
- * The client's template window has a Save button, and on a client build this
- * app has not been certified against it does nothing at all: the five file
- * routines it needs are the ones `src/wasm.rs` patches, and an uncertified
- * build is served untransformed. Silence there reads as a broken game. It is
- * not — every other thing the client does is unaffected, which is the part
- * worth saying in the same breath as the part that is missing.
+ * Filtering here rather than at each use keeps `CONTROLS` the specification: a
+ * control that is hidden is still the same declaration, still tested, and still
+ * the thing `changed` and `needsRelaunch` reason about. Those two deliberately
+ * keep reading the whole list — they are given keys that were actually saved,
+ * and a key that could not be shown was never among them.
  *
- * Said here rather than in the launcher because it is a state, not an event: a
- * player who reads it once at a boot they were half-watching still needs
- * somewhere to go and check, and this panel is where the rest of what this app
- * decided for them already lives.
- *
- * @param {unknown} state `window.__gwnativeTemplateSave` — 'ready', 'uncertified' or 'failed'
- * @returns {string | null}
+ * @param {Record<string, unknown>} [host] where the host's injections landed
+ * @returns {Control[]}
  */
-export function templateSaveNotice(state) {
-  if (state === 'uncertified') {
-    return (
-      'Build templates cannot be saved: this release has not been checked against ' +
-      'the client build ArenaNet is currently shipping. Everything else works, ' +
-      'including the characters and settings already on this Mac. Saving comes ' +
-      'back in a later release of this app.'
-    );
-  }
-  if (state === 'failed') {
-    return (
-      'Build templates cannot be saved: preparing the client for it did not ' +
-      'finish. Everything else works. The Diagnostics window says what failed.'
-    );
-  }
-  return null;
+export function offered(host = globalThis) {
+  return CONTROLS.filter((control) => !control.when || control.when(host));
+}
+
+/**
+ * How much of the game image is on this Mac, in a sentence.
+ *
+ * The figure is chunks × chunk size rather than a byte count, so the last
+ * partial chunk rounds it up by at most a quarter of a megabyte in four
+ * gigabytes — below the first decimal place it is shown to.
+ *
+ * @param {Record<string, number | boolean | null> | null} progress from `__prefetch`
+ * @returns {string}
+ */
+export function dataLine(progress) {
+  if (!progress) return 'The game data cannot be read right now.';
+  const cached = Number(progress.cached ?? 0);
+  const total = Number(progress.total ?? 0);
+  const chunk = Number(progress.chunkSize ?? 0);
+  if (!total || !chunk) return 'No game data is stored on this Mac yet.';
+  const gb = (chunks) => ((chunks * chunk) / 1e9).toFixed(1);
+  if (cached >= total) return `All ${gb(total)} GB of the game image is on this Mac.`;
+  const share = Math.floor((cached / total) * 100);
+  const line = `${gb(cached)} of ${gb(total)} GB on this Mac (${share}%)`;
+  return progress.running ? `${line} · downloading` : line;
 }
 
 /**
@@ -190,12 +247,16 @@ export async function applyLive(keys, settings, page) {
  *   save: (patch: object) => Promise<Record<string, unknown>>,
  *   showLog: (on: boolean) => void,
  *   sweep: (action: 'start' | 'stop') => Promise<unknown>,
+ *   progress: () => Promise<Record<string, unknown>>,
+ *   clearData: () => Promise<void>,
  *   relaunch: () => Promise<void>,
  *   log: (...args: unknown[]) => void,
  * }} deps
  * @returns {() => void} opens the panel
  */
-export function installSettingsPanel({ read, save, showLog, sweep, relaunch, log }) {
+export function installSettingsPanel({
+  read, save, showLog, sweep, progress, clearData, relaunch, log,
+}) {
   const overlay = document.getElementById('settings');
   const rows = document.getElementById('settings-rows');
   const note = document.getElementById('settings-note');
@@ -219,12 +280,17 @@ export function installSettingsPanel({ read, save, showLog, sweep, relaunch, log
   /** The `<select>` for each control, by key. */
   const fields = new Map();
 
+  // Read once. What the host injected does not change while the page is up, and
+  // a panel whose rows appeared and disappeared between openings would be worse
+  // than one that is simply shorter on some builds.
+  const controls = offered();
+
   // The value round-trips through an index rather than through the option's
   // value attribute, which is a string: `false` and `null` would both come back
   // as text and the host would refuse the patch by type.
   const chosen = (control) => control.choices[Number(fields.get(control.key).value)]?.value;
 
-  for (const control of CONTROLS) {
+  for (const control of controls) {
     const row = document.createElement('div');
     row.className = 'settings-row';
 
@@ -258,7 +324,7 @@ export function installSettingsPanel({ read, save, showLog, sweep, relaunch, log
 
   const show = () => {
     const settings = read();
-    for (const control of CONTROLS) {
+    for (const control of controls) {
       const index = control.choices.findIndex((choice) => Object.is(choice.value, settings[control.key]));
       // A value the panel has no choice for is a file written by a later build,
       // or by hand. Showing the first choice would silently offer to overwrite
@@ -268,12 +334,15 @@ export function installSettingsPanel({ read, save, showLog, sweep, relaunch, log
     note.textContent = '';
     say('');
     offerSaving();
+    offerClearing();
+    watchData();
     overlay.hidden = false;
-    fields.get(CONTROLS[0].key).focus();
+    fields.get(controls[0].key).focus();
     diagnostics.count('gw.settings.opened');
   };
 
   const close = () => {
+    stopWatching();
     overlay.hidden = true;
     // The client stops hearing keys the moment something else takes focus, and
     // the panel took it. Giving it back is what makes the game playable again
@@ -283,7 +352,7 @@ export function installSettingsPanel({ read, save, showLog, sweep, relaunch, log
 
   const apply = async () => {
     const before = read();
-    const after = Object.fromEntries(CONTROLS.map((c) => [c.key, chosen(c)]).filter(([, v]) => v !== undefined));
+    const after = Object.fromEntries(controls.map((c) => [c.key, chosen(c)]).filter(([, v]) => v !== undefined));
     const keys = changed(before, after);
     if (keys.length === 0) {
       close();
@@ -315,16 +384,110 @@ export function installSettingsPanel({ read, save, showLog, sweep, relaunch, log
     }
   };
 
-  const button = (label, run, primary) => {
+  const button = (label, run, primary, danger) => {
     const element = document.createElement('button');
     element.textContent = label;
     if (primary) element.classList.add('primary');
+    if (danger) element.classList.add('danger');
     element.addEventListener('click', run);
     return element;
   };
 
   const offerSaving = () => {
     actions.replaceChildren(button('Cancel', close), button('Save', apply, true));
+  };
+
+  // The game image, as a figure and a way to be rid of it.
+  //
+  // Deliberately below the Save row and not part of it. Everything above is a
+  // preference that a Cancel takes back; this deletes gigabytes and cannot be
+  // taken back, so it does not share a button row with a form — and it acts the
+  // moment it is confirmed rather than waiting to be saved, because there is no
+  // version of "clear the cache" that should sit pending until Save is pressed.
+  const section = document.getElementById('settings-data');
+  const line = document.getElementById('settings-data-line');
+  const dataActions = document.getElementById('settings-data-actions');
+  const dataOffered = Boolean(section && line && dataActions && progress && clearData);
+
+  /** The poll that keeps the figure moving while the panel sits open. */
+  let watching = null;
+
+  const refreshData = async () => {
+    let info = null;
+    try {
+      info = await progress();
+    } catch (error) {
+      // A build with no snapshot store, or a host that stopped answering. The
+      // section is about data that may not exist, so it goes away rather than
+      // offering to clear something nothing can report on.
+      stopWatching();
+      section.hidden = true;
+      log(`settings: no game data to report on (${error})`);
+      return;
+    }
+    line.textContent = dataLine(info);
+    section.hidden = false;
+  };
+
+  const watchData = () => {
+    if (!dataOffered || watching) return;
+    void refreshData();
+    // A download moves by tens of megabytes a second, and a figure that only
+    // updated on open would be wrong within a second of being read.
+    watching = setInterval(refreshData, DATA_POLL_MS);
+  };
+
+  function stopWatching() {
+    if (watching !== null) clearInterval(watching);
+    watching = null;
+  }
+
+  const offerClearing = () => {
+    if (!dataOffered) return;
+    dataActions.replaceChildren(button('Clear Game Data…', confirmClearing));
+  };
+
+  // The poll is stopped for the length of the question, because the next tick
+  // would overwrite the sentence being answered with a progress figure.
+  const confirmClearing = () => {
+    stopWatching();
+    line.textContent =
+      'The downloaded game data will be deleted when the app restarts, and fetched ' +
+      'again as the game asks for it. Characters, settings and storage are held by ' +
+      'ArenaNet and are not touched.';
+    dataActions.replaceChildren(
+      button('Keep It', () => {
+        offerClearing();
+        watchData();
+      }),
+      button('Clear and Restart', clearAndRestart, false, true),
+    );
+  };
+
+  const clearAndRestart = async () => {
+    dataActions.replaceChildren();
+    line.textContent = 'Clearing…';
+    try {
+      await clearData();
+    } catch (error) {
+      line.textContent = `Not cleared: ${error}`;
+      diagnostics.count('gw.settings.game-data-clear-failed');
+      log(`[warn] settings: ${error}`);
+      offerClearing();
+      return;
+    }
+    diagnostics.count('gw.settings.game-data-cleared');
+    line.textContent = 'The game data will be cleared when the app restarts.';
+    try {
+      await relaunch();
+    } catch (error) {
+      // The request is recorded either way, so this is a slower path to the
+      // same place rather than a failure to say sorry for.
+      note.textContent = `Not restarted: ${error}`;
+      say('The game data will be cleared the next time the app starts.');
+      diagnostics.count('gw.settings.relaunch-failed');
+      log(`[warn] settings: ${error}`);
+    }
   };
 
   /**

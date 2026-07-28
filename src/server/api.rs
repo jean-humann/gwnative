@@ -19,7 +19,7 @@ use std::sync::Arc;
 use super::{Context, Flow, tracing};
 use crate::chunks::ChunkStore;
 use crate::http::{Request, json, no_content, respond, text, token_matches};
-use crate::{app, diagnostics, disk, dock, keychain, net, relaunch, ws};
+use crate::{app, cache, diagnostics, disk, dock, keychain, net, relaunch, ws};
 
 /// Room to leave behind after a full download.
 ///
@@ -32,9 +32,9 @@ const DISK_HEADROOM: u64 = 2 * 1024 * 1024 * 1024;
 /// Answer a `__` route.
 ///
 /// `None` means this request is not one of ours and the caller should go on to
-/// serve it as content — which is also how the three routes that need a
-/// snapshot behave when there is none, so a build with no image installed
-/// refuses them exactly as it refuses any other name it does not know.
+/// serve it as content. Every `__` name below answers here instead, including
+/// the four that need a game image and have none — see [`no_snapshot`] for what
+/// falling through cost them.
 pub(super) fn serve(
     request: &Request,
     stream: &mut TcpStream,
@@ -58,11 +58,16 @@ pub(super) fn serve(
     // Every arm answers and falls out to `flow`, bar the two that decide the
     // connection's fate themselves.
     match request.path.as_str() {
-        // Diagnostic channel for the bring-up harness. Real host calls will go
-        // over WKScriptMessageHandlerWithReply; this only exists so a page can
-        // report results without a UI.
+        // Everything the page logs, including everything the client logs
+        // through it. Two destinations and both are wanted: the terminal is
+        // where a developer running `cargo run` reads it, and the diagnostics
+        // file is the only one of the two a player has — without it, every
+        // warning printed before a failure was lost to the one person who
+        // could have sent it on.
         "__report" if request.method == "POST" => {
-            note!("[report] {}", String::from_utf8_lossy(&request.body));
+            let batch = String::from_utf8_lossy(&request.body);
+            note!("[report] {batch}");
+            context.recorder.page(&batch);
             no_content(stream)?;
         }
         "__dns" => dns(request, stream)?,
@@ -72,15 +77,15 @@ pub(super) fn serve(
         "__diag" => diag(request, stream, context)?,
         "__resident" => match &context.snapshot {
             Some(store) => resident(stream, store)?,
-            None => return Ok(None),
+            None => no_snapshot(request, stream)?,
         },
         "__warm" => match &context.snapshot {
             Some(store) => warm(request, stream, store)?,
-            None => return Ok(None),
+            None => no_snapshot(request, stream)?,
         },
         "__prefetch" => match &context.snapshot {
             Some(store) => prefetch(request, stream, store)?,
-            None => return Ok(None),
+            None => no_snapshot(request, stream)?,
         },
         // The harness says the first frame is up. Two things follow from that.
         // Everything the store read before now is what booting costs, so that
@@ -104,6 +109,27 @@ pub(super) fn serve(
             app::request_quit();
             return Ok(Some(Flow::Close));
         }
+        // Ask the *next* launch to start from an empty cache. Deliberately not
+        // a delete: see `cache::request_clear` for why a running store cannot
+        // have the directory removed from under it. The caller relaunches.
+        //
+        // The directory comes from the open store rather than from
+        // `cache::default_cache_dir`, so what gets cleared is what this launch
+        // is actually reading — and a launch with no store has nothing it could
+        // honestly promise to clear.
+        "__data" if request.method == "DELETE" => match &context.snapshot {
+            Some(store) => match cache::request_clear(store.cache_dir()) {
+                Ok(()) => {
+                    note!("[chunks] the game data will be cleared at the next launch");
+                    no_content(stream)?;
+                }
+                Err(e) => {
+                    note!("[chunks] the clear could not be armed: {e}");
+                    text(stream, 500, &e.to_string())?;
+                }
+            },
+            None => no_snapshot(request, stream)?,
+        },
         // The same quit, with something to come back to. Deliberately two
         // routes and not one with a flag: quitting is unconditional and this
         // one is not, and a caller that asked to come back and did not needs to
@@ -133,6 +159,24 @@ pub(super) fn serve(
         }
     }
     Ok(Some(flow))
+}
+
+/// The answer for a route that speaks for the game image on a launch that has
+/// none.
+///
+/// A launch reaches this before the manifest is fetched, and stays here if the
+/// fetch failed. Both routes used to answer it by declining to handle the
+/// request at all, which left the static file server to refuse a `__` path with
+/// a bare 403 — the exact outcome the fall-through arm above exists to prevent,
+/// and one that reads to a caller as "you are not allowed to ask" rather than
+/// "there is nothing here to ask about".
+fn no_snapshot(request: &Request, stream: &mut TcpStream) -> std::io::Result<()> {
+    note!(
+        "[loopback] {} /{} has no game image to answer for",
+        request.method,
+        request.path
+    );
+    text(stream, 404, "no game image on this launch")
 }
 
 /// The game asks for an address before it dials. Answering here keeps name
