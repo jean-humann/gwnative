@@ -153,35 +153,11 @@ impl Manifest {
             .as_object()
             .ok_or_else(|| Error::ManifestFormat("manifest must be an object".into()))?;
 
-        let compression = match obj.get("compressionMode").and_then(|v| v.as_str()) {
-            Some("none") => Compression::None,
-            Some("gzip") => Compression::Gzip,
-            other => {
-                return Err(Error::ManifestFormat(format!(
-                    "unsupported compression: {other:?}"
-                )));
-            }
-        };
+        let compression = compression(obj)?;
+        let chunk_size = chunk_size(obj)?;
 
-        let chunk_size = obj
-            .get("chunkSize")
-            .and_then(|v| v.as_u64())
-            .filter(|n| *n > 0 && *n <= MAX_CHUNK_SIZE)
-            .ok_or_else(|| Error::ManifestFormat("bad chunkSize".into()))?;
-
-        let empty = Vec::new();
-        let dirs = match obj.get("directories") {
-            None | Some(serde_json::Value::Null) => &empty,
-            Some(v) => v
-                .as_array()
-                .ok_or_else(|| Error::ManifestFormat("invalid directory list".into()))?,
-        };
-        let files = match obj.get("files") {
-            None | Some(serde_json::Value::Null) => &empty,
-            Some(v) => v
-                .as_array()
-                .ok_or_else(|| Error::ManifestFormat("invalid file list".into()))?,
-        };
+        let dirs = list(obj, "directories", "directory")?;
+        let files = list(obj, "files", "file")?;
         if dirs.len() > MAX_DIRECTORIES || files.len() > MAX_FILES {
             return Err(Error::ManifestFormat("manifest too large".into()));
         }
@@ -189,70 +165,10 @@ impl Manifest {
         let dir_paths = resolve_directories(dirs)?;
 
         let mut parsed: HashMap<String, FileEntry> = HashMap::new();
-        let mut hash_lengths: HashMap<ContentHash, u64> = HashMap::new();
-        let mut references: u64 = 0;
-
+        let mut tally = Tally::default();
         for file in files {
-            let entry = file
-                .as_object()
-                .ok_or_else(|| Error::ManifestFormat("invalid file entry".into()))?;
-            let name = validate_name(entry.get("name"), "file")?;
-            let parent = validate_parent(entry.get("parentIndex"), dirs.len(), "file")?;
-            let path = match parent {
-                0 => name,
-                p => format!("{}/{}", dir_paths[p], name),
-            };
-
-            let size = entry
-                .get("size")
-                .and_then(|v| v.as_u64())
-                .filter(|n| *n > 0)
-                .ok_or_else(|| Error::ManifestFormat(format!("invalid size for {path}")))?;
-
-            let hashes = entry
-                .get("chunkHashes")
-                .and_then(|v| v.as_array())
-                .ok_or_else(|| Error::ManifestFormat(format!("invalid chunk list for {path}")))?;
-
-            let expected = size.div_ceil(chunk_size);
-            if hashes.len() as u64 != expected {
-                return Err(Error::ManifestFormat(format!(
-                    "chunk count mismatch for {path}"
-                )));
-            }
-            references += expected;
-            if references > MAX_CHUNK_REFERENCES {
-                return Err(Error::ManifestFormat("too many chunk references".into()));
-            }
-
-            let mut chunk_hashes = Vec::with_capacity(hashes.len());
-            for (i, value) in hashes.iter().enumerate() {
-                let hash = ContentHash::parse(
-                    value
-                        .as_str()
-                        .ok_or_else(|| Error::HashFormat(value.to_string()))?,
-                )?;
-                // Every reference to a hash must agree on how many bytes it
-                // decodes to, or a short final chunk could be served where a
-                // full one is expected.
-                let length = chunk_size.min(size - i as u64 * chunk_size);
-                match hash_lengths.get(&hash) {
-                    Some(prev) if *prev != length => {
-                        return Err(Error::ManifestFormat(format!(
-                            "chunk {hash} has conflicting lengths"
-                        )));
-                    }
-                    _ => {
-                        hash_lengths.insert(hash, length);
-                    }
-                }
-                chunk_hashes.push(hash);
-            }
-
-            if parsed
-                .insert(path.clone(), FileEntry { size, chunk_hashes })
-                .is_some()
-            {
+            let (path, entry) = parse_file(file, &dir_paths, chunk_size, &mut tally)?;
+            if parsed.insert(path.clone(), entry).is_some() {
                 return Err(Error::ManifestFormat(format!(
                     "duplicate manifest path {path}"
                 )));
@@ -288,6 +204,116 @@ impl Manifest {
         }
         found.ok_or_else(|| Error::ManifestFormat(format!("manifest is missing {basename}")))
     }
+}
+
+fn compression(obj: &serde_json::Map<String, serde_json::Value>) -> Result<Compression> {
+    match obj.get("compressionMode").and_then(|v| v.as_str()) {
+        Some("none") => Ok(Compression::None),
+        Some("gzip") => Ok(Compression::Gzip),
+        other => Err(Error::ManifestFormat(format!(
+            "unsupported compression: {other:?}"
+        ))),
+    }
+}
+
+fn chunk_size(obj: &serde_json::Map<String, serde_json::Value>) -> Result<u64> {
+    obj.get("chunkSize")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0 && *n <= MAX_CHUNK_SIZE)
+        .ok_or_else(|| Error::ManifestFormat("bad chunkSize".into()))
+}
+
+/// One of the manifest's two arrays.
+///
+/// Absent and null both read as empty, which is not laxness: the live service
+/// omits `directories` entirely for a flat manifest, and refusing that would
+/// refuse every such update.
+fn list<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    kind: &str,
+) -> Result<&'a [serde_json::Value]> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(&[]),
+        Some(v) => v
+            .as_array()
+            .map(Vec::as_slice)
+            .ok_or_else(|| Error::ManifestFormat(format!("invalid {kind} list"))),
+    }
+}
+
+/// What the file loop carries from one file to the next: the length every hash
+/// has been seen to decode to, and how many chunk references the whole manifest
+/// has spent so far.
+#[derive(Default)]
+struct Tally {
+    lengths: HashMap<ContentHash, u64>,
+    references: u64,
+}
+
+/// One entry of the file list, resolved to its full path and its chunk list.
+fn parse_file(
+    file: &serde_json::Value,
+    dir_paths: &[String],
+    chunk_size: u64,
+    tally: &mut Tally,
+) -> Result<(String, FileEntry)> {
+    let entry = file
+        .as_object()
+        .ok_or_else(|| Error::ManifestFormat("invalid file entry".into()))?;
+    let name = validate_name(entry.get("name"), "file")?;
+    let parent = validate_parent(entry.get("parentIndex"), dir_paths.len(), "file")?;
+    let path = match parent {
+        0 => name,
+        p => format!("{}/{}", dir_paths[p], name),
+    };
+
+    let size = entry
+        .get("size")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
+        .ok_or_else(|| Error::ManifestFormat(format!("invalid size for {path}")))?;
+
+    let hashes = entry
+        .get("chunkHashes")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| Error::ManifestFormat(format!("invalid chunk list for {path}")))?;
+
+    let expected = size.div_ceil(chunk_size);
+    if hashes.len() as u64 != expected {
+        return Err(Error::ManifestFormat(format!(
+            "chunk count mismatch for {path}"
+        )));
+    }
+    tally.references += expected;
+    if tally.references > MAX_CHUNK_REFERENCES {
+        return Err(Error::ManifestFormat("too many chunk references".into()));
+    }
+
+    let mut chunk_hashes = Vec::with_capacity(hashes.len());
+    for (i, value) in hashes.iter().enumerate() {
+        let hash = ContentHash::parse(
+            value
+                .as_str()
+                .ok_or_else(|| Error::HashFormat(value.to_string()))?,
+        )?;
+        // Every reference to a hash must agree on how many bytes it decodes to,
+        // or a short final chunk could be served where a full one is expected.
+        let length = chunk_size.min(size - i as u64 * chunk_size);
+        match tally.lengths.get(&hash) {
+            Some(prev) if *prev != length => {
+                return Err(Error::ManifestFormat(format!(
+                    "chunk {hash} has conflicting lengths"
+                )));
+            }
+            _ => {
+                tally.lengths.insert(hash, length);
+            }
+        }
+        chunk_hashes.push(hash);
+    }
+
+    Ok((path, FileEntry { size, chunk_hashes }))
 }
 
 fn resolve_directories(dirs: &[serde_json::Value]) -> Result<Vec<String>> {
