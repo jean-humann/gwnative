@@ -270,38 +270,53 @@ per-user and does not follow `$HOME`; the Electron build passes
 benchmark cannot click, and bytes written measure how far the client got rather
 than a fixed cost of installing.
 
-### What it said, 300 seconds each, same machine, same hour
+### What it says, 300 seconds each, same machine, repeated
 
-|                                        | gwnative | Electron |
-| -------------------------------------- | -------: | -------: |
-| page load to first frame (ms)          |  144,487 |   14,602 |
-| physical footprint, whole tree (MiB)   |      554 |      998 |
-| its peak, summed over the tree (MiB)   |    1,913 |    1,306 |
-| resident, whole tree (MiB)             |    1,854 |    1,204 |
-| CPU seconds, whole tree                |     44.1 |    148.6 |
-| processes at peak                      |        4 |        5 |
-| written to a blank profile (MiB)       |      366 |      771 |
+Single runs of this benchmark are not quotable — first frame on this build has
+been measured anywhere from 21 to 39 seconds across one night depending on CDN
+edge state and whether the window was composited — so what follows is ranges
+over repeated runs, not a column of point estimates.
 
-Two of those are the result this app was written for. It settles a third of a
-gigabyte lighter and spends a third of the CPU, which is the whole argument, and
-it is not close.
+|                                        |    gwnative |   Electron |
+| -------------------------------------- | ----------: | ---------: |
+| page load to first frame (s)           |     21 – 35 |    13 – 18 |
+| CPU seconds, whole tree                |     28 – 88 |   37 – 123 |
+| footprint peak, summed over tree (MiB) | 1986 – 2105 | 1212 – 1357 |
+| full 4.2 GB download, blank install (s)|         166 |  106 – 120 |
 
-The first row is the argument against it, and it is worse than the ratio looks.
-Both builds submit their first frame only once the client's own startup download
-finishes, so that row is a download time wearing a rendering label: this build
-took ten times as long to fetch **half as much** — 366 MiB against 771 — across
-5,176 range requests whose slowest took 1.36 s. `gw.frame.ms` of 413 ms in the
-same run is a frame time measured while that fetch was still saturating
-everything, not a rendering cost. The chunk fetch path is the next thing to fix,
-and until it is fixed this app is materially slower to start than the thing it
-replaces.
+The CPU column is the result this app was written for, and it holds across
+every run. The other three are where the Electron build still wins, each for a
+reason now known rather than guessed:
 
-The other unflattering number is the summed peak: 1,913 MiB against 1,306. Most
-of it is one high-water mark, `WebContent` at 1,536 MiB, against a wasm heap of
-256. Something transient is four times the size of the heap it serves. A summed
-peak is a ceiling rather than a reading — the kernel keeps one high-water mark
-per process and they need not have coincided — but a ceiling that far above the
-554 MiB steady state is worth finding.
+**First frame.** The transport is no longer the story. Fetching moved to the
+OS HTTP/2 stack, the boot set ships as a built-in chunk list the store warms
+before the client asks, and demand reads that once averaged 22 ms against the
+network average 1.4 ms against the warmed cache. What remains is the client's
+own startup walk, which advances a handful of files per animation frame — a
+frame-rate-paced loop, which is why the Electron build's 120 Hz
+requestAnimationFrame beats a 60 Hz one at booting, of all things. This build
+now asks WebKit for the display's full rate; the walk is the number to watch.
+
+**The full download.** Both builds sweep the same 16,023 chunks from the same
+CDN. Chromium's connection opens at ~53 MiB/s and never collapses; CFNetwork
+opens at ~33 and, in every measured run, throttles itself to ~4 MiB/s from
+roughly second 35 to second 75 before recovering — while a side-channel fetch
+of the same objects on a fresh connection runs at full speed, so it is not the
+network. Chromium advertises 6 MiB HTTP/2 stream windows; NSURLSession's are
+neither that large nor configurable. Matching this number means bypassing
+CFNetwork for bulk transfer, which has not been judged worth its dependency
+yet.
+
+**The summed peak** is unchanged in shape: one `WebContent` high-water mark
+several times the wasm heap it serves. A summed peak is a ceiling rather than
+a reading — the kernel keeps one high-water mark per process and they need not
+have coincided — but a ceiling that far above steady state is still worth
+finding.
+
+A blank install used to be the launch nothing could help, since the boot list
+that lets the store fetch ahead of demand was recorded by the launch before.
+It is now the launch the built-in list exists for; recording still happens,
+and a session's own list replaces the shipped one the moment it seals.
 
 ## When booting fails, and what the host pushes
 
