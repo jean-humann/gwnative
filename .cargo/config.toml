@@ -1,3 +1,13 @@
 # Sign before running. See scripts/signed-run for why the keychain needs it.
 [target.aarch64-apple-darwin]
 runner = "scripts/signed-run"
+
+[env]
+# The floor the Info.plist already declares, said again where the linker will
+# hear it. rustc otherwise stamps LC_BUILD_VERSION with its own default of
+# macOS 11, so a binary inspected on its own claimed to run on Macs whose
+# WebKit has no JSPI and where Gw.jspi.wasm cannot instantiate. Launch Services
+# reads the plist and would have refused those anyway; this is about the two
+# numbers agreeing, and about `otool -l` being a usable answer to "what does
+# this need".
+MACOSX_DEPLOYMENT_TARGET = "15.2"

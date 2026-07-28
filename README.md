@@ -1114,8 +1114,18 @@ the one answer that stops you looking again.
 
 `.github/workflows/ci.yml` runs on every push and pull request: `cargo fmt
 --check`, `cargo clippy` with warnings denied, the tests, a release build and
-`scripts/bundle`. On a macOS 15 Apple Silicon runner, because that is the only
-configuration this project targets.
+`scripts/bundle`. On `macos-26`, which is Apple Silicon and the newest image
+GitHub offers.
+
+Newest, because the runner's SDK is a ceiling on what the code may call and it
+should not sit below the SDK on the machine the code is written on — a symbol
+that compiles locally and fails in CI is a failure about nobody's change.
+Development happens on macOS 27 and there is no macOS 27 runner, so one major
+version of drift is the floor of what is achievable here. That is separate from
+the *deployment* floor, which is 15.2 and set in two places that have to agree:
+`MACOSX_DEPLOYMENT_TARGET` in `.cargo/config.toml`, so `LC_BUILD_VERSION` says
+15.2 rather than rustc's default of macOS 11, and `LSMinimumSystemVersion` in
+the plist, which is the one Launch Services enforces.
 
 The release build is a separate step from the tests on purpose — fat LTO with
 one codegen unit and `panic = "abort"` is a different compilation, and

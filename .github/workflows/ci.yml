@@ -33,11 +33,23 @@ env:
 
 jobs:
   check:
-    # Apple Silicon. This project builds one arm64 slice, links against AppKit
-    # and WebKit, and its tests talk to the macOS keychain and to loopback — an
-    # Intel runner would be testing a build nobody ships and a machine nobody
-    # runs it on.
-    runs-on: macos-15
+    # Apple Silicon, and the newest image GitHub offers. Both halves matter.
+    #
+    # arm64 because this project builds one arm64 slice; an Intel runner would
+    # be testing a build nobody ships, on a machine nobody runs it on.
+    #
+    # Newest because the SDK the runner links against is a ceiling on what the
+    # code may call, and it should not sit below the SDK on the machine the code
+    # is written on — otherwise a symbol that compiles locally fails here for a
+    # reason that has nothing to do with the change. Development happens on
+    # macOS 27; there is no macOS 27 runner (only a preview Xcode 27 image), so
+    # macOS 26 is as close as it gets and the gap is one major version instead
+    # of two. Pinned rather than macos-latest, so the day that alias moves is a
+    # commit and not a surprise.
+    #
+    # The floor is not the runner's business: MACOSX_DEPLOYMENT_TARGET and
+    # LSMinimumSystemVersion both say 15.2, and a newer SDK does not raise it.
+    runs-on: macos-26
     timeout-minutes: 30
 
     steps:
