@@ -1124,6 +1124,21 @@ in an `if: always()` step so it does not outlive a cancelled run. The private
 key is imported without `-A`, so `codesign` can use it and nothing else in the
 job can read it back out.
 
+Half of this cannot be tested on the machine it was written on — a keychain that
+has never held a certificate behaves differently from one that has — so the
+workflow takes a `dry_run` input that does everything including the submission
+to Apple and stops before publishing:
+
+```sh
+gh workflow run release.yml -f dry_run=true
+```
+
+It still needs the approval, because it still reaches the secrets. What it
+proves is the part a local run cannot: that the certificate imports and chains,
+that Apple accepts the build, and that the ticket staples to the image. Use it
+after touching anything in the signing path; the alternative is a first real run
+whose notarization log arrives after the release is public.
+
 The two certificates in `packaging/certs` are imported alongside it. They are
 Apple's public Developer ID intermediates and they are committed rather than
 fetched, because a keychain created from nothing has no path from the leaf to
