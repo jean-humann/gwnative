@@ -248,65 +248,71 @@ pub fn install(
 }
 
 fn build(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenu> {
-    /// An item AppKit already knows how to perform, sent up the responder
-    /// chain.
-    fn item(
-        mtm: MainThreadMarker,
-        title: &str,
-        action: Sel,
-        key: &str,
-        modifiers: Option<NSEventModifierFlags>,
-    ) -> Retained<NSMenuItem> {
-        // SAFETY: the selectors are AppKit's own first-responder actions, sent
-        // down the responder chain rather than to a specific object.
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(title),
-                Some(action),
-                &NSString::from_str(key),
-            )
-        };
-        if let Some(modifiers) = modifiers {
-            item.setKeyEquivalentModifierMask(modifiers);
-        }
-        item
-    }
-
-    /// An item this file performs itself. Distinguished from `item` only by
-    /// having a target: with one, AppKit stops walking the responder chain and
-    /// sends the action straight there.
-    fn ours(
-        mtm: MainThreadMarker,
-        actions: &Actions,
-        title: &str,
-        action: Sel,
-        key: &str,
-        modifiers: Option<NSEventModifierFlags>,
-    ) -> Retained<NSMenuItem> {
-        let item = item(mtm, title, action, key, modifiers);
-        // SAFETY: the target is leaked by `install`, so it outlives every menu
-        // item holding this weak reference to it.
-        unsafe { item.setTarget(Some(actions)) };
-        item
-    }
-
-    fn submenu(mtm: MainThreadMarker, title: &str, items: &[&NSMenuItem]) -> Retained<NSMenuItem> {
-        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
-        for item in items {
-            menu.addItem(item);
-        }
-        let holder = NSMenuItem::new(mtm);
-        holder.setSubmenu(Some(&menu));
-        holder
-    }
-
-    let command = NSEventModifierFlags::Command;
     let menu = NSMenu::new(mtm);
+    menu.addItem(&application_menu(mtm, actions));
+    menu.addItem(&edit_menu(mtm));
+    menu.addItem(&view_menu(mtm, actions));
+    menu.addItem(&help_menu(mtm, actions));
+    menu
+}
 
-    // The first submenu is the application menu whatever it is titled; macOS
-    // substitutes the process name for the title it is given.
-    menu.addItem(&submenu(
+/// An item AppKit already knows how to perform, sent up the responder chain.
+fn item(
+    mtm: MainThreadMarker,
+    title: &str,
+    action: Sel,
+    key: &str,
+    modifiers: Option<NSEventModifierFlags>,
+) -> Retained<NSMenuItem> {
+    // SAFETY: the selectors are AppKit's own first-responder actions, sent
+    // down the responder chain rather than to a specific object.
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(title),
+            Some(action),
+            &NSString::from_str(key),
+        )
+    };
+    if let Some(modifiers) = modifiers {
+        item.setKeyEquivalentModifierMask(modifiers);
+    }
+    item
+}
+
+/// An item this file performs itself. Distinguished from [`item`] only by
+/// having a target: with one, AppKit stops walking the responder chain and
+/// sends the action straight there.
+fn ours(
+    mtm: MainThreadMarker,
+    actions: &Actions,
+    title: &str,
+    action: Sel,
+    key: &str,
+    modifiers: Option<NSEventModifierFlags>,
+) -> Retained<NSMenuItem> {
+    let item = item(mtm, title, action, key, modifiers);
+    // SAFETY: the target is leaked by `install`, so it outlives every menu
+    // item holding this weak reference to it.
+    unsafe { item.setTarget(Some(actions)) };
+    item
+}
+
+fn submenu(mtm: MainThreadMarker, title: &str, items: &[&NSMenuItem]) -> Retained<NSMenuItem> {
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
+    for item in items {
+        menu.addItem(item);
+    }
+    let holder = NSMenuItem::new(mtm);
+    holder.setSubmenu(Some(&menu));
+    holder
+}
+
+/// The first submenu is the application menu whatever it is titled; macOS
+/// substitutes the process name for the title it is given.
+fn application_menu(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenuItem> {
+    let command = NSEventModifierFlags::Command;
+    submenu(
         mtm,
         "Guild Wars",
         &[
@@ -326,11 +332,14 @@ fn build(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenu> {
             &NSMenuItem::separatorItem(mtm),
             &item(mtm, "Quit Guild Wars", sel!(terminate:), "q", None),
         ],
-    ));
+    )
+}
 
-    // Cut and copy matter as much as paste: the client's own fields are these
-    // proxies, so the player expects the ordinary Mac editing keys in them.
-    menu.addItem(&submenu(
+/// Cut and copy matter as much as paste: the client's own fields are these
+/// proxies, so the player expects the ordinary Mac editing keys in them.
+fn edit_menu(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+    let command = NSEventModifierFlags::Command;
+    submenu(
         mtm,
         "Edit",
         &[
@@ -348,12 +357,15 @@ fn build(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenu> {
             &item(mtm, "Paste", sel!(paste:), "v", None),
             &item(mtm, "Select All", sel!(selectAll:), "a", None),
         ],
-    ));
+    )
+}
 
-    // Full screen is the only one of these AppKit performs. It is here because
-    // without a menu item there is no ⌃⌘F, and the green button is the only way
-    // in — which is a poor only way for a game.
-    menu.addItem(&submenu(
+/// Full screen is the only one of these AppKit performs. It is here because
+/// without a menu item there is no ⌃⌘F, and the green button is the only way
+/// in — which is a poor only way for a game.
+fn view_menu(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenuItem> {
+    let command = NSEventModifierFlags::Command;
+    submenu(
         mtm,
         "View",
         &[
@@ -383,8 +395,10 @@ fn build(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenu> {
             ),
             &ours(mtm, actions, "Reload Game", sel!(gwReloadGame:), "r", None),
         ],
-    ));
+    )
+}
 
+fn help_menu(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenuItem> {
     let log = ours(
         mtm,
         actions,
@@ -401,7 +415,7 @@ fn build(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenu> {
         "",
         None,
     );
-    let mut help: Vec<&NSMenuItem> = vec![&log];
+    let mut items: Vec<&NSMenuItem> = vec![&log];
     // Constant, and meant to be: whether the item exists is decided by what
     // `Cargo.toml` declares, not by anything that happens at runtime. Clippy is
     // right that this folds away and wrong that folding away makes it pointless
@@ -409,9 +423,7 @@ fn build(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenu> {
     // not offer to send them anywhere.
     #[allow(clippy::const_is_empty)]
     if !WEBSITE.is_empty() {
-        help.push(&website);
+        items.push(&website);
     }
-    menu.addItem(&submenu(mtm, "Help", &help));
-
-    menu
+    submenu(mtm, "Help", &items)
 }
