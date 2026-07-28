@@ -68,11 +68,13 @@ jobs:
       # do on a developer's machine — that is what lets the script run unchanged.
       - name: Unlock a keychain for this run
         env:
-          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          # Named exactly as they are in the GitLab project these came from, so
+          # moving one is a copy and never a rename.
+          APPLE_DEVELOPER_ID_APPLICATION_P12: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12 }}
+          APPLE_DEVELOPER_ID_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_KEY_ISSUER: ${{ secrets.APPLE_NOTARY_KEY_ISSUER }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
         run: |
           set -euo pipefail
 
@@ -84,32 +86,62 @@ jobs:
           security create-keychain -p "$keychain_password" "$keychain"
           # Without this the keychain relocks on a timer and a build long enough
           # to outlast it fails at the signing step with an error that says
-          # nothing about time.
-          security set-keychain-settings -lut 3600 "$keychain"
+          # nothing about time. Notarization is a wait on somebody else's queue,
+          # so the timer is set well past anything this job should take.
+          security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$keychain_password" "$keychain"
           security default-keychain -s "$keychain"
-          security list-keychains -d user -s "$keychain" login.keychain-db
+          # Prepended to the existing list rather than replacing it: the search
+          # list is how `security find-identity` is reached at all, since unlike
+          # codesign it has no way to be pointed at a keychain path.
+          existing=$(security list-keychains -d user | sed -e 's/"//g' | xargs)
+          # Deliberately unquoted: -s takes each path as its own argument.
+          # shellcheck disable=SC2086
+          security list-keychains -d user -s "$keychain" $existing
 
           # -A is deliberately absent: the key is usable by codesign and by
           # nothing else, so a later step in this job cannot read it out.
           p12=$RUNNER_TEMP/certificate.p12
-          printf '%s' "$CERTIFICATE_P12" | base64 --decode > "$p12"
-          security import "$p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign -f pkcs12
+          printf '%s' "$APPLE_DEVELOPER_ID_APPLICATION_P12" | base64 --decode > "$p12"
+          security import "$p12" -k "$keychain" \
+            -P "$APPLE_DEVELOPER_ID_PASSWORD" -T /usr/bin/codesign -f pkcs12
           rm -f "$p12"
+
+          # The link from the leaf to the Apple Root the system already trusts.
+          # A keychain built from nothing has no intermediates, and without them
+          # the identity is present but untrusted — see packaging/certs/README.md.
+          for ca in packaging/certs/*.cer; do
+            security import "$ca" -k "$keychain" -t cert
+          done
 
           # Stops the "codesign wants to access key" prompt that has nobody to
           # answer it on a runner, and hangs the job until it times out.
-          security set-key-partition-list -S apple-tool:,apple: \
-            -k "$keychain_password" "$keychain" > /dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" > /dev/null
 
-          # The same profile name scripts/release defaults to, in the keychain
-          # that is now the default one — so the script's own preflight finds it.
+          # Unconditional, and worth the four lines: `find-identity` without -v
+          # lists what is there along with any trust error, and with -v lists
+          # only what is chain-valid. The difference between the two is the
+          # whole diagnosis when signing fails, and it cannot be recovered after
+          # the job has deleted the keychain.
+          security find-identity "$keychain" || true
+          security find-identity -v -p codesigning "$keychain" || true
+
+          # An App Store Connect API key rather than an Apple ID and an
+          # app-specific password: it carries only the Developer-ID role, it is
+          # revocable on its own, and it is not somebody's account login.
+          #
+          # Stored under the profile name scripts/release defaults to, in the
+          # keychain that is now the default one, so that script's own preflight
+          # finds it exactly as it does on a developer's Mac.
+          p8=$RUNNER_TEMP/notary.p8
+          printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 --decode > "$p8"
           xcrun notarytool store-credentials gwnative \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_PASSWORD" \
+            --key "$p8" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_KEY_ISSUER" \
             --keychain "$keychain"
+          rm -f "$p8"
 
           echo "RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
@@ -150,4 +182,4 @@ jobs:
         if: always()
         run: |
           security delete-keychain "$RELEASE_KEYCHAIN" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/certificate.p12"
+          rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/notary.p8"
