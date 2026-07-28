@@ -274,6 +274,12 @@ fn watch() {
     for (name, callback) in [
         ("NSWindowDidMoveNotification", moved as Callback),
         ("NSWindowDidResizeNotification", moved),
+        // A window that has not been ordered front yet is on no screen at all,
+        // so the report at launch can come up empty; these are where it lands
+        // on one. `DidChangeScreen` is also the only notice of a display whose
+        // mode changed underneath a window that never moved.
+        ("NSWindowDidBecomeKeyNotification", screened),
+        ("NSWindowDidChangeScreenNotification", screened),
         ("NSWindowDidEndLiveResizeNotification", settled),
         ("NSWindowDidEnterFullScreenNotification", settled),
         ("NSWindowDidExitFullScreenNotification", left_full_screen),
@@ -293,6 +299,22 @@ extern "C" fn moved(
     _info: *const c_void,
 ) {
     touch();
+}
+
+/// The window has a screen, or a different one. Nothing to write — where a
+/// window is was already written by the move that took it there.
+extern "C" fn screened(
+    _center: CenterRef,
+    _observer: *mut c_void,
+    _name: *const c_void,
+    _object: *const c_void,
+    _info: *const c_void,
+) {
+    TRACKED.with(|tracked| {
+        if let Some(tracker) = tracked.borrow_mut().as_mut() {
+            report_refresh_rate(tracker);
+        }
+    });
 }
 
 extern "C" fn settled(
