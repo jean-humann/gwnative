@@ -310,11 +310,19 @@ fn diag(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io
         .snapshot
         .as_ref()
         .map_or((0, 0), |store| store.retries());
+    // The one field here the page reads back for the player rather than for a
+    // log: when the client reports a fatal read, this is the only account of
+    // why it happened that anyone has. See `ChunkStore::last_failure`.
+    let last_failure = context
+        .snapshot
+        .as_ref()
+        .and_then(|store| store.last_failure());
     let body = serde_json::json!({
         "footprintMiB": usage.footprint as f64 / 1048576.0,
         "cpuSeconds": usage.cpu().as_secs_f64(),
         "chunks": { "fromCache": from_cache, "fetched": fetched, "coalesced": coalesced },
         "retries": { "attempts": retried, "sleptMs": slept_ms },
+        "lastFetchFailure": last_failure,
         "metrics": context.recorder.metrics.snapshot(),
     });
     json(stream, 200, body.to_string().as_bytes())
