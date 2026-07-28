@@ -1,10 +1,17 @@
 [package]
 name = "gwnative"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Native macOS host for the Guild Wars WebAssembly client"
 license = "GPL-2.0-or-later"
+# Read at compile time by `src/release.rs`, and the switch for two features
+# rather than a note in a manifest: the Help menu's website item and the update
+# check are both left out of a build that declares no repository, because an
+# application that offers to show its project page and then shows nothing is
+# worse than one with a shorter Help menu. Tags there are what the update check
+# compares against, in the `vX.Y.Z` shapes `release::parse` accepts.
+repository = "https://github.com/jean-humann/gwnative"
 publish = false
 
 [[bin]]
