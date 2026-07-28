@@ -1,0 +1,251 @@
+//! Just enough of the WebAssembly binary format to take a module apart and put
+//! it back together byte-for-byte.
+//!
+//! Nothing here knows what a Guild Wars build is. It reads sections, LEB128
+//! integers, index vectors and function bodies, and every encoder is the exact
+//! inverse of its decoder — which is what lets [`super::rewrite`] pin an output
+//! hash and have that mean something.
+
+use super::Outcome;
+
+pub(super) const WASM_HEADER: [u8; 8] = [0, 97, 115, 109, 1, 0, 0, 0];
+
+/// Width LLVM uses for relocatable call targets, so a repoint fits in place.
+const PADDED_INDEX_BYTES: usize = 5;
+
+pub(super) struct Section {
+    pub id: u8,
+    pub body: Vec<u8>,
+}
+
+pub(super) fn uleb(mut value: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+pub(super) fn sleb(mut value: i64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        let sign = byte & 0x40 != 0;
+        if (value == 0 && !sign) || (value == -1 && sign) {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// Deliberately capped at five bytes. This reads an 8 MB module we did not
+/// build; a wider read would silently accept a malformed index rather than
+/// reporting it.
+fn read_uleb(bytes: &[u8], cursor: &mut usize) -> Outcome<u32> {
+    let mut result = 0u32;
+    let mut shift = 0;
+    for _ in 0..PADDED_INDEX_BYTES {
+        let byte = *bytes.get(*cursor).ok_or("wasm: truncated LEB128")?;
+        *cursor += 1;
+        result |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+    }
+    Err("wasm: oversized LEB128".to_owned())
+}
+
+/// Fixed-width index, so a rewritten `call` stays byte-for-byte as long.
+fn padded_index(mut value: u32) -> [u8; PADDED_INDEX_BYTES] {
+    let mut out = [0u8; PADDED_INDEX_BYTES];
+    for (index, slot) in out.iter_mut().enumerate() {
+        let last = index == PADDED_INDEX_BYTES - 1;
+        *slot = (value as u8 & 0x7f) | if last { 0 } else { 0x80 };
+        value >>= 7;
+    }
+    out
+}
+
+/// `call` with a padded target, the six bytes a certified call site holds.
+pub(super) fn padded_call(function: u32) -> Vec<u8> {
+    let mut out = vec![0x10];
+    out.extend_from_slice(&padded_index(function));
+    out
+}
+
+pub(super) fn split_sections(bytes: &[u8]) -> Outcome<Vec<Section>> {
+    if bytes.len() < WASM_HEADER.len() || bytes[..WASM_HEADER.len()] != WASM_HEADER {
+        return Err("wasm: invalid WebAssembly header".to_owned());
+    }
+    let mut sections = Vec::new();
+    let mut cursor = WASM_HEADER.len();
+    while cursor < bytes.len() {
+        let id = bytes[cursor];
+        cursor += 1;
+        let size = read_uleb(bytes, &mut cursor)? as usize;
+        let end = cursor
+            .checked_add(size)
+            .filter(|end| *end <= bytes.len())
+            .ok_or("wasm: truncated section")?;
+        sections.push(Section {
+            id,
+            body: bytes[cursor..end].to_vec(),
+        });
+        cursor = end;
+    }
+    Ok(sections)
+}
+
+pub(super) fn section_by_id(sections: &[Section], id: u8) -> Outcome<&[u8]> {
+    sections
+        .iter()
+        .find(|section| section.id == id)
+        .map(|section| section.body.as_slice())
+        .ok_or_else(|| format!("wasm: missing section {id}"))
+}
+
+pub(super) fn encode_section(section: &Section) -> Vec<u8> {
+    let mut out = vec![section.id];
+    out.extend_from_slice(&uleb(section.body.len() as u64));
+    out.extend_from_slice(&section.body);
+    out
+}
+
+pub(super) fn parse_index_vector(bytes: &[u8]) -> Outcome<Vec<u32>> {
+    let mut cursor = 0;
+    let count = read_uleb(bytes, &mut cursor)?;
+    let mut values = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        values.push(read_uleb(bytes, &mut cursor)?);
+    }
+    if cursor != bytes.len() {
+        return Err("wasm: malformed index vector".to_owned());
+    }
+    Ok(values)
+}
+
+pub(super) fn encode_index_vector(values: &[u32]) -> Vec<u8> {
+    let mut out = uleb(values.len() as u64);
+    for value in values {
+        out.extend_from_slice(&uleb(u64::from(*value)));
+    }
+    out
+}
+
+pub(super) fn parse_code(bytes: &[u8]) -> Outcome<Vec<Vec<u8>>> {
+    let mut cursor = 0;
+    let count = read_uleb(bytes, &mut cursor)?;
+    let mut bodies = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let size = read_uleb(bytes, &mut cursor)? as usize;
+        let end = cursor
+            .checked_add(size)
+            .filter(|end| *end <= bytes.len())
+            .ok_or("wasm: truncated function body")?;
+        bodies.push(bytes[cursor..end].to_vec());
+        cursor = end;
+    }
+    if cursor != bytes.len() {
+        return Err("wasm: malformed code section".to_owned());
+    }
+    Ok(bodies)
+}
+
+pub(super) fn encode_code(bodies: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = uleb(bodies.len() as u64);
+    for body in bodies {
+        out.extend_from_slice(&uleb(body.len() as u64));
+        out.extend_from_slice(body);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leb128_round_trips_the_edges() {
+        for value in [0u64, 1, 127, 128, 624_485, u64::from(u32::MAX)] {
+            let encoded = uleb(value);
+            let mut cursor = 0;
+            assert_eq!(u64::from(read_uleb(&encoded, &mut cursor).unwrap()), value);
+            assert_eq!(cursor, encoded.len());
+        }
+        assert_eq!(uleb(624_485), vec![0xe5, 0x8e, 0x26]);
+        assert_eq!(sleb(0), vec![0x00]);
+        assert_eq!(sleb(-1), vec![0x7f]);
+        // The marker encoding the forwarders depend on, group by group:
+        // -70001 = -547·128 + 15, -547 = -5·128 + 93, -5 terminates at 123.
+        assert_eq!(sleb(-70_001), vec![0x8f, 0xdd, 0x7b]);
+    }
+
+    #[test]
+    fn a_padded_index_is_always_five_bytes() {
+        // The whole repoint depends on this: a call site is overwritten in
+        // place, so a shorter encoding for a smaller index would shift every
+        // instruction after it.
+        for value in [0u32, 1, 219, 12_345, u32::MAX] {
+            let padded = padded_index(value);
+            assert_eq!(padded.len(), PADDED_INDEX_BYTES);
+            let mut cursor = 0;
+            assert_eq!(read_uleb(&padded, &mut cursor).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn an_oversized_leb_is_refused_rather_than_wrapped() {
+        let mut cursor = 0;
+        assert!(read_uleb(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x00], &mut cursor).is_err());
+    }
+
+    #[test]
+    fn sections_survive_a_round_trip() {
+        let mut module = WASM_HEADER.to_vec();
+        module.extend_from_slice(&encode_section(&Section {
+            id: 3,
+            body: vec![1, 2, 3],
+        }));
+        module.extend_from_slice(&encode_section(&Section {
+            id: 10,
+            body: vec![4],
+        }));
+        let sections = split_sections(&module).unwrap();
+        assert_eq!(sections.len(), 2);
+        assert_eq!(section_by_id(&sections, 3).unwrap(), &[1, 2, 3]);
+        assert_eq!(section_by_id(&sections, 10).unwrap(), &[4]);
+        assert!(section_by_id(&sections, 7).is_err());
+    }
+
+    #[test]
+    fn a_truncated_section_is_refused() {
+        let mut module = WASM_HEADER.to_vec();
+        module.extend_from_slice(&[3, 40, 1, 2]); // declares 40 bytes, holds 2
+        assert!(split_sections(&module).is_err());
+    }
+
+    #[test]
+    fn something_that_is_not_wasm_is_refused() {
+        assert!(split_sections(b"not a module at all").is_err());
+        assert!(split_sections(&[]).is_err());
+    }
+
+    #[test]
+    fn code_and_index_vectors_survive_a_round_trip() {
+        let bodies = vec![vec![0x00, 0x0b], vec![0x00, 0x41, 0x02, 0x0b]];
+        assert_eq!(parse_code(&encode_code(&bodies)).unwrap(), bodies);
+        let values = vec![0u32, 7, 200, 40_000];
+        assert_eq!(
+            parse_index_vector(&encode_index_vector(&values)).unwrap(),
+            values
+        );
+    }
+}
