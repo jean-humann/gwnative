@@ -270,48 +270,83 @@ per-user and does not follow `$HOME`; the Electron build passes
 benchmark cannot click, and bytes written measure how far the client got rather
 than a fixed cost of installing.
 
-### What it says, 300 seconds each, same machine, repeated
+### What it says, alternating runs, same machine, same hour
 
 Single runs of this benchmark are not quotable — first frame on this build has
-been measured anywhere from 21 to 39 seconds across one night depending on CDN
-edge state and whether the window was composited — so what follows is ranges
-over repeated runs, not a column of point estimates.
+been measured anywhere from 8.7 to 27.8 seconds depending on conditions neither
+build controls — so what follows is samples taken alternately, one build then
+the other, never one build's night against the other's.
 
-|                                        |    gwnative |   Electron |
-| -------------------------------------- | ----------: | ---------: |
-| page load to first frame (s)           |     21 – 35 |    13 – 18 |
-| CPU seconds, whole tree                |     28 – 88 |   37 – 123 |
-| footprint peak, summed over tree (MiB) | 1986 – 2105 | 1212 – 1357 |
-| full 4.2 GB download, blank install (s)|         166 |  106 – 120 |
+Both builds have a fast mode and a slow one, they differ by a factor of three,
+and nothing in either decides which a launch gets: across eight interleaved
+runs the slow ones landed in the same ten minutes of wall clock on *both*
+builds, and the fast ones after it. Best and worst are therefore quoted
+separately, because an average over the two modes describes no launch anyone
+will have.
 
-The CPU column is the result this app was written for, and it holds across
-every run. The other three are where the Electron build still wins, each for a
-reason now known rather than guessed:
+|                                          |    gwnative |    Electron |
+| ---------------------------------------- | ----------: | ----------: |
+| first frame, best of four (s)            |         8.7 |        10.8 |
+| first frame, worst of four (s)           |        27.8 |        31.1 |
+| CPU seconds, whole tree, 60 s window     |     24 – 40 |     29 – 34 |
+| footprint peak, summed over tree (MiB)   | 1999 – 2114 | 1370 – 1415 |
+| full 4.2 GB download, blank install (s)  |   105 – 106 |    90 – 346 |
 
-**First frame.** The transport is no longer the story. Fetching moved to the
-OS HTTP/2 stack, the boot set ships as a built-in chunk list the store warms
-before the client asks, and demand reads that once averaged 22 ms against the
-network average 1.4 ms against the warmed cache. What remains is the client's
-own startup walk, which advances a handful of files per animation frame — a
-frame-rate-paced loop, which is why the Electron build's 120 Hz
-requestAnimationFrame beats a 60 Hz one at booting, of all things. This build
-now asks WebKit for the display's full rate; the walk is the number to watch.
+The CPU row counts only runs that reached a frame and then rendered out the
+window, since a launch that never draws spends nothing on drawing — one such
+run flattered the Electron build with 15.5 seconds and is left out. Frame rate
+is this build's own counter: 6,258 frames in 53.9 seconds, or 116 fps, on a
+120 Hz display. The 60 Hz cap is gone. The Electron build exposes no frame
+counter to the harness, so its rate is not quoted here.
 
-**The full download.** Both builds sweep the same 16,023 chunks from the same
-CDN. Chromium's connection opens at ~53 MiB/s and never collapses; CFNetwork
-opens at ~33 and, in every measured run, throttles itself to ~4 MiB/s from
-roughly second 35 to second 75 before recovering — while a side-channel fetch
-of the same objects on a fresh connection runs at full speed, so it is not the
-network. Chromium advertises 6 MiB HTTP/2 stream windows; NSURLSession's are
-neither that large nor configurable. Matching this number means bypassing
-CFNetwork for bulk transfer, which has not been judged worth its dependency
-yet.
+Where the columns disagree, each now has a measured reason rather than a
+guessed one.
 
-**The summed peak** is unchanged in shape: one `WebContent` high-water mark
-several times the wasm heap it serves. A summed peak is a ceiling rather than
-a reading — the kernel keeps one high-water mark per process and they need not
-have coincided — but a ceiling that far above steady state is still worth
-finding.
+**First frame.** Best case now belongs to this build, 8.7 seconds against
+10.8, and the transport stopped being the story a while ago: fetching moved to
+the OS HTTP/2 stack, the boot set ships as a built-in chunk list the store
+warms before the client asks, and demand reads that once averaged 22 ms now
+average 1.4 ms against the warmed cache. What is left is the spread. A launch
+either walks its startup at roughly 2,200 files per second or at 215, with
+nothing in between, and the slow mode is not waiting on anything this build
+owns — range reads average 1–2 ms in *both* modes, retries are zero, and a slow
+launch records no frames at all. The two plausible culprits were tested rather
+than argued about: `-NSAppSleepDisabled YES` moved the median by 79 ms, and the
+slowest of six runs was the one held frontmost, so neither App Nap nor
+occlusion is it. Nor is the stall confined to boot — one launch reached its
+first frame in 9.0 seconds and then spent 23.4 seconds inside a single frame.
+What puts the cause outside both builds is that the Electron one has the same
+mode and wears it worse: its slowest of four was 31.1 seconds against this
+build's 27.8, in the same ten minutes of wall clock.
+
+**The full download.** Both builds sweep the same 16,167 chunks — every hash
+distinct, so neither gets a deduplication discount — from the same CloudFront
+HTTP/2 origin. What used to stand here, that CFNetwork throttled itself to
+~4 MiB/s partway through every transfer, was wrong, and the measurement that
+retired it is cheap to repeat: `curl --parallel` over the same URL list, doing
+no hashing and writing to `/dev/null`, reaches 47.0 and 39.4 MiB/s at 8
+requests in flight, 48.3 and 47.7 at 24, and falls back to 36.4 and 41.0 at 48.
+The link underneath reports 529 Mbit/s and 18 ms idle latency, so the ceiling
+belongs to the path and not to either client — and this build already sits on
+it, at 41–46 MiB/s with hashing and disk writes on top. Alternating
+blank-install downloads say the same: 105 and 106 seconds here against 90 and
+346 there. The 346 is not a typo, it is the slow mode above landing on a
+transfer instead of a boot, and it is why that column is a range and not a
+verdict.
+
+**The summed peak** is the row this build loses on its own merits, and it is
+now measured rather than inferred. The client's linear memory is 256 MiB and
+never grows — the module declares 256 initial against a 2,048 maximum, and the
+growth import is called zero times in a full session — so the 1.5 GiB
+`WebContent` high-water mark is seven times the heap it serves, and none of the
+rest is the game's. Both builds render the same module at the same scale, each
+defaulting to 2, which leaves WebKit's texture and object accounting against
+Chromium's. A summed peak is a ceiling rather than a reading — the kernel keeps
+one high-water mark per process and they need not have coincided — and steady
+state is kinder: one run finished holding 549 MiB against its own 1,881 MiB
+peak, where the Electron build finishes within 40 MiB of its peak every time.
+The ceiling is still 700 MiB above the other build's, and it is the one number
+in this table that has not moved.
 
 A blank install used to be the launch nothing could help, since the boot list
 that lets the store fetch ahead of demand was recorded by the launch before.
