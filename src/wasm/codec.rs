@@ -119,10 +119,30 @@ pub(super) fn encode_section(section: &Section) -> Vec<u8> {
     out
 }
 
+/// Room for `count` elements, refused if `remaining` bytes cannot hold that many.
+///
+/// Every element of both vectors below costs at least one byte on the wire — an
+/// index is one LEB128 byte at minimum, a function body one size byte — so a
+/// count larger than what is left is malformed however the rest of it parses.
+/// Worth catching before the `read_uleb` that would eventually fail on its own,
+/// because the reservation happens first: `read_uleb` yields up to `u32::MAX`,
+/// and asking the allocator for four billion elements is tens of gigabytes.
+/// A refused allocation in Rust is not an error a parser gets to report — it
+/// aborts, which for an 8 MB module that merely arrived damaged is the wrong
+/// end of the trade.
+fn with_room<T>(count: u32, remaining: usize) -> Outcome<Vec<T>> {
+    if count as usize > remaining {
+        return Err(format!(
+            "wasm: {count} elements declared in {remaining} bytes"
+        ));
+    }
+    Ok(Vec::with_capacity(count as usize))
+}
+
 pub(super) fn parse_index_vector(bytes: &[u8]) -> Outcome<Vec<u32>> {
     let mut cursor = 0;
     let count = read_uleb(bytes, &mut cursor)?;
-    let mut values = Vec::with_capacity(count as usize);
+    let mut values = with_room(count, bytes.len() - cursor)?;
     for _ in 0..count {
         values.push(read_uleb(bytes, &mut cursor)?);
     }
@@ -143,7 +163,7 @@ pub(super) fn encode_index_vector(values: &[u32]) -> Vec<u8> {
 pub(super) fn parse_code(bytes: &[u8]) -> Outcome<Vec<Vec<u8>>> {
     let mut cursor = 0;
     let count = read_uleb(bytes, &mut cursor)?;
-    let mut bodies = Vec::with_capacity(count as usize);
+    let mut bodies = with_room(count, bytes.len() - cursor)?;
     for _ in 0..count {
         let size = read_uleb(bytes, &mut cursor)? as usize;
         let end = cursor
@@ -205,6 +225,33 @@ mod tests {
     fn an_oversized_leb_is_refused_rather_than_wrapped() {
         let mut cursor = 0;
         assert!(read_uleb(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x00], &mut cursor).is_err());
+    }
+
+    /// A count is refused for being impossible, not for being large: four
+    /// billion indices cannot live in four bytes, and finding that out by
+    /// reserving room for them is an allocator abort rather than a parse error.
+    /// Both vectors take their count the same way, so both are checked.
+    #[test]
+    fn a_count_larger_than_the_bytes_holding_it_is_refused_not_reserved() {
+        // `uleb(u32::MAX)` then nothing at all to put in the vector.
+        let mut wild = uleb(u64::from(u32::MAX));
+        assert!(
+            parse_index_vector(&wild).is_err(),
+            "no room for any of them"
+        );
+        assert!(parse_code(&wild).is_err());
+
+        // Still refused with a plausible amount of data behind it, since the
+        // count is what is impossible rather than the shortfall.
+        wild.extend_from_slice(&[1u8; 64]);
+        assert!(parse_index_vector(&wild).is_err());
+        assert!(parse_code(&wild).is_err());
+
+        // And an honest vector, exactly as long as its count allows, still
+        // parses — the check must not cost the boundary case.
+        let mut tight = uleb(3);
+        tight.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(parse_index_vector(&tight).unwrap(), vec![1, 2, 3]);
     }
 
     #[test]
