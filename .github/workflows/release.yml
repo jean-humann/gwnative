@@ -28,12 +28,25 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  # For re-cutting a release whose upload failed after notarization succeeded.
   workflow_dispatch:
     inputs:
+      # For re-cutting a release whose upload failed after notarization
+      # succeeded. Empty means whatever ref the run was dispatched from, which
+      # is what a dry run wants.
       tag:
-        description: The existing tag to build
-        required: true
+        description: The existing tag to build (blank for the current ref)
+        required: false
+      # Everything except the publish. The point is that the half of this
+      # workflow which cannot be tested locally — importing a certificate into a
+      # keychain that has never held one, and Apple actually accepting the
+      # result — is exercised without an irreversible public release at the end
+      # of it. A signing pipeline whose first real run is also its first
+      # publication is one where the notarization log arrives too late to be
+      # useful.
+      dry_run:
+        description: Build and notarize, but publish nothing
+        type: boolean
+        default: false
 
 permissions:
   # To create the release and upload the disk image to it. Nothing else — the
@@ -153,6 +166,7 @@ jobs:
         run: scripts/release
 
       - name: Publish
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
@@ -174,6 +188,30 @@ jobs:
             --title "Guild Wars $version" \
             --generate-notes \
             --verify-tag
+
+      # A dry run that says nothing looks the same as one that did nothing.
+      # This prints what the publish would have uploaded, and re-reads the
+      # finished image rather than the log: `stapler validate` on the DMG is the
+      # end-to-end answer, because a ticket only staples to something Apple
+      # actually issued one for.
+      - name: What a real run would have published
+        if: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          dmg="dist/gwnative-$version.dmg"
+          {
+            echo "### Dry run — nothing was published"
+            echo
+            echo "A real run would have created release \`v$version\` from"
+            echo "\`$dmg\` ($(du -h "$dmg" | cut -f1))."
+            echo
+            echo '```'
+            xcrun stapler validate "$dmg" 2>&1
+            spctl --assess --type open --context context:primary-signature \
+              --verbose=2 "$dmg" 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Always, including after a failure: a keychain holding a signing identity
       # should not outlive the job that needed it, and a cancelled run is
