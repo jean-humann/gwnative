@@ -48,10 +48,6 @@ fn open(hashes: &str, size: u64, cache_dir: PathBuf) -> ChunkStore {
         .as_bytes(),
     )
     .expect("the synthetic manifest should parse");
-    ChunkStore::open(
-        Client::new("", String::new()),
-        manifest,
-        cache_dir,
-    )
-    .expect("the store should open over an empty cache")
+    ChunkStore::open(Client::new("", String::new()), manifest, cache_dir)
+        .expect("the store should open over an empty cache")
 }

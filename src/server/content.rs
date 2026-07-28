@@ -12,8 +12,8 @@ use std::net::TcpStream;
 use super::{Context, Flow, tracing};
 use crate::chunks::ChunkStore;
 use crate::http::{
-    BODY_BUFFER, Request, etag, mime, parse_range, respond, respond_head, respond_not_modified,
-    respond_proxy, respond_static, respond_streaming, resolve, text,
+    BODY_BUFFER, Request, etag, mime, parse_range, resolve, respond, respond_head,
+    respond_not_modified, respond_proxy, respond_static, respond_streaming, text,
 };
 use crate::patch::SNAPSHOT;
 use crate::proxy;

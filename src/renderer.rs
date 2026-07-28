@@ -135,7 +135,6 @@ impl Guard {
             && url.starts_with(origin.as_str())
             && url.as_bytes()[origin.len()] == b'/'
     }
-
 }
 
 /// Say, once, that the game stopped — because the second crash leaves a blank
