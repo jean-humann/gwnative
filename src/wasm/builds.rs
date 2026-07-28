@@ -428,7 +428,10 @@ mod tests {
                 build.import_count, base.import_count,
                 "appending forwarders cannot change the import count",
             );
-            assert!(build.hook_function >= build.import_count, "hook is imported");
+            assert!(
+                build.hook_function >= build.import_count,
+                "hook is imported"
+            );
             assert_eq!(build.layout.words().len(), ENHANCEMENT_LAYOUT_WORDS);
         }
         assert!(find_enhancement_build("not a hash").is_none());

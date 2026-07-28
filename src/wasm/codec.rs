@@ -460,7 +460,18 @@ mod tests {
 
     #[test]
     fn a_signed_leb_reads_back_what_it_wrote() {
-        for value in [0i64, 1, -1, 63, -64, 64, -65, 8191, -70_001, i64::from(i32::MAX)] {
+        for value in [
+            0i64,
+            1,
+            -1,
+            63,
+            -64,
+            64,
+            -65,
+            8191,
+            -70_001,
+            i64::from(i32::MAX),
+        ] {
             let encoded = sleb(value);
             let mut cursor = 0;
             assert_eq!(i64::from(read_sleb(&encoded, &mut cursor).unwrap()), value);
@@ -469,7 +480,10 @@ mod tests {
         // The five-byte group: the sign has nowhere left to extend into, so the
         // guard that would have written over the top of the word must not fire.
         let mut cursor = 0;
-        assert_eq!(read_sleb(&sleb(i64::from(i32::MIN)), &mut cursor).unwrap(), i32::MIN);
+        assert_eq!(
+            read_sleb(&sleb(i64::from(i32::MIN)), &mut cursor).unwrap(),
+            i32::MIN
+        );
     }
 
     #[test]
@@ -495,7 +509,10 @@ mod tests {
         assert_eq!(parse_table(&[0x01, 0x70, 0x00, 0x08]).unwrap().min, 8);
         let bounded = parse_table(&[0x01, 0x70, 0x01, 0x08, 0x10]).unwrap();
         assert_eq!((bounded.min, bounded.max), (8, Some(16)));
-        assert!(parse_table(&[0x02, 0x70, 0x00, 0x08]).is_err(), "two tables");
+        assert!(
+            parse_table(&[0x02, 0x70, 0x00, 0x08]).is_err(),
+            "two tables"
+        );
         assert!(parse_table(&[0x01, 0x6f, 0x00, 0x08]).is_err(), "externref");
 
         // One segment at offset 1 holding three functions: 1, 2 and 3 are taken
