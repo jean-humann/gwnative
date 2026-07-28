@@ -32,9 +32,9 @@ use crate::chunks::ChunkStore;
 use crate::diagnostics::Recorder;
 use crate::generation;
 use crate::http::{MAX_BODY_BYTES, POLICY, Request, policy, read_request, text};
+use crate::qos;
 use crate::settings;
 use crate::sockets::{self, Registry};
-use crate::qos;
 
 /// The origin's port. Any constant would do; this one is unassigned by IANA and
 /// sits below macOS's ephemeral floor of 49152, so the kernel will not hand it

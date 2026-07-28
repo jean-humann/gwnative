@@ -118,7 +118,8 @@ fn usable(dir: &Path, build: &KnownBuild) -> bool {
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Outcome<()> {
     let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes).map_err(|e| format!("template-save: {}: {e}", temporary.display()))?;
+    fs::write(&temporary, bytes)
+        .map_err(|e| format!("template-save: {}: {e}", temporary.display()))?;
     fs::rename(&temporary, path).map_err(|e| format!("template-save: {}: {e}", path.display()))
 }
 
