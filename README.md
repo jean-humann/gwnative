@@ -7,6 +7,14 @@ Independent reimplementation of the host side of
 [gwonmac](https://github.com/Mat4m0/gwonmac); the renderer harness derives from
 that project.
 
+**Requires Apple Silicon and macOS 15.2 or newer.** Both are hard floors rather
+than defaults. macOS 15.2 is the release where WebKit shipped the JavaScript
+Promise Integration API, and `Gw.jspi.wasm` suspends and resumes its stacks
+through it — anything older loads the page and then fails to instantiate the
+module. Apple Silicon is a decision: there is one `arm64` slice, so an Intel Mac
+is told the application will not open on it rather than being started under
+Rosetta and finding out slowly.
+
 ## Why a WebView at all
 
 ArenaNet's patch server ships **two** artifacts: `Gw.jspi.wasm` and
@@ -923,10 +931,15 @@ carries a build hash, so without this every rebuild is a new application to the
 keychain and the saved login quietly stops appearing. Signing with a
 certificate replaces the hash with a rule naming the identifier and the
 certificate's common name, which survives both rebuilds and certificate
-renewal. Any codesigning identity in the login keychain will do and the first
-one found is used; `GWNATIVE_SIGN_IDENTITY` picks a specific one. With no
-identity at all the app still builds and runs — it just goes back to forgetting
-the login on every rebuild, and says so.
+renewal. `scripts/sign-identity` chooses it: a Developer ID Application
+certificate first, then an Apple Development one, then whatever is installed.
+That order matters beyond the release — Developer ID is the only certificate
+Apple will notarize, so a published build carries one, and signing development
+builds with anything else would give them a different designated requirement
+and make everyone moving between the two sign in again.
+`GWNATIVE_SIGN_IDENTITY` picks a specific one. With no identity at all the app
+still builds and runs — it just goes back to forgetting the login on every
+rebuild, and says so.
 
 A login saved by an earlier, differently signed build is not lost. macOS offers
 it on first read, and Always Allow adopts it; declining that just means signing
@@ -993,6 +1006,18 @@ It is signed with the same identity and the same `com.gwnative.app` identifier
 as `cargo run` uses, so its designated requirement is byte-for-byte the one the
 keychain already knows and the saved login carries over.
 
+The bundle is signed with the hardened runtime on every build, not only on
+released ones — it is a precondition for notarization, and turning it on at the
+last moment would mean the first build to run under its rules is the one nobody
+tested. Locally it comes with `packaging/debug.entitlements`, which is
+`get-task-allow` and nothing else: without it the hardened runtime refuses
+`sample`, `leaks`, Instruments and lldb, which is how nearly every number in
+this file was arrived at. Notarization rejects that entitlement — it is
+permission for any process the user runs to read this one — so `scripts/release`
+passes no entitlements at all, and there are none it wants. The only exception
+this application might have asked for is JIT, and the JavaScript needing one
+runs in WebKit's own `WebContent` process under Apple's signature.
+
 A packaged build does not serve out of `Contents/Resources/web`. The patch
 client writes `Gw.jspi.wasm` into the web root, and writing into a bundle
 invalidates its signature — the same signature the login depends on. The
@@ -1015,6 +1040,88 @@ icon, visibly larger than everything beside it in the Dock. The same `.icns` is
 embedded in the binary and installed at launch, so a `cargo run` build — which
 has no bundle and therefore no `CFBundleIconFile` — shows the icon too, and the
 download progress bar has something to draw over.
+
+## Release
+
+```sh
+scripts/release
+```
+
+Builds, signs, notarizes, staples and packages `dist/gwnative-<version>.dmg`.
+The difference from `scripts/bundle` is not the build — it is the same binary —
+it is that Gatekeeper has to be willing to open the result on a Mac that has
+never seen this project. Four things have to be true for that: a Developer ID
+signature, a countersignature from Apple's timestamp server, a notarization
+ticket, and that ticket stapled into the artifact. The last one is the one
+people skip. Notarization without stapling works only while the machine opening
+it is online; stapled, the ticket travels inside the file.
+
+Notarization credentials are a keychain profile, created once by whoever
+releases:
+
+```sh
+xcrun notarytool store-credentials gwnative \
+    --apple-id <apple-id> --team-id <team-id> --password <app-specific-password>
+```
+
+The password is an app-specific one from appleid.apple.com — the Apple ID
+password itself is refused. `GWNATIVE_NOTARY_PROFILE` names a different profile.
+Nothing in this repository holds an Apple ID, a password or a key, and nothing
+should: the script reads the profile by name and the keychain answers.
+
+The preflight refuses a development certificate, proves the credentials still
+work with a one-second call, and stops on a dirty working tree — all before a
+five-minute LTO build, because finding out afterwards that there are no
+credentials is finding out after the build. After signing it re-reads what
+`codesign` produced rather than trusting the flags it passed: a missing hardened
+runtime and a missing timestamp are both silent until Apple returns `Invalid`.
+
+Releasing is deliberately local. Publishing from CI would mean exporting the
+Developer ID private key into the secret store of a public repository, and that
+key signs everything its owner ships rather than only this. The cost is running
+one command by hand, and `git tag` plus `gh release create` afterwards — which
+the script prints, because tags are what the update check reads.
+
+## The update check, and what it will not do
+
+The feed is the repository's own release list — `GET /repos/<owner>/<name>/releases`,
+anonymous, one page of a hundred — compared against this build's version.
+`src/release.rs` reads the repository out of `Cargo.toml` at compile time, and a
+build that declares none has neither this check nor the Help menu's website
+item, because an application that offers to show its project page and then shows
+nothing is worse than one with a shorter menu.
+
+Tags are the whole interface. `vX.Y.Z`, optionally `-alpha.N`, `-beta.N` or
+`-rc.N`, and anything else on the page is skipped rather than guessed at — a
+stable install is never offered a prerelease, including one whose tag looks
+stable but which was published marked as one. Drafts are not published to
+anybody.
+
+What it will not do is install anything. There is no updater, no feed to sign,
+no code that replaces this binary with something it downloaded — the one answer
+with anywhere to go opens the releases page, and the button says so. That is the
+reason there is nothing here about verifying an update's signature before
+applying it: applying it is the user's own drag from a notarized disk image,
+checked by Gatekeeper the same way the first install was.
+
+Asked, never volunteered: nothing checks at launch unless `autoCheckUpdates` was
+turned on, and even then only once a day, and even then only a genuinely newer
+version is allowed to interrupt. "Could not check" is never reported as "up to
+date" — being told you are current by a request that never left the machine is
+the one answer that stops you looking again.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request: `cargo fmt
+--check`, `cargo clippy` with warnings denied, the tests, a release build and
+`scripts/bundle`. On a macOS 15 Apple Silicon runner, because that is the only
+configuration this project targets.
+
+The release build is a separate step from the tests on purpose — fat LTO with
+one codegen unit and `panic = "abort"` is a different compilation, and
+`scripts/release` should not be the first thing to discover that. The bundle
+step runs without any certificate; `scripts/bundle` reports that it found none
+and carries on, which is exactly what makes the step meaningful there.
 
 ## Licence
 
