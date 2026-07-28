@@ -1,0 +1,176 @@
+#!/bin/sh
+# Build, sign, notarize and package "Guild Wars.app" for other people's Macs.
+#
+# The difference between this and scripts/bundle is not the build — it is the
+# same binary — it is that Gatekeeper has to be willing to open the result on a
+# machine that has never seen this project. Three things have to be true for
+# that, and each is a separate step below: the signature must come from a
+# Developer ID certificate, it must be countersigned by Apple's timestamp
+# server, and Apple must have been shown the build and issued a ticket for it.
+#
+# The ticket is the part worth understanding. Notarization is not a review; it
+# is an automated scan that returns a ticket naming the exact code directory
+# hash it was shown. `stapler` writes that ticket into the artifact so that a
+# first launch does not need the network — without stapling, someone opening
+# this offline gets the unidentified-developer refusal even though the build was
+# notarized months ago.
+#
+# Deliberately a local script rather than a CI job. Publishing from CI would
+# mean exporting the Developer ID private key into the secret store of a public
+# repository, and that key signs everything its owner ships, not only this. The
+# trade is a manual `gh release create` at the end, and a key that never leaves
+# this machine.
+#
+# Usage: scripts/release
+# Environment:
+#   GWNATIVE_NOTARY_PROFILE  keychain profile holding the Apple ID credentials
+#                            (default: gwnative). Create it yourself, once:
+#     xcrun notarytool store-credentials gwnative \
+#         --apple-id <your-apple-id> --team-id <your-team-id> \
+#         --password <an app-specific password from appleid.apple.com>
+#   GWNATIVE_SIGN_IDENTITY   overrides scripts/sign-identity
+set -e
+
+cd "$(dirname "$0")/.."
+root=$PWD
+profile=${GWNATIVE_NOTARY_PROFILE:-gwnative}
+
+say() { echo "[release] $*" >&2; }
+die() {
+	say "$*"
+	exit 1
+}
+
+# notarytool takes a zip, a disk image or an installer package and never a bare
+# bundle, and it reports the outcome in its output rather than always in its
+# exit status — so the status line is read rather than assumed. `Accepted` is
+# the only one that means a ticket was issued; `Invalid` means the scan found
+# something and the log URL it prints is where that something is named.
+notarize() {
+	xcrun notarytool submit "$1" --keychain-profile "$profile" --wait 2>&1 |
+		tee "$root/dist/notarytool.log" |
+		sed 's/^/[release] /' >&2
+	grep -q "status: Accepted" "$root/dist/notarytool.log" ||
+		die "Apple did not accept ${1##*/}; the submission log above says why"
+}
+
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+app="$root/dist/Guild Wars.app"
+zip="$root/dist/gwnative-$version.zip"
+dmg="$root/dist/gwnative-$version.dmg"
+
+# ---------------------------------------------------------------- preflight --
+# Everything knowable before a five-minute LTO build is checked here. Finding
+# out at the notarization step that there are no credentials means finding out
+# after the build.
+
+identity=$(scripts/sign-identity)
+case $identity in
+"Developer ID Application:"*) ;;
+"") die "no code-signing identity found. Notarization needs a Developer ID." ;;
+*) die "the signing identity is \"$identity\". Apple only notarizes builds
+    signed by a Developer ID Application certificate; a development or
+    self-signed certificate cannot be published. Set GWNATIVE_SIGN_IDENTITY if
+    the right one is installed under another name." ;;
+esac
+say "signing as $identity"
+
+# The cheapest call that proves the profile exists and its credentials are still
+# accepted. An expired app-specific password fails here, in a second, rather
+# than after the upload.
+xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1 ||
+	die "no usable notarization credentials in keychain profile \"$profile\".
+    Create it with:
+      xcrun notarytool store-credentials $profile --apple-id <apple-id> \\
+          --team-id <team-id> --password <app-specific-password>
+    The password is an app-specific one made at appleid.apple.com; the Apple ID
+    password itself will not work. Set GWNATIVE_NOTARY_PROFILE for another name."
+
+# A release is a claim about a commit. Publishing from a tree with edits in it
+# means what someone downloads matches no revision in the history.
+[ -z "$(git status --porcelain 2>/dev/null)" ] ||
+	die "the working tree has uncommitted changes; commit or stash them first"
+
+# ------------------------------------------------------------------- build ---
+say "building $version"
+mkdir -p "$root/dist"
+
+# GWNATIVE_RELEASE is what makes scripts/bundle countersign the signature and
+# leave the get-task-allow entitlement off. Everything else about the bundle is
+# identical to the one built for this machine, on purpose: the build that gets
+# tested here is the build that ships.
+GWNATIVE_RELEASE=1 scripts/bundle "$app"
+
+# What was actually signed, rather than what was asked for. --deep is the right
+# flag for verifying even though it is the wrong one for signing: it walks into
+# the bundle instead of trusting its seal.
+codesign --verify --deep --strict "$app"
+
+# The two rejections `codesign --verify` will not warn about, both silent until
+# Apple returns Invalid: the hardened runtime left off, and a signature with no
+# trusted timestamp. `Signed Time` is what an untimestamped signature carries
+# instead, and it is the machine's own clock rather than Apple's countersignature.
+described=$(codesign --display --verbose=4 "$app" 2>&1)
+case $described in
+*"flags="*runtime*) ;;
+*) die "the bundle is signed without the hardened runtime" ;;
+esac
+case $described in
+*"Timestamp="*) ;;
+*) die "the signature carries no trusted timestamp" ;;
+esac
+echo "$described" | sed 's/^/[release] /' >&2
+
+# ---------------------------------------------------------------- notarize ---
+# The upload is a zip, but the ticket is issued for the application inside it,
+# which is why the staple below names the app and not this file. ditto rather
+# than `zip`, because only ditto preserves the symlinks and extended attributes
+# a signed bundle is made of.
+say "submitting to Apple; this usually takes a couple of minutes"
+rm -f "$zip"
+ditto -c -k --keepParent "$app" "$zip"
+notarize "$zip"
+xcrun stapler staple "$app" 2>&1 | sed 's/^/[release] /' >&2
+
+# The end-to-end check, and the only one that answers the question anybody is
+# actually asking: would this open. After stapling, because before it the honest
+# answer is "only while online".
+spctl --assess --type execute --verbose=2 "$app" 2>&1 |
+	sed 's/^/[release] /' >&2
+
+# ----------------------------------------------------------------- package ---
+# A disk image rather than the zip, because a zip has nowhere to put the "drag
+# this to Applications" that says where the application goes — and one run from
+# ~/Downloads is one macOS moves into a randomised read-only path the first time
+# it is opened, which is App Translocation and looks like the app losing its own
+# files.
+say "building $dmg"
+staging=$root/dist/dmg
+rm -rf "$staging" "$dmg"
+mkdir -p "$staging"
+# ditto again: cp would be copying a bundle whose ticket and signature live in
+# metadata, and this is the copy that ends up on the image.
+ditto "$app" "$staging/${app##*/}"
+ln -s /Applications "$staging/Applications"
+hdiutil create -volname "Guild Wars" -srcfolder "$staging" -ov \
+	-format UDZO "$dmg" >/dev/null
+xcrun stapler validate "$staging/${app##*/}" >/dev/null ||
+	die "the application lost its notarization ticket on the way to the image"
+rm -rf "$staging"
+
+# The image is notarized in its own right. The application inside it is already
+# stapled and would open either way, but an unnotarized image is refused when it
+# is mounted, which is the first thing anyone sees.
+codesign --force --sign "$identity" --timestamp "$dmg" 2>&1 |
+	sed 's/^/[release] /' >&2
+notarize "$dmg"
+xcrun stapler staple "$dmg" 2>&1 | sed 's/^/[release] /' >&2
+xcrun stapler validate "$dmg" 2>&1 | sed 's/^/[release] /' >&2
+
+rm -f "$zip" "$root/dist/notarytool.log"
+
+say "$dmg"
+say "the update check compares published tags, so publish it under one:"
+say "  git tag -s v$version -m \"Guild Wars $version\""
+say "  git push origin v$version"
+say "  gh release create v$version \"$dmg\" --title \"Guild Wars $version\""
