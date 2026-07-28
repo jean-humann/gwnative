@@ -117,7 +117,7 @@ pub fn check_identity() {
     if code.check_validity(Flags::NONE, &requirement).is_ok() {
         return;
     }
-    eprintln!(
+    note!(
         "[keychain] this build is ad-hoc signed, so the saved login will not survive the \
          next rebuild — the account stops appearing and macOS asks for your system \
          password instead. Run it through scripts/signed-run (`cargo run`) or \
@@ -184,10 +184,10 @@ fn load_from(vault: &impl Vault) -> Option<Credentials> {
             match Denial::of(&e) {
                 // A first run. The ordinary state, and nothing to say about it.
                 _ if e.code() == ITEM_NOT_FOUND => {}
-                Some(denial) => eprintln!("[keychain] {}", denial.help()),
+                Some(denial) => note!("[keychain] {}", denial.help()),
                 // Anything else is unexpected rather than explicable, so pass
                 // the system's own wording through instead of guessing at it.
-                None => eprintln!("[keychain] could not read the saved login: {e}"),
+                None => note!("[keychain] could not read the saved login: {e}"),
             }
             return None;
         }
@@ -197,7 +197,7 @@ fn load_from(vault: &impl Vault) -> Option<Credentials> {
         // An item that will not parse is one this app cannot use, and leaving it
         // in place would fail the same way on every launch.
         Err(e) => {
-            eprintln!("[keychain] stored login is unreadable ({e}); discarding it");
+            note!("[keychain] stored login is unreadable ({e}); discarding it");
             let _ = vault.delete();
             None
         }

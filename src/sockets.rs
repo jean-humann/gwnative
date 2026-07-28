@@ -94,12 +94,12 @@ fn tracing() -> Trace {
 fn trace(destination: &str, direction: &str, data: &[u8]) {
     match tracing() {
         Trace::Off => {}
-        Trace::Sizes => eprintln!("[socket] {destination}: {direction} {}", data.len()),
+        Trace::Sizes => note!("[socket] {destination}: {direction} {}", data.len()),
         Trace::Hex => {
             let head = &data[..data.len().min(TRACE_HEAD)];
             let hex: String = head.iter().map(|b| format!("{b:02x}")).collect();
             let elided = if data.len() > head.len() { "…" } else { "" };
-            eprintln!(
+            note!(
                 "[socket] {destination}: {direction} {} {hex}{elided}",
                 data.len()
             );
@@ -121,7 +121,7 @@ pub fn bridge(
     let sink = Sink::new(match page.try_clone() {
         Ok(clone) => clone,
         Err(e) => {
-            eprintln!("[socket] {destination}: cannot split page socket: {e}");
+            note!("[socket] {destination}: cannot split page socket: {e}");
             return;
         }
     });
@@ -138,7 +138,7 @@ pub fn bridge(
     let game = match net::connect(destination) {
         Ok(stream) => stream,
         Err(e) => {
-            eprintln!("[socket] {destination}: {e}");
+            note!("[socket] {destination}: {e}");
             let _ = sink.send(
                 TEXT,
                 format!(
@@ -151,7 +151,7 @@ pub fn bridge(
             return;
         }
     };
-    eprintln!("[socket] {destination}: connected");
+    note!("[socket] {destination}: connected");
     if sink.send(TEXT, br#"{"type":"open"}"#).is_err() {
         return;
     }
@@ -163,7 +163,7 @@ pub fn bridge(
         let mut game = match game.try_clone() {
             Ok(clone) => clone,
             Err(e) => {
-                eprintln!("[socket] {destination}: cannot split game socket: {e}");
+                note!("[socket] {destination}: cannot split game socket: {e}");
                 sink.close();
                 return;
             }
@@ -208,11 +208,11 @@ pub fn bridge(
             // means the two sides disagree about the protocol, so say so rather
             // than dropping it into the TCP stream as if it were packet data.
             Ok(Some(Message::Text(text))) => {
-                eprintln!("[socket] {destination}: unexpected control frame from page: {text}");
+                note!("[socket] {destination}: unexpected control frame from page: {text}");
             }
             Ok(Some(Message::Close)) | Ok(None) => break,
             Err(e) => {
-                eprintln!("[socket] {destination}: page read failed: {e}");
+                note!("[socket] {destination}: page read failed: {e}");
                 break;
             }
         }
@@ -224,7 +224,7 @@ pub fn bridge(
     // Safe to drop the page connection now: the read loop above has finished,
     // so there is nothing unread left to turn this into an RST.
     let _ = page.shutdown(Shutdown::Both);
-    eprintln!(
+    note!(
         "[socket] {destination}: closed after {sent} bytes up, {} down",
         downstream.load(Ordering::Relaxed)
     );

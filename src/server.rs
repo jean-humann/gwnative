@@ -164,7 +164,7 @@ fn bind() -> std::io::Result<TcpListener> {
     match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
         Ok(listener) => Ok(listener),
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!(
+            note!(
                 "[loopback] port {port} is taken, falling back to an ephemeral one; \
                  saved page state will not be found this session"
             );
@@ -255,7 +255,7 @@ fn handle(
     };
 
     if tracing() {
-        eprintln!("[loopback] -> {} /{}", request.method, request.path);
+        note!("[loopback] -> {} /{}", request.method, request.path);
     }
 
     // Every `__` route is a host capability rather than page content: name
@@ -269,7 +269,7 @@ fn handle(
     if request.path.starts_with("__")
         && !token_matches(&context.token, request.offered_token().as_deref())
     {
-        eprintln!(
+        note!(
             "[loopback] refused an untokened {} /{}",
             request.method, request.path
         );
@@ -281,7 +281,7 @@ fn handle(
     // WKScriptMessageHandlerWithReply; this only exists so a page can report
     // results without a UI.
     if request.method == "POST" && request.path == "__report" {
-        eprintln!("[report] {}", String::from_utf8_lossy(&request.body));
+        note!("[report] {}", String::from_utf8_lossy(&request.body));
         respond(stream, 204, "No Content", "text/plain", b"", &[])?;
         return Ok(flow);
     }
@@ -293,7 +293,7 @@ fn handle(
         match net::resolve(&name) {
             Ok(address) => {
                 if tracing() {
-                    eprintln!("[dns] {name} -> {address}");
+                    note!("[dns] {name} -> {address}");
                 }
                 respond(
                     stream,
@@ -305,7 +305,7 @@ fn handle(
                 )?;
             }
             Err(e) => {
-                eprintln!("[dns] {name}: {e}");
+                note!("[dns] {name}: {e}");
                 respond(
                     stream,
                     502,
@@ -325,13 +325,13 @@ fn handle(
             "GET" => match keychain::load() {
                 Some(credentials) => {
                     let body = serde_json::to_vec(&credentials).unwrap_or_default();
-                    eprintln!("[credentials] read from the keychain");
+                    note!("[credentials] read from the keychain");
                     respond(stream, 200, "OK", "application/json", &body, &[])?;
                 }
                 // Not an error: a first launch has nothing saved, and the client
                 // treats "none" as "ask the player".
                 None => {
-                    eprintln!("[credentials] nothing saved yet");
+                    note!("[credentials] nothing saved yet");
                     respond(
                         stream,
                         404,
@@ -348,18 +348,18 @@ fn handle(
                     .and_then(|c: keychain::Credentials| keychain::store(&c));
                 match stored {
                     Ok(()) => {
-                        eprintln!("[credentials] saved to the keychain");
+                        note!("[credentials] saved to the keychain");
                         respond(stream, 204, "No Content", "text/plain", b"", &[])?;
                     }
                     Err(e) => {
-                        eprintln!("[credentials] not saved: {e}");
+                        note!("[credentials] not saved: {e}");
                         respond(stream, 400, "Bad Request", "text/plain", e.as_bytes(), &[])?;
                     }
                 }
             }
             "DELETE" => {
                 keychain::clear();
-                eprintln!("[credentials] cleared");
+                note!("[credentials] cleared");
                 respond(stream, 204, "No Content", "text/plain", b"", &[])?;
             }
             _ => respond(
@@ -396,7 +396,7 @@ fn handle(
                     // A refused patch is a bug in the page, not a player error,
                     // so it is said out loud rather than only answered with 400.
                     Err(e) => {
-                        eprintln!("[settings] refused a patch: {e}");
+                        note!("[settings] refused a patch: {e}");
                         respond(stream, 400, "Bad Request", "text/plain", e.as_bytes(), &[])?;
                     }
                 }
@@ -452,7 +452,7 @@ fn handle(
         if request.method == "POST" {
             match serde_json::from_slice(&request.body) {
                 Ok(body) => diagnostics::absorb(&context.recorder.metrics, &body),
-                Err(e) => eprintln!("[diag] ignoring a malformed batch: {e}"),
+                Err(e) => note!("[diag] ignoring a malformed batch: {e}"),
             }
             // Nothing back. The page posts a batch every second and never reads
             // the reply, so answering with the full snapshot meant serializing
@@ -541,7 +541,7 @@ fn handle(
                 // Refused rather than started-and-abandoned: a sweep that runs
                 // until the volume fills takes the rest of the machine down
                 // with it, and the client streams perfectly well without it.
-                eprintln!(
+                note!(
                     "[prefetch] refused: {:.1} GB free, {:.1} GB needed",
                     free as f64 / 1e9,
                     (outstanding + DISK_HEADROOM) as f64 / 1e9
@@ -641,7 +641,7 @@ fn handle(
             request.body,
         ) {
             Ok(reply) => {
-                eprintln!(
+                note!(
                     "[proxy] {} /{route}{tail} -> {}",
                     request.method, reply.status
                 );
@@ -651,7 +651,7 @@ fn handle(
                 return Ok(Flow::Close);
             }
             Err(e) => {
-                eprintln!("[proxy] {} /{route}{tail}: {e}", request.method);
+                note!("[proxy] {} /{route}{tail}: {e}", request.method);
                 respond(
                     stream,
                     502,
@@ -681,7 +681,7 @@ fn handle(
                 && request.if_none_match.as_deref() == Some(tag.as_str())
             {
                 if tracing() {
-                    eprintln!("[loopback] 304 /{}", request.path);
+                    note!("[loopback] 304 /{}", request.path);
                 }
                 respond_not_modified(stream, tag)?;
                 return Ok(flow);
@@ -689,18 +689,18 @@ fn handle(
             match std::fs::read(&file) {
                 Ok(body) => {
                     if tracing() {
-                        eprintln!("[loopback] 200 /{} ({} bytes)", request.path, body.len());
+                        note!("[loopback] 200 /{} ({} bytes)", request.path, body.len());
                     }
                     respond_static(stream, mime(&file), &body, tag.as_deref())?;
                 }
                 Err(_) => {
-                    eprintln!("[loopback] 404 /{}", request.path);
+                    note!("[loopback] 404 /{}", request.path);
                     respond(stream, 404, "Not Found", "text/plain", b"not found", &[])?;
                 }
             }
         }
         None => {
-            eprintln!("[loopback] 403 /{}", request.path);
+            note!("[loopback] 403 /{}", request.path);
             respond(stream, 403, "Forbidden", "text/plain", b"forbidden", &[])?;
         }
     }
@@ -775,7 +775,7 @@ fn serve_snapshot(
 
     let mut body = std::io::BufWriter::with_capacity(BODY_BUFFER, &mut *stream);
     if let Err(e) = store.read_into(start, length, &mut body) {
-        eprintln!("[loopback] /{SNAPSHOT} {start}+{length} failed mid-body: {e}");
+        note!("[loopback] /{SNAPSHOT} {start}+{length} failed mid-body: {e}");
         return Ok(false);
     }
     body.flush()?;
@@ -783,7 +783,7 @@ fn serve_snapshot(
     stream.flush()?;
 
     if tracing() {
-        eprintln!("[loopback] 206 /{SNAPSHOT} bytes {start}-{last}/{total} ({produced} bytes)");
+        note!("[loopback] 206 /{SNAPSHOT} bytes {start}-{last}/{total} ({produced} bytes)");
     }
     Ok(true)
 }

@@ -198,7 +198,7 @@ pub struct Recorder {
 impl Recorder {
     pub fn open(dir: PathBuf) -> Arc<Self> {
         if let Err(e) = fs::create_dir_all(&dir) {
-            eprintln!("[gwnative] no diagnostics in {}: {e}", dir.display());
+            note!("[gwnative] no diagnostics in {}: {e}", dir.display());
         }
         Arc::new(Self {
             dir,

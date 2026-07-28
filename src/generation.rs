@@ -147,7 +147,7 @@ impl Store {
             Ok(bytes) => match serde_json::from_slice::<State>(&bytes) {
                 Ok(state) if state.format_version == FORMAT => state,
                 Ok(state) => {
-                    eprintln!(
+                    note!(
                         "[generation] a record written by format {} cannot be read here; \
                          starting over",
                         state.format_version
@@ -155,7 +155,7 @@ impl Store {
                     State::default()
                 }
                 Err(e) => {
-                    eprintln!("[generation] the record is unreadable ({e}); starting over");
+                    note!("[generation] the record is unreadable ({e}); starting over");
                     State::default()
                 }
             },
@@ -185,7 +185,7 @@ impl Store {
             // record is one redundant sync and one build that could have been
             // refused not being; the cost of treating it as fatal is an app
             // that will not start because of a bookkeeping file.
-            eprintln!("[generation] could not write the record: {e}");
+            note!("[generation] could not write the record: {e}");
         }
     }
 
@@ -209,7 +209,7 @@ impl Store {
                 match check(&path, expected) {
                     Ok(()) => false,
                     Err(reason) => {
-                        eprintln!("[generation] {name}: {reason}");
+                        note!("[generation] {name}: {reason}");
                         true
                     }
                 }
@@ -240,13 +240,13 @@ impl Store {
         // with one that does not work either, and lose the record of both.
         for (name, expected) in &previous.artifacts {
             if let Err(reason) = check(&self.dir.join("previous").join(name), expected) {
-                eprintln!("[generation] cannot roll back — the stashed {name}: {reason}");
+                note!("[generation] cannot roll back — the stashed {name}: {reason}");
                 return None;
             }
         }
         for name in previous.artifacts.keys() {
             if let Err(e) = fs::copy(self.dir.join("previous").join(name), root.join(name)) {
-                eprintln!("[generation] cannot roll back — restoring {name}: {e}");
+                note!("[generation] cannot roll back — restoring {name}: {e}");
                 return None;
             }
         }
@@ -288,7 +288,7 @@ impl Store {
             Ok(())
         };
         if let Err(e) = copy() {
-            eprintln!(
+            note!(
                 "[generation] could not stash the current client ({e}); a bad sync will not be undoable"
             );
             let _ = fs::remove_dir_all(&stash);
@@ -312,7 +312,7 @@ impl Store {
         });
         state.proven = false;
         self.save(&state);
-        eprintln!("[generation] client build {id} installed, not yet proven");
+        note!("[generation] client build {id} installed, not yet proven");
     }
 
     /// Take an installation that predates the record as the current set.
@@ -342,7 +342,7 @@ impl Store {
         });
         state.proven = true;
         self.save(&state);
-        eprintln!("[generation] adopted the client already on disk; it is checked from now on");
+        note!("[generation] adopted the client already on disk; it is checked from now on");
     }
 
     /// The page reached a first frame, so the current set works here.
@@ -359,7 +359,7 @@ impl Store {
         state.previous = None;
         self.save(&state);
         let id = state.current.as_ref().map_or("", |g| g.id.as_str());
-        eprintln!("[generation] client build {id} reached a first frame; keeping it");
+        note!("[generation] client build {id} reached a first frame; keeping it");
         let _ = fs::remove_dir_all(self.dir.join("previous"));
     }
 }
@@ -377,7 +377,7 @@ fn weigh(root: &Path, names: &[&'static str]) -> Option<BTreeMap<String, Artifac
                 artifacts.insert((*name).to_owned(), artifact);
             }
             Err(e) => {
-                eprintln!("[generation] could not record {name} ({e}); the set is not recorded");
+                note!("[generation] could not record {name} ({e}); the set is not recorded");
                 return None;
             }
         }

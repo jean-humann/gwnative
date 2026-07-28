@@ -5,6 +5,11 @@
 //! and WebGL. On macOS 27 that is WKWebView. Everything outside that realm
 //! (patching, chunk storage, sockets, credentials, windowing) is Rust.
 
+// Out of alphabetical order on purpose: `macro_rules!` is in scope only for
+// what follows it, and `note!` is used by nearly every module below.
+#[macro_use]
+mod log;
+
 mod app;
 mod cache;
 mod chunks;
@@ -96,7 +101,7 @@ fn web_root() -> PathBuf {
         // seed leaves the missing file to be noticed by whatever needed it,
         // whereas falling back to the bundle would put the patch sync inside
         // it, which is the one outcome this function exists to prevent.
-        eprintln!("[gwnative] could not lay out {}: {e}", live.display());
+        note!("[gwnative] could not lay out {}: {e}", live.display());
     }
     live
 }
@@ -138,7 +143,7 @@ fn main() {
     let _instance = match instance::acquire(&lock_path) {
         Ok(held) => held,
         Err(reason) => {
-            eprintln!("[gwnative] {reason}");
+            note!("[gwnative] {reason}");
             // A second launch of a windowed app should look like asking for the
             // one that is already open, not like nothing happening. Raising it
             // by pid rather than bundle id works in development too, where
@@ -171,7 +176,7 @@ fn main() {
     // enough on its own.
     let generations = Arc::new(generation::Store::open(support_dir().join("generations")));
     if let Some(refused) = generations.roll_back(&root) {
-        eprintln!(
+        note!(
             "[gwnative] client build {refused} never reached a first frame; \
              restored the one before it"
         );
@@ -183,7 +188,7 @@ fn main() {
     {
         // A stale-but-complete web root still boots, so a failed refresh is
         // only fatal when the client is not on disk at all.
-        eprintln!("[gwnative] patch sync failed: {e}");
+        note!("[gwnative] patch sync failed: {e}");
         if !missing.is_empty() {
             std::process::exit(1);
         }
@@ -201,7 +206,7 @@ fn main() {
     // the shell still opens; only the game data is unavailable.
     let snapshot = match open_snapshot() {
         Ok(store) => {
-            eprintln!(
+            note!(
                 "[gwnative] snapshot: {:.1} GB in {} KiB chunks, on demand",
                 store.snapshot_size() as f64 / 1e9,
                 store.chunk_size() / 1024
@@ -216,7 +221,7 @@ fn main() {
             Some(store)
         }
         Err(e) => {
-            eprintln!("[gwnative] snapshot unavailable: {e}");
+            note!("[gwnative] snapshot unavailable: {e}");
             None
         }
     };
@@ -242,11 +247,11 @@ fn main() {
     let derived_wasm = match wasm::prepare(&root.join("Gw.jspi.wasm"), &derived_dir()) {
         Ok(Some(path)) => Some(path),
         Ok(None) => {
-            println!("[gwnative] template save: unavailable, this client build is not certified");
+            note!("[gwnative] template save: unavailable, this client build is not certified");
             None
         }
         Err(reason) => {
-            eprintln!("[gwnative] template save unavailable: {reason}");
+            note!("[gwnative] template save unavailable: {reason}");
             None
         }
     };
@@ -269,13 +274,13 @@ fn main() {
     )
     .expect("bind loopback");
     let url = format!("http://{}/index.html", loopback.addr);
-    eprintln!("[gwnative] serving {} at {}", root.display(), url);
+    note!("[gwnative] serving {} at {}", root.display(), url);
     // The windowed app keeps its token to itself — it reaches the page over the
     // injection channel and nowhere else. But every measurement worth taking
     // lives behind that gate on `__diag`, and a benchmark that cannot read it
     // is a benchmark of nothing. So: on request, and only on request.
     if std::env::var_os("GWNATIVE_PRINT_TOKEN").is_some() {
-        eprintln!("[gwnative] session token {token}");
+        note!("[gwnative] session token {token}");
     }
 
     if headless {
@@ -283,7 +288,13 @@ fn main() {
         // exercising is behind the gate and there is otherwise no way to get
         // past it from outside the page. Only ever printed here: in the app the
         // token reaches the page over the injection channel and nowhere else.
-        println!("{} {token}", loopback.addr);
+        // The one line on stdout, and written the same forgiving way as every
+        // line on stderr — see `log`. A harness that has already left is not
+        // worth aborting over, and headless mode parks below regardless.
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stdout().lock(), "{} {token}", loopback.addr);
+        }
         loop {
             std::thread::park();
         }
@@ -346,9 +357,9 @@ fn sync(
     generations: &generation::Store,
 ) -> error::Result<()> {
     if unsound.is_empty() {
-        eprintln!("[gwnative] refreshing client artifacts");
+        note!("[gwnative] refreshing client artifacts");
     } else {
-        eprintln!(
+        note!(
             "[gwnative] fetching client artifacts: {}",
             unsound.join(", ")
         );
@@ -360,7 +371,7 @@ fn sync(
 
     if generations.rejected(&offered) {
         if unsound.is_empty() {
-            eprintln!(
+            note!(
                 "[gwnative] the service still offers client build {offered}, which never reached \
                  a first frame here; keeping the one on disk"
             );
@@ -369,7 +380,7 @@ fn sync(
         // The alternative to a build that did not work is no client at all, so
         // it gets another try — loudly, because if it fails the same way the
         // line above is the one that explains why nothing changed.
-        eprintln!(
+        note!(
             "[gwnative] client build {offered} never reached a first frame here, but the client \
              on disk is incomplete, so there is nothing else to run"
         );
@@ -378,7 +389,7 @@ fn sync(
     generations.stash(root, &names);
     let fetched = patch::sync_with(&client, &manifest, root)?;
     for (name, bytes) in fetched {
-        eprintln!("[gwnative]   {name} ({bytes} bytes)");
+        note!("[gwnative]   {name} ({bytes} bytes)");
     }
     generations.record(&offered, root, &names);
     Ok(())
@@ -498,7 +509,7 @@ fn disable_webkit_features(preferences: &objc2_web_kit::WKPreferences) {
         }
     }
     for name in remaining {
-        eprintln!("[gwnative] WebKit no longer lists {name}; its default behaviour stands");
+        note!("[gwnative] WebKit no longer lists {name}; its default behaviour stands");
     }
 }
 

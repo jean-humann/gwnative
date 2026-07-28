@@ -147,7 +147,7 @@ fn report(result: *mut AnyObject, error: *mut NSError) {
     if !error.is_null() {
         // SAFETY: non-null, and WebKit hands the block a live error.
         let error = unsafe { &*error };
-        eprintln!("[gwnative] the game files could not be flushed: {error}");
+        note!("[gwnative] the game files could not be flushed: {error}");
         return;
     }
     if result.is_null() {
@@ -159,10 +159,10 @@ fn report(result: *mut AnyObject, error: *mut NSError) {
     // did not reach its own return — worth saying, and worth not asserting.
     match outcome.downcast_ref::<NSString>() {
         Some(outcome) if outcome.to_string() == "flushed" => {
-            eprintln!("[gwnative] the game files are on disk");
+            note!("[gwnative] the game files are on disk");
         }
-        Some(outcome) => eprintln!("[gwnative] the game files were not flushed: {outcome}"),
-        None => eprintln!("[gwnative] the flush answered with something unreadable"),
+        Some(outcome) => note!("[gwnative] the game files were not flushed: {outcome}"),
+        None => note!("[gwnative] the flush answered with something unreadable"),
     }
 }
 
