@@ -124,10 +124,48 @@ fn is_public_unicast(ip: IpAddr) -> bool {
                 // Unique local fc00::/7 and link local fe80::/10.
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
-                // IPv4-mapped addresses would otherwise bypass the v4 rules.
-                || v6.to_ipv4_mapped().is_some())
+                // Every notation that writes an IPv4 destination in IPv6, all
+                // of which bypass the rules above this line.
+                || carries_v4(v6)
+                // 2001:db8::/32 documentation and 100::/64 discard-only, which
+                // are the v6 halves of rules the v4 arm already has.
+                || matches!(v6.segments(), [0x2001, 0x0db8, ..])
+                || matches!(v6.segments(), [0x0100, 0, 0, 0, ..]))
         }
     }
+}
+
+/// Whether this IPv6 address is really an IPv4 one in disguise.
+///
+/// Refused rather than judged on the address it carries, because every one of
+/// these is a way of writing a destination that `resolve` would have answered
+/// in IPv4 — this host asks for A records and gets back four bytes, so nothing
+/// legitimate ever arrives spelled like this, and the ArenaNet name that does
+/// publish a AAAA record publishes an ordinary global unicast address.
+///
+/// The mapped form is the one everybody knows and the only one that used to be
+/// caught. It is also the least interesting: a stack has to be asked for it,
+/// whereas `64:ff9b::7f00:1` is the well-known NAT64 prefix and a network with
+/// a NAT64 gateway — every IPv6-only mobile network — will happily translate it
+/// to 127.0.0.1 and deliver it. `::a9fe:a9fe` reaches the link-local metadata
+/// service the same way. Both read as public unicast to a check that only asks
+/// about mapping.
+fn carries_v4(v6: std::net::Ipv6Addr) -> bool {
+    matches!(
+        v6.segments(),
+        // ::ffff:a.b.c.d mapped, and ::a.b.c.d compatible — deprecated by
+        // RFC 4291 and still parsed by every stack that ever supported it.
+        // `::` and `::1` land here too and are refused a second time, which
+        // costs nothing and keeps this rule whole.
+        [0, 0, 0, 0, 0, 0xffff | 0, ..]
+        // 64:ff9b::/96, the RFC 6052 well-known prefix.
+        | [0x0064, 0xff9b, 0, 0, 0, 0, ..]
+        // 2002::/16 6to4, whose second and third groups are the gateway's
+        // IPv4 address. Deprecated by RFC 7526; still routed by some hosts.
+        | [0x2002, ..]
+        // 2001::/32 Teredo, which carries a v4 server address of its own.
+        | [0x2001, 0, ..]
+    )
 }
 
 /// Resolve `host` to a single IPv4 address, which is the shape the client's
@@ -400,10 +438,35 @@ mod tests {
         }
     }
 
+    /// The v4 rules are the substantial half of this policy, and there are four
+    /// ways to write a v4 destination in v6 notation. Asking about the mapped
+    /// form alone caught one of them; the other three read as ordinary public
+    /// unicast, and a NAT64 network delivers `64:ff9b::7f00:1` to 127.0.0.1
+    /// without anything on this machine being asked.
     #[test]
-    fn ipv4_mapped_ipv6_cannot_smuggle_loopback() {
-        assert!(!is_public_unicast("::ffff:127.0.0.1".parse().unwrap()));
-        assert!(!is_public_unicast("::ffff:10.0.0.1".parse().unwrap()));
+    fn ipv6_notation_cannot_smuggle_an_ipv4_destination() {
+        for ip in [
+            // Mapped, which is the one that was already refused.
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            // IPv4-compatible, deprecated and still parsed.
+            "::127.0.0.1",
+            "::a9fe:a9fe",
+            // NAT64: the one a live network actually translates.
+            "64:ff9b::127.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            // 6to4 and Teredo, which carry a v4 address of their own.
+            "2002:7f00:1::1",
+            "2001:0:53aa:64c:2000:7f00:1:1",
+            // The v6 halves of rules the v4 arm already has.
+            "2001:db8::1",
+            "100::1",
+        ] {
+            assert!(
+                !is_public_unicast(ip.parse().unwrap()),
+                "{ip} must be refused"
+            );
+        }
     }
 
     #[test]
