@@ -143,6 +143,12 @@
     grid-column: 2; color: #9399b2; font-size: 12px; margin: -6px 0 4px;
   }
   .settings-hint:empty { display: none; }
+  /* Amber rather than the red below it: something is missing, nothing is
+     wrong, and the two should not look the same. */
+  #settings-compat {
+    color: #d9b25c; max-width: 38em; text-align: center; font-size: 13px; line-height: 1.5;
+  }
+  #settings-compat[hidden] { display: none; }
   #settings-note { color: #f38ba8; min-height: 1.5em; max-width: 38em; text-align: center; }
   #settings-actions { display: flex; gap: 10px; }
   #settings button {
@@ -189,6 +195,7 @@
      table in that file, and two lists that have to agree is one list too many. -->
 <div id="settings" hidden>
   <h1 id="settings-title">Settings</h1>
+  <div id="settings-compat" hidden></div>
   <div id="settings-rows"></div>
   <div id="settings-note"></div>
   <div id="settings-actions"></div>

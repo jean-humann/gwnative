@@ -255,17 +255,23 @@ fn main() {
     // certified. A failure here is never fatal: the untransformed module still
     // plays, it just cannot save, list or delete a build — which is where the
     // client started. See `wasm` for what the derived module changes.
-    let derived_wasm = match wasm::prepare(&root.join("Gw.jspi.wasm"), &derived_dir()) {
-        Ok(Some(path)) => Some(path),
-        Ok(None) => {
-            note!("[gwnative] template save: unavailable, this client build is not certified");
-            None
-        }
-        Err(reason) => {
-            note!("[gwnative] template save unavailable: {reason}");
-            None
-        }
-    };
+    //
+    // The outcome is carried to the page as well as to the log. A player who
+    // clicks Save in the client's template window and watches nothing happen is
+    // owed a sentence about why, and the log is not where they will look for
+    // it; `settings-panel.js` is what turns this into that sentence.
+    let (derived_wasm, template_save) =
+        match wasm::prepare(&root.join("Gw.jspi.wasm"), &derived_dir()) {
+            Ok(Some(path)) => (Some(path), "ready"),
+            Ok(None) => {
+                note!("[gwnative] template save: unavailable, this client build is not certified");
+                (None, "uncertified")
+            }
+            Err(reason) => {
+                note!("[gwnative] template save unavailable: {reason}");
+                (None, "failed")
+            }
+        };
 
     // Read before the window exists: the render scale the client is handed and
     // the gesture translation the page installs are both settled before the
@@ -291,9 +297,7 @@ fn main() {
         Err(e) => alert::fatal(
             !headless,
             "Guild Wars could not start",
-            &format!(
-                "The local address the game is served from could not be opened.\n\n{e}"
-            ),
+            &format!("The local address the game is served from could not be opened.\n\n{e}"),
         ),
     };
     let url = format!("http://{}/index.html", loopback.addr);
@@ -331,7 +335,14 @@ fn main() {
     // resizes the window to the remembered one before it is ever shown, and the
     // content view follows.
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
-    let webview = make_webview(mtm, frame, &url, &token, &loopback.settings.get());
+    let webview = make_webview(
+        mtm,
+        frame,
+        &url,
+        &token,
+        &loopback.settings.get(),
+        template_save,
+    );
     let window = window::open(mtm, &webview, support_dir().join("window.json"));
 
     // After the window, not before: two of the menu's items are requests to the
@@ -484,10 +495,7 @@ fn disable_webkit_features(preferences: &objc2_web_kit::WKPreferences) {
     let mut remaining: Vec<&str> = DISABLED_WEBKIT_FEATURES.to_vec();
     // (feature list class method, matching setter taking that feature kind)
     let surfaces: [(objc2::runtime::Sel, objc2::runtime::Sel); 3] = [
-        (
-            objc2::sel!(_features),
-            objc2::sel!(_setEnabled:forFeature:),
-        ),
+        (objc2::sel!(_features), objc2::sel!(_setEnabled:forFeature:)),
         (
             objc2::sel!(_internalDebugFeatures),
             objc2::sel!(_setEnabled:forInternalDebugFeature:),
@@ -542,6 +550,7 @@ fn make_webview(
     url: &str,
     token: &str,
     settings: &settings::Settings,
+    template_save: &str,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
 
@@ -563,16 +572,22 @@ fn make_webview(
     // which listeners `input.js` installs, so both are needed before anything
     // the page could await. `PUT /__settings` is what changes them afterwards;
     // this is only the value they start at.
+    //
+    // The template-save state is settled before the page exists — it is which
+    // module the server is about to hand out — so it travels with the rest
+    // rather than costing the panel a round trip the first time it opens.
     unsafe {
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
             WKUserScript::alloc(mtm),
             &NSString::from_str(&format!(
                 "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
-                 window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};",
+                 window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
+                 window.__gwnativeTemplateSave = {};",
                 serde_json::Value::from(token),
                 layout::as_json(),
                 wasm::markers_json(),
                 serde_json::to_string(settings).unwrap_or_else(|_| "{}".to_owned()),
+                serde_json::Value::from(template_save),
             )),
             WKUserScriptInjectionTime::AtDocumentStart,
             true,

@@ -20,9 +20,7 @@ use objc2_foundation::{MainThreadMarker, NSString};
 /// click is not a message, it is a hang.
 pub fn fatal(on_screen: bool, message: &str, detail: &str) -> ! {
     note!("[gwnative] {message}: {detail}");
-    if on_screen
-        && let Some(mtm) = MainThreadMarker::new()
-    {
+    if on_screen && let Some(mtm) = MainThreadMarker::new() {
         let app = NSApplication::sharedApplication(mtm);
         // The policy is normally set further down `main`, which this failure
         // never reaches. Without it the process is an accessory: the alert

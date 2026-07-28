@@ -22,7 +22,8 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAboutPanelOptionApplicationName, NSAboutPanelOptionApplicationVersion,
-    NSAboutPanelOptionCredits, NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem, NSWorkspace,
+    NSAboutPanelOptionCredits, NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem,
+    NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSDictionary, NSObject, NSObjectProtocol, NSString, NSURL,
