@@ -924,6 +924,16 @@ refreshes them without opening a window. Neither needs setting up: the patch
 service access key identifies the official client rather than a player, so it is
 the same value everywhere and ships in `src/patch.rs`.
 
+One executable, three runs — no argument opens the window, `sync` downloads and
+exits, `serve` runs the origin without a window — plus `--version` and `--help`,
+which answer and exit. `src/cli.rs` decides which before anything is opened,
+downloaded or read, and refuses an argument it does not know rather than
+ignoring it. Ignoring it is how `--sync`, a plausible typo for a real command,
+used to start a 4 GB download and a game window instead of doing nothing
+visible. A `-psn_*` from Launch Services is the one exception it skips, since
+refusing that would mean an app that opens from a terminal and not from the
+Dock.
+
 `cargo run` signs the binary first, through the runner in `.cargo/config.toml`.
 That is not packaging: the keychain identifies the application allowed to open a
 saved item by its code signature, and the signature cargo links by itself
@@ -941,23 +951,49 @@ and make everyone moving between the two sign in again.
 still builds and runs — it just goes back to forgetting the login on every
 rebuild, and says so.
 
-A login saved by an earlier, differently signed build is not lost. macOS offers
-it on first read, and Always Allow adopts it; declining that just means signing
-in once more, which replaces the item outright — the update is refused for the
-same reason the read was, so `src/keychain.rs` deletes and recreates instead.
-Removing an item does not require permission to open it, which is the whole
-trick. Once only: the second write is a create against nothing, so a refusal
-there is a different condition and the only thing left to say is which item to
-delete by hand.
+### The dialog, and why there is not one
 
-The three ways the keychain says no are kept apart, because they used to share
-one message and it was wrong twice out of three times. Only `errSecAuthFailed`
-is the signature story. `errSecUserCanceled` means the prompt was dismissed a
-second ago, and `errSecInteractionNotAllowed` means the screen was locked and
-nobody was asked at all — sending either of those to read about code signing
-wastes the reader's time. The retry is behind a small trait so the refusal paths
-have tests; against the real keychain they would need a second signing identity
-and somebody to press Cancel.
+A saved item carries a list of the code allowed to open it, and the entry is a
+*designated requirement* — the identifier plus the signing certificate. Not a
+path: the same signed build reads its item from anywhere on disk, so installing
+into `/Applications` costs nothing by itself. Not the binary either: a rebuild
+with a different code hash still reads, which is what lets an update ship
+without logging everybody out. Only the signature counts, and the list grows by
+one entry per signature that ever wrote the item rather than replacing.
+
+When the running code is not on that list, macOS's own answer is a dialog:
+*Guild Wars wants to use your confidential information stored in "gwnative
+(Guild Wars)" — enter the "login" keychain password.* Over a game. Every answer
+to it is bad. Deny loses the login, Allow types the password to the whole
+account into a dialog nobody can verify, and Always Allow does that and adds
+another entry to the list that grew the problem.
+
+So it is never raised. `src/keychain.rs` suppresses keychain interaction around
+every call it makes, which turns the dialog into `errSecInteractionNotAllowed`,
+and treats that as "nothing saved" — the client shows its own sign-in form,
+asking for the account password it is actually signing in with. Signing in
+there replaces the item under the current signature, so a signature change
+costs one sign-in, once, instead of a system-password prompt.
+
+Replacing works where overwriting does not: an update asks the same permission
+a read does and is refused the same way, but removing an item does not require
+permission to open it, so `store_in` deletes and recreates. Once only — the
+second write is a create against nothing, so a refusal there is a different
+condition and the only thing left to say is which item to delete by hand.
+
+The data-protection keychain would remove the list entirely, since it decides
+access by signing team. It is not reachable here: it needs
+`keychain-access-groups`, that entitlement needs a provisioning profile
+embedded in the bundle to authorise it, and without one `SecItemAdd` returns
+`errSecMissingEntitlement` while *with* the entitlement and no profile macOS
+kills the process at launch. Such a profile is issued per App ID and expires,
+which would give a downloadable Developer ID build an expiry date. For one
+saved password that is a bad trade.
+
+`errSecUserCanceled` is kept apart from the other two: it means a prompt was
+dismissed, and sending someone to read about code signing over that wastes
+their time. The retry is behind a small trait so the refusal paths have tests;
+against the real keychain they would need a second signing identity.
 
 ## Two WebKit data roots, and why they stay that way
 

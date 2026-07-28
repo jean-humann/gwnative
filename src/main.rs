@@ -14,6 +14,7 @@ mod alert;
 mod app;
 mod cache;
 mod chunks;
+mod cli;
 mod commands;
 mod diagnostics;
 mod disk;
@@ -63,11 +64,22 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 /// the order itself: one instance, then a client worth running, then the data it
 /// reads, then an origin to serve both from, and only then a window.
 fn main() {
-    let command = std::env::args().nth(1);
-    let force_sync = command.as_deref() == Some("sync");
-    // `serve` runs the origin without a window, so the snapshot range path can
-    // be exercised from curl or a test.
-    let headless = command.as_deref() == Some("serve");
+    // Before anything is opened, downloaded or locked: a question about this
+    // executable deserves an answer and not a launch.
+    let command = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(command) => command,
+        Err(exit) => {
+            let out: &mut dyn std::io::Write = if exit.failed {
+                &mut std::io::stderr()
+            } else {
+                &mut std::io::stdout()
+            };
+            let _ = writeln!(out, "{}", exit.message);
+            std::process::exit(i32::from(exit.failed) * 2);
+        }
+    };
+    let force_sync = command == cli::Command::Sync;
+    let headless = command == cli::Command::Serve;
     // The two commands above are the runs with a terminal attached. Everything
     // that would otherwise put a message on screen asks this first.
     let windowed = !headless && !force_sync;
