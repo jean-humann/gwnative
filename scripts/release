@@ -15,11 +15,17 @@
 # this offline gets the unidentified-developer refusal even though the build was
 # notarized months ago.
 #
-# Deliberately a local script rather than a CI job. Publishing from CI would
-# mean exporting the Developer ID private key into the secret store of a public
-# repository, and that key signs everything its owner ships, not only this. The
-# trade is a manual `gh release create` at the end, and a key that never leaves
-# this machine.
+# A script rather than a workflow, and .github/workflows/release.yml runs this
+# same file rather than reimplementing it. A release path only exercised by CI
+# is one nobody can reproduce when it breaks, and a local one that CI works
+# around is one CI is not testing. What the workflow adds is a keychain holding
+# the identity and the credentials — which is the environment this already
+# expects — plus the approval gate that a Developer ID key in a public
+# repository's secret store has to have.
+#
+# So there are two ways to publish and one implementation. Locally: run this,
+# then tag and `gh release create`, which it prints. From CI: push the tag and
+# approve the run.
 #
 # Usage: scripts/release
 # Environment:
