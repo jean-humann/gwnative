@@ -329,7 +329,10 @@ export async function installEnhancements(instance, module, selection) {
       window.gwCompanionRuntime = null;
     };
     window.addEventListener('pagehide', teardown, { once: true });
-    console.info(`[enhancement] installed for client build ${manifest.buildId}`);
+    // `log`, not `info`: the harness forwards log, warn and error to the host
+    // and nothing else, so an `info` here is a line that reaches the WebKit
+    // inspector and no log file, report or overlay anyone will actually open.
+    console.log(`[enhancement] installed for client build ${manifest.buildId}`);
     return runtime;
   } catch (error) {
     hookSlot.value = 0;
