@@ -1,13 +1,15 @@
 //! What the player chose, kept across launches.
 //!
-//! One small JSON file in the support directory. Four fields, and every one of
-//! them is read by something that already exists here: `renderScale` is what
-//! the client asks for through `emscripten_get_device_pixel_ratio`, `touchMode`
-//! selects which gesture translation `input.js` installs, `showDiagnostics`
-//! opens the log pane at boot, and `dataStrategy` records the answer to the
-//! launcher's one question. Nothing is stored for a feature this app does not
-//! have — a settings file whose fields nothing reads is a migration burden that
-//! never bought anything.
+//! One small JSON file in the support directory. Every field is read by
+//! something that already exists here: `renderScale` is what the client asks
+//! for through `emscripten_get_device_pixel_ratio`, `touchMode` selects which
+//! gesture translation `input.js` installs, `showDiagnostics` opens the log pane
+//! at boot, `dataStrategy` records the answer to the launcher's one question,
+//! `autoCheckUpdates` and `lastUpdateCheckAt` together decide whether a launch
+//! asks GitHub about itself, and `compatibilityNoticeSeenFor` is which client
+//! build the player has already been warned about. Nothing is stored for a
+//! feature this app does not have — a settings file whose fields nothing reads
+//! is a migration burden that never bought anything.
 //!
 //! The reader is deliberately lopsided: an unknown *field* is ignored, an
 //! unknown *value* is refused. A file written by a later build should still
@@ -17,6 +19,11 @@
 //! theirs explains. A `formatVersion` this build does not know is refused
 //! outright rather than reinterpreted, and [`Store::open`] then moves the file
 //! aside intact instead of overwriting a shape it could not read.
+//!
+//! Two fields are readable by the page and not writable by it — see
+//! [`PATCHABLE`]. One describes the file itself; the other is the host's record
+//! of a request the host made, and a page that could write it could tell this
+//! build a check had just happened and never be asked to make another.
 
 use std::fs;
 use std::io::Write;
@@ -44,12 +51,29 @@ const CORRUPT_BACKUPS_KEPT: usize = 3;
 /// file cost a fifth of the frame rate with nothing on screen to explain it.
 const RENDER_SCALES: [f64; 3] = [1.0, 1.5, 2.0];
 
+/// What a mouse gesture is turned into before the client sees it.
+///
+/// Not a preference so much as a repair. ArenaNet's build registers no
+/// `dblclick` handler, and the Emscripten mouse event it does read carries no
+/// click count — so *there is no path by which a double click can reach the
+/// game as a double click*. The client's own double-tap detector is on its
+/// touch path, which is why [`Dbltap`](Self::Dbltap) exists and why it is the
+/// default: without it, picking an item up and equipping it are simply not
+/// things a player can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TouchMode {
+    /// Nothing is translated, and double clicking does not work. Kept for
+    /// diagnosing whether a problem is this file's fault.
     Off,
+    /// A macOS double click — its speed and distance as the player has set them
+    /// system-wide — is replayed as the pair of taps the client recognises.
+    /// Single clicks, drags and the right button are untouched.
     Dbltap,
+    /// Every left-button gesture becomes a touch and the mouse event is
+    /// withheld from the client.
     Translate,
+    /// Both: the client sees the touch and the mouse event.
     Augment,
 }
 
@@ -63,13 +87,49 @@ pub enum DataStrategy {
     Full,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+/// Not `Copy`, deliberately: [`Settings::compatibility_notice_seen_for`] is a
+/// 64-character hash, and the alternative — a fixed-width array with a hex codec
+/// either side of it — would be machinery bought to keep a struct copyable that
+/// is read a handful of times a session.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub render_scale: f64,
     pub touch_mode: TouchMode,
     pub show_diagnostics: bool,
     pub data_strategy: Option<DataStrategy>,
+    /// Whether a launch may ask GitHub whether this build is the newest one.
+    /// Off unless the player turns it on: see [`crate::release`] for why the
+    /// check is asked for rather than volunteered.
+    pub auto_check_updates: bool,
+    /// When the last check — automatic or from the menu — got an answer, in
+    /// seconds since the epoch. What makes an opted-in launch ask once a day
+    /// rather than once a launch.
+    pub last_update_check_at: Option<u64>,
+    /// The sha256 of the `Gw.jspi.wasm` this profile has already been warned
+    /// about, when the warning applied. Per build rather than a boolean because
+    /// the thing being acknowledged is *this* ArenaNet build being one we have
+    /// not certified — the next one deserves its own sentence, and a boolean
+    /// would either nag every launch or stay silent through every future patch.
+    pub compatibility_notice_seen_for: Option<String>,
+    /// Draw the game's own cursor art with the page's compositor instead of
+    /// letting the client draw it into the frame. See [`crate::wasm`] for what
+    /// has to happen to the client for this to be possible at all.
+    pub native_cursor: bool,
+    /// Show what the player has targeted, read out of the game each tick.
+    pub target_readout: bool,
+}
+
+impl Settings {
+    /// Whether this launch needs the enhanced client module.
+    ///
+    /// Derived rather than stored, and deliberately so. A `enhancementsEnabled`
+    /// field could say no while a tool it governs said yes, and nothing in the
+    /// file would say which of the two the session actually obeyed. Asking the
+    /// tools directly means the question cannot have two answers.
+    pub fn enhancements_enabled(&self) -> bool {
+        self.native_cursor || self.target_readout
+    }
 }
 
 impl Default for Settings {
@@ -79,9 +139,21 @@ impl Default for Settings {
             // scales the result. 2 is a Retina panel's native ratio, so it is
             // the one that does not resample.
             render_scale: 2.0,
-            touch_mode: TouchMode::Off,
+            // See TouchMode. Off would ship a game whose inventory cannot be
+            // used, so the repair is on unless it is turned off deliberately.
+            touch_mode: TouchMode::Dbltap,
             show_diagnostics: false,
             data_strategy: None,
+            auto_check_updates: false,
+            last_update_check_at: None,
+            compatibility_notice_seen_for: None,
+            // On: a cursor the compositor draws is the one thing in this app
+            // that makes the game feel like it is running at the display's
+            // refresh rate rather than the client's.
+            native_cursor: true,
+            // Off: it puts a panel over the game, which is a change to what the
+            // player sees and not one to volunteer.
+            target_readout: false,
         }
     }
 }
@@ -97,17 +169,53 @@ struct Wire {
     touch_mode: Option<TouchMode>,
     show_diagnostics: Option<bool>,
     data_strategy: Option<DataStrategy>,
+    auto_check_updates: Option<bool>,
+    last_update_check_at: Option<u64>,
+    compatibility_notice_seen_for: Option<String>,
+    native_cursor: Option<bool>,
+    target_readout: Option<bool>,
 }
 
-/// The names a patch may carry. `formatVersion` is not among them: it describes
-/// the file, and a page that could set it could make the next launch unable to
-/// read its own settings.
-const PATCHABLE: [&str; 4] = [
+/// The names a patch may carry.
+///
+/// Two fields the file holds are absent, and for one reason each.
+/// `formatVersion` describes the file, and a page that could set it could make
+/// the next launch unable to read its own settings. `lastUpdateCheckAt` is the
+/// host's record of a request the host made — a page that could write it could
+/// suppress the daily check indefinitely by claiming one had just happened. Both
+/// are still *read* from the file, because a launch has to be able to load what
+/// the previous one wrote; see [`Store::remember_update_check`] for the one way
+/// the second is set.
+///
+/// `compatibilityNoticeSeenFor` is here rather than beside them because the page
+/// is the thing that gives the notice: the dismissal is a button in the overlay,
+/// so the write has to come from there. What stops it being abused is the shape
+/// check below — the value must be a client hash, and a build hash the player
+/// has genuinely seen is the only thing that can silence anything.
+const PATCHABLE: [&str; 8] = [
     "renderScale",
     "touchMode",
     "showDiagnostics",
     "dataStrategy",
+    "autoCheckUpdates",
+    "compatibilityNoticeSeenFor",
+    "nativeCursor",
+    "targetReadout",
 ];
+
+/// Whether `value` is the shape [`digest`](crate::wasm) writes: 64 lowercase hex
+/// characters.
+///
+/// Checked rather than taken on trust because the field is compared for equality
+/// against this launch's client hash, and a value that can never match is a
+/// notice that reappears at every launch with nothing on screen to explain why.
+/// The failure is loud here instead.
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 /// Fold whatever `raw` says over `base`.
 ///
@@ -140,6 +248,28 @@ fn merge(base: Settings, raw: &serde_json::Value) -> Result<Settings, String> {
     }
     if object.contains_key("dataStrategy") {
         out.data_strategy = wire.data_strategy;
+    }
+    if let Some(auto) = wire.auto_check_updates {
+        out.auto_check_updates = auto;
+    }
+    if let Some(at) = wire.last_update_check_at {
+        out.last_update_check_at = Some(at);
+    }
+    // `null` here is "warn me about this build again", which is a value and not
+    // an omission — same reason `dataStrategy` is read off the object.
+    if object.contains_key("compatibilityNoticeSeenFor") {
+        if let Some(seen) = &wire.compatibility_notice_seen_for
+            && !is_sha256(seen)
+        {
+            return Err("compatibilityNoticeSeenFor must be null or a client sha256".to_owned());
+        }
+        out.compatibility_notice_seen_for = wire.compatibility_notice_seen_for;
+    }
+    if let Some(on) = wire.native_cursor {
+        out.native_cursor = on;
+    }
+    if let Some(on) = wire.target_readout {
+        out.target_readout = on;
     }
     Ok(out)
 }
@@ -204,7 +334,7 @@ impl Store {
     }
 
     pub fn get(&self) -> Settings {
-        *self.current.lock().unwrap()
+        self.current.lock().unwrap().clone()
     }
 
     /// Fold a patch in and write the result.
@@ -213,13 +343,48 @@ impl Store {
     /// that is told its change was saved can rely on the next launch agreeing.
     pub fn apply(&self, raw: &serde_json::Value) -> Result<Settings, String> {
         let mut current = self.current.lock().unwrap();
-        let next = patch(*current, raw)?;
+        let next = patch(current.clone(), raw)?;
         if next != *current {
             save(&self.path, &next).map_err(|e| format!("could not save settings: {e}"))?;
-            *current = next;
+            *current = next.clone();
         }
         Ok(next)
     }
+
+    /// Record that a check for updates got an answer, at `at`.
+    ///
+    /// Not a patch, because [`PATCHABLE`] deliberately does not contain this
+    /// field: the page must not be able to claim a check happened. Every caller
+    /// is a worker thread that has just finished one, and none of them has
+    /// anything to do about a failed write — the cost of losing it is one extra
+    /// request at the next launch — so this answers nothing and says so in the
+    /// log instead.
+    pub fn remember_update_check(&self, at: u64) {
+        let mut current = self.current.lock().unwrap();
+        if current.last_update_check_at == Some(at) {
+            return;
+        }
+        let next = Settings {
+            last_update_check_at: Some(at),
+            ..current.clone()
+        };
+        match save(&self.path, &next) {
+            Ok(()) => *current = next,
+            Err(e) => note!("[settings] the update-check time was not saved: {e}"),
+        }
+    }
+}
+
+/// Seconds since the epoch, or 0 on a clock that will not answer.
+///
+/// Zero rather than a failure because every caller is deciding how long ago
+/// something was, and a clock that cannot be read is one whose answers are
+/// worthless — 0 makes "long ago" the conclusion, which is the safe end of a
+/// decision about whether to make one network request.
+pub fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 fn load(path: &Path) -> Result<Settings, String> {
@@ -330,6 +495,16 @@ mod tests {
         (dir, path)
     }
 
+    /// The client has no double-click of its own, so this default is not a
+    /// preference — it is whether a fresh install can equip an item. It shipped
+    /// as `Off` once and the game arrived unable to use its own inventory, with
+    /// nothing on screen to say why.
+    #[test]
+    fn a_fresh_profile_can_double_click() {
+        assert_eq!(Settings::default().touch_mode, TouchMode::Dbltap);
+        assert_eq!(parse(&json!({})).unwrap().touch_mode, TouchMode::Dbltap);
+    }
+
     #[test]
     fn an_empty_object_is_every_default() {
         assert_eq!(parse(&json!({})).unwrap(), Settings::default());
@@ -338,7 +513,7 @@ mod tests {
     #[test]
     fn an_unknown_field_is_ignored_but_an_unknown_value_is_not() {
         let forward =
-            parse(&json!({"touchMode": "augment", "tuchMode": "off", "nativeCursor": true}));
+            parse(&json!({"touchMode": "augment", "tuchMode": "off", "fromALaterBuild": true}));
         assert_eq!(forward.unwrap().touch_mode, TouchMode::Augment);
 
         assert!(parse(&json!({"touchMode": "maybe"})).is_err());
@@ -364,16 +539,17 @@ mod tests {
             touch_mode: TouchMode::Dbltap,
             show_diagnostics: true,
             data_strategy: Some(DataStrategy::Full),
+            ..Settings::default()
         };
-        let after = patch(current, &json!({"showDiagnostics": false})).unwrap();
+        let after = patch(current.clone(), &json!({"showDiagnostics": false})).unwrap();
         assert_eq!(
             after,
             Settings {
                 show_diagnostics: false,
-                ..current
+                ..current.clone()
             }
         );
-        assert!(patch(current, &json!({"renderscale": 1})).is_err());
+        assert!(patch(current.clone(), &json!({"renderscale": 1})).is_err());
         assert!(patch(current, &json!({"formatVersion": 1})).is_err());
     }
 
@@ -384,7 +560,7 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(
-            patch(asked, &json!({"dataStrategy": null}))
+            patch(asked.clone(), &json!({"dataStrategy": null}))
                 .unwrap()
                 .data_strategy,
             None,
@@ -394,6 +570,116 @@ mod tests {
                 .unwrap()
                 .data_strategy,
             Some(DataStrategy::Quick),
+        );
+    }
+
+    /// A launch that asks GitHub about itself is a launch doing something on
+    /// the player's behalf that they did not ask for at that moment, so the
+    /// answer to "may it" has to be theirs and has to start as no.
+    #[test]
+    fn nothing_is_checked_for_updates_until_a_player_says_so() {
+        assert!(!Settings::default().auto_check_updates);
+        assert_eq!(Settings::default().last_update_check_at, None);
+        assert!(!parse(&json!({})).unwrap().auto_check_updates);
+        let on = patch(Settings::default(), &json!({"autoCheckUpdates": true})).unwrap();
+        assert!(on.auto_check_updates);
+    }
+
+    /// The two host-owned fields. A page that could write either could tell
+    /// this build that a check had just happened, or that a client build had
+    /// been warned about when it had not — and both are how a notice comes to
+    /// be silently suppressed for good.
+    #[test]
+    fn a_page_cannot_write_the_hosts_own_bookkeeping() {
+        let now = Settings::default();
+        assert!(patch(now.clone(), &json!({"lastUpdateCheckAt": 1})).is_err());
+        assert!(patch(now, &json!({"formatVersion": 1})).is_err());
+        // Still read from the file, because a launch has to load what the
+        // previous one wrote.
+        assert_eq!(
+            parse(&json!({"lastUpdateCheckAt": 1_700_000_000_u64}))
+                .unwrap()
+                .last_update_check_at,
+            Some(1_700_000_000),
+        );
+    }
+
+    /// The acknowledgement is compared for equality against this launch's
+    /// client hash, so a value that cannot be one is a notice that comes back
+    /// every launch with nothing to explain it.
+    #[test]
+    fn the_acknowledged_build_has_to_look_like_a_build() {
+        let hash = "a".repeat(64);
+        let seen = patch(
+            Settings::default(),
+            &json!({ "compatibilityNoticeSeenFor": hash }),
+        )
+        .unwrap();
+        assert_eq!(seen.compatibility_notice_seen_for.as_deref(), Some(&*hash));
+        // Cleared back to "warn me again", which is a value rather than an
+        // omission.
+        assert_eq!(
+            patch(seen, &json!({"compatibilityNoticeSeenFor": null}))
+                .unwrap()
+                .compatibility_notice_seen_for,
+            None,
+        );
+
+        for refused in [
+            "",
+            "ABCDEF",
+            &"A".repeat(64),
+            &"g".repeat(64),
+            &"a".repeat(63),
+        ] {
+            assert!(
+                patch(
+                    Settings::default(),
+                    &json!({ "compatibilityNoticeSeenFor": refused })
+                )
+                .is_err(),
+                "{refused:?} is not a client sha256"
+            );
+        }
+    }
+
+    /// The launch reads one question off two switches, and the answer decides
+    /// which client module is served. A stored master flag would be a third
+    /// place for the same fact to live, and the one that could disagree.
+    #[test]
+    fn whether_the_tools_are_wanted_is_read_off_the_tools_themselves() {
+        // The default profile wants them: the native cursor is on.
+        assert!(Settings::default().enhancements_enabled());
+
+        let off = patch(Settings::default(), &json!({"nativeCursor": false})).unwrap();
+        assert!(!off.enhancements_enabled(), "no tool is on");
+        let readout = patch(off.clone(), &json!({"targetReadout": true})).unwrap();
+        assert!(readout.enhancements_enabled(), "one tool is enough");
+        assert!(!off.target_readout, "the default readout is off");
+
+        assert!(patch(Settings::default(), &json!({"nativeCursor": "yes"})).is_err());
+
+        let (_dir, path) = scratch("tools");
+        assert!(
+            Store::open(path).get().native_cursor,
+            "a profile that has never been written still gets the default",
+        );
+    }
+
+    /// Written by the host and by nothing else, and readable by the next
+    /// launch — which is the whole of what makes the check daily rather than
+    /// per-launch.
+    #[test]
+    fn the_time_of_a_check_survives_the_launch_that_made_it() {
+        let (_dir, path) = scratch("update-check");
+        let store = Store::open(path.clone());
+        assert_eq!(store.get().last_update_check_at, None);
+
+        store.remember_update_check(1_700_000_000);
+        assert_eq!(store.get().last_update_check_at, Some(1_700_000_000));
+        assert_eq!(
+            Store::open(path).get().last_update_check_at,
+            Some(1_700_000_000)
         );
     }
 

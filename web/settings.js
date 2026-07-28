@@ -20,6 +20,11 @@
  *   touchMode: TouchMode,
  *   showDiagnostics: boolean,
  *   dataStrategy: DataStrategy,
+ *   autoCheckUpdates: boolean,
+ *   lastUpdateCheckAt: number | null,
+ *   compatibilityNoticeSeenFor: string | null,
+ *   nativeCursor: boolean,
+ *   targetReadout: boolean,
  * }} Settings
  */
 
@@ -29,13 +34,32 @@
  * values as the host's own defaults: the two disagreeing would show up as a
  * setting that appears to change nothing.
  *
+ * Two of these are read-only from here. `lastUpdateCheckAt` is the host's record
+ * of a request the host made, and the host refuses a patch that names it; it is
+ * in the shape because `readSettings` gets the whole file back and dropping a
+ * field on the floor would make `current()` disagree with what was saved.
+ *
  * @type {Settings}
  */
 const FALLBACK = {
   renderScale: 2,
-  touchMode: 'off',
+  // The host's default too, and it has to be: this value decides whether
+  // `input.js` installs the translation that makes double-clicking possible at
+  // all, so a page that fell back to `off` would silently ship a game whose
+  // inventory cannot be used.
+  touchMode: 'dbltap',
   showDiagnostics: false,
   dataStrategy: null,
+  autoCheckUpdates: false,
+  lastUpdateCheckAt: null,
+  compatibilityNoticeSeenFor: null,
+  // The GWonMac Tools. There is deliberately no master switch beside them:
+  // "are the tools on" is derived from "is any tool on", so a stored master
+  // could disagree with the tools it claims to speak for. Which module the
+  // host serves is decided from these two before this page exists, which is
+  // why both are relaunch-required in the panel.
+  nativeCursor: true,
+  targetReadout: false,
 };
 
 /** @type {Settings} */
@@ -71,15 +95,6 @@ export async function readSettings() {
 }
 
 /**
- * Write some of the settings and take back the merged whole.
- *
- * The host refuses an unknown field rather than ignoring it, so a misspelled
- * name fails here instead of becoming a control that silently does nothing.
- *
- * @param {Partial<Settings>} patch
- * @returns {Promise<Settings>}
- */
-/**
  * Ask the host to quit and come back.
  *
  * The two settings that only take effect on the boot path are saved long before
@@ -97,6 +112,18 @@ export async function relaunchApp() {
   }
 }
 
+/**
+ * Write some of the settings and take back the merged whole.
+ *
+ * The host refuses an unknown field rather than ignoring it, so a misspelled
+ * name fails here instead of becoming a control that silently does nothing. It
+ * refuses `lastUpdateCheckAt` for a different reason — the page must not be able
+ * to claim a check happened — so that one is readable above and not writable
+ * here.
+ *
+ * @param {Partial<Settings>} patch
+ * @returns {Promise<Settings>}
+ */
 export async function saveSettings(patch) {
   const response = await fetch('__settings', {
     method: 'PUT',

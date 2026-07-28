@@ -1,9 +1,17 @@
 //! Whether the project has published a build newer than this one.
 //!
-//! Asked, never volunteered. There is one caller — the Check for Updates item —
-//! and no launch-time call: an application that phones a server on every start
+//! Asked, never volunteered. An application that phones a server on every start
 //! to ask about itself is doing something the player did not request, and the
-//! answer is never urgent enough to justify it.
+//! answer is never urgent enough to justify it — so the Check for Updates item
+//! is the request, and nothing else here fires by itself.
+//!
+//! There is one exception and it is one the player made: `autoCheckUpdates`,
+//! off in a fresh profile, turns launches into askers. Even then the rules stay
+//! the ones above. [`due`] holds it to once a day rather than once a launch, and
+//! [`interrupts`] lets only [`Notice::Available`] reach the screen — being told
+//! at boot that a check failed, or that nothing has changed, is the volunteering
+//! this module exists not to do. The other two outcomes go to the log, where
+//! somebody looking for them can find them.
 //!
 //! The answer has three shapes, never two. "We could not tell" is not "you are
 //! up to date", and the difference matters most exactly when the check is
@@ -43,6 +51,41 @@ const FRESH: Duration = Duration::from_secs(10 * 60);
 
 /// The request is a courtesy; a slow one has already failed at being one.
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long an automatic check waits before the next launch may ask again.
+///
+/// A day, in seconds. [`FRESH`] cannot do this job: it is an in-process cache
+/// that a quit forgets, so a player who opens and closes the game six times in
+/// an evening would make six requests. This one is read from the settings file,
+/// which is the only thing in this application that remembers anything across a
+/// launch.
+const AUTOMATIC_INTERVAL: u64 = 24 * 60 * 60;
+
+/// Whether this launch should ask GitHub about itself without being told to.
+///
+/// `last` is [`crate::settings::Settings::last_update_check_at`] and `now` is
+/// [`crate::settings::now`]; both are seconds since the epoch, and both are
+/// passed in rather than read here so that the rule is a function of three
+/// numbers and can be exercised without a clock or a profile.
+///
+/// A clock that has gone backwards — a corrected machine, a restored profile,
+/// the 0 that `now` returns when the clock will not answer — asks. The failure
+/// mode of asking early is one extra request; the failure mode of treating a
+/// future timestamp as recent is a check that never runs again on that profile.
+pub fn due(auto: bool, last: Option<u64>, now: u64) -> bool {
+    auto && last.is_none_or(|last| now < last || now - last >= AUTOMATIC_INTERVAL)
+}
+
+/// Whether an answer nobody asked for has earned a modal.
+///
+/// Only the one that says something the player can act on. `Current` is the
+/// application interrupting to say nothing happened, and `Unknown` is it
+/// interrupting to say it failed at something they did not ask for — both are
+/// log lines. A *requested* check shows all three, because there a silence
+/// would be the menu item doing nothing.
+pub fn interrupts(notice: &Notice) -> bool {
+    matches!(notice, Notice::Available { .. })
+}
 
 /// GitHub pages releases, and orders the page by publication activity rather
 /// than by version. One page of a hundred is what it takes for the newest
@@ -639,6 +682,59 @@ mod tests {
         // And what this build actually declares: the check is offered exactly
         // when the URL is one that can be turned into an API path.
         assert_eq!(repository().is_some(), releases_url().is_some());
+    }
+
+    /// The opt-in is the whole of the permission: off means no launch asks,
+    /// whatever the clock says.
+    #[test]
+    fn a_launch_asks_once_a_day_and_only_when_invited() {
+        const DAY: u64 = AUTOMATIC_INTERVAL;
+        let now = 1_800_000_000;
+
+        assert!(!due(false, None, now), "never opted in");
+        assert!(!due(false, Some(now - 10 * DAY), now), "still never");
+
+        assert!(due(true, None, now), "opted in and never checked");
+        assert!(due(true, Some(now - DAY), now), "exactly a day");
+        assert!(due(true, Some(now - DAY - 1), now));
+        assert!(!due(true, Some(now - DAY + 1), now), "not quite a day");
+        assert!(!due(true, Some(now), now), "this launch already asked");
+    }
+
+    /// A clock that disagrees with the file must fall on the side of one extra
+    /// request, not of a profile that never checks again.
+    #[test]
+    fn a_clock_that_went_backwards_asks_rather_than_waits() {
+        // A timestamp from the future: a corrected machine, a profile copied
+        // from another one, a laptop whose battery died.
+        assert!(due(true, Some(2_000_000_000), 1_800_000_000));
+        // What `settings::now` returns when the clock will not answer at all.
+        assert!(due(true, Some(1_800_000_000), 0));
+    }
+
+    /// The line between "asked" and "volunteered". Only the answer a player can
+    /// do something about is allowed to arrive uninvited.
+    #[test]
+    fn an_unrequested_check_interrupts_only_for_a_newer_version() {
+        assert!(interrupts(&Notice::Available {
+            current: "1.2.3".into(),
+            latest: "1.3.0".into(),
+        }));
+        assert!(!interrupts(&Notice::Current {
+            current: "1.2.3".into(),
+        }));
+        for reason in [
+            Reason::Unsupported,
+            Reason::Unreachable,
+            Reason::RateLimited,
+            Reason::Server,
+            Reason::Unreadable,
+        ] {
+            assert!(
+                !interrupts(&Notice::Unknown(reason)),
+                "{reason:?} is a log line, not a modal"
+            );
+        }
     }
 
     /// The real endpoint. Run on request: `cargo test --release -- --ignored`.

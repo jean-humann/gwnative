@@ -530,11 +530,23 @@ export function installGameInput({ canvas, touchMode = 'off', log }) {
     virtualCursor = { x: event.clientX - rect.left, y: event.clientY - rect.top };
     pointerWanted = true;
     if (document.pointerLockElement === canvas) return;
-    /** @param {unknown} error */
+    /**
+     * Give up the camera, keep the click.
+     *
+     * A refusal used to call releaseButtons(), which synthesises a mouseup for
+     * every held button — so the client was told the right button had come back
+     * up microseconds after it went down, and a right click did nothing at all.
+     * The lock is what lets a drag keep turning past the window edge; it is not
+     * what makes the button a button. Dropping only the virtual cursor leaves
+     * the real press and release to reach the client as themselves.
+     * @param {unknown} error
+     */
     const refused = (error) => {
       log('[warn] pointer lock refused:',
         error instanceof Error ? error.message : String(error));
-      releaseButtons();
+      pointerWanted = false;
+      virtualCursor = null;
+      canvas.classList.remove('cursor-hidden');
     };
     try {
       const request = canvas.requestPointerLock();
@@ -571,12 +583,18 @@ export function installGameInput({ canvas, touchMode = 'off', log }) {
     if (locked && !pointerWanted) {
       document.exitPointerLock();
     } else if (virtualCursor && !locked) {
+      // A lock lost while the button is still held — Escape, or the window
+      // going away. Unlike a refusal, this one has already been integrating
+      // deltas, so the client's idea of where the cursor is no longer matches
+      // anything on screen and the safe end is to let go of everything.
       releaseButtons();
     }
   });
   document.addEventListener('pointerlockerror', () => {
     log('[warn] pointer lock failed (needs a user gesture and focused document)');
-    releaseButtons();
+    pointerWanted = false;
+    virtualCursor = null;
+    canvas.classList.remove('cursor-hidden');
   });
   document.documentElement.addEventListener('mouseleave', releaseAll);
 

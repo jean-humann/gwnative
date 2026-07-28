@@ -1,4 +1,7 @@
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
-targets = ["aarch64-apple-darwin"]
+# The second triple is the companion module `build.rs` compiles; see
+# `src/companion-kernel/lib.rs`. Listed here so a fresh checkout installs it
+# with the toolchain rather than failing the first build.
+targets = ["aarch64-apple-darwin", "wasm32-unknown-unknown"]

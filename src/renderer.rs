@@ -1,7 +1,7 @@
 //! What the page is allowed to do, and what happens when it dies.
 //!
-//! Two jobs, one object, because WebKit asks for both through the same delegate
-//! protocol.
+//! Three jobs, one object, because WebKit asks for all of them through
+//! delegates it holds on the same web view.
 //!
 //! **Navigation.** The page starts at the loopback origin and has no business
 //! leaving it. Nothing in `web/` links off-origin, so any navigation that tries
@@ -22,17 +22,33 @@
 //! happen. Only one: a client that crashes its renderer on every boot would
 //! otherwise reload forever, and a loop is worse than a message, so the second
 //! one says what happened instead.
+//!
+//! **Pointer lock.** Holding the right button rotates the camera, and the page
+//! implements that by locking the pointer and integrating `movementX`/`Y` — the
+//! only way to keep turning once the cursor reaches the edge of the window.
+//!
+//! In Safari a page just gets the lock. In a `WKWebView` it does not: the
+//! request is routed to the application's UI delegate, and WebKit's
+//! `UIDelegate::UIClient::requestPointerLock` ends in `completionHandler(false)`
+//! when no delegate is set or when the one that is set answers neither of the
+//! two selectors below. A host that installs no UI delegate therefore denies
+//! every request its own page makes — and because the page treats a refusal as
+//! "the button is not really down", *every right click died on arrival*, not
+//! merely the camera. That is what this delegate is for. Both spellings are
+//! implemented because WebKit prefers the completion-handler form and falls
+//! back to the older one, and neither is in the public protocol.
 
 use std::cell::Cell;
 
 use block2::DynBlock;
 use objc2::rc::Retained;
+use objc2::runtime::Bool;
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSAlert, NSAlertStyle};
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString};
 use objc2_web_kit::{
-    WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKWebView,
+    WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKUIDelegate, WKWebView,
 };
 
 pub struct Ivars {
@@ -107,6 +123,33 @@ define_class!(
             let _ = unsafe { webview.reload() };
         }
     }
+
+    // Empty, and required: `setUIDelegate:` takes an `id<WKUIDelegate>`, and
+    // every method in the protocol is optional. What WebKit actually calls are
+    // the two private selectors below, which it finds by `respondsToSelector:`
+    // when the delegate is installed.
+    unsafe impl WKUIDelegate for Guard {}
+
+    /// The pointer-lock answer WebKit asks for on current systems.
+    ///
+    /// Granted unconditionally. There is one page, it is ours, it is on the
+    /// loopback origin the navigation delegate above pins it to, and the only
+    /// thing that ever asks is the right-drag camera. A prompt here would be a
+    /// prompt in the middle of turning around.
+    impl Guard {
+        #[unsafe(method(_webView:requestPointerLockWithCompletionHandler:))]
+        fn request_pointer_lock(&self, _webview: &WKWebView, handler: &DynBlock<dyn Fn(Bool)>) {
+            handler.call((Bool::YES,));
+        }
+
+        /// The same answer for the older spelling, which has no handler to call
+        /// — WebKit takes the mere presence of this method as consent. Kept
+        /// because `respondsToSelector:` is what decides, so a system that
+        /// stopped asking the first way still gets an answer rather than the
+        /// silent `completionHandler(false)` that having neither means.
+        #[unsafe(method(_webViewDidRequestPointerLock:))]
+        fn did_request_pointer_lock(&self, _webview: &WKWebView) {}
+    }
 );
 
 impl Guard {
@@ -164,31 +207,58 @@ fn explain() {
 }
 
 thread_local! {
-    /// The live delegate. WKWebView holds its navigation delegate *weakly*, so
+    /// The live delegate. WKWebView holds both of its delegates *weakly*, so
     /// something on this side has to keep it alive — dropping it here would
     /// leave the web view with a dangling delegate and every policy decision
-    /// back to WebKit's permissive default.
+    /// back to WebKit's permissive default, and every pointer-lock request back
+    /// to WebKit's refusing one.
     static GUARD: std::cell::RefCell<Option<Retained<Guard>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Confine `webview` to `origin` and give it one free reload. Main thread.
+/// Confine `webview` to `origin`, give it one free reload, and let it lock the
+/// pointer. Main thread.
 ///
 /// `origin` is scheme and authority with no trailing slash, as
 /// `http://127.0.0.1:38112`.
 pub fn guard(mtm: MainThreadMarker, webview: &WKWebView, origin: &str) {
     let guard = Guard::new(mtm, origin.to_owned());
+    let object = ProtocolObject::from_ref(&*guard);
     // SAFETY: main thread, and the delegate is kept alive below for as long as
     // the process runs.
     unsafe {
-        webview.setNavigationDelegate(Some(ProtocolObject::from_ref(&*guard)));
+        webview.setNavigationDelegate(Some(object));
+        webview.setUIDelegate(Some(ProtocolObject::from_ref(&*guard)));
     }
     GUARD.with(|held| *held.borrow_mut() = Some(guard));
 }
 
 #[cfg(test)]
 mod tests {
-    use super::permits;
+    use super::{Guard, permits};
+    use objc2::ClassType;
+    use objc2::runtime::AnyClass;
+    use objc2::sel;
+
+    /// Both pointer-lock selectors are private, so nothing at compile time
+    /// checks that they are spelled the way WebKit looks them up — and a
+    /// misspelling is not a crash or a warning. WebKit asks
+    /// `respondsToSelector:`, gets no, and answers its own page
+    /// `completionHandler(false)`; the game then behaves as though the right
+    /// mouse button were broken. So the spelling is asserted the same way
+    /// WebKit reads it.
+    #[test]
+    fn webkit_can_find_both_pointer_lock_selectors() {
+        let class: &AnyClass = Guard::class();
+        assert!(
+            class.responds_to(sel!(_webView:requestPointerLockWithCompletionHandler:)),
+            "the form current WebKit prefers"
+        );
+        assert!(
+            class.responds_to(sel!(_webViewDidRequestPointerLock:)),
+            "the fallback WebKit uses when the first is absent"
+        );
+    }
 
     #[test]
     fn only_the_origin_the_window_was_opened_at() {

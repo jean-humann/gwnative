@@ -17,6 +17,7 @@ use crate::http::{
 };
 use crate::patch::SNAPSHOT;
 use crate::proxy;
+use crate::wasm::{COMPANION_KERNEL, COMPANION_KERNEL_PATH};
 
 /// Largest span served from one request. The harness asks for far less; this
 /// only stops a stray `Range: bytes=0-` from walking the whole image in one go.
@@ -26,6 +27,7 @@ use crate::proxy;
 /// how long one request occupies a connection and a fetch slot: 32 MiB is 128
 /// chunks, and a demand read arriving behind that waits for all of them.
 const MAX_RANGE_BYTES: u64 = 8 * 1024 * 1024;
+
 
 /// Answer anything that is not a host capability.
 pub(super) fn serve(
@@ -78,6 +80,23 @@ pub(super) fn serve(
         && let Some(store) = &context.snapshot
     {
         store.back_to_waiting();
+    }
+
+    // The companion, which is in the binary rather than the web root — see
+    // `crate::wasm::COMPANION_KERNEL`. Answered here rather than in
+    // [`static_file`] because there is no file: `resolve` would refuse it and
+    // the page would be told a name it correctly asked for is forbidden.
+    if request.path == COMPANION_KERNEL_PATH {
+        if tracing() {
+            note!(
+                "[loopback] 200 /{COMPANION_KERNEL_PATH} ({} bytes, embedded)",
+                COMPANION_KERNEL.len()
+            );
+        }
+        // No validator: it is six kilobytes fetched once per launch, and the
+        // only honest one would be a hash of bytes that are already in memory.
+        respond_static(stream, "application/wasm", COMPANION_KERNEL, None)?;
+        return Ok(flow);
     }
 
     static_file(request, stream, context)?;

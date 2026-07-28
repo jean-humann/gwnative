@@ -5,16 +5,23 @@
 //! `footprint` and grepped console lines. That reconstruction is how this
 //! project's headline CPU comparison came out wrong and stayed wrong.
 //!
-//! Two producers write here. The sampler thread records what the kernel knows
-//! about this process once a second, and the page posts its own counters to
-//! `__diag`. Both land in the same JSONL file on the same clock, which is the
-//! only way a frame-time spike and a chunk fetch can be lined up against each
-//! other.
+//! Three producers write here. The sampler thread records what the kernel knows
+//! about this process once a second, the page posts its own counters to
+//! `__diag`, and every line the page logs comes through `__report`. All of it
+//! lands in the same JSONL file on the same clock, which is the only way a
+//! frame-time spike, a chunk fetch and the warning the client printed can be
+//! lined up against each other.
+//!
+//! Every record carries a `kind`, so one file can hold four shapes and still be
+//! greppable: `session` once at launch, `sample` on the cadence, `page` for a
+//! logged line, `mark` for a moment a player pointed at.
 
 use std::collections::BTreeMap;
+use std::ffi::CString;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -51,6 +58,38 @@ const MAX_NAME_LEN: usize = 128;
 /// Where refused names are counted, so a full table says so rather than just
 /// quietly missing the metric somebody is looking for.
 const OVERFLOW: &str = "gw.metrics.dropped";
+
+/// How many logged lines from the page this session will keep, and how long
+/// each one may be.
+///
+/// The page forwards everything the client prints, and a client stuck in a
+/// failing loop prints without pause. Unbounded, that would push every sample
+/// worth having out of the rotation within a minute — the file would survive
+/// and the diagnosis would not. Five thousand lines is more than a boot and a
+/// long session produce together.
+const MAX_PAGE_LINES: u64 = 5_000;
+const MAX_PAGE_LINE_LEN: usize = 2_000;
+
+/// Where dropped log lines are counted, for the same reason [`OVERFLOW`] exists.
+const PAGE_DROPPED: &str = "gw.pagelog.dropped";
+
+/// How finely the sampler runs, and for how long a mark buys the finer rate.
+///
+/// A player presses ⌘⇧M during a stutter, and one figure a second either side of
+/// it says nothing about a stutter that lasted 300 ms. Ten seconds at 100 ms is
+/// a hundred extra records — nothing against a 5 MiB file — and it covers the
+/// tail of what was pressed at, not the run-up to it. Nothing here can recover
+/// the run-up: the samples before the mark were taken at the resting rate and
+/// no amount of asking afterwards makes them finer. That is the honest limit of
+/// a mark over a capture, and it is why the guide says to press it *while* the
+/// game is misbehaving rather than after it has stopped.
+const BURST_SAMPLES: u32 = 100;
+const BURST_INTERVAL: Duration = Duration::from_millis(100);
+const RESTING_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Samples still owed at the fine rate. Read and decremented by the sampler
+/// thread, set by [`Recorder::mark`] from whichever thread pressed the item.
+static BURST: AtomicU32 = AtomicU32::new(0);
 
 /// A name-to-number registry, shared by the host and the page.
 ///
@@ -188,10 +227,99 @@ pub fn usage() -> Option<Usage> {
     })
 }
 
+/// Ask the kernel what it knows, by name.
+///
+/// Two calls because that is the interface: a null buffer asks how much room
+/// the answer needs, and the second one fills it. Everything read through here
+/// is a fixed name from the source below, so a failure means the key is gone on
+/// this OS version rather than that the caller got it wrong — hence `Option`
+/// rather than an error worth reporting.
+fn sysctl(name: &str) -> Option<Vec<u8>> {
+    let name = CString::new(name).ok()?;
+    let mut len: usize = 0;
+    // SAFETY: a null `oldp` with a valid `oldlenp` is the documented way to ask
+    // for the size alone; `newp`/`newlen` null and zero make this a read.
+    let sized = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if sized != 0 || len == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; len];
+    // SAFETY: `buffer` holds exactly the `len` bytes the call above asked for,
+    // and `len` is passed by pointer so the kernel can shorten it.
+    let read = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    buffer.truncate(len);
+    Some(buffer)
+}
+
+fn sysctl_string(name: &str) -> Option<String> {
+    let bytes = sysctl(name)?;
+    let text = String::from_utf8(bytes).ok()?;
+    Some(text.trim_end_matches('\0').to_owned())
+}
+
+fn sysctl_u64(name: &str) -> Option<u64> {
+    let bytes = sysctl(name)?;
+    // These keys are declared as `int` or `uint64_t` depending on which one it
+    // is, and the width is what the kernel returns rather than what the caller
+    // asks for.
+    match bytes.len() {
+        4 => Some(u64::from(u32::from_ne_bytes(bytes[..4].try_into().ok()?))),
+        8 => Some(u64::from_ne_bytes(bytes[..8].try_into().ok()?)),
+        _ => None,
+    }
+}
+
+/// What Mac this is, and what is running on it.
+///
+/// Written once at launch and again at the top of every problem report, because
+/// a performance figure without the machine it came from is not a measurement.
+/// Nothing here identifies a person: the model is a product name like `Mac16,10`
+/// and not a serial, and the hostname is deliberately absent — it is very often
+/// somebody's own name.
+pub fn environment() -> serde_json::Value {
+    serde_json::json!({
+        "app": env!("CARGO_PKG_VERSION"),
+        "arch": std::env::consts::ARCH,
+        "macos": sysctl_string("kern.osproductversion"),
+        "macosBuild": sysctl_string("kern.osversion"),
+        "hardware": sysctl_string("hw.model"),
+        "cores": sysctl_u64("hw.logicalcpu"),
+        "memoryGiB": sysctl_u64("hw.memsize").map(|b| b as f64 / 1073741824.0),
+    })
+}
+
+fn epoch_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
 /// A JSONL file that rotates, and the metrics that go into it.
 pub struct Recorder {
     dir: PathBuf,
     file: Mutex<Option<fs::File>>,
+    /// Lines from the page written so far, against [`MAX_PAGE_LINES`].
+    page_lines: AtomicU64,
     pub metrics: Metrics,
 }
 
@@ -203,12 +331,82 @@ impl Recorder {
         Arc::new(Self {
             dir,
             file: Mutex::new(None),
+            page_lines: AtomicU64::new(0),
             metrics: Metrics::default(),
         })
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn path(&self) -> PathBuf {
         self.dir.join("gwnative.jsonl")
+    }
+
+    /// Open the session. One record naming the machine, so that a log found on
+    /// its own answers "which Mac, which OS, which build" without anybody
+    /// having to be asked.
+    ///
+    /// Not written by `open`, because every test in this file opens a recorder
+    /// and none of them is a session.
+    pub fn session(&self) {
+        self.write(&serde_json::json!({
+            "kind": "session",
+            "t": epoch_seconds(),
+            "env": environment(),
+        }));
+    }
+
+    /// A line the page logged.
+    ///
+    /// The page already forwards these to the host's terminal, which is exactly
+    /// the wrong place for them: a player has no terminal, so every warning the
+    /// client printed before a failure was lost to the one person who needed to
+    /// send it on. They belong in the file, on the same clock as the samples.
+    ///
+    /// A batch arrives newline-joined and becomes one record per line, so that
+    /// a torn write costs one line rather than a whole boot's worth.
+    pub fn page(&self, batch: &str) {
+        for line in batch.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            if self.page_lines.fetch_add(1, Ordering::Relaxed) >= MAX_PAGE_LINES {
+                self.metrics.count(PAGE_DROPPED, 1.0);
+                continue;
+            }
+            let line = match line.char_indices().nth(MAX_PAGE_LINE_LEN) {
+                Some((cut, _)) => &line[..cut],
+                None => line,
+            };
+            self.write(&serde_json::json!({
+                "kind": "page",
+                "t": epoch_seconds(),
+                "line": line,
+            }));
+        }
+    }
+
+    /// The moment a player said the game was misbehaving.
+    ///
+    /// Two things at once, and both matter. The record is a landmark in a file
+    /// that is otherwise an undifferentiated second-by-second wall — without it,
+    /// reading a report means guessing which of nine hundred samples the player
+    /// meant. And it raises the sampling rate for the next ten seconds, so the
+    /// stutter that is still happening is described by a hundred readings rather
+    /// than ten.
+    pub fn mark(&self, reason: &str) {
+        BURST.store(BURST_SAMPLES, Ordering::Relaxed);
+        let usage = usage();
+        self.write(&serde_json::json!({
+            "kind": "mark",
+            "t": epoch_seconds(),
+            "reason": reason,
+            "footprintMiB": usage.map(|u| u.footprint as f64 / 1048576.0),
+            "cpuSeconds": usage.map(|u| u.cpu().as_secs_f64()),
+            "metrics": self.metrics.snapshot(),
+        }));
     }
 
     /// Append one record. Failures are silent past the first: diagnostics that
@@ -253,7 +451,23 @@ impl Recorder {
     }
 }
 
-/// Sample this process once a second for as long as it runs.
+/// How long to wait before the next sample, spending a burst sample if one is
+/// owed. Called by the sampler thread and nothing else.
+fn interval() -> Duration {
+    let spent = BURST
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+            (left > 0).then(|| left - 1)
+        })
+        .is_ok();
+    if spent {
+        BURST_INTERVAL
+    } else {
+        RESTING_INTERVAL
+    }
+}
+
+/// Sample this process once a second for as long as it runs — ten times a
+/// second for the ten seconds after a mark.
 ///
 /// `extra` contributes whatever the caller wants alongside the process figures
 /// — the chunk store's counters, in practice — so that a memory step and the
@@ -267,7 +481,7 @@ pub fn spawn_sampler(
         let started = SystemTime::now();
         let mut previous: Option<(SystemTime, Duration)> = None;
         loop {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(interval());
             let Some(usage) = usage() else { continue };
             let now = SystemTime::now();
             // Occupancy over the interval, so 100 means one core saturated and
@@ -280,6 +494,7 @@ pub fn spawn_sampler(
             });
             previous = Some((now, usage.cpu()));
             let record = serde_json::json!({
+                "kind": "sample",
                 "t": now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64(),
                 "uptime": now.duration_since(started).unwrap_or_default().as_secs_f64(),
                 "footprintMiB": usage.footprint as f64 / 1048576.0,
@@ -468,6 +683,95 @@ mod tests {
             ],
             "ten rotations must still leave five files"
         );
+    }
+
+    /// Every record in `dir`'s log, in order.
+    fn records(dir: &std::path::Path) -> Vec<serde_json::Value> {
+        fs::read_to_string(dir.join("gwnative.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_batch_of_logged_lines_becomes_one_record_each() {
+        let dir = TempDir::new("diag-page");
+        let recorder = Recorder::open(dir.0.clone());
+        recorder.page("first\n[warn] second\n\nthird");
+
+        let lines = records(&dir.0);
+        assert_eq!(lines.len(), 3, "and the blank one is not a record");
+        assert_eq!(lines[1]["line"], "[warn] second");
+        assert_eq!(lines[1]["kind"], "page");
+    }
+
+    #[test]
+    fn a_client_stuck_printing_cannot_evict_the_samples() {
+        let dir = TempDir::new("diag-page-flood");
+        let recorder = Recorder::open(dir.0.clone());
+        for _ in 0..MAX_PAGE_LINES + 20 {
+            recorder.page("the same failure, again");
+        }
+
+        assert_eq!(records(&dir.0).len(), MAX_PAGE_LINES as usize);
+        assert_eq!(
+            recorder.metrics.snapshot()[PAGE_DROPPED],
+            20.0,
+            "and the log says how much it did not keep"
+        );
+    }
+
+    #[test]
+    fn an_enormous_logged_line_is_cut_rather_than_refused() {
+        let dir = TempDir::new("diag-page-long");
+        let recorder = Recorder::open(dir.0.clone());
+        // Multi-byte, so a naive byte slice would panic rather than truncate.
+        recorder.page(&"é".repeat(MAX_PAGE_LINE_LEN + 100));
+
+        let line = records(&dir.0)[0]["line"].as_str().unwrap().to_owned();
+        assert_eq!(line.chars().count(), MAX_PAGE_LINE_LEN);
+    }
+
+    /// One test rather than two, because [`BURST`] is process-wide and two tests
+    /// marking in parallel would each see the other's burst.
+    #[test]
+    fn a_mark_records_the_moment_and_buys_a_bounded_run_of_fine_samples() {
+        let dir = TempDir::new("diag-mark");
+        let recorder = Recorder::open(dir.0.clone());
+        assert_eq!(interval(), RESTING_INTERVAL, "resting until asked");
+
+        recorder.metrics.count("gw.frames", 120.0);
+        recorder.mark("the player pressed the item");
+
+        let record = records(&dir.0).remove(0);
+        assert_eq!(record["kind"], "mark");
+        assert_eq!(record["reason"], "the player pressed the item");
+        assert_eq!(
+            record["metrics"]["gw.frames"], 120.0,
+            "a mark carries what was true when it was pressed"
+        );
+        assert!(record["cpuSeconds"].as_f64().is_some_and(|s| s > 0.0));
+
+        for _ in 0..BURST_SAMPLES {
+            assert_eq!(interval(), BURST_INTERVAL);
+        }
+        // The point of the bound: a mark must not leave the sampler running ten
+        // times a second for the rest of the session.
+        assert_eq!(interval(), RESTING_INTERVAL);
+    }
+
+    #[test]
+    fn the_environment_names_this_machine() {
+        let env = environment();
+        assert_eq!(env["app"], env!("CARGO_PKG_VERSION"));
+        // `hw.model` and the OS version are the two a report is useless without,
+        // and both have been in the kernel since long before any Mac that runs
+        // this. A None here means the read is broken, not the machine.
+        assert!(env["hardware"].is_string(), "{env}");
+        assert!(env["macos"].is_string(), "{env}");
+        assert!(env["memoryGiB"].as_f64().is_some_and(|g| g > 0.5), "{env}");
+        assert!(env.get("hostname").is_none(), "and not who owns it");
     }
 
     #[test]

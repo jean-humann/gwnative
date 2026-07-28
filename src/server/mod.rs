@@ -58,6 +58,10 @@ pub struct Loopback {
     /// The same store the `__settings` route answers from, so the host can read
     /// what the player chose without a second copy that could disagree.
     pub settings: Arc<settings::Store>,
+    /// The same recorder `__report` and `__diag` write into, for the same
+    /// reason: the menu's Mark a Slowdown has to land in the file the page's
+    /// own counters are landing in, or the two describe different sessions.
+    pub recorder: Arc<Recorder>,
 }
 
 /// Per-request tracing, off unless `GWNATIVE_TRACE_HTTP` is set, matching
@@ -112,7 +116,7 @@ pub fn spawn(
         root,
         snapshot,
         sockets: Arc::default(),
-        recorder,
+        recorder: Arc::clone(&recorder),
         derived_wasm,
         settings: Arc::clone(&settings),
         generations,
@@ -137,7 +141,11 @@ pub fn spawn(
             }
         })?;
 
-    Ok(Loopback { addr, settings })
+    Ok(Loopback {
+        addr,
+        settings,
+        recorder,
+    })
 }
 
 /// Take [`PORT`], or an ephemeral port if something else already holds it.
@@ -390,5 +398,110 @@ mod tests {
         // A name nobody serves is named as such, rather than refused by the
         // static file server as though it might have been a path.
         assert_eq!(request(addr, "GET", "/__nonesuch", auth, "").0, 404);
+    }
+
+    /// The route the settings panel's "Clear Game Data…" reaches.
+    ///
+    /// What it does when there *is* a store is `cache::request_clear`, which has
+    /// its own tests and does not need a socket to be shown. What only the wire
+    /// can show is the rest: that the route exists at all, that the same gate
+    /// covers it, and that a launch with no snapshot answers rather than
+    /// arming a clear for a directory this process never opened.
+    #[test]
+    fn the_clear_route_is_gated_and_refuses_what_it_cannot_clear() {
+        let temp = TempDir::new("server-clear");
+        let dir = temp.0.clone();
+        let token = "test-token";
+        let loopback = spawn(
+            dir.clone(),
+            // The interesting half of this test: no store, which is every launch
+            // before the manifest is fetched and every launch that failed to get
+            // one.
+            None,
+            Recorder::open(dir.join("diagnostics")),
+            None,
+            Arc::new(settings::Store::open(dir.join("settings.json"))),
+            Arc::new(generation::Store::open(dir.join("generations"))),
+            token.to_owned(),
+        )
+        .unwrap();
+        let addr = loopback.addr;
+
+        assert_eq!(
+            request(addr, "DELETE", "/__data", None, "").0,
+            403,
+            "the gate comes before anything the route decides",
+        );
+        // Handled by falling through, which is what every `__` route does when
+        // the thing it speaks for is not there — the page treats it as "nothing
+        // to report on" and takes the section away.
+        assert_eq!(request(addr, "DELETE", "/__data", Some(token), "").0, 404);
+        // Same answer, for the same reason, from the route the panel reads the
+        // figure from. Both used to fall through to the static file server and
+        // come back 403, which reads as "you may not ask" rather than "there is
+        // nothing to ask about".
+        assert_eq!(request(addr, "GET", "/__prefetch", Some(token), "").0, 404);
+
+        // And no marker was left behind for the next launch to act on.
+        assert!(!dir.join("chunks.clear").exists());
+    }
+
+    /// What the page prints has to reach the file the player can send on.
+    ///
+    /// Worth a wire test because the two halves were written years apart and
+    /// neither notices the other: `harness.js` wraps `console.*` and posts a
+    /// batch here, and for a long time this route only echoed it to stderr —
+    /// which is nobody's, on a build a player is running. The batch arriving
+    /// and the batch being recorded are separate facts, and only this test
+    /// holds them together.
+    #[test]
+    fn a_batch_the_page_posted_lands_in_the_file_the_player_can_send() {
+        let temp = TempDir::new("server-report");
+        let dir = temp.0.clone();
+        let token = "test-token";
+        let diagnostics = dir.join("diagnostics");
+        let loopback = spawn(
+            dir.clone(),
+            None,
+            Recorder::open(diagnostics.clone()),
+            None,
+            Arc::new(settings::Store::open(dir.join("settings.json"))),
+            Arc::new(generation::Store::open(dir.join("generations"))),
+            token.to_owned(),
+        )
+        .unwrap();
+        let addr = loopback.addr;
+
+        assert_eq!(
+            request(addr, "POST", "/__report", None, "[warn] leaked\n").0,
+            403,
+            "an untokened page must not be able to write into the report",
+        );
+        assert_eq!(
+            request(
+                addr,
+                "POST",
+                "/__report",
+                Some(token),
+                "[warn] first\nsecond\n"
+            )
+            .0,
+            204,
+        );
+
+        // The recorder writes on the calling thread, so by the time the answer
+        // is back the lines are on disk — no polling needed.
+        let body = std::fs::read_to_string(diagnostics.join("gwnative.jsonl")).unwrap();
+        let lines: Vec<&str> = body
+            .lines()
+            .filter(|line| line.contains("\"kind\":\"page\""))
+            .collect();
+        assert_eq!(lines.len(), 2, "one record per printed line, in {body}");
+        assert!(lines[0].contains("[warn] first"));
+        assert!(lines[1].contains("second"));
+        assert!(
+            !body.contains("leaked"),
+            "the refused batch was recorded anyway: {body}",
+        );
     }
 }

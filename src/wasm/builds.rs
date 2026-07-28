@@ -1,4 +1,4 @@
-//! The one ArenaNet build this transform is certified against, described
+//! The ArenaNet builds these transforms are certified against, described
 //! precisely enough that anything else fails closed.
 //!
 //! Everything here is data: which stub each bridge replaces, what that stub's
@@ -6,6 +6,11 @@
 //! bodies are recorded rather than merely the indices because an index is a
 //! coincidence and a body is a fingerprint — a later build that happens to put
 //! a different function at 185 is rejected instead of rewritten.
+//!
+//! [`ENHANCEMENT_BUILDS`] is the same idea one layer up. Its input is not
+//! ArenaNet's module but the output of the template-save transform above, so
+//! the two are certified as a chain rather than as alternatives — see
+//! [`super::enhancement`].
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum BridgeKind {
@@ -195,6 +200,175 @@ pub(super) fn find_build(sha256: &str) -> Option<&'static KnownBuild> {
     BUILDS.iter().find(|build| build.sha256 == sha256)
 }
 
+/// Where the companion reads the game from, in the client's linear memory.
+///
+/// Every one of these is an address or an offset that was found by probing a
+/// running build, so the whole struct is only meaningful next to the hash it
+/// was found in. It is a named struct rather than an array because the names
+/// *are* the certification record: `agentX: 0x74` says which field of an agent
+/// 0x74 is, and a bare 116 in a list says nothing anyone could check.
+///
+/// The order of the fields is the order of the words in the manifest the
+/// companion reads, and [`EnhancementLayout::words`] is the one place that
+/// order lives. Reordering the struct changes the module's bytes.
+pub(super) struct EnhancementLayout {
+    pub context_root: u32,
+    pub agent_array: u32,
+    /// `AvSelectGetTarget` returns the manual target when it is non-zero and
+    /// the automatic one otherwise. The companion repeats that exact rule.
+    pub manual_target_agent_id: u32,
+    pub automatic_target_agent_id: u32,
+    pub game_context_slot: u32,
+    pub character_context: u32,
+    pub map_id: u32,
+    pub is_explorable: u32,
+    pub current_map_id: u32,
+    pub current_instance_type: u32,
+    pub player_number: u32,
+    pub agent_id: u32,
+    pub agent_x: u32,
+    pub agent_y: u32,
+    pub agent_type: u32,
+    pub agent_player_number: u32,
+    pub agent_model_type: u32,
+    /// The cursor block. The game decodes the active cursor into these fixed
+    /// buffers whenever it changes and then calls an Emscripten sink that does
+    /// nothing, which is what leaves them readable. `cursor_color_buffer` is
+    /// 32×32 BGRA at a pitch of 128, and its own alpha already matches the
+    /// redundant A8 mask beside it.
+    pub cursor_active_art: u32,
+    pub cursor_software_model: u32,
+    pub cursor_show_count: u32,
+    pub cursor_color_buffer: u32,
+    pub cursor_art_hotspot: u32,
+    pub cursor_art_texture: u32,
+    pub cursor_handle_key: u32,
+    pub cursor_handle_object: u32,
+    pub cursor_view_texture: u32,
+    pub cursor_texture_type: u32,
+    pub cursor_texture_width: u32,
+    pub cursor_texture_height: u32,
+}
+
+impl EnhancementLayout {
+    /// The layout as the companion receives it: one word per field, in
+    /// declaration order.
+    pub(super) fn words(&self) -> [u32; ENHANCEMENT_LAYOUT_WORDS] {
+        [
+            self.context_root,
+            self.agent_array,
+            self.manual_target_agent_id,
+            self.automatic_target_agent_id,
+            self.game_context_slot,
+            self.character_context,
+            self.map_id,
+            self.is_explorable,
+            self.current_map_id,
+            self.current_instance_type,
+            self.player_number,
+            self.agent_id,
+            self.agent_x,
+            self.agent_y,
+            self.agent_type,
+            self.agent_player_number,
+            self.agent_model_type,
+            self.cursor_active_art,
+            self.cursor_software_model,
+            self.cursor_show_count,
+            self.cursor_color_buffer,
+            self.cursor_art_hotspot,
+            self.cursor_art_texture,
+            self.cursor_handle_key,
+            self.cursor_handle_object,
+            self.cursor_view_texture,
+            self.cursor_texture_type,
+            self.cursor_texture_width,
+            self.cursor_texture_height,
+        ]
+    }
+}
+
+/// Fields in [`EnhancementLayout`]. Named because the companion's own `Layout`
+/// is this many words long and the two have to agree.
+pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 29;
+
+pub(super) struct EnhancementBuild {
+    /// The *template-save* output, not ArenaNet's own module. That transform is
+    /// the floor every launch lands on, so layering this on top of it is what
+    /// keeps opting in from costing template save.
+    pub sha256: &'static str,
+    pub output_sha256: &'static str,
+    /// Imported functions, which is where the local index space starts. The
+    /// template-save transform only appends, so this is the same count as
+    /// [`KnownBuild::import_count`] — asserted below rather than assumed.
+    pub import_count: u32,
+    pub program_id: u32,
+    pub build_id: u32,
+    /// ArenaNet's exported browser-driven client loop,
+    /// `EmscriptenExeThreadMainLoop`. The older GWCA `FrApi`/`LeaveGameThread`
+    /// anchor runs only during startup on this build and is no use as a tick.
+    pub hook_function: u32,
+    /// The signature that function must have, as value-type bytes. `0x7f` is
+    /// `i32`; the dispatcher is generated from the parameter count, so a build
+    /// whose loop took two arguments would still be refused here rather than
+    /// rewritten into something that calls it wrong.
+    pub hook_params: &'static [u8],
+    pub hook_results: &'static [u8],
+    /// The table slot the dispatcher borrows to reach the companion. Emscripten
+    /// reserves slot 0 for the null function pointer and never fills it.
+    pub table_slot: u32,
+    pub layout: EnhancementLayout,
+}
+
+pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[EnhancementBuild {
+    sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
+    output_sha256: "903967df89f33e3b632b3ee1718d0b0ad5b2947ae7103e25df10f544eebe9232",
+    import_count: 219,
+    program_id: 1,
+    build_id: 38771,
+    hook_function: 446,
+    hook_params: &[0x7f],
+    hook_results: &[],
+    table_slot: 0,
+    layout: EnhancementLayout {
+        context_root: 0x5a_0e20,
+        agent_array: 0x5a_4d98,
+        manual_target_agent_id: 0x5a_388c,
+        automatic_target_agent_id: 0x5a_3888,
+        game_context_slot: 6,
+        character_context: 0x44,
+        map_id: 0x198,
+        is_explorable: 0x19c,
+        current_map_id: 0x234,
+        current_instance_type: 0x23c,
+        player_number: 0x2ac,
+        agent_id: 0x2c,
+        agent_x: 0x74,
+        agent_y: 0x78,
+        agent_type: 0x9c,
+        agent_player_number: 0xf4,
+        agent_model_type: 0xf6,
+        cursor_active_art: 0x5a_1620,
+        cursor_software_model: 0x5a_1624,
+        cursor_show_count: 0x5a_1628,
+        cursor_color_buffer: 0x29_8d90,
+        cursor_art_hotspot: 0x00,
+        cursor_art_texture: 0x0c,
+        cursor_handle_key: 0x08,
+        cursor_handle_object: 0x00,
+        cursor_view_texture: 0x08,
+        cursor_texture_type: 0x0c,
+        cursor_texture_width: 0x14,
+        cursor_texture_height: 0x18,
+    },
+}];
+
+pub(super) fn find_enhancement_build(sha256: &str) -> Option<&'static EnhancementBuild> {
+    ENHANCEMENT_BUILDS
+        .iter()
+        .find(|build| build.sha256 == sha256)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +405,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The two tables are one chain, and nothing else says so.
+    ///
+    /// The enhancement transform reads a module the template-save transform
+    /// wrote, and takes its import count on trust because appending functions
+    /// cannot change one. If a later template-save entry ever did change it,
+    /// every enhancement index — the hook function most of all — would be off
+    /// by that difference and the rewrite would still produce a module, just
+    /// one that dispatches the wrong function.
+    #[test]
+    fn the_enhancement_table_is_layered_on_the_template_save_one() {
+        for build in ENHANCEMENT_BUILDS {
+            assert_eq!(build.sha256.len(), 64);
+            assert_eq!(build.output_sha256.len(), 64);
+            let base = BUILDS
+                .iter()
+                .find(|template| template.output_sha256 == build.sha256)
+                .expect("an enhancement input no template-save transform produces");
+            assert_eq!(
+                build.import_count, base.import_count,
+                "appending forwarders cannot change the import count",
+            );
+            assert!(build.hook_function >= build.import_count, "hook is imported");
+            assert_eq!(build.layout.words().len(), ENHANCEMENT_LAYOUT_WORDS);
+        }
+        assert!(find_enhancement_build("not a hash").is_none());
+        assert!(find_enhancement_build(ENHANCEMENT_BUILDS[0].sha256).is_some());
     }
 }

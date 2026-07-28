@@ -340,6 +340,10 @@ let recovery;
 // `Module.wasmExports`: this build's glue does not export that name, and asking
 // for it does not return undefined — it aborts.
 let gameInstance;
+// Kept beside it because the GWonMac Tools read their manifest off the module
+// rather than the instance — `WebAssembly.Module.customSections` — and by the
+// time the runtime is initialised, `instantiateWasm`'s `result` is long gone.
+let gameModule;
 
 Module = {
   canvas: document.getElementById('canvas'),
@@ -429,6 +433,7 @@ Module = {
       );
       log('wasm instantiated');
       gameInstance = result.instance;
+      gameModule = result.module;
       success(result.instance, result.module);
     })().catch((error) => fail(`The game client could not start: ${error}`));
 
@@ -547,6 +552,7 @@ Module = {
     performance.mark('gw.runtime.initialized');
     log('runtime initialised');
     status('Starting Guild Wars');
+    installTools();
   },
 
   onAbort(reason) {
@@ -571,6 +577,46 @@ Module = {
     }).catch(() => {});
   },
 };
+
+/**
+ * Install the GWonMac Tools, if this launch is one that has them.
+ *
+ * Three things have to line up, and each one is a different party's decision:
+ * the player turned a tool on, the host answered by deriving a client that has
+ * the hook (`window.__gwnativeEnhancements`, `'ready'`), and the module the
+ * page actually instantiated carries the manifest that proves it. The last is
+ * checked rather than assumed because it is the only one of the three this
+ * page can see for itself, and the cost of being wrong is a companion reading
+ * whatever happens to be at those offsets.
+ *
+ * `enhancements.js` and everything under it is imported here rather than in
+ * `boot` so that a launch with no tools on never fetches it at all.
+ */
+function installTools() {
+  const settings = host.currentSettings();
+  const selection = {
+    nativeCursor: settings.nativeCursor === true,
+    targetReadout: settings.targetReadout === true,
+  };
+  if (!selection.nativeCursor && !selection.targetReadout) return;
+  if (window.__gwnativeEnhancements !== 'ready') {
+    log(`[warn] GWonMac Tools are on but this client is ${window.__gwnativeEnhancements}`);
+    return;
+  }
+  if (
+    !gameInstance
+    || !gameModule
+    || WebAssembly.Module.customSections(gameModule, 'enhancement_manifest').length !== 1
+  ) {
+    log('[warn] GWonMac Tools: the client the page ran carries no manifest');
+    return;
+  }
+  const instance = gameInstance;
+  const module = gameModule;
+  void import('./enhancements.js')
+    .then(({ installEnhancements }) => installEnhancements(instance, module, selection))
+    .catch((error) => log('[warn] GWonMac Tools:', error?.message ?? error));
+}
 
 function appendGlue() {
   const src = 'Gw.jspi.js';
@@ -597,7 +643,7 @@ function appendGlue() {
   try {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
-      start, panel, metrics,
+      start, panel, data, compat, guide, metrics,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -611,6 +657,9 @@ function appendGlue() {
       import('./settings.js'),
       import('./launcher.js'),
       import('./settings-panel.js'),
+      import('./game-data.js'),
+      import('./compatibility.js'),
+      import('./guide.js'),
       import('./diagnostics.js'),
     ]);
     host = {
@@ -626,6 +675,9 @@ function appendGlue() {
       ...prefs,
       ...start,
       ...panel,
+      ...data,
+      ...compat,
+      ...guide,
     };
     // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
     // contract could plausibly want for something else.
@@ -659,9 +711,16 @@ function appendGlue() {
     save: host.saveSettings,
     showLog: (on) => window.gwLog(on),
     sweep: host.sweepSnapshot,
+    progress: host.snapshotProgress,
+    clearData: host.clearGameData,
     relaunch: host.relaunchApp,
     log,
   });
+
+  // Same moment and the same reason as the panel: Help → User Guide has to
+  // answer from the first frame, and a player looking for the guide is often a
+  // player whose game did not start.
+  window.gwOpenGuide = host.installGuide({ log });
 
   // The only failure here that will still be a failure tomorrow. Everything
   // else the overlay catches is transient, which is why its first offer is to
@@ -764,6 +823,21 @@ function appendGlue() {
     // The launcher's own failure paths already end in "boot anyway"; this is
     // for the one it cannot catch, which deserves the same answer.
     log(`[warn] launcher: ${error}`);
+    document.getElementById('launcher').hidden = true;
+  }
+
+  // After the launcher and before the glue, which is the only gap left: the
+  // launcher owns the overlay until it is done with it, and once the client is
+  // appended there is nowhere to say anything. Awaited because it is a sentence
+  // a player is reading, not a step in the boot — see compatibility.js.
+  try {
+    await host.announceCompatibility({
+      log,
+      save: host.saveSettings,
+      seenFor: host.currentSettings().compatibilityNoticeSeenFor,
+    });
+  } catch (error) {
+    log(`[warn] compatibility: ${error}`);
     document.getElementById('launcher').hidden = true;
   }
 

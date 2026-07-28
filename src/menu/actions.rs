@@ -3,8 +3,9 @@
 //! A menu item with no target is performed by whatever is on the responder
 //! chain, which is how cut, paste, full screen and quit are answered without
 //! this build implementing any of them. What is left over is the handful
-//! nobody else can answer — reload the page, reveal the log, open the settings
-//! panel, say what this application is — and each of those needs an
+//! nobody else can answer — reload the page, write a problem report, mark a
+//! slowdown, open the settings panel, say what this application is — and each
+//! of those needs an
 //! Objective-C object to receive it. That object is the only reason this half
 //! exists; the bar it hangs off is next door.
 //!
@@ -12,7 +13,6 @@
 //! sends a menu action.
 
 use std::ffi::c_void;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -30,14 +30,25 @@ use objc2_foundation::{
 };
 use objc2_web_kit::WKWebView;
 
-use crate::{app, release, settings, window};
+use crate::{app, diagnostics, release, report, settings, window};
 
 /// Whether a check is already running or already on screen.
 ///
 /// The item is a menu item, so the way to press it twice is to press it twice.
 /// [`release::check`] would answer the second press from its cache, but a
 /// second alert stacked on the first is still two alerts for one question.
+///
+/// Shared with the automatic check, which is the case that needs it most: an
+/// opted-in launch and an impatient player pressing the item can otherwise
+/// arrive at [`present`] together and stack two alerts about one answer.
 static ASKING: AtomicBool = AtomicBool::new(false);
+
+/// Where a player who does not own the game buys it.
+///
+/// The root rather than a locale path, because the store redirects to the one
+/// it thinks the visitor wants and this build has no business choosing an
+/// English page for somebody whose Mac is not in English.
+const STORE_URL: &str = "https://store.guildwars.com/";
 
 /// What the About panel says this application is.
 ///
@@ -58,10 +69,12 @@ pub struct Ivars {
     /// The page, for the items that are really requests to it.
     webview: Retained<WKWebView>,
     /// The settings file, so that a diagnostics overlay switched on from the
-    /// menu is still on after a relaunch.
+    /// menu is still on after a relaunch — and the profile a problem report
+    /// prints at the top of itself.
     settings: Arc<settings::Store>,
-    /// Where the diagnostics log is written, for Report a Problem.
-    log_dir: PathBuf,
+    /// The diagnostics log, for Report a Problem and Mark a Slowdown. Both
+    /// write to it; one of them also reads it back.
+    recorder: Arc<diagnostics::Recorder>,
 }
 
 define_class!(
@@ -167,6 +180,32 @@ define_class!(
             open(release::PROJECT_URL);
         }
 
+        /// Where the game is sold.
+        ///
+        /// Not the project's link, and that is why it can be offered on every
+        /// build: `PROJECT_URL` may be empty, but ArenaNet's store is where it
+        /// has always been. Someone who found this client before they found the
+        /// game needs an account, and a login screen that cannot say where one
+        /// comes from is a dead end.
+        #[unsafe(method(gwOpenStore:))]
+        fn open_store(&self, _sender: Option<&AnyObject>) {
+            open(STORE_URL);
+        }
+
+        /// Show the guide.
+        ///
+        /// Sent to the page for the same reason Settings is: the guide is a
+        /// document about the panel, the overlay and the touch modes, all of
+        /// which live there. A build with no repository can still open it,
+        /// which a link to a markdown file on GitHub could not.
+        #[unsafe(method(gwOpenGuide:))]
+        fn open_guide(&self, _sender: Option<&AnyObject>) {
+            self.evaluate(
+                "window.dispatchEvent(new CustomEvent('gw:command', \
+                 { detail: { name: 'guide-open' } }));",
+            );
+        }
+
         /// Ask whether the project has published something newer.
         ///
         /// The request takes up to five seconds and this is the thread drawing
@@ -175,46 +214,114 @@ define_class!(
         /// published from — see [`super::updates_offered`].
         #[unsafe(method(gwCheckForUpdates:))]
         fn check_for_updates(&self, _sender: Option<&AnyObject>) {
-            if ASKING.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            std::thread::spawn(|| {
-                let notice = Box::new(release::check());
-                // SAFETY: the box is leaked here and rebuilt exactly once, by
-                // the function libdispatch hands it to.
-                unsafe { app::to_main(Box::into_raw(notice).cast(), present) };
-            });
+            ask(Arc::clone(&self.ivars().settings), Requested::ByThePlayer);
         }
 
-        /// Show the player the diagnostics log rather than exporting one.
+        /// Ask which kind of problem it is, then do the thing that suits it.
         ///
-        /// The Electron build builds a report on demand because its diagnostics
-        /// live in memory. Here they are already a file, written a line a
-        /// second for the whole session, so an export would be a copy of
-        /// something the player can attach to an issue directly. Revealing it
-        /// selects the file in the Finder, which is where an attachment comes
-        /// from anyway.
-        #[unsafe(method(gwRevealDiagnostics:))]
-        fn reveal_diagnostics(&self, _sender: Option<&AnyObject>) {
-            let dir = &self.ivars().log_dir;
-            let log = dir.join("gwnative.jsonl");
-            // The directory is created at startup and the log appears with the
-            // first sample, so both exist in practice. Selecting a file that
-            // does not opens the folder, which is the right failure.
-            let workspace = NSWorkspace::sharedWorkspace();
-            let selected = workspace.selectFile_inFileViewerRootedAtPath(
-                Some(&NSString::from_str(&log.to_string_lossy())),
-                &NSString::from_str(&dir.to_string_lossy()),
-            );
-            if !selected {
-                note!(
-                    "[gwnative] the diagnostics log could not be shown; it is at {}",
-                    log.display()
-                );
+        /// The two answers are not variations on each other. A crash, a failed
+        /// download or a launch that never finished is already fully described
+        /// by what is on disk, so the useful action is to write the report now.
+        /// A stutter is not described by anything yet, because the sampler was
+        /// running at its resting rate when it happened — so the useful action
+        /// is to mark the moment and let the player press ⌘⇧M again each time
+        /// it recurs, then export once at the end.
+        #[unsafe(method(gwReportProblem:))]
+        fn report_problem(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::from(self);
+            let alert = NSAlert::new(mtm);
+            alert.setAlertStyle(NSAlertStyle::Informational);
+            alert.setMessageText(&NSString::from_str("Report a problem"));
+            alert.setInformativeText(&NSString::from_str(
+                "For a crash, a failed download or a launch that never \
+                 finished, save the report now.\n\nFor stutter or slow \
+                 frames, mark it while it is happening — press ⌘⇧M each time \
+                 — and save the report afterwards.",
+            ));
+            alert.addButtonWithTitle(&NSString::from_str("Save Report…"));
+            alert.addButtonWithTitle(&NSString::from_str("Mark a Slowdown"));
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            match alert.runModal() {
+                r if r == NSAlertFirstButtonReturn => self.save_report(),
+                r if r == NSAlertFirstButtonReturn + 1 => self.mark(),
+                _ => {}
             }
+        }
+
+        /// The moment the game misbehaved, ⌘⇧M.
+        ///
+        /// A menu item and a key equivalent because both are needed: the item is
+        /// how it is discovered, and the key is the only one of the two that can
+        /// be used without taking a hand off the game and losing the stutter
+        /// that was being reported.
+        #[unsafe(method(gwMarkSlowdown:))]
+        fn mark_slowdown(&self, _sender: Option<&AnyObject>) {
+            self.mark();
         }
     }
 );
+
+/// Who wanted the answer. What it decides is whether a check that found nothing
+/// is allowed to interrupt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Requested {
+    /// The menu item. All three answers go on screen, because an item that
+    /// sometimes does nothing visible reads as a broken item.
+    ByThePlayer,
+    /// An opted-in launch. Only [`release::interrupts`] reaches the screen; the
+    /// rest is a log line, which is what keeps a permission to check from
+    /// becoming a permission to talk.
+    ByTheLaunch,
+}
+
+/// Ask on a worker thread and bring the answer back to the main queue.
+///
+/// The request takes up to five seconds and the caller is on the thread drawing
+/// the game, so nothing here may run there. The time is recorded whichever way
+/// the answer went and whoever asked for it: a manual check counts against the
+/// daily automatic one, because a player who has just looked does not need the
+/// next launch to look again on their behalf.
+fn ask(settings: Arc<settings::Store>, who: Requested) {
+    if ASKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let notice = release::check();
+        settings.remember_update_check(settings::now());
+        if who == Requested::ByTheLaunch && !release::interrupts(&notice) {
+            note!("[release] {notice:?} (checked at launch; nothing to say)");
+            ASKING.store(false, Ordering::SeqCst);
+            return;
+        }
+        let notice = Box::new(notice);
+        // SAFETY: the box is leaked here and rebuilt exactly once, by the
+        // function libdispatch hands it to.
+        unsafe { app::to_main(Box::into_raw(notice).cast(), present) };
+    });
+}
+
+/// Ask GitHub about this build, if this profile has asked to be asked and the
+/// last answer is a day old.
+///
+/// Called once, after the window is up. Returns immediately on every launch
+/// that is not due, which is all of them by default — see
+/// [`crate::settings::Settings::auto_check_updates`], off in a fresh profile.
+pub fn at_launch(settings: &Arc<settings::Store>) {
+    // Nothing to compare against, so there is no request worth making. The same
+    // rule that keeps the menu item off this build.
+    if !super::updates_offered() {
+        return;
+    }
+    let profile = settings.get();
+    if !release::due(
+        profile.auto_check_updates,
+        profile.last_update_check_at,
+        settings::now(),
+    ) {
+        return;
+    }
+    ask(Arc::clone(settings), Requested::ByTheLaunch);
+}
 
 /// Hand a URL to whatever the player browses with.
 fn open(url: &str) {
@@ -271,12 +378,12 @@ impl Actions {
         mtm: MainThreadMarker,
         webview: &WKWebView,
         settings: Arc<settings::Store>,
-        log_dir: PathBuf,
+        recorder: Arc<diagnostics::Recorder>,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(Ivars {
             webview: webview.retain(),
             settings,
-            log_dir,
+            recorder,
         });
         // SAFETY: `NSObject`'s designated initializer, on a freshly allocated
         // instance whose ivars are set.
@@ -290,6 +397,55 @@ impl Actions {
             self.ivars()
                 .webview
                 .evaluateJavaScript_completionHandler(&NSString::from_str(script), None);
+        }
+    }
+
+    /// Record the moment, on both sides.
+    ///
+    /// The page is told as well as the file, because the counters that describe
+    /// a stutter — frames, frame time, the audio underruns that go with it —
+    /// are the page's, batched on a one-second timer. Left alone, the batch
+    /// carrying the stutter would be flushed up to a second after the mark and
+    /// might not be the batch the stutter happened in. Asking for it now is what
+    /// makes the mark and the numbers describe the same instant.
+    fn mark(&self) {
+        self.ivars().recorder.mark("the player marked a slowdown");
+        self.evaluate(
+            "window.dispatchEvent(new CustomEvent('gw:command', \
+             { detail: { name: 'diagnostics-mark' } }));",
+        );
+    }
+
+    /// Write the report and select it in the Finder, which is where an
+    /// attachment is picked up from anyway.
+    fn save_report(&self) {
+        let ivars = self.ivars();
+        let dir = ivars.recorder.dir().to_owned();
+        let path = match report::write(&ivars.recorder, &ivars.settings.get()) {
+            Ok(path) => path,
+            Err(e) => {
+                note!("[report] the problem report was not written: {e}");
+                // A modal, not a log line: the player pressed a button and is
+                // waiting to be shown a file.
+                let mtm = MainThreadMarker::from(self);
+                let alert = NSAlert::new(mtm);
+                alert.setAlertStyle(NSAlertStyle::Warning);
+                alert.setMessageText(&NSString::from_str("The report was not written"));
+                alert.setInformativeText(&NSString::from_str(&format!("{dir:?}: {e}")));
+                alert.runModal();
+                return;
+            }
+        };
+        note!("[report] {}", path.display());
+        let selected = NSWorkspace::sharedWorkspace().selectFile_inFileViewerRootedAtPath(
+            Some(&NSString::from_str(&path.to_string_lossy())),
+            &NSString::from_str(&dir.to_string_lossy()),
+        );
+        if !selected {
+            note!(
+                "[report] it could not be shown in the Finder; it is at {}",
+                path.display()
+            );
         }
     }
 }
