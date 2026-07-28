@@ -14,7 +14,9 @@ pub struct Request {
     pub query: String,
     pub range: Option<String>,
     pub content_length: usize,
-    pub upgrade: Option<String>,
+    /// Read through [`Request::wants_websocket`], which is the only question
+    /// anything here asks of it.
+    upgrade: Option<String>,
     pub websocket_key: Option<String>,
     pub token: Option<String>,
     /// The validator the page already holds for a static file, if any.

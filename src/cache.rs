@@ -210,7 +210,7 @@ pub fn prune(cache_dir: &Path, live: &HashSet<String>) {
 
 /// Whether `name` is one this cache writes: lowercase hex, and as long as one
 /// of the digests [`ContentHash`] produces.
-pub fn is_chunk_name(name: &str) -> bool {
+fn is_chunk_name(name: &str) -> bool {
     matches!(name.len(), 40 | 64)
         && name
             .bytes()
@@ -244,7 +244,7 @@ pub fn default_cache_dir() -> PathBuf {
 /// best-effort: a failure leaves the old directory where it is and costs a
 /// re-download, which is the same outcome as never having tried, so nothing is
 /// worth aborting a launch over.
-pub fn migrate_cache(legacy: &Path, current: &Path) {
+fn migrate_cache(legacy: &Path, current: &Path) {
     if current.exists() || !legacy.exists() {
         return;
     }

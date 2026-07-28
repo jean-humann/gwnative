@@ -19,6 +19,8 @@
 
 use std::ffi::c_void;
 
+use crate::notify;
+
 type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
 
@@ -221,42 +223,14 @@ unsafe fn translate(layout: *const u8) -> Vec<(&'static str, String)> {
     table
 }
 
-type CFNotificationCenterRef = *const c_void;
-type CFNotificationCallback = extern "C" fn(
-    center: CFNotificationCenterRef,
-    observer: *mut c_void,
-    name: CFStringRef,
-    object: *const c_void,
-    user_info: CFTypeRef,
-);
-
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFNotificationCenterGetDistributedCenter() -> CFNotificationCenterRef;
-    fn CFNotificationCenterAddObserver(
-        center: CFNotificationCenterRef,
-        observer: *const c_void,
-        callback: CFNotificationCallback,
-        name: CFStringRef,
-        object: *const c_void,
-        suspension_behavior: i32,
-    );
-}
-
-/// Deliver even while the app is inactive. The player switches layout with the
-/// game in front of them, but they may also do it from another app and come
-/// back, and coalescing that away would leave the stale table in place until
-/// the next focus refresh.
-const DELIVER_IMMEDIATELY: i32 = 4;
-
 static ON_CHANGE: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
 
 extern "C" fn layout_changed(
-    _center: CFNotificationCenterRef,
+    _center: notify::CenterRef,
     _observer: *mut c_void,
-    _name: CFStringRef,
+    _name: *const c_void,
     _object: *const c_void,
-    _user_info: CFTypeRef,
+    _user_info: *const c_void,
 ) {
     if let Some(handler) = ON_CHANGE.get() {
         handler(&as_json());
@@ -277,20 +251,20 @@ pub fn watch(on_change: fn(&str)) {
     if ON_CHANGE.set(on_change).is_err() {
         return;
     }
-    // SAFETY: the name is HIToolbox's constant CFString, the observer pointer
-    // is only ever handed back to `layout_changed`, which ignores it, and the
-    // callback outlives the process.
+    // SAFETY: the name is HIToolbox's constant CFString, which outlives the
+    // process.
     unsafe {
         if kTISNotifySelectedKeyboardInputSourceChanged.is_null() {
             return;
         }
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetDistributedCenter(),
-            std::ptr::null(),
-            layout_changed,
+        // Immediately, rather than coalesced until the app comes forward: the
+        // player switches layout with the game in front of them, but they may
+        // also do it from another app and come back, and coalescing that away
+        // would leave the stale table in place until the next focus refresh.
+        notify::distributed(
             kTISNotifySelectedKeyboardInputSourceChanged,
-            std::ptr::null(),
-            DELIVER_IMMEDIATELY,
+            layout_changed,
+            notify::DELIVER_IMMEDIATELY,
         );
     }
 }

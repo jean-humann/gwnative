@@ -27,6 +27,7 @@ mod layout;
 mod manifest;
 mod menu;
 mod net;
+mod notify;
 mod patch;
 mod paths;
 mod proxy;

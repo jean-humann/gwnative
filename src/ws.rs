@@ -88,7 +88,7 @@ impl Sink {
 
 /// `base64(sha1(key + MAGIC))` — the value the client checks to confirm it is
 /// talking to something that understood the upgrade rather than a naive proxy.
-pub fn accept_key(key: &str) -> String {
+fn accept_key(key: &str) -> String {
     let mut hasher = sha1::Sha1::new();
     hasher.update(key.as_bytes());
     hasher.update(MAGIC.as_bytes());

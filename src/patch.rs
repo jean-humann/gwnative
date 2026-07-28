@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::manifest::{Compression, ContentHash, HashAlgo, Manifest};
 use crate::transport;
 
-pub const PATCH_ROOT: &str = "https://patching.1.arenanetworks.com";
+const PATCH_ROOT: &str = "https://patching.1.arenanetworks.com";
 
 /// Identifies this client to ArenaNet. Kept honest on purpose.
 const USER_AGENT: &str = "gwnative (Guild Wars interoperability client)";
@@ -42,8 +42,8 @@ const PREFETCH_JOBS: usize = 8;
 /// service does not have. Retrying these only burns time and looks like abuse.
 const FATAL_STATUS: [u16; 3] = [401, 403, 404];
 
-pub const CLIENT_ARTIFACTS: [&str; 2] = ["Gw.jspi.js", "Gw.jspi.wasm"];
-pub const COMMON_ARTIFACTS: [&str; 1] = ["version.json"];
+const CLIENT_ARTIFACTS: [&str; 2] = ["Gw.jspi.js", "Gw.jspi.wasm"];
+const COMMON_ARTIFACTS: [&str; 1] = ["version.json"];
 /// The prebuilt filesystem image the chunk store hydrates IDBFS from. Not part
 /// of the startup sync — it is hundreds of megabytes and fetched on demand.
 pub const SNAPSHOT: &str = "Gw.snapshot";
@@ -64,9 +64,9 @@ pub struct Client {
 #[derive(Default)]
 pub struct Retries {
     /// Attempts after the first, across every fetch.
-    pub attempts: AtomicU64,
+    attempts: AtomicU64,
     /// Milliseconds spent asleep between them.
-    pub slept_ms: AtomicU64,
+    slept_ms: AtomicU64,
 }
 
 impl Client {
