@@ -43,8 +43,9 @@ pub fn is_successor() -> bool {
 
 /// Start another copy of this app, and report whether it got off the ground.
 ///
-/// The arguments are carried over so that a relaunched `--headless` run is
-/// still headless. The environment is inherited for the same reason: every
+/// The arguments are carried over so that a relaunched `serve` run still
+/// serves rather than opening a window. The environment is inherited for the
+/// same reason: every
 /// switch this app reads from it — the port, the web root, the trace flags —
 /// is part of what this launch *is*, and a successor that quietly dropped them
 /// would be a different app wearing the same window.
