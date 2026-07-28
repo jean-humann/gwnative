@@ -46,7 +46,6 @@ pub const CLIENT_ARTIFACTS: [&str; 2] = ["Gw.jspi.js", "Gw.jspi.wasm"];
 pub const COMMON_ARTIFACTS: [&str; 1] = ["version.json"];
 /// The prebuilt filesystem image the chunk store hydrates IDBFS from. Not part
 /// of the startup sync — it is hundreds of megabytes and fetched on demand.
-#[allow(dead_code)]
 pub const SNAPSHOT: &str = "Gw.snapshot";
 
 pub struct Client {
