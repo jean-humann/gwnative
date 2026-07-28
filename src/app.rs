@@ -209,7 +209,7 @@ unsafe extern "C" {
 /// A dispatch timer rather than an `NSTimer`, because this has to fire during a
 /// termination the run loop is already inside — a timer scheduled on the
 /// default mode would not.
-fn after(delay_ms: u32, work: impl Fn() + 'static) {
+pub fn after(delay_ms: u32, work: impl Fn() + 'static) {
     let block = RcBlock::new(work);
     // SAFETY: `DISPATCH_TIME_NOW` is 0, the delay is in nanoseconds, and
     // `dispatch_after` copies the block.
@@ -220,6 +220,22 @@ fn after(delay_ms: u32, work: impl Fn() + 'static) {
             &block,
         );
     }
+}
+
+/// Hand `work` to the main queue, with `context` for it to take ownership of.
+///
+/// The one route from a worker thread into AppKit. Everything the loopback
+/// server answers runs on a connection thread, and half of what the page asks
+/// for — quit, an icon to redraw — is a main-thread-only call at the other end.
+///
+/// # Safety
+///
+/// `work` must be the only consumer of `context`, which libdispatch hands it
+/// exactly once.
+pub unsafe fn to_main(context: *mut c_void, work: extern "C" fn(*mut c_void)) {
+    // SAFETY: `_dispatch_main_q` is libdispatch's own main queue object, and
+    // the contract on the context is this function's caller's to keep.
+    unsafe { dispatch_async_f(&raw const _dispatch_main_q, context, work) };
 }
 
 extern "C" fn terminate_on_main(_context: *mut c_void) {
@@ -239,13 +255,6 @@ extern "C" fn terminate_on_main(_context: *mut c_void) {
 /// Routed through `terminate:` rather than `exit` so it goes through the
 /// delegate above and the game's files are written like any other quit.
 pub fn request_quit() {
-    // SAFETY: `_dispatch_main_q` is libdispatch's own main queue object, and
-    // the work function takes no context.
-    unsafe {
-        dispatch_async_f(
-            &raw const _dispatch_main_q,
-            std::ptr::null_mut(),
-            terminate_on_main,
-        )
-    };
+    // SAFETY: the work function takes no context, so there is nothing to own.
+    unsafe { to_main(std::ptr::null_mut(), terminate_on_main) };
 }

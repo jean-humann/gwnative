@@ -17,6 +17,7 @@ mod chunks;
 mod commands;
 mod diagnostics;
 mod disk;
+mod dock;
 mod error;
 mod generation;
 mod http;
