@@ -26,9 +26,20 @@ use objc2_app_kit::{NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSString};
 use objc2_web_kit::WKWebView;
 
-use crate::settings;
+use crate::{release, settings};
 
-use actions::{Actions, WEBSITE};
+use actions::Actions;
+
+/// Whether this build can be compared against anything published.
+///
+/// Decided by what `Cargo.toml` declares, not by anything that happens at
+/// runtime — so a build with nowhere to look does not offer to look. The
+/// alternative is an item that can only ever answer "this build did not come
+/// from the release process", which is a worse thing to put in a menu than
+/// nothing at all.
+fn updates_offered() -> bool {
+    release::repository().is_some()
+}
 
 /// Build the menu bar and hand it to the application. Main thread, before
 /// `run`.
@@ -113,27 +124,51 @@ fn submenu(mtm: MainThreadMarker, title: &str, items: &[&NSMenuItem]) -> Retaine
 /// substitutes the process name for the title it is given.
 fn application_menu(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenuItem> {
     let command = NSEventModifierFlags::Command;
-    submenu(
+    let about = ours(mtm, actions, "About Guild Wars", sel!(gwAbout:), "", None);
+    // Directly under About, where every Mac application that has one puts it,
+    // and so where a player will look without being told.
+    let updates = ours(
         mtm,
-        "Guild Wars",
-        &[
-            &ours(mtm, actions, "About Guild Wars", sel!(gwAbout:), "", None),
-            &NSMenuItem::separatorItem(mtm),
-            &ours(mtm, actions, "Settings…", sel!(gwOpenSettings:), ",", None),
-            &NSMenuItem::separatorItem(mtm),
-            &item(mtm, "Hide Guild Wars", sel!(hide:), "h", None),
-            &item(
-                mtm,
-                "Hide Others",
-                sel!(hideOtherApplications:),
-                "h",
-                Some(command | NSEventModifierFlags::Option),
-            ),
-            &item(mtm, "Show All", sel!(unhideAllApplications:), "", None),
-            &NSMenuItem::separatorItem(mtm),
-            &item(mtm, "Quit Guild Wars", sel!(terminate:), "q", None),
-        ],
-    )
+        actions,
+        "Check for Updates…",
+        sel!(gwCheckForUpdates:),
+        "",
+        None,
+    );
+    let settings = ours(mtm, actions, "Settings…", sel!(gwOpenSettings:), ",", None);
+    let hide = item(mtm, "Hide Guild Wars", sel!(hide:), "h", None);
+    let hide_others = item(
+        mtm,
+        "Hide Others",
+        sel!(hideOtherApplications:),
+        "h",
+        Some(command | NSEventModifierFlags::Option),
+    );
+    let show_all = item(mtm, "Show All", sel!(unhideAllApplications:), "", None);
+    let quit = item(mtm, "Quit Guild Wars", sel!(terminate:), "q", None);
+    // One each: an item belongs to one menu, and three rules drawn from one
+    // object would be one rule drawn three times.
+    let rules = [
+        NSMenuItem::separatorItem(mtm),
+        NSMenuItem::separatorItem(mtm),
+        NSMenuItem::separatorItem(mtm),
+    ];
+
+    let mut items: Vec<&NSMenuItem> = vec![&about];
+    if updates_offered() {
+        items.push(&updates);
+    }
+    items.extend([
+        &*rules[0],
+        &*settings,
+        &*rules[1],
+        &*hide,
+        &*hide_others,
+        &*show_all,
+        &*rules[2],
+        &*quit,
+    ]);
+    submenu(mtm, "Guild Wars", &items)
 }
 
 /// Cut and copy matter as much as paste: the client's own fields are these
@@ -223,7 +258,7 @@ fn help_menu(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenuItem> {
     // — the whole point is that a build with nowhere to send the player does
     // not offer to send them anywhere.
     #[allow(clippy::const_is_empty)]
-    if !WEBSITE.is_empty() {
+    if !release::PROJECT_URL.is_empty() {
         items.push(&website);
     }
     submenu(mtm, "Help", &items)

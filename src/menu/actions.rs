@@ -11,8 +11,10 @@
 //! Every one of these runs on the main thread, because that is where AppKit
 //! sends a menu action.
 
+use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc2::Message;
 use objc2::rc::Retained;
@@ -20,22 +22,22 @@ use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAboutPanelOptionApplicationName, NSAboutPanelOptionApplicationVersion,
-    NSAboutPanelOptionCredits, NSApplication, NSWorkspace,
+    NSAboutPanelOptionCredits, NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
+    NSWorkspace,
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSDictionary, NSObject, NSObjectProtocol, NSString, NSURL,
 };
 use objc2_web_kit::WKWebView;
 
-use crate::{settings, window};
+use crate::{app, release, settings, window};
 
-/// Where the project lives, taken from `Cargo.toml` rather than written here.
+/// Whether a check is already running or already on screen.
 ///
-/// It is empty until the package declares a `repository`, and the Help item is
-/// left out while it is. A menu that offers to open the project website and
-/// then opens nothing — or worse, opens someone else's repository because the
-/// URL was guessed — is worse than a Help menu with one item in it.
-pub(super) const WEBSITE: &str = env!("CARGO_PKG_REPOSITORY");
+/// The item is a menu item, so the way to press it twice is to press it twice.
+/// [`release::check`] would answer the second press from its cache, but a
+/// second alert stacked on the first is still two alerts for one question.
+static ASKING: AtomicBool = AtomicBool::new(false);
 
 /// What the About panel says this application is.
 ///
@@ -162,10 +164,26 @@ define_class!(
 
         #[unsafe(method(gwOpenWebsite:))]
         fn open_website(&self, _sender: Option<&AnyObject>) {
-            let Some(url) = NSURL::URLWithString(&NSString::from_str(WEBSITE)) else {
+            open(release::PROJECT_URL);
+        }
+
+        /// Ask whether the project has published something newer.
+        ///
+        /// The request takes up to five seconds and this is the thread drawing
+        /// the game, so a worker asks and the answer comes back to the main
+        /// queue to be shown. Offered only on a build that says where it was
+        /// published from — see [`super::updates_offered`].
+        #[unsafe(method(gwCheckForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            if ASKING.swap(true, Ordering::SeqCst) {
                 return;
-            };
-            NSWorkspace::sharedWorkspace().openURL(&url);
+            }
+            std::thread::spawn(|| {
+                let notice = Box::new(release::check());
+                // SAFETY: the box is leaked here and rebuilt exactly once, by
+                // the function libdispatch hands it to.
+                unsafe { app::to_main(Box::into_raw(notice).cast(), present) };
+            });
         }
 
         /// Show the player the diagnostics log rather than exporting one.
@@ -197,6 +215,56 @@ define_class!(
         }
     }
 );
+
+/// Hand a URL to whatever the player browses with.
+fn open(url: &str) {
+    let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) else {
+        return;
+    };
+    NSWorkspace::sharedWorkspace().openURL(&url);
+}
+
+/// Put the answer on screen.
+///
+/// What it says is [`release::wording`]'s business; this is the window around
+/// it. A second button exists only when there is somewhere to send the player,
+/// which is why the answer is read back from `releases` rather than from the
+/// notice again.
+extern "C" fn present(context: *mut c_void) {
+    // SAFETY: `check_for_updates` leaked exactly this box, and libdispatch runs
+    // this once with it.
+    let notice = *unsafe { Box::from_raw(context.cast::<release::Notice>()) };
+    // SAFETY: this runs on the main queue, which is the main thread.
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+
+    let release::Wording {
+        title,
+        detail,
+        releases,
+    } = release::wording(&notice);
+    let alert = NSAlert::new(mtm);
+    alert.setAlertStyle(NSAlertStyle::Informational);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(&detail));
+    if releases.is_some() {
+        alert.addButtonWithTitle(&NSString::from_str("Show Releases"));
+        alert.addButtonWithTitle(&NSString::from_str("Later"));
+    }
+    note!("[release] {notice:?}");
+
+    // The check is slow enough that the player may have gone elsewhere, and an
+    // alert behind another window is the same as no alert.
+    NSApplication::sharedApplication(mtm).activate();
+    let chosen = alert.runModal();
+    // After the modal, not before: until it closes there is still a check on
+    // screen, and the answer to being asked again is the one already showing.
+    ASKING.store(false, Ordering::SeqCst);
+    if chosen == NSAlertFirstButtonReturn
+        && let Some(releases) = releases
+    {
+        open(&releases);
+    }
+}
 
 impl Actions {
     pub(super) fn new(
