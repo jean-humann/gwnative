@@ -75,7 +75,7 @@ define_class!(
                 // The URL is printed because the only way this fires is a bug or
                 // an attack, and neither is diagnosable from "a navigation was
                 // blocked".
-                eprintln!(
+                note!(
                     "[renderer] refused to navigate to {}",
                     url.as_deref().unwrap_or("a request with no URL")
                 );
@@ -93,11 +93,11 @@ define_class!(
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         fn terminated(&self, webview: &WKWebView) {
             if self.ivars().recovered.replace(true) {
-                eprintln!("[renderer] the web content process died again; not reloading");
+                note!("[renderer] the web content process died again; not reloading");
                 self.explain();
                 return;
             }
-            eprintln!("[renderer] the web content process died; reloading");
+            note!("[renderer] the web content process died; reloading");
             // `reload` rather than `reloadFromOrigin`: the artifacts are served
             // with `no-cache`, so they revalidate anyway, and reloading from
             // origin would throw away the compiled form of an 8.2 MB module

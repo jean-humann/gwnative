@@ -89,7 +89,7 @@ define_class!(
                 .apply(&serde_json::json!({ "showDiagnostics": showing }))
             {
                 Ok(_) => self.evaluate(&format!("window.gwLog?.({showing});")),
-                Err(e) => eprintln!("[gwnative] the diagnostics setting was not saved: {e}"),
+                Err(e) => note!("[gwnative] the diagnostics setting was not saved: {e}"),
             }
         }
 
@@ -139,7 +139,7 @@ define_class!(
                 &NSString::from_str(&dir.to_string_lossy()),
             );
             if !selected {
-                eprintln!(
+                note!(
                     "[gwnative] the diagnostics log could not be shown; it is at {}",
                     log.display()
                 );

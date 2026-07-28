@@ -781,11 +781,11 @@ mod tests {
     fn the_real_client_transforms_to_the_certified_output() {
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("web/Gw.jspi.wasm");
         let Ok(input) = fs::read(&base) else {
-            eprintln!("skipping: {base:?} has not been fetched");
+            note!("skipping: {base:?} has not been fetched");
             return;
         };
         let Some(build) = find_build(&digest(&input)) else {
-            eprintln!("skipping: the fetched client is not a certified build");
+            note!("skipping: the fetched client is not a certified build");
             return;
         };
         let output = rewrite(&input, build).expect("the certified build rewrites");

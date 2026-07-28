@@ -421,7 +421,7 @@ pub fn respond_proxy(stream: &mut TcpStream, reply: &proxy::Reply) -> std::io::R
         // A header value carrying CRLF would let upstream inject headers of its
         // own choosing, or a whole second response, into this one.
         if value.contains(['\r', '\n']) {
-            eprintln!("[proxy] dropped a header with embedded newlines: {name}");
+            note!("[proxy] dropped a header with embedded newlines: {name}");
             continue;
         }
         head.push_str(&format!("{name}: {value}\r\n"));

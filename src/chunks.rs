@@ -466,7 +466,7 @@ impl ChunkStore {
                     Ok(()) => {
                         self.verified.lock().unwrap().insert(hash);
                     }
-                    Err(e) => eprintln!("[gwnative] chunk cache write failed: {e}"),
+                    Err(e) => note!("[gwnative] chunk cache write failed: {e}"),
                 }
                 let shared = Arc::new(bytes);
                 slot.fulfil(Ok(Arc::clone(&shared)));
@@ -647,8 +647,8 @@ impl ChunkStore {
             chunks,
         };
         match write_boot_list(&self.boot_list_path(), &list) {
-            Ok(()) => eprintln!("[gwnative] boot list: {count} chunks recorded"),
-            Err(e) => eprintln!("[gwnative] could not write the boot list: {e}"),
+            Ok(()) => note!("[gwnative] boot list: {count} chunks recorded"),
+            Err(e) => note!("[gwnative] could not write the boot list: {e}"),
         }
     }
 
@@ -674,7 +674,7 @@ impl ChunkStore {
             },
         };
         if list.chunk_size != self.chunk_size() {
-            eprintln!(
+            note!(
                 "[gwnative] boot list is for {} KiB chunks, not {} KiB; discarding it",
                 list.chunk_size / 1024,
                 self.chunk_size() / 1024
@@ -688,7 +688,7 @@ impl ChunkStore {
         if chunks.is_empty() {
             return;
         }
-        eprintln!("[gwnative] warming {} boot chunks", chunks.len());
+        note!("[gwnative] warming {} boot chunks", chunks.len());
         let chunks = Arc::new(chunks);
         for worker in 0..MAX_PREFETCH_FETCHES {
             let store = Arc::clone(self);
@@ -701,7 +701,7 @@ impl ChunkStore {
                         // The list is a guess about a previous session. A chunk
                         // that is gone or changed is ordinary, and the demand
                         // read that wants it will report it properly.
-                        eprintln!("[gwnative] warm chunk {index}: {e}");
+                        note!("[gwnative] warm chunk {index}: {e}");
                     }
                 }
             });
@@ -772,7 +772,7 @@ impl ChunkStore {
                         // One bad chunk should not abandon the sweep; the game
                         // will ask for it again on demand and surface the error
                         // there, where it can be acted on.
-                        eprintln!("[gwnative] prefetch chunk {index}: {e}");
+                        note!("[gwnative] prefetch chunk {index}: {e}");
                     }
                     store.prefetch.done.fetch_add(1, Ordering::Relaxed);
                     index += workers;
@@ -780,11 +780,11 @@ impl ChunkStore {
                 if outstanding.fetch_sub(1, Ordering::SeqCst) == 1 {
                     store.prefetch.running.store(false, Ordering::SeqCst);
                     let (done, total, _) = store.prefetch_progress();
-                    eprintln!("[gwnative] full download finished: {done}/{total} chunks");
+                    note!("[gwnative] full download finished: {done}/{total} chunks");
                 }
             });
         }
-        eprintln!(
+        note!(
             "[gwnative] full download started: {} chunks, {workers} workers",
             self.chunk_count()
         );
@@ -821,7 +821,7 @@ impl ChunkStore {
             return Some(bytes);
         }
         if let Err(e) = crate::patch::verify(&bytes, hash) {
-            eprintln!("[gwnative] cached chunk is corrupt, refetching: {e}");
+            note!("[gwnative] cached chunk is corrupt, refetching: {e}");
             let _ = fs::remove_file(&path);
             return None;
         }

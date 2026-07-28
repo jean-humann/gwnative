@@ -150,7 +150,7 @@ pub fn sweep_orphans(cache_dir: &Path) {
         }
     }
     if removed > 0 {
-        eprintln!("[gwnative] cleared {removed} abandoned chunk writes");
+        note!("[gwnative] cleared {removed} abandoned chunk writes");
     }
 }
 
@@ -201,7 +201,7 @@ pub fn prune(cache_dir: &Path, live: &HashSet<String>) {
         }
     }
     if removed > 0 {
-        eprintln!(
+        note!(
             "[gwnative] dropped {removed} chunks ({:.2} GB) the current build no longer uses",
             bytes as f64 / 1e9
         );
@@ -252,12 +252,12 @@ pub fn migrate_cache(legacy: &Path, current: &Path) {
         return;
     };
     if let Err(e) = std::fs::create_dir_all(parent) {
-        eprintln!("[chunks] could not prepare {}: {e}", parent.display());
+        note!("[chunks] could not prepare {}: {e}", parent.display());
         return;
     }
     match std::fs::rename(legacy, current) {
         Ok(()) => {
-            eprintln!(
+            note!(
                 "[chunks] moved the cache out of ~/Library/Caches, which macOS may purge, \
                  to {}",
                 current.display()
@@ -271,7 +271,7 @@ pub fn migrate_cache(legacy: &Path, current: &Path) {
             }
         }
         Err(e) => {
-            eprintln!("[chunks] could not move the existing cache ({e}); leaving it in place")
+            note!("[chunks] could not move the existing cache ({e}); leaving it in place")
         }
     }
 }

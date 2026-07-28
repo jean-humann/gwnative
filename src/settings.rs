@@ -187,12 +187,12 @@ impl Store {
             Ok(settings) => settings,
             Err(reason) => {
                 match set_aside(&path) {
-                    Some(backup) => eprintln!(
+                    Some(backup) => note!(
                         "[settings] {} is unreadable ({reason}); kept as {}",
                         path.display(),
                         backup.display()
                     ),
-                    None => eprintln!("[settings] {} is unreadable: {reason}", path.display()),
+                    None => note!("[settings] {} is unreadable: {reason}", path.display()),
                 }
                 Settings::default()
             }

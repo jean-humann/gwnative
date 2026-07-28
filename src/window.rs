@@ -142,7 +142,7 @@ pub fn load(path: &Path) -> Option<State> {
     match parse(&text) {
         Ok(state) => Some(state),
         Err(reason) => {
-            eprintln!("[window] ignoring {}: {reason}", path.display());
+            note!("[window] ignoring {}: {reason}", path.display());
             let _ = std::fs::remove_file(path);
             None
         }

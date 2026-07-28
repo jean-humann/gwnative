@@ -131,7 +131,7 @@ pub fn forward(
                 // Dropping the header turns the redirect into a bare 3xx, which
                 // the client reports as a failed request rather than following
                 // somewhere this host never vouched for.
-                None => eprintln!("[proxy] {route}: refused a redirect to {value}"),
+                None => note!("[proxy] {route}: refused a redirect to {value}"),
             }
             continue;
         }
