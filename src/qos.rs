@@ -1,4 +1,6 @@
-//! Thread quality-of-service, which on Apple silicon means core selection.
+//! Thread quality-of-service, which on Apple silicon means core selection —
+//! and, for anything that touches the network, scheduling priority out on the
+//! wire as well.
 //!
 //! Every `std::thread::spawn` inherits `QOS_CLASS_DEFAULT`, and the scheduler
 //! reads that as "this might be interactive" — so a background sweep of 16000
@@ -7,9 +9,15 @@
 //! as the frame the player is waiting on.
 //!
 //! Saying which threads are latency-critical and which are merely throughput
-//! work moves the sweep onto efficiency cores and leaves the P-cores to the
+//! work moves that sweep onto efficiency cores and leaves the P-cores to the
 //! game. It is also something Electron structurally cannot do: its equivalent
 //! work runs on libuv's threadpool at whatever QoS the pool was created with.
+//!
+//! What the classes cannot be is a property of the thread's *job*, because the
+//! same job changes meaning: the fetchers filling the cache are the launch
+//! before there is a frame and background work after one, and a class chosen
+//! once at spawn is wrong for half of that. [`Following`] is how a thread
+//! changes its mind, and `ChunkStore::fetch_class` is where the answer lives.
 //!
 //! [`ChunkStore`](crate::chunks::ChunkStore) already reasons about this at the
 //! HTTP-concurrency level — `MAX_PREFETCH_FETCHES` reserves request slots for
@@ -33,6 +41,30 @@ pub enum Class {
 #[link(name = "System", kind = "dylib")]
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+}
+
+/// A thread's class, kept in step with an answer that changes under it.
+///
+/// The fetch threads outlive the reason they were spawned. The same worker
+/// that raced the progress bar to a first frame is still there an hour later,
+/// topping the cache up behind a player who is fighting something — and the
+/// right class is not the same in both halves of that life. Re-declaring costs
+/// one call, and only when the answer has actually changed.
+pub struct Following(u32);
+
+impl Following {
+    pub fn start(class: Class) -> Self {
+        set(class);
+        Self(class as u32)
+    }
+
+    /// Move to `class`, unless it is already the one in force.
+    pub fn now(&mut self, class: Class) {
+        if self.0 != class as u32 {
+            set(class);
+            self.0 = class as u32;
+        }
+    }
 }
 
 /// Declare the calling thread's class. Call it first thing in the thread body.
