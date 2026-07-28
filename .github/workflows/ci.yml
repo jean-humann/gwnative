@@ -6,10 +6,9 @@
 # because of something in ~/.cargo. It runs on a clean checkout with nothing
 # else on it, which is the whole point.
 #
-# What it deliberately does not do is sign, notarize or publish anything. Those
-# need the Developer ID private key, and that key is not going into the secret
-# store of a public repository — see scripts/release, which runs on the machine
-# that already has it.
+# It has no secrets and no `permissions` beyond the read-only default, because
+# it runs on pull requests from anywhere. Signing, notarizing and publishing are
+# release.yml's, which runs only for a tag and only behind an approval gate.
 name: CI
 
 on:

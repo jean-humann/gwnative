@@ -1076,11 +1076,31 @@ credentials is finding out after the build. After signing it re-reads what
 `codesign` produced rather than trusting the flags it passed: a missing hardened
 runtime and a missing timestamp are both silent until Apple returns `Invalid`.
 
-Releasing is deliberately local. Publishing from CI would mean exporting the
-Developer ID private key into the secret store of a public repository, and that
-key signs everything its owner ships rather than only this. The cost is running
-one command by hand, and `git tag` plus `gh release create` afterwards — which
-the script prints, because tags are what the update check reads.
+There are two ways to publish and one implementation.
+`.github/workflows/release.yml` runs this same script rather than
+reimplementing it: a release path only exercised by CI is one nobody can
+reproduce when it breaks, and a local one CI works around is one CI is not
+testing. The workflow's job is to build the environment the script already
+expects — a keychain holding the identity and the notarization profile — and
+then get out of the way. Locally: run the script, then `git tag -s` and `gh
+release create`, which it prints, because tags are what the update check reads.
+From CI: push the tag and approve the run.
+
+Approve is the word. This is a public repository and a Developer ID certificate
+signs everything its owner ships, not only this project, so the release job
+declares `environment: release` and that environment needs required reviewers
+configured on it or the line is decoration. Anyone who can land a workflow file
+can otherwise read every secret in it. For the same reason the job runs no
+third-party actions at all — no cache, no toolchain action, no release action —
+since each would be someone else's code in a process that can reach a signing
+key, and the cache is worth about two minutes.
+
+The secrets it reads are `MACOS_CERTIFICATE_P12` (base64 of a `.p12` export of
+the Developer ID Application certificate and its key), `MACOS_CERTIFICATE_PASSWORD`,
+`APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`. The keychain the job
+builds from them is created in `RUNNER_TEMP`, made default so the scripts find
+it exactly as they do on a developer's machine, and deleted in an `if: always()`
+step so it does not outlive a cancelled run.
 
 ## The update check, and what it will not do
 

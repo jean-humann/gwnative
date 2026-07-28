@@ -1,0 +1,153 @@
+# Publish a signed, notarized disk image for a tag.
+#
+# This runs the same scripts/release that runs locally, unmodified. That is the
+# design: a release path only exercised by CI is one nobody can reproduce when
+# it breaks, and a local one that CI works around is one CI is not testing. What
+# the steps below do is build the environment that script already expects — a
+# keychain holding a Developer ID identity and a notarytool credential profile —
+# and then get out of the way.
+#
+# On the secrets, and why this job is gated
+# -----------------------------------------
+# This is a public repository, and the identity it signs with is not this
+# project's alone: a Developer ID certificate signs everything its owner ships.
+# Two things follow, and both are load-bearing rather than ceremony.
+#
+# The `environment: release` line means the secrets are unreachable until
+# somebody approves the run — configure required reviewers on that environment
+# or it is decoration. Without it, anyone who can land a commit that changes a
+# workflow file can read every secret here, and on a public repository that
+# blast radius reaches well past this application.
+#
+# And nothing third-party runs in this job. actions/checkout is GitHub's own;
+# there is no cache action, no toolchain action, no release action, because each
+# would be someone else's code executing in a process that can read a signing
+# key. The cache is worth roughly two minutes a release and is not worth that.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # For re-cutting a release whose upload failed after notarization succeeded.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The existing tag to build
+        required: true
+
+permissions:
+  # To create the release and upload the disk image to it. Nothing else — the
+  # default token grants far more, and this job needs none of it.
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    # The approval gate. See the note at the top of this file.
+    environment: release
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # scripts/bundle takes CFBundleVersion from the commit count, and a
+          # published build is the one place that number has to be right.
+          fetch-depth: 0
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # A keychain that exists for this job and is deleted with it, holding both
+      # the signing identity and the notarization credentials. Made the default
+      # so that scripts/sign-identity and notarytool find them the same way they
+      # do on a developer's machine — that is what lets the script run unchanged.
+      - name: Unlock a keychain for this run
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # Never a secret and never reused: the keychain is destroyed at the end
+          # of the job, so its password only has to survive these steps.
+          keychain_password=$(openssl rand -base64 24)
+          keychain=$RUNNER_TEMP/release.keychain-db
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          # Without this the keychain relocks on a timer and a build long enough
+          # to outlast it fails at the signing step with an error that says
+          # nothing about time.
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security default-keychain -s "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+
+          # -A is deliberately absent: the key is usable by codesign and by
+          # nothing else, so a later step in this job cannot read it out.
+          p12=$RUNNER_TEMP/certificate.p12
+          printf '%s' "$CERTIFICATE_P12" | base64 --decode > "$p12"
+          security import "$p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -f pkcs12
+          rm -f "$p12"
+
+          # Stops the "codesign wants to access key" prompt that has nobody to
+          # answer it on a runner, and hangs the job until it times out.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$keychain_password" "$keychain" > /dev/null
+
+          # The same profile name scripts/release defaults to, in the keychain
+          # that is now the default one — so the script's own preflight finds it.
+          xcrun notarytool store-credentials gwnative \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --keychain "$keychain"
+
+          echo "RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+      # Unmodified, and that is the point. Everything it checks — a Developer ID
+      # rather than a development certificate, working credentials, a clean
+      # tree, a hardened runtime, a real timestamp, a ticket that staples — it
+      # checks here too.
+      - name: Build, sign, notarize and package
+        run: scripts/release
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          dmg="dist/gwnative-$version.dmg"
+          test -f "$dmg"
+
+          # A tag that names a different version than Cargo.toml declares would
+          # publish a download whose filename, Info.plist and update check all
+          # disagree with the release it is attached to.
+          [ "$TAG" = "v$version" ] ||
+            { echo "tag $TAG does not match version $version in Cargo.toml"; exit 1; }
+
+          # --verify-tag: the release must describe a tag that already exists,
+          # rather than creating one pointing at whatever this job checked out.
+          gh release create "$TAG" "$dmg" \
+            --title "Guild Wars $version" \
+            --generate-notes \
+            --verify-tag
+
+      # Always, including after a failure: a keychain holding a signing identity
+      # should not outlive the job that needed it, and a cancelled run is
+      # exactly when it would.
+      - name: Take the keychain away again
+        if: always()
+        run: |
+          security delete-keychain "$RELEASE_KEYCHAIN" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/certificate.p12"
