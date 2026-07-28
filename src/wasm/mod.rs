@@ -124,12 +124,25 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Outcome<()> {
 }
 
 /// `{ ensureDirectory: -70001, … }`, for injection into the page.
+///
+/// Built by the encoder rather than spelled out, like [`crate::layout::as_json`]
+/// and every other JSON body in this crate. The keys here are compile-time
+/// literals and the values are `i64` constants, so the braces were not wrong —
+/// but this string is injected into a `WKUserScript`, which is the last place
+/// worth keeping a second escaper that only happens to have nothing to escape.
 pub fn markers_json() -> String {
-    let pairs: Vec<String> = ALL_BRIDGE_KINDS
-        .iter()
-        .map(|kind| format!("\"{}\":{}", kind.key(), kind.marker()))
-        .collect();
-    format!("{{{}}}", pairs.join(","))
+    serde_json::Value::from(
+        ALL_BRIDGE_KINDS
+            .iter()
+            .map(|kind| {
+                (
+                    kind.key().to_owned(),
+                    serde_json::Value::from(kind.marker()),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>(),
+    )
+    .to_string()
 }
 
 #[cfg(test)]
