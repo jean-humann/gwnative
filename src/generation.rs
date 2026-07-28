@@ -418,27 +418,7 @@ fn check(path: &Path, expected: &Artifact) -> std::result::Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "gwnative-generation-{tag}-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::scratch::TempDir;
 
     const NAMES: [&str; 2] = ["Gw.jspi.js", "Gw.jspi.wasm"];
 
@@ -460,7 +440,7 @@ mod tests {
 
     #[test]
     fn presence_is_not_soundness() {
-        let temp = TempDir::new("soundness");
+        let temp = TempDir::new("generation-soundness");
         let root = temp.0.join("web");
         let store = proven(temp.0.join("state"), &root, "good");
 
@@ -485,7 +465,7 @@ mod tests {
 
     #[test]
     fn with_no_record_a_file_only_has_to_be_there() {
-        let temp = TempDir::new("unrecorded");
+        let temp = TempDir::new("generation-unrecorded");
         let root = temp.0.join("web");
         write_client(&root, "whatever");
         let store = Store::open(temp.0.join("state"));
@@ -499,7 +479,7 @@ mod tests {
 
     #[test]
     fn a_client_that_predates_the_record_is_taken_at_its_word_once() {
-        let temp = TempDir::new("adopt");
+        let temp = TempDir::new("generation-adopt");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
         write_client(&root, "installed-long-ago");
@@ -534,7 +514,7 @@ mod tests {
 
     #[test]
     fn a_build_that_never_booted_is_undone_and_refused_by_name() {
-        let temp = TempDir::new("rollback");
+        let temp = TempDir::new("generation-rollback");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
         let store = proven(state.clone(), &root, "old");
@@ -570,7 +550,7 @@ mod tests {
 
     #[test]
     fn a_first_frame_settles_it() {
-        let temp = TempDir::new("prove");
+        let temp = TempDir::new("generation-prove");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
         let store = proven(state.clone(), &root, "old");
@@ -592,7 +572,7 @@ mod tests {
 
     #[test]
     fn the_only_client_on_the_disk_is_never_taken_away() {
-        let temp = TempDir::new("first-install");
+        let temp = TempDir::new("generation-first-install");
         let root = temp.0.join("web");
         write_client(&root, "first");
         let store = Store::open(temp.0.join("state"));
@@ -607,7 +587,7 @@ mod tests {
 
     #[test]
     fn refusals_do_not_accumulate_without_bound() {
-        let temp = TempDir::new("refusals");
+        let temp = TempDir::new("generation-refusals");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
         let store = proven(state, &root, "keeper");
