@@ -28,7 +28,6 @@ use crate::wasm::{COMPANION_KERNEL, COMPANION_KERNEL_PATH};
 /// chunks, and a demand read arriving behind that waits for all of them.
 const MAX_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 
-
 /// Answer anything that is not a host capability.
 pub(super) fn serve(
     request: &Request,

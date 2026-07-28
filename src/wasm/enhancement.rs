@@ -193,8 +193,7 @@ pub(super) fn transform(input: &[u8], build: &EnhancementBuild) -> Outcome<Vec<u
         .hook_function
         .checked_sub(build.import_count)
         .filter(|index| (*index as usize) < bodies.len())
-        .ok_or_else(|| fault("the hook function is out of range"))?
-        as usize;
+        .ok_or_else(|| fault("the hook function is out of range"))? as usize;
     let type_index = function_types[local_index];
     let hook_type = types
         .get(type_index as usize)
@@ -321,7 +320,12 @@ mod tests {
 
         // And the tail dispatches through the table one below the global.
         let tail = &body[1 + expected.len()..];
-        assert_eq!(tail, &[0x20, 0x00, 0x23, 0x07, 0x41, 0x01, 0x6b, 0x11, 0x0b, 0x00, 0x0b]);
+        assert_eq!(
+            tail,
+            &[
+                0x20, 0x00, 0x23, 0x07, 0x41, 0x01, 0x6b, 0x11, 0x0b, 0x00, 0x0b
+            ]
+        );
     }
 
     /// Read a name-prefixed vector entry: `(name, rest)`.
@@ -329,7 +333,10 @@ mod tests {
         let mut cursor = 0;
         let length = read_uleb(bytes, &mut cursor).expect("a name is length-prefixed") as usize;
         let (text, rest) = bytes[cursor..].split_at(length);
-        (String::from_utf8(text.to_vec()).expect("names are utf-8"), rest)
+        (
+            String::from_utf8(text.to_vec()).expect("names are utf-8"),
+            rest,
+        )
     }
 
     /// The two halves of the enhancement are compiled from different files by
@@ -437,9 +444,7 @@ mod tests {
         assert_eq!(section.id, 0, "the manifest is not a custom section");
         let body = String::from_utf8(section.body.clone()).unwrap();
         let json = body
-            .strip_prefix(&format!(
-                "\u{14}{MANIFEST_SECTION}",
-            ))
+            .strip_prefix(&format!("\u{14}{MANIFEST_SECTION}",))
             .expect("the section does not start with its own name");
         assert!(
             json.starts_with(r#"{"transformAbi":4,"snapshotAbi":1,"snapshotBytes":64,"#),
