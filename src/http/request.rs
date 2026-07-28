@@ -60,25 +60,33 @@ impl Request {
     }
 }
 
+/// Decoded in bytes throughout, never by slicing the `str`.
+///
+/// The query string arrives inside a line `read_line` has already proved is
+/// UTF-8, and nothing says the character after a `%` is one byte wide. Slicing
+/// `value[i + 1..i + 3]` to read the escape lands in the middle of any
+/// multi-byte character that starts there, which is not a parse failure in Rust
+/// but a panic — and this crate aborts on panic, so a query of `?token=%a€`
+/// took the whole app down from any caller that could open a socket. A byte is
+/// a hex digit or it is not; the width of the character it belongs to is not a
+/// question this has to ask.
 fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&value[i + 1..i + 3], 16) {
-                    Ok(byte) => {
-                        out.push(byte);
-                        i += 3;
-                    }
-                    // A stray '%' is data, not a broken escape.
-                    Err(_) => {
-                        out.push(b'%');
-                        i += 1;
-                    }
+            b'%' => match escape_at(bytes, i + 1) {
+                Some(byte) => {
+                    out.push(byte);
+                    i += 3;
                 }
-            }
+                // A stray '%' is data, not a broken escape.
+                None => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
             b'+' => {
                 out.push(b' ');
                 i += 1;
@@ -90,6 +98,19 @@ fn percent_decode(value: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The byte the two hex digits at `at` spell, if that is what they are.
+///
+/// `None` covers both ways a `%` can fail to begin an escape — too near the end
+/// of the string, or not followed by two hex digits — because the caller treats
+/// them the same. Stricter than the `from_str_radix` it replaces, which also
+/// accepted a leading sign and so decoded `%+1` to a byte; RFC 3986 spells a
+/// pct-encoded octet as `%` HEXDIG HEXDIG and nothing else.
+fn escape_at(bytes: &[u8], at: usize) -> Option<u8> {
+    let digit = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let pair = bytes.get(at..at + 2)?;
+    Some(digit(pair[0])? << 4 | digit(pair[1])?)
 }
 
 /// Largest body accepted on this server. Everything posted here is a log line,
@@ -191,16 +212,25 @@ pub fn parse_range(header: &str, total: u64) -> Option<(u64, u64)> {
         return None;
     }
     let (first, last) = spec.split_once('-')?;
+    // Every arm below wants the last valid offset, and a resource of no length
+    // does not have one — so it has no satisfiable range either, which is the
+    // answer `None` already means here. Taken once, up front, because `total - 1`
+    // written inline underflows: harmlessly in a release build, where the wrap
+    // fails the bounds test on the last line anyway, but as a panic anywhere
+    // overflow checks are on. `total` is a size out of the manifest, which is a
+    // document fetched over the network, and none of the sizes in it are this
+    // function's to vouch for.
+    let last_offset = total.checked_sub(1)?;
     let (start, end) = match (first.trim(), last.trim()) {
         // A suffix range asks for the final N bytes.
         ("", suffix) => {
             let n: u64 = suffix.parse().ok()?;
-            (total.checked_sub(n)?, total - 1)
+            (total.checked_sub(n)?, last_offset)
         }
-        (first, "") => (first.parse().ok()?, total - 1),
+        (first, "") => (first.parse().ok()?, last_offset),
         (first, last) => (
             first.parse().ok()?,
-            last.parse::<u64>().ok()?.min(total - 1),
+            last.parse::<u64>().ok()?.min(last_offset),
         ),
     };
     (start <= end && start < total).then_some((start, end))
@@ -238,5 +268,64 @@ mod tests {
         assert_eq!(parse_range("bytes=50-10", TOTAL), None);
         assert_eq!(parse_range("bytes=0-10,20-30", TOTAL), None);
         assert_eq!(parse_range("items=0-10", TOTAL), None);
+    }
+
+    /// No byte of it exists, so no range over it is satisfiable — and reaching
+    /// that answer must not go through `0 - 1` to get there.
+    #[test]
+    fn nothing_is_a_satisfiable_range_of_an_empty_resource() {
+        for spec in ["bytes=0-", "bytes=0-0", "bytes=-0", "bytes=-10"] {
+            assert_eq!(parse_range(spec, 0), None, "{spec} over an empty resource");
+        }
+    }
+
+    /// The query string is UTF-8 — `read_line` would not have produced it
+    /// otherwise — and a `%` in it can be followed by a character several bytes
+    /// wide. Reading the escape by slicing the `str` lands inside that character
+    /// and panics, which under this crate's `panic = "abort"` is the whole
+    /// process. Anything that can open a socket to the loopback server can send
+    /// this, and `offered_token` decodes the query before any token is checked,
+    /// so it was reachable without one.
+    fn query(q: &str) -> Request {
+        let wire = format!("GET /__socket?{q} HTTP/1.1\r\n\r\n");
+        read_request(&mut std::io::BufReader::new(wire.as_bytes()))
+            .expect("a well-formed request line")
+            .expect("not a closed connection")
+    }
+
+    #[test]
+    fn a_multibyte_character_after_a_percent_is_data_not_a_crash() {
+        assert_eq!(query("token=%a€").offered_token().as_deref(), Some("%a€"));
+        assert_eq!(query("token=%€x").offered_token().as_deref(), Some("%€x"));
+        assert_eq!(
+            query("token=a%9éb").offered_token().as_deref(),
+            Some("a%9éb")
+        );
+        // The same shape at the very end of the string, where there are not two
+        // bytes left to read at all.
+        assert_eq!(query("token=abc%").offered_token().as_deref(), Some("abc%"));
+        assert_eq!(
+            query("token=abc%4").offered_token().as_deref(),
+            Some("abc%4")
+        );
+    }
+
+    #[test]
+    fn a_real_escape_still_decodes() {
+        assert_eq!(
+            query("token=a%2Fb%2fc").offered_token().as_deref(),
+            Some("a/b/c")
+        );
+        assert_eq!(
+            query("token=one+two").offered_token().as_deref(),
+            Some("one two")
+        );
+        // `from_str_radix` took a sign; a pct-encoded octet is two hex digits.
+        assert_eq!(query("token=%+1").offered_token().as_deref(), Some("% 1"));
+        // The header still wins over the query string when both are offered.
+        assert_eq!(
+            query("token=fromquery").param("token").as_deref(),
+            Some("fromquery")
+        );
     }
 }
