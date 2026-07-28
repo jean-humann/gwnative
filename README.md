@@ -1006,6 +1006,16 @@ Launch it from Finder, or run `dist/Guild Wars.app/Contents/MacOS/gwnative` to
 keep the diagnostics on the terminal — the executable resolves its own bundle
 either way.
 
+The icon is built by `scripts/icon` from `packaging/icon.png` and committed as
+`packaging/AppIcon.icns`, because an icon is designed rather than compiled and
+`iconutil` is not on every machine that can build this. macOS draws app icons
+inside a grid whose body fills 824 of a 1024 canvas, so the artwork is inset to
+that ratio at every size; artwork that fills its canvas is the tell of a ported
+icon, visibly larger than everything beside it in the Dock. The same `.icns` is
+embedded in the binary and installed at launch, so a `cargo run` build — which
+has no bundle and therefore no `CFBundleIconFile` — shows the icon too, and the
+download progress bar has something to draw over.
+
 ## Licence
 
 GPL-2.0-or-later, matching the upstream project.

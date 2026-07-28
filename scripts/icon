@@ -1,0 +1,81 @@
+#!/bin/sh
+# Rebuild packaging/AppIcon.icns from packaging/icon.png.
+#
+# Run when the artwork changes. The .icns is committed, because iconutil is not
+# on every machine that might build this and an icon is a designed thing rather
+# than a compiled one — regenerating it on each build would put a binary diff in
+# the tree every time somebody upgraded a tool.
+#
+# The one decision here is the margin. macOS draws an app icon inside a grid
+# whose body fills 824 of a 1024 canvas — 80.5% — and everything the Dock shows
+# beside us obeys it. Artwork that fills its canvas edge to edge looks oversized
+# next to Safari and Mail, which is the tell of a ported icon. The source is
+# already a rounded rectangle with its own corners, so all that is missing is
+# the margin, and the ratio holds at every size: 512 draws into 412, 32 into 26.
+#
+# No baked drop shadow. Apple's own template has one, but its exact blur and
+# offset are not published as numbers, and a guessed shadow reads as a mistake
+# in a way that no shadow does not.
+set -e
+
+cd "$(dirname "$0")/.."
+source=packaging/icon.png
+icns=packaging/AppIcon.icns
+iconset=$(mktemp -d)/AppIcon.iconset
+mkdir -p "$iconset"
+
+cat > "$iconset/../render.swift" <<'SWIFT'
+import AppKit
+
+// argv: source, output directory. Every size is drawn from the source at its
+// final pixel dimensions rather than resampled down a chain from one large
+// render, which is a sharper small icon for the same three lines.
+let args = CommandLine.arguments
+guard args.count == 3, let source = NSImage(contentsOfFile: args[1]) else {
+    FileHandle.standardError.write(Data("[icon] cannot read \(args.dropFirst(1).first ?? "")\n".utf8))
+    exit(1)
+}
+let directory = URL(fileURLWithPath: args[2])
+
+// (pixels, file name). The @2x entries are the same pixel count as the plain
+// entry one step up and are still both required: the Dock picks by point size
+// and scale, not by pixels.
+let entries: [(Int, String)] = [
+    (16, "icon_16x16.png"), (32, "icon_16x16@2x.png"),
+    (32, "icon_32x32.png"), (64, "icon_32x32@2x.png"),
+    (128, "icon_128x128.png"), (256, "icon_128x128@2x.png"),
+    (256, "icon_256x256.png"), (512, "icon_256x256@2x.png"),
+    (512, "icon_512x512.png"), (1024, "icon_512x512@2x.png"),
+]
+
+let bodyRatio = 824.0 / 1024.0
+
+for (pixels, name) in entries {
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+    ) else { exit(1) }
+    // Drawn through an explicit bitmap rather than NSImage.lockFocus, which
+    // takes the backing scale of whatever display is attached and would make
+    // the output depend on which Mac ran this script.
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    NSGraphicsContext.current?.imageInterpolation = .high
+    let body = (Double(pixels) * bodyRatio).rounded()
+    let inset = ((Double(pixels) - body) / 2).rounded()
+    source.draw(
+        in: NSRect(x: inset, y: inset, width: body, height: body),
+        from: .zero, operation: .sourceOver, fraction: 1
+    )
+    NSGraphicsContext.restoreGraphicsState()
+    guard let png = rep.representation(using: .png, properties: [:]) else { exit(1) }
+    try png.write(to: directory.appendingPathComponent(name))
+}
+SWIFT
+
+swift "$iconset/../render.swift" "$source" "$iconset"
+iconutil --convert icns --output "$icns" "$iconset"
+rm -rf "$(dirname "$iconset")"
+
+echo "[icon] $icns ($(wc -c < "$icns" | tr -d ' ') bytes)"

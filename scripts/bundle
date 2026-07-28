@@ -34,6 +34,11 @@ printf 'APPL????' > "$app/Contents/PkgInfo"
 
 cp target/release/gwnative "$app/Contents/MacOS/gwnative"
 
+# Finder, the Dock and Launch Services read this one; the copy inside the binary
+# is what a `cargo run` build installs for itself. Both come from scripts/icon,
+# so they cannot drift.
+cp packaging/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+
 # The shell only. Gw.jspi.js, Gw.jspi.wasm and version.json are the client
 # itself, fetched from ArenaNet against the live manifest; shipping a copy would
 # freeze the game at whatever build this was packaged from, because the patch

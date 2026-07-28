@@ -427,6 +427,9 @@ fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module)
     let mtm = MainThreadMarker::new().expect("main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // Before the window: the Dock tile is created with the application, and an
+    // icon set afterwards is one the player can watch change.
+    dock::set_icon(mtm);
 
     // The frame the web view is created at does not matter: `window::open`
     // resizes the window to the remembered one before it is ever shown, and the
