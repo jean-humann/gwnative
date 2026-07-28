@@ -23,7 +23,7 @@ const SNAPSHOT = /(^|[/\\])Gw\.snapshot$/i;
 export function createImageSource({ size, chunkSize, resident, writeBytes, log }) {
   const handles = new Set();
   let nextHandle = 1;
-  const stats = { reads: 0, bytes: 0 };
+  const stats = { reads: 0, bytes: 0, warmed: 0 };
 
   const chunkRange = (offset, length) => [
     Math.floor(offset / chunkSize),
@@ -46,6 +46,25 @@ export function createImageSource({ size, chunkSize, resident, writeBytes, log }
     const [first, last] = chunkRange(offset, bytes);
     for (let i = first; i <= last; i++) markResident(i);
     return data;
+  }
+
+  /**
+   * Warming asks the host to have a chunk, and wants nothing back.
+   *
+   * It used to be `fetchRange` with the result dropped, which is the same
+   * request with 256 KiB attached: over the loopback socket, through
+   * `arrayBuffer()`, into a `Uint8Array`, and straight into the garbage. A quick
+   * launch warms some 1,800 chunks in twenty seconds, faster than the collector
+   * reclaims them, and that is most of the gap between a renderer that settles
+   * at 400 MB and one whose footprint peaks at 1.7 GB on the way there.
+   */
+  async function warmRange(offset, bytes) {
+    const response = await fetch(`__warm?offset=${offset}&bytes=${bytes}`, {
+      headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
+    });
+    if (!response.ok) throw new Error(`snapshot warm ${offset}+${bytes}: HTTP ${response.status}`);
+    const [first, last] = chunkRange(offset, bytes);
+    for (let i = first; i <= last; i++) markResident(i);
   }
 
   const image = {
@@ -92,7 +111,8 @@ export function createImageSource({ size, chunkSize, resident, writeBytes, log }
       for (let i = first; i <= last; i++) {
         if (isResident(i)) continue;
         const start = i * chunkSize;
-        await fetchRange(start, Math.min(chunkSize, size - start));
+        stats.warmed++;
+        await warmRange(start, Math.min(chunkSize, size - start));
         try {
           progress(1);
         } catch (error) {
