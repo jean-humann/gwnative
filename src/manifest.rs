@@ -391,13 +391,19 @@ fn validate_name(value: Option<&serde_json::Value>, kind: &str) -> Result<String
 
 /// The live service signals "no parent" by sending null rather than omitting the
 /// field. Rejecting that stops every client update from applying.
+///
+/// Zero is the third spelling of the same thing and is admitted whatever `len`
+/// is, including zero. Both callers branch on it before they index, so it is
+/// never a subscript — and a flat manifest, which is the one shape that omits
+/// `directories` entirely, is precisely the one where `len` is 0 and a bounds
+/// check would turn "this file is at the root" into a manifest nobody can read.
 fn validate_parent(value: Option<&serde_json::Value>, len: usize, kind: &str) -> Result<usize> {
     match value {
         None | Some(serde_json::Value::Null) => Ok(0),
         Some(v) => {
             let n = v
                 .as_u64()
-                .filter(|n| (*n as usize) < len)
+                .filter(|n| *n == 0 || (*n as usize) < len)
                 .ok_or_else(|| Error::ManifestFormat(format!("invalid {kind} parent index")))?;
             Ok(n as usize)
         }
@@ -438,6 +444,32 @@ mod tests {
         ))
         .expect("parse");
         assert!(m.files.contains_key("a.bin"));
+    }
+
+    /// The third spelling, and the one the bounds check used to swallow. A flat
+    /// manifest omits `directories`, so there are no directories to be inside
+    /// and every index is out of range — including the one that was never an
+    /// index. Reading 0 as "out of range" rather than as "the root" rejects the
+    /// whole manifest, which is an app that cannot start.
+    #[test]
+    fn a_parent_index_of_zero_means_root_even_with_no_directories() {
+        let m = manifest(&format!(
+            r#"{{"compressionMode":"none","chunkSize":16,
+                 "files":[{{"name":"a.bin","size":16,"parentIndex":0,
+                            "chunkHashes":["{}"]}}]}}"#,
+            "c".repeat(64)
+        ))
+        .expect("a file at the root of a flat manifest");
+        assert!(m.files.contains_key("a.bin"));
+
+        // Still an index everywhere else, and still bounded there.
+        let err = manifest(&format!(
+            r#"{{"compressionMode":"none","chunkSize":16,
+                 "files":[{{"name":"a.bin","size":16,"parentIndex":1,
+                            "chunkHashes":["{}"]}}]}}"#,
+            "c".repeat(64)
+        ));
+        assert!(err.is_err(), "there is no directory 1 to be inside");
     }
 
     #[test]
