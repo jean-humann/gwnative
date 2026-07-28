@@ -86,7 +86,7 @@ pub fn forward(
     query: &str,
     method: &str,
     headers: &[(String, String)],
-    body: Vec<u8>,
+    body: &[u8],
 ) -> Result<Reply, String> {
     let host = host(route).ok_or_else(|| format!("unknown proxy route: {route}"))?;
     if !matches!(method, "GET" | "POST" | "PUT") {
@@ -116,7 +116,7 @@ pub fn forward(
         method,
         &url,
         &forwarded,
-        matches!(method, "POST" | "PUT").then_some(body.as_slice()),
+        matches!(method, "POST" | "PUT").then_some(body),
         TIMEOUT,
     )?;
 

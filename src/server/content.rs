@@ -28,15 +28,12 @@ use crate::proxy;
 const MAX_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Answer anything that is not a host capability.
-///
-/// Takes the request by value because the proxy forwards the body upstream
-/// rather than reading it, and a 8 MiB copy to save a move is not worth it.
 pub(super) fn serve(
-    request: Request,
+    request: &Request,
     stream: &mut TcpStream,
     context: &Context,
 ) -> std::io::Result<Flow> {
-    let flow = Flow::after(&request);
+    let flow = Flow::after(request);
 
     if request.path == SNAPSHOT
         && let Some(store) = &context.snapshot
@@ -52,24 +49,23 @@ pub(super) fn serve(
         // A range that fails part way through has already put bytes on the wire
         // under a Content-Length it can no longer honour. There is no way back
         // to a clean message boundary, so the connection ends here.
-        let intact = snapshot(stream, &request, store)?;
+        let intact = snapshot(stream, request, store)?;
         let ms = began.elapsed().as_secs_f64() * 1000.0;
         let metrics = &context.recorder.metrics;
         metrics.count("gw.range.requests", 1.0);
         metrics.count("gw.range.ms.total", ms);
         metrics.peak("gw.range.ms.max", ms);
-        return Ok(match intact {
-            true => flow,
-            false => Flow::Close,
-        });
+        return Ok(if intact { flow } else { Flow::Close });
     }
 
     // The client's own web requests, which it addressed to this origin because
     // its glue rewrote them. See `proxy` for why, and why the table is closed.
-    // Only the first segment is needed to recognise one, and recognising one is
-    // all that happens on the path a static file takes.
-    if proxy::host(request.path.split('/').next().unwrap_or("")).is_some() {
-        return forward(request, stream, flow);
+    let (route, tail) = match request.path.split_once('/') {
+        Some((route, tail)) => (route, tail),
+        None => (request.path.as_str(), ""),
+    };
+    if proxy::host(route).is_some() {
+        return forward(request, route, tail, stream, flow);
     }
 
     // A request for the document itself is the page starting over — the Reload
@@ -84,32 +80,35 @@ pub(super) fn serve(
         store.back_to_waiting();
     }
 
-    static_file(&request, stream, context)?;
+    static_file(request, stream, context)?;
     Ok(flow)
 }
 
 /// Relay one of the client's own requests to the host it was addressed to.
 ///
-/// Splits the path again rather than taking the caller's halves: the body moves
-/// upstream from here, and a borrow of the path would outlive it. The two small
-/// allocations that costs are on a path that is about to make a network round
-/// trip, so they are not worth avoiding.
-fn forward(request: Request, stream: &mut TcpStream, flow: Flow) -> std::io::Result<Flow> {
-    let (route, tail) = match request.path.split_once('/') {
-        Some((route, tail)) => (route.to_owned(), format!("/{tail}")),
-        None => (request.path.clone(), "/".to_owned()),
-    };
+/// `route` is the first path segment and `tail` everything after the slash that
+/// ended it, both borrowed from the request — upstream reads the body rather
+/// than taking it, so nothing here has to own anything.
+fn forward(
+    request: &Request,
+    route: &str,
+    tail: &str,
+    stream: &mut TcpStream,
+    flow: Flow,
+) -> std::io::Result<Flow> {
     if request.body.len() > proxy::MAX_BODY {
         text(stream, 413, "request body too large")?;
         return Ok(flow);
     }
+    // Upstream wants the tail rooted; the caller's split left the slash behind.
+    let tail = format!("/{tail}");
     match proxy::forward(
-        &route,
+        route,
         &tail,
         &request.query,
         &request.method,
         &request.headers,
-        request.body,
+        &request.body,
     ) {
         Ok(reply) => {
             note!(

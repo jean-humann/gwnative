@@ -49,7 +49,7 @@ fn open(hashes: &str, size: u64, cache_dir: PathBuf) -> ChunkStore {
     )
     .expect("the synthetic manifest should parse");
     ChunkStore::open(
-        Client::new(String::new(), String::new()),
+        Client::new("", String::new()),
         manifest,
         cache_dir,
     )

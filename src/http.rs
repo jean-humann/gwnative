@@ -11,6 +11,9 @@
 //! bytes into a `Request` and writes bytes back; which route answers, and what
 //! it answers with, is next door.
 
+// Anonymous because `io::Write` is here too and both spell `write!`; the
+// compiler picks by receiver, and only strings use this one.
+use std::fmt::Write as _;
 use std::io::{BufRead, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Component, Path, PathBuf};
@@ -322,7 +325,9 @@ fn common_headers(
         POLICY.get().map_or("default-src 'self'", String::as_str)
     );
     for (name, value) in extra {
-        head.push_str(&format!("{name}: {value}\r\n"));
+        // Written in place rather than through a `format!`, which would
+        // allocate a String per header and drop it a line later.
+        let _ = write!(head, "{name}: {value}\r\n");
     }
     head.push_str("\r\n");
     head
@@ -480,7 +485,7 @@ pub fn respond_proxy(stream: &mut TcpStream, reply: &proxy::Reply) -> std::io::R
             note!("[proxy] dropped a header with embedded newlines: {name}");
             continue;
         }
-        head.push_str(&format!("{name}: {value}\r\n"));
+        let _ = write!(head, "{name}: {value}\r\n");
     }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;

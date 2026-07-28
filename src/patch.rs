@@ -73,14 +73,14 @@ pub struct Retries {
 impl Client {
     /// Both endpoint and key can be overridden from the environment; neither has
     /// to be, so a clean checkout runs without setup. See [`ACCESS_KEY`].
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env() -> Self {
         let access_key =
             std::env::var("GWNATIVE_ACCESS_KEY").unwrap_or_else(|_| ACCESS_KEY.to_owned());
         let root = std::env::var("GWNATIVE_PATCH_ROOT").unwrap_or_else(|_| PATCH_ROOT.to_owned());
-        Ok(Self::new(root, access_key))
+        Self::new(&root, access_key)
     }
 
-    pub fn new(root: String, access_key: String) -> Self {
+    pub fn new(root: &str, access_key: String) -> Self {
         Self {
             root: root.trim_end_matches('/').to_owned(),
             access_key,
@@ -203,8 +203,7 @@ impl Client {
             }
             match self.get_once(url, limit) {
                 Ok(bytes) => return Ok(bytes),
-                Err(e @ Error::Http { .. }) => return Err(e),
-                Err(e @ Error::TooLarge { .. }) => return Err(e),
+                Err(e @ (Error::Http { .. } | Error::TooLarge { .. })) => return Err(e),
                 Err(e) => last = Some(e),
             }
         }
@@ -404,7 +403,7 @@ mod tests {
     /// silently reads zero forever would actually come from.
     #[test]
     fn the_retry_ladder_is_reported_from_the_counters_it_increments() {
-        let client = Client::new(String::new(), String::new());
+        let client = Client::new("", String::new());
         assert_eq!(
             client.retries(),
             (0, 0),

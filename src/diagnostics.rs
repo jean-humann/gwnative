@@ -104,7 +104,7 @@ impl Metrics {
 }
 
 /// What the kernel will say about this process.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Usage {
     /// The number that matches Activity Monitor's "Memory" column and
     /// `footprint`, and the only memory figure worth comparing between two

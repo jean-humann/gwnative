@@ -244,7 +244,7 @@ fn handle(
 
     match api::serve(&request, stream, context)? {
         Some(flow) => Ok(flow),
-        None => content::serve(request, stream, context),
+        None => content::serve(&request, stream, context),
     }
 }
 

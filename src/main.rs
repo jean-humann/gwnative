@@ -336,7 +336,7 @@ fn run_windowed(loopback: &server::Loopback, token: &str, template_save: &str) {
 }
 
 fn open_snapshot() -> error::Result<Arc<chunks::ChunkStore>> {
-    let client = patch::Client::from_env()?;
+    let client = patch::Client::from_env();
     let manifest = client.fetch_manifest()?;
     let store = chunks::ChunkStore::open(client, manifest, cache::default_cache_dir())?;
     Ok(Arc::new(store))
@@ -361,7 +361,7 @@ fn sync(
             unsound.join(", ")
         );
     }
-    let client = patch::Client::from_env()?;
+    let client = patch::Client::from_env();
     let manifest = client.fetch_manifest()?;
     let names = patch::artifacts();
     let offered = generation::identify(&manifest, &names)?;

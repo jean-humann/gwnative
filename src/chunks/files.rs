@@ -129,7 +129,10 @@ impl ChunkStore {
     /// than on every read: nothing can change the length behind an open
     /// descriptor, because nothing ever writes to a cached chunk in place.
     fn handle(&self, hash: &ContentHash, expected: u64) -> Option<Arc<fs::File>> {
-        if let Some(file) = self.handles.lock().unwrap().get(hash) {
+        // Bound so the lock is gone before `open_sized` runs. Opening a file
+        // is a syscall, and every other window read is waiting on this mutex.
+        let cached = self.handles.lock().unwrap().get(hash);
+        if let Some(file) = cached {
             return Some(file);
         }
         let file = Arc::new(open_sized(&self.cache_path(hash), expected)?);

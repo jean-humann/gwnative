@@ -7,6 +7,9 @@
 //! windows are the backpressure. Nothing accumulates in the host, so there is
 //! no bound to get wrong.
 
+// Anonymous because `io::Write` is here too and both spell `write!`; the
+// compiler picks by receiver, and only the hex trace uses this one.
+use std::fmt::Write as _;
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
@@ -97,7 +100,12 @@ fn trace(destination: &str, direction: &str, data: &[u8]) {
         Trace::Sizes => note!("[socket] {destination}: {direction} {}", data.len()),
         Trace::Hex => {
             let head = &data[..data.len().min(TRACE_HEAD)];
-            let hex: String = head.iter().map(|b| format!("{b:02x}")).collect();
+            // Folded rather than collected from `format!`, which would allocate
+            // a String per byte to build one string of `2 * TRACE_HEAD` chars.
+            let hex = head.iter().fold(String::new(), |mut out, b| {
+                let _ = write!(out, "{b:02x}");
+                out
+            });
             let elided = if data.len() > head.len() { "…" } else { "" };
             note!(
                 "[socket] {destination}: {direction} {} {hex}{elided}",
@@ -210,7 +218,7 @@ pub fn bridge(
             Ok(Some(Message::Text(text))) => {
                 note!("[socket] {destination}: unexpected control frame from page: {text}");
             }
-            Ok(Some(Message::Close)) | Ok(None) => break,
+            Ok(Some(Message::Close) | None) => break,
             Err(e) => {
                 note!("[socket] {destination}: page read failed: {e}");
                 break;
