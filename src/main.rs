@@ -32,6 +32,7 @@ mod patch;
 mod paths;
 mod proxy;
 mod qos;
+mod relaunch;
 mod renderer;
 #[cfg(test)]
 mod scratch;
@@ -182,7 +183,14 @@ fn main() {
 /// identify.
 fn hold_the_only_instance(windowed: bool) -> instance::Instance {
     let lock_path = paths::support_dir().join("gwnative.lock");
-    match instance::acquire(&lock_path) {
+    // A relaunch is started by the app it replaces, so for a moment there
+    // really are two — and this is the one that has to wait for the other.
+    let patience = if relaunch::is_successor() {
+        relaunch::PATIENCE
+    } else {
+        std::time::Duration::ZERO
+    };
+    match instance::acquire(&lock_path, patience) {
         Ok(held) => held,
         Err(reason) => {
             note!("[gwnative] {reason}");
@@ -329,6 +337,9 @@ fn run_windowed(loopback: &server::Loopback, token: &str, template_save: &str) {
 
     window.makeKeyAndOrderFront(None);
     app.activate();
+    // The last thing before the thread stops being ours. `app::request_quit`
+    // reads this to know a `terminate:` will be heard.
+    app::about_to_run();
     app.run();
 
     // `run` returns after `applicationWillTerminate`, so `window` has already

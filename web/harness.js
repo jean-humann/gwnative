@@ -622,6 +622,7 @@ function appendGlue() {
     save: host.saveSettings,
     showLog: (on) => window.gwLog(on),
     sweep: host.sweepSnapshot,
+    relaunch: host.relaunchApp,
     log,
   });
 
