@@ -102,6 +102,82 @@ impl Client {
         Manifest::parse(&bytes)
     }
 
+    fn manifest_url(&self) -> String {
+        format!("{}/manifest.json", self.root)
+    }
+
+    /// The manifest this launch should run on, preferring the copy on disk.
+    ///
+    /// A warm launch has the whole client installed and wants the manifest for
+    /// one thing: the snapshot's chunk list, which [`crate::chunks::ChunkStore`]
+    /// reads when it opens. That list is 1.2 MB, and fetching it was 120 ms of
+    /// the 165 ms this process spent before the window existed — three quarters
+    /// of a launch spent asking the service to re-send a file that had not
+    /// changed in six days.
+    ///
+    /// Being a launch behind costs nothing here, which is the part worth being
+    /// precise about. The client artifacts on disk were installed from this same
+    /// cached manifest and their hashes are checked against the record before
+    /// this is called, so the cached manifest describes exactly the client that
+    /// is about to run. It is the arrangement this replaces — a *fresh* manifest
+    /// paired with a client from whenever the last sync happened — that
+    /// describes something nobody has installed.
+    ///
+    /// The caller revalidates off the launch path. See [`Client::revalidate`].
+    pub fn manifest(&self, dir: &Path) -> Result<(Manifest, Source)> {
+        if let Some((_, bytes)) = read_cache(dir)
+            && let Ok(manifest) = Manifest::parse(&bytes)
+        {
+            return Ok((manifest, Source::Disk));
+        }
+        let fetched = self.fetch_with(&self.manifest_url(), MAX_MANIFEST_BYTES, None)?;
+        let bytes = fetched.body.expect("an unconditional GET returns a body");
+        // Parsed before it is stored: a body that cannot be read is not a copy
+        // worth booting the next launch from.
+        let manifest = Manifest::parse(&bytes)?;
+        write_cache(dir, fetched.validator.as_deref(), &bytes);
+        Ok((manifest, Source::Service))
+    }
+
+    /// Refresh the cached manifest if the service has a different one, and say
+    /// whether it did.
+    ///
+    /// Conditional, so the ordinary answer is 304 and a few hundred bytes rather
+    /// than 1.2 MB. Every installation shares one access key, so what this costs
+    /// the service is multiplied by everyone running it — see [`ACCESS_KEY`].
+    ///
+    /// Nothing is applied to the running app, and that is deliberate: the client
+    /// this process is running came from the old manifest, and swapping the
+    /// chunk list underneath a live game would pair a running client with a
+    /// snapshot it was not built against.
+    ///
+    /// What it does *not* do is install anything. `main` syncs the client
+    /// artifacts only when one of them is missing or fails its hash, so a
+    /// manifest that changed leaves the next launch opening on the new chunk
+    /// list with the old artifacts still on disk — which is what every launch
+    /// did before this cache existed, since each one fetched a fresh manifest
+    /// and none of them re-synced either. Storing it here is what makes closing
+    /// that gap cheap; it does not close it.
+    pub fn revalidate(&self, dir: &Path) -> Result<bool> {
+        let Some((known, _)) = read_cache(dir) else {
+            return Ok(false);
+        };
+        let fetched =
+            self.fetch_with(&self.manifest_url(), MAX_MANIFEST_BYTES, known.as_deref())?;
+        let Some(bytes) = fetched.body else {
+            return Ok(false);
+        };
+        // A service with no ETag answers every conditional request in full, so
+        // compare the bytes rather than trusting the 200: without this, a
+        // validator-less service would look like it patched on every launch.
+        if read_cache(dir).is_some_and(|(_, cached)| cached == bytes) {
+            return Ok(false);
+        }
+        Manifest::parse(&bytes)?;
+        write_cache(dir, fetched.validator.as_deref(), &bytes);
+        Ok(true)
+    }
+
     /// Fetch one chunk and return its decoded bytes, verified against `hash`.
     pub fn fetch_chunk(
         &self,
@@ -190,6 +266,15 @@ impl Client {
     /// GET `url` with the patch headers, retrying transient failures with
     /// exponential backoff. Fatal statuses and redirects abort immediately.
     fn fetch(&self, url: &str, limit: u64) -> Result<Vec<u8>> {
+        // Unconditional, so the service has nothing to answer 304 to and a
+        // success always carries bytes.
+        let fetched = self.fetch_with(url, limit, None)?;
+        Ok(fetched.body.expect("an unconditional GET returns a body"))
+    }
+
+    /// [`Client::fetch`], plus the validator, and with `If-None-Match` when
+    /// `known` is set. See [`Fetched`].
+    fn fetch_with(&self, url: &str, limit: u64, known: Option<&str>) -> Result<Fetched> {
         let mut last = None;
         for attempt in 0..MAX_ATTEMPTS {
             if attempt > 0 {
@@ -200,8 +285,8 @@ impl Client {
                     .fetch_add(nap.as_millis() as u64, Ordering::Relaxed);
                 std::thread::sleep(nap);
             }
-            match self.get_once(url, limit) {
-                Ok(bytes) => return Ok(bytes),
+            match self.get_once(url, limit, known) {
+                Ok(fetched) => return Ok(fetched),
                 Err(e @ (Error::Http { .. } | Error::TooLarge { .. })) => return Err(e),
                 Err(e) => last = Some(e),
             }
@@ -209,29 +294,44 @@ impl Client {
         Err(last.expect("at least one attempt"))
     }
 
-    fn get_once(&self, url: &str, limit: u64) -> Result<Vec<u8>> {
+    fn get_once(&self, url: &str, limit: u64, known: Option<&str>) -> Result<Fetched> {
         // Redirects come back as their 3xx and land in FATAL below: a patch
         // endpoint that suddenly wants to send us elsewhere is a signal to
         // stop, not to follow. Identity encoding because chunks are already
         // compressed per the manifest, and a transfer-level layer would defeat
         // the byte budget below.
-        let response = transport::fetch(
-            "GET",
-            url,
-            &[
-                ("X-Access-Key", &self.access_key),
-                ("Accept-Encoding", "identity"),
-                ("User-Agent", USER_AGENT),
-            ],
-            None,
-            REQUEST_TIMEOUT,
-        )
-        .map_err(|detail| Error::Transport {
-            url: url.to_owned(),
-            detail,
-        })?;
+        let mut headers = vec![
+            ("X-Access-Key", self.access_key.as_str()),
+            ("Accept-Encoding", "identity"),
+            ("User-Agent", USER_AGENT),
+        ];
+        if let Some(known) = known {
+            headers.push(("If-None-Match", known));
+        }
+        let response =
+            transport::fetch("GET", url, &headers, None, REQUEST_TIMEOUT).map_err(|detail| {
+                Error::Transport {
+                    url: url.to_owned(),
+                    detail,
+                }
+            })?;
+
+        let validator = response
+            .headers
+            .iter()
+            .find(|(name, _)| name == "etag")
+            .map(|(_, value)| value.clone());
 
         let status = response.status;
+        // Only when we asked: 304 answers `If-None-Match` and nothing else, so
+        // an unsolicited one is a service doing something we did not ask for and
+        // stays in the 3xx refusal below with the redirects.
+        if known.is_some() && status == 304 {
+            return Ok(Fetched {
+                body: None,
+                validator,
+            });
+        }
         if status != 200 {
             let fatal = FATAL_STATUS.contains(&status) || (300..400).contains(&status);
             return Err(if fatal {
@@ -257,7 +357,79 @@ impl Client {
                 limit,
             });
         }
-        Ok(response.body)
+        Ok(Fetched {
+            body: Some(response.body),
+            validator,
+        })
+    }
+}
+
+/// A response the patch client accepted.
+struct Fetched {
+    /// `None` only when the service answered 304 — the caller's copy stands.
+    body: Option<Vec<u8>>,
+    /// The service's `ETag` for these bytes, when it published one. Kept beside
+    /// the body it names so the two can be stored together; see [`CACHE_FILE`].
+    validator: Option<String>,
+}
+
+/// Where [`Client::manifest`] came from.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Source {
+    /// Fetched from the service, because there was no readable local copy.
+    /// Already current — nothing to revalidate.
+    Service,
+    /// Read from disk, and therefore as old as the last launch that stored one.
+    Disk,
+}
+
+/// The cached manifest: its validator, a newline, then the bytes that validator
+/// names.
+///
+/// One file rather than two, and that is the whole reason it has a format at
+/// all. Split across a body file and an ETag file, a crash between the two
+/// writes leaves a validator naming bytes that are no longer there — and the
+/// next launch would send it as `If-None-Match`, be told "still fresh", and keep
+/// a body the service never associated with that tag. Written together, the two
+/// cannot disagree: either the rename lands or it does not.
+///
+/// The validator is a header value and so cannot contain a newline; the split is
+/// on the first one only, which leaves the manifest's own bytes untouched.
+const CACHE_FILE: &str = "manifest.cache";
+
+/// The cached validator — `None` if the service published none — and the bytes.
+///
+/// Every failure here reads as "no cache": absent, truncated by a full disk,
+/// written by a version that spelled it differently. The caller's answer to all
+/// of those is the same, and it is the answer that was correct before this cache
+/// existed — fetch it.
+fn read_cache(dir: &Path) -> Option<(Option<String>, Vec<u8>)> {
+    let raw = fs::read(dir.join(CACHE_FILE)).ok()?;
+    let split = raw.iter().position(|b| *b == b'\n')?;
+    let validator = std::str::from_utf8(&raw[..split]).ok()?;
+    let validator = (!validator.is_empty()).then(|| validator.to_owned());
+    Some((validator, raw[split + 1..].to_vec()))
+}
+
+/// Store `bytes` and the validator that names them, atomically.
+///
+/// Failures are logged and dropped. What a failed write costs is one launch
+/// that fetches the manifest the old way, which is the behaviour this replaced
+/// and is not worth refusing to start over.
+fn write_cache(dir: &Path, validator: Option<&str>, bytes: &[u8]) {
+    let path = dir.join(CACHE_FILE);
+    let tmp = temp_path(&path);
+    let write = || -> std::io::Result<()> {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(validator.unwrap_or_default().as_bytes())?;
+        file.write_all(b"\n")?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, &path)
+    };
+    if let Err(e) = write() {
+        let _ = fs::remove_file(&tmp);
+        note!("[patch] could not store the manifest: {e}");
     }
 }
 
@@ -356,10 +528,61 @@ fn temp_path(dest: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    use crate::scratch::TempDir;
+
     fn gzip(data: &[u8]) -> Vec<u8> {
         let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         e.write_all(data).unwrap();
         e.finish().unwrap()
+    }
+
+    /// The launch path reads this file and boots on what comes back, so a body
+    /// that survives the round trip only most of the time is a client that
+    /// starts only most of the time. A manifest is 1.2 MB of arbitrary bytes and
+    /// the format puts a newline in the middle of the file on purpose — these
+    /// are the cases where a split on the wrong newline shows up.
+    #[test]
+    fn a_stored_manifest_comes_back_byte_for_byte() {
+        let dir = TempDir::new("manifest-cache");
+        for (validator, body) in [
+            (Some("\"8fa40eee\""), &b"{\"files\":{}}"[..]),
+            // The manifest is JSON, and JSON is routinely pretty-printed. Every
+            // one of these newlines is a place a second split would land.
+            (
+                Some("\"tagged\""),
+                &b"{\n  \"files\": {\n    \"a\": 1\n  }\n}\n"[..],
+            ),
+            // A service that publishes no ETag still gets a usable cache; the
+            // validator is simply absent and revalidation goes unconditional.
+            (None, &b"{\"files\":{}}"[..]),
+            // Nothing says a manifest cannot start with a newline, and a naive
+            // reader would hand back an empty body for this one.
+            (Some("\"leading\""), &b"\n{\"files\":{}}"[..]),
+            (None, &b""[..]),
+        ] {
+            write_cache(&dir.0, validator, body);
+            let (stored, bytes) = read_cache(&dir.0).expect("just written");
+            assert_eq!(stored.as_deref(), validator);
+            assert_eq!(bytes, body);
+        }
+    }
+
+    /// Absent, truncated, or written by something else: all of them have to read
+    /// as "no cache" rather than as a cache holding nonsense, because the caller
+    /// boots on whatever this returns.
+    #[test]
+    fn an_unreadable_cache_is_no_cache() {
+        let dir = TempDir::new("manifest-cache-bad");
+        assert!(read_cache(&dir.0).is_none());
+
+        // No newline anywhere: there is no validator and no body, only bytes.
+        fs::write(dir.0.join(CACHE_FILE), b"no newline here").unwrap();
+        assert!(read_cache(&dir.0).is_none());
+
+        // A validator is a header value, so it is ASCII. Bytes that are not
+        // valid UTF-8 mean this file is not one of ours.
+        fs::write(dir.0.join(CACHE_FILE), b"\xff\xfe\n{}").unwrap();
+        assert!(read_cache(&dir.0).is_none());
     }
 
     #[test]

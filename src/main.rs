@@ -349,9 +349,38 @@ fn run_windowed(loopback: &server::Loopback, token: &str, template_save: &str) {
 
 fn open_snapshot() -> error::Result<Arc<chunks::ChunkStore>> {
     let client = patch::Client::from_env();
-    let manifest = client.fetch_manifest()?;
+    let (manifest, source) = client.manifest(&paths::support_dir())?;
+    if source == patch::Source::Disk {
+        revalidate_manifest();
+    }
     let store = chunks::ChunkStore::open(client, manifest, cache::default_cache_dir())?;
     Ok(Arc::new(store))
+}
+
+/// Check the cached manifest against the service, behind the launch.
+///
+/// Its own client and its own thread, because the point is that nothing waits
+/// for it: the store already has the manifest it will run on, and this only
+/// decides what the *next* launch opens. A background thread that cannot answer
+/// keeps a socket busy until the patch client's request timeout and then goes
+/// away, which is the correct amount of fuss to make about a check nobody is
+/// waiting on.
+fn revalidate_manifest() {
+    std::thread::spawn(|| {
+        qos::set(qos::Class::Utility);
+        let client = patch::Client::from_env();
+        match client.revalidate(&paths::support_dir()) {
+            // Says what happened, not what it wishes had: the new manifest is
+            // stored and the next launch opens on it, but nothing here re-syncs
+            // the client artifacts. See [`patch::Client::revalidate`].
+            Ok(true) => note!("[gwnative] the service has published a new manifest; stored"),
+            Ok(false) => {}
+            // Not an error the player has anything to do about: the app is
+            // running the client it already had, which is what it would have
+            // done anyway.
+            Err(e) => note!("[gwnative] could not check for a new client build: {e}"),
+        }
+    });
 }
 
 /// Fetch the client, unless the only thing on offer is a build that has already
