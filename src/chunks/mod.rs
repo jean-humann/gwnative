@@ -85,6 +85,15 @@ pub struct ChunkStore {
     /// the amplification the pread path exists to remove — so each chunk is
     /// checked the first time this session asks for it and preads after that.
     verified: Mutex<HashSet<ContentHash>>,
+    /// Why the most recent fetch that failed, failed.
+    ///
+    /// Kept because the page cannot see it otherwise. A chunk read reaches the
+    /// client through ArenaNet's own glue, which reports a fatal read by
+    /// calling `handleFatalReadError` with no argument at all — so at the one
+    /// moment the player is owed a reason, the only side that has one is this
+    /// one. Overwritten rather than accumulated: a failing session fails the
+    /// same way a thousand times, and it is the last word that is asked for.
+    last_failure: Mutex<Option<String>>,
     /// Cached chunk files, held open across reads.
     ///
     /// What a window read costs is dominated by the syscalls around the
@@ -157,6 +166,7 @@ impl ChunkStore {
             recording: AtomicBool::new(true),
             playing: AtomicBool::new(false),
             verified: Mutex::default(),
+            last_failure: Mutex::default(),
             handles: Mutex::default(),
         })
     }
@@ -167,6 +177,11 @@ impl ChunkStore {
             self.stats.fetched.load(Ordering::Relaxed),
             self.stats.coalesced.load(Ordering::Relaxed),
         )
+    }
+
+    /// Why the last failed fetch failed, if one has.
+    pub fn last_failure(&self) -> Option<String> {
+        self.last_failure.lock().unwrap().clone()
     }
 
     /// What the transport's retry ladder has cost this session. See
@@ -350,10 +365,18 @@ impl ChunkStore {
         self.fetch(index, None)
     }
 
-    /// The one fetch path. `permit` is `Some` when the caller already holds one
-    /// and is handing it over: if this turns out to coalesce onto somebody
-    /// else's fetch, the permit is released rather than held across the wait.
+    /// The one fetch path, and so the one place a read failure can be caught on
+    /// its way out. What it catches is kept for [`last_failure`](Self::last_failure).
     fn fetch<'a>(&'a self, index: usize, permit: Option<Permit<'a>>) -> Result<Arc<Vec<u8>>> {
+        self.attempt(index, permit).inspect_err(|e| {
+            *self.last_failure.lock().unwrap() = Some(e.to_string());
+        })
+    }
+
+    /// `permit` is `Some` when the caller already holds one and is handing it
+    /// over: if this turns out to coalesce onto somebody else's fetch, the
+    /// permit is released rather than held across the wait.
+    fn attempt<'a>(&'a self, index: usize, permit: Option<Permit<'a>>) -> Result<Arc<Vec<u8>>> {
         let hash = self.chunk_hash(index)?;
         let expected = self.chunk_length(index)?;
 
@@ -522,5 +545,29 @@ mod tests {
             "a fetch slot was held across a wait for somebody else's download"
         );
         assert_eq!(free(), MAX_CONCURRENT_FETCHES, "a permit went missing");
+    }
+
+    /// The page has no other source for this. ArenaNet's glue reports a fatal
+    /// read by calling `handleFatalReadError` with no argument, so if the store
+    /// does not keep why the fetch failed, the sentence the player reads can
+    /// only guess — which is what it used to do.
+    ///
+    /// Failed here by asking for a chunk the manifest does not have, rather
+    /// than by letting a fetch fall off the end of a network this store does
+    /// not have: the retry ladder makes that take fourteen seconds, and what is
+    /// under test is on the way out of `fetch`, which both arrive at.
+    #[test]
+    fn a_failed_fetch_leaves_its_reason_behind() {
+        let temp = TempDir::new("last-failure");
+        let store = store_of(temp.0.join("chunks"), 4);
+
+        assert_eq!(store.last_failure(), None, "nothing has failed yet");
+        store.fetch(99, None).expect_err("chunk 99 does not exist");
+
+        let reason = store.last_failure().expect("the failure left no reason");
+        assert!(
+            reason.contains("99"),
+            "{reason:?} is not the failure that just happened"
+        );
     }
 }

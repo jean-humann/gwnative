@@ -159,6 +159,43 @@ const fail = (text) => {
   recovery?.showFailure(text, log);
 };
 
+// Long enough for a loopback round trip several times over, short enough that
+// nobody is left looking at a frozen game while it runs out. This is already a
+// failed boot: a host that has stopped answering must not turn the failure
+// screen into a blank one.
+const REASON_DEADLINE_MS = 1500;
+
+/**
+ * Why a read of the game data failed, in the player's terms.
+ *
+ * The client reports a fatal read by calling `handleFatalReadError` with no
+ * argument, so the page is told that something went wrong and nothing at all
+ * about what. This used to answer "no cached copy of the required game data is
+ * available", which named a cause the page had not established and named the
+ * least likely one — this host streams, so a read failing has far more to do
+ * with the network or the disk than with the cache. Worse, the overlay under
+ * the sentence offers to delete the player's game data, and a sentence about a
+ * missing cache is exactly what would send someone to that button.
+ *
+ * So it asks. The host has the reason — every chunk fetch that failed left one
+ * behind — and when it answers, the player reads what actually happened. When
+ * it does not, they read the part that is true either way.
+ */
+const describeReadFailure = async () => {
+  try {
+    const response = await fetch('__diag', {
+      headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
+      signal: AbortSignal.timeout(REASON_DEADLINE_MS),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const reason = (await response.json()).lastFetchFailure;
+    if (reason) return `The game data could not be read: ${reason}`;
+  } catch (error) {
+    log('[warn] the host could not say why the read failed:', error);
+  }
+  return 'The game data could not be read.';
+};
+
 window.gwLog = (on = true) => {
   const el = document.getElementById('log');
   if (!el) return false;
@@ -491,7 +528,7 @@ Module = {
   },
 
   handleFatalReadError() {
-    fail('No cached copy of the required game data is available.');
+    describeReadFailure().then(fail);
   },
 
   setBuildInfo(info) {
@@ -626,8 +663,19 @@ function appendGlue() {
     log,
   });
 
+  // The only failure here that will still be a failure tomorrow. Everything
+  // else the overlay catches is transient, which is why its first offer is to
+  // try again; this one is a WebKit that predates JSPI, so trying again does
+  // the same thing forever and the offer beside it deletes the player's game
+  // data for nothing. The remedy is not in this app at all — the bundle asks
+  // for macOS 15.2 because that is the first release whose WebKit has this —
+  // so the sentence says where it is rather than naming the API.
   if (!('Suspending' in WebAssembly)) {
-    return fail('This WebView lacks WebAssembly JSPI (WebAssembly.Suspending).');
+    log('[err] WebAssembly.Suspending is missing; the client cannot be run here');
+    return fail(
+      'Guild Wars cannot run on this version of macOS. Updating macOS updates ' +
+        'the web engine the game needs, which is missing here.',
+    );
   }
 
   // ArenaNet's glue never dials its own API hosts. Outside Capacitor it folds
