@@ -20,8 +20,13 @@ use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSEventModifierFlags, NSMenu, NSMenuItem, NSWorkspace};
-use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString, NSURL};
+use objc2_app_kit::{
+    NSAboutPanelOptionApplicationName, NSAboutPanelOptionApplicationVersion,
+    NSAboutPanelOptionCredits, NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem, NSWorkspace,
+};
+use objc2_foundation::{
+    MainThreadMarker, NSAttributedString, NSDictionary, NSObject, NSObjectProtocol, NSString, NSURL,
+};
 use objc2_web_kit::WKWebView;
 
 use crate::{settings, window};
@@ -33,6 +38,21 @@ use crate::{settings, window};
 /// then opens nothing — or worse, opens someone else's repository because the
 /// URL was guessed — is worse than a Help menu with one item in it.
 const WEBSITE: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// What the About panel says this application is.
+///
+/// The first line is the manifest's own description, so the sentence in the
+/// panel and the sentence in `Cargo.toml` cannot drift apart. The rest is what
+/// a player deserves to be told before they type an account name into it:
+/// whose game this is, and that nobody official is behind this window.
+const CREDITS: &str = concat!(
+    env!("CARGO_PKG_DESCRIPTION"),
+    ".\n\nGuild Wars is a trademark of NCSOFT Corporation. This is an unofficial \
+     client and is not affiliated with, or endorsed by, NCSOFT or ArenaNet.\n\n\
+     Licensed ",
+    env!("CARGO_PKG_LICENSE"),
+    "."
+);
 
 pub struct Ivars {
     /// The page, for the items that are really requests to it.
@@ -107,6 +127,38 @@ define_class!(
             // SAFETY: main thread — AppKit sends menu actions there.
             unsafe {
                 self.ivars().webview.reload();
+            }
+        }
+
+        /// The standard About panel, told what it is looking at.
+        ///
+        /// The stock item reads a bundle's Info.plist, and every build that is
+        /// not a bundle — `cargo run`, `scripts/signed-run`, every benchmark —
+        /// has none, so it announces a program called `gwnative` with no
+        /// version and no explanation. Supplying the three values it would have
+        /// read makes the two kinds of build say the same thing, and everything
+        /// supplied comes from `Cargo.toml`.
+        #[unsafe(method(gwAbout:))]
+        fn about(&self, _sender: Option<&AnyObject>) {
+            let name = NSString::from_str("Guild Wars");
+            let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
+            // The panel takes credits as an attributed string and nothing else;
+            // handed a plain one it shows an empty info area.
+            let credits = NSAttributedString::from_nsstring(&NSString::from_str(CREDITS));
+            // SAFETY: the three constants are AppKit's own option keys, and the
+            // values are of the types their documentation names — two strings
+            // and an attributed string.
+            unsafe {
+                let options = NSDictionary::from_slices(
+                    &[
+                        NSAboutPanelOptionApplicationName,
+                        NSAboutPanelOptionApplicationVersion,
+                        NSAboutPanelOptionCredits,
+                    ],
+                    &[&*name as &AnyObject, &*version, &*credits],
+                );
+                NSApplication::sharedApplication(MainThreadMarker::from(self))
+                    .orderFrontStandardAboutPanelWithOptions(&options);
             }
         }
 
@@ -257,13 +309,7 @@ fn build(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenu> {
         mtm,
         "Guild Wars",
         &[
-            &item(
-                mtm,
-                "About Guild Wars",
-                sel!(orderFrontStandardAboutPanel:),
-                "",
-                None,
-            ),
+            &ours(mtm, actions, "About Guild Wars", sel!(gwAbout:), "", None),
             &NSMenuItem::separatorItem(mtm),
             &ours(mtm, actions, "Settings…", sel!(gwOpenSettings:), ",", None),
             &NSMenuItem::separatorItem(mtm),
