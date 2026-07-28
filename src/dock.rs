@@ -91,6 +91,8 @@ impl Tile {
         let this = Self::alloc(mtm).set_ivars(Cell::new(0.0));
         // The Dock resizes the content view to its tile; the frame given here
         // only has to be non-empty so the first draw has somewhere to happen.
+        // SAFETY: `NSView`'s designated initialiser, sent once to an object
+        // this call just allocated, on the thread `mtm` proves is the main one.
         unsafe {
             msg_send![super(this), initWithFrame: NSRect::new(
                 NSPoint::new(0.0, 0.0),
@@ -113,14 +115,24 @@ struct Showing {
 
 thread_local! {
     static SHOWING: RefCell<Option<Showing>> = const { RefCell::new(None) };
+
+    /// Which tick loop is the live one.
+    ///
+    /// A sweep that stops and starts again inside one tick period leaves the
+    /// first loop parked on its timer, and it would wake to find a sweep
+    /// running — the *new* one — and reschedule itself beside the loop that
+    /// sweep started. Nothing ever brings the count back down, so a player who
+    /// restarts a download a few times ends up redrawing the icon several
+    /// times a second. Each `begin` claims the next generation, and a tick
+    /// holding an older one stops instead of rescheduling.
+    static GENERATION: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Follow `store`'s full download on the Dock icon until it finishes.
 ///
 /// Called from the worker thread that started the sweep, so the work hops to
-/// the main queue before it touches AppKit. Starting a second follow while one
-/// is running is harmless — the tick that finds the icon already installed
-/// reuses it — but there is only one sweep, so it does not happen.
+/// the main queue before it touches AppKit. A second follow while one is
+/// running takes over from it rather than running alongside it.
 pub fn follow(store: &Arc<ChunkStore>) {
     let context = Box::into_raw(Box::new(Arc::clone(store))).cast::<c_void>();
     // SAFETY: `begin` takes ownership of exactly this box, and libdispatch
@@ -131,12 +143,19 @@ pub fn follow(store: &Arc<ChunkStore>) {
 extern "C" fn begin(context: *mut c_void) {
     // SAFETY: the pointer is the box `follow` leaked, and this runs once.
     let store = unsafe { Box::from_raw(context.cast::<Arc<ChunkStore>>()) };
-    tick(&store);
+    let generation = GENERATION.get() + 1;
+    GENERATION.set(generation);
+    tick(&store, generation);
 }
 
-fn tick(store: &Arc<ChunkStore>) {
+fn tick(store: &Arc<ChunkStore>, generation: u64) {
     // SAFETY: only ever reached from the main queue, which is the main thread.
     let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    // A later follow has taken the icon over. Leave it to that loop, which is
+    // watching the same store and will clear the icon when its sweep ends.
+    if GENERATION.get() != generation {
+        return;
+    }
     let (_, _, running) = store.prefetch_progress();
     let total = store.chunk_count();
     if !running || total == 0 {
@@ -148,7 +167,7 @@ fn tick(store: &Arc<ChunkStore>) {
     // Mac, not how far down the list this particular sweep has walked.
     show(mtm, store.resident_count() as f64 / total as f64);
     let store = Arc::clone(store);
-    crate::app::after(TICK_MS, move || tick(&store));
+    crate::app::after(TICK_MS, move || tick(&store, generation));
 }
 
 fn show(mtm: MainThreadMarker, fraction: f64) {

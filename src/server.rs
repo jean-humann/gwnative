@@ -672,6 +672,18 @@ fn handle(
         }
     }
 
+    // A request for the document itself is the page starting over — the
+    // Reload item, or a failed boot taking its own escape hatch. The class the
+    // fetch threads run at follows what is on screen, and what is on screen is
+    // about to be the launcher again.
+    // Bare `/` and the explicit name are the same document — `resolve` treats
+    // them alike, so this has to as well.
+    if (request.path.is_empty() || request.path == "index.html")
+        && let Some(store) = &context.snapshot
+    {
+        store.back_to_waiting();
+    }
+
     // The derived client answers to the base module's own name, so the page
     // asks for one thing and the glue's `locateFile` needs no special case.
     let derived = context
