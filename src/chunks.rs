@@ -296,6 +296,37 @@ impl ChunkStore {
         }
     }
 
+    /// Put every chunk covering `offset..offset + length` on disk, without
+    /// producing any of their bytes.
+    ///
+    /// The client warms ranges it is about to need, and the only thing it wants
+    /// back is the knowledge that they are there. Serving that as a range read
+    /// meant 256 KiB crossing the loopback socket per chunk and being materialised
+    /// into an `ArrayBuffer` the page immediately dropped — measured at boot, some
+    /// 1.3 GB of garbage the collector was still catching up with when the
+    /// renderer's footprint peaked.
+    pub fn warm(&self, offset: u64, length: u64) -> Result<()> {
+        let produced = self.readable(offset, length);
+        if produced == 0 {
+            return Ok(());
+        }
+        let chunk_size = self.chunk_size();
+        let first = (offset / chunk_size) as usize;
+        let last = ((offset + produced - 1) / chunk_size) as usize;
+        for index in first..=last {
+            // The same two calls a real read makes, for the same reason. Warming
+            // is the client walking forwards through the image, and it is the
+            // strongest statement of where it is going that the store ever gets:
+            // without them the readahead window never moves, every chunk waits
+            // for the one before it, and a boot that took nine seconds takes
+            // twenty-two.
+            self.note(index);
+            self.advance_readahead(index);
+            self.ensure(index)?;
+        }
+        Ok(())
+    }
+
     /// Write `length` bytes at `offset` from the snapshot to `out`, fetching
     /// whatever chunks are not cached. A read past the end is clamped, not an
     /// error.

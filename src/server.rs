@@ -447,6 +447,49 @@ fn handle(
         return Ok(flow);
     }
 
+    // "Have this range ready", answered with nothing.
+    //
+    // The client warms what it is about to read, and the page used to do that by
+    // requesting the range and discarding the response. That put the bytes on the
+    // loopback socket and then through `arrayBuffer()` — 256 KiB of garbage per
+    // chunk, at boot faster than the collector kept up with, which is most of why
+    // the renderer's footprint peaked near 1.7 GB on a launch that settles at 400
+    // MB. Warming is the same work on the host with no body attached.
+    if request.path == "__warm"
+        && let Some(store) = &context.snapshot
+    {
+        let number = |name: &str| request.param(name).and_then(|v| v.parse::<u64>().ok());
+        let (Some(offset), Some(bytes)) = (number("offset"), number("bytes")) else {
+            respond(
+                stream,
+                400,
+                "Bad Request",
+                "text/plain",
+                b"__warm needs offset and bytes",
+                &[],
+            )?;
+            return Ok(flow);
+        };
+        return Ok(match store.warm(offset, bytes) {
+            Ok(()) => {
+                respond(stream, 204, "No Content", "text/plain", b"", &[])?;
+                flow
+            }
+            Err(e) => {
+                note!("[warm] {offset}+{bytes}: {e}");
+                respond(
+                    stream,
+                    502,
+                    "Bad Gateway",
+                    "text/plain",
+                    e.to_string().as_bytes(),
+                    &[],
+                )?;
+                flow
+            }
+        });
+    }
+
     // The page's own metrics. POST folds a batch in, GET reads back everything
     // the host has — its own sampler's figures included, so one fetch answers
     // "what is this process doing" from inside the page.
