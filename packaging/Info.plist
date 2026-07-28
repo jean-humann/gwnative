@@ -46,10 +46,21 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 
+	<!--
+	  Two different numbers on purpose. CFBundleShortVersionString is the one a
+	  player reads and the one the update check compares — it is the package
+	  version, and it goes backwards when a release line is patched out of
+	  order. CFBundleVersion is the build, and macOS requires it to only ever
+	  increase for a given identifier: it is what Launch Services uses to decide
+	  which of two copies on the volume is the newer one, so a rebuild that
+	  reuses a number leaves the Finder opening whichever it cached. The commit
+	  count fills it, which is monotonic on a linear history and needs no state
+	  outside the repository. scripts/bundle substitutes both.
+	-->
 	<key>CFBundleShortVersionString</key>
 	<string>__VERSION__</string>
 	<key>CFBundleVersion</key>
-	<string>__VERSION__</string>
+	<string>__BUILD__</string>
 
 	<!--
 	  The reason this bundle exists. Game Mode only considers applications in a
@@ -68,17 +79,20 @@
 	<string>15.2</string>
 
 	<!--
+	  There is no key for "Apple Silicon only", and none is needed: the binary
+	  has one arm64 slice, and Launch Services refuses to open an application
+	  with nothing it can run rather than starting it under Rosetta. That is
+	  also why NSSupportsAutomaticGraphicsSwitching is not here — it selects
+	  between two GPUs on Intel machines, and there is no Intel build to select
+	  anything on.
+	-->
+
+
+	<!--
 	  Without this the window is composited at 1x and scaled up, which on a
 	  Retina display is exactly the blur the native port exists to avoid.
 	-->
 	<key>NSHighResolutionCapable</key>
-	<true/>
-
-	<!--
-	  Nothing here needs the discrete GPU. On the Intel machines that have one,
-	  saying so keeps the game on the integrated part and off the fans.
-	-->
-	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 
 	<!--

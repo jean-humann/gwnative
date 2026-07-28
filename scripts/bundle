@@ -26,7 +26,16 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/web"
 
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-sed "s/__VERSION__/$version/g" packaging/Info.plist > "$app/Contents/Info.plist"
+
+# CFBundleVersion has to increase for every build of a given identifier, and the
+# package version does not: patching an older line publishes a lower one. The
+# commit count is monotonic on this project's linear history, needs no state
+# outside the repository, and is the same number in CI as on this machine. A
+# build from a tarball with no git history falls back to the version, which is
+# wrong in the same way it was wrong before this line existed and no worse.
+build=$(git rev-list --count HEAD 2>/dev/null || echo "$version")
+sed -e "s/__VERSION__/$version/g" -e "s/__BUILD__/$build/g" \
+	packaging/Info.plist > "$app/Contents/Info.plist"
 
 # Pre-bundle-identifier legacy, but Launch Services still reads it and it costs
 # eight bytes.
