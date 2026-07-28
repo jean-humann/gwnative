@@ -120,6 +120,27 @@ describe('settings panel', () => {
     );
   });
 
+  // The state the host injects is the only way the page can know, and the
+  // three values are the three outcomes of `wasm::prepare`. Anything else is a
+  // host and a page that have drifted, and saying nothing is the safe end of
+  // that: a sentence about a missing feature that is not missing is worse than
+  // no sentence at all.
+  it('speaks up about build templates only when they are actually unavailable', () => {
+    assert.equal(panel.templateSaveNotice('ready'), null);
+    assert.equal(panel.templateSaveNotice(undefined), null);
+    assert.equal(panel.templateSaveNotice('something later'), null);
+    assert.match(panel.templateSaveNotice('uncertified'), /cannot be saved/);
+    assert.match(panel.templateSaveNotice('failed'), /cannot be saved/);
+  });
+
+  // Both sentences have to say what still works, because "templates cannot be
+  // saved" on its own reads as "the game is broken" — which it is not.
+  it('says what is unaffected in the same breath', () => {
+    for (const state of ['uncertified', 'failed']) {
+      assert.match(panel.templateSaveNotice(state), /Everything else works/);
+    }
+  });
+
   // Every control's choices have to be reachable from the settings the host
   // will accept, or the panel offers something that cannot be saved.
   it('offers only values the host declares patchable', () => {

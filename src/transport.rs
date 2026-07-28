@@ -151,7 +151,10 @@ pub fn fetch(
     // budget is enforced at the receive below.
     request.setTimeoutInterval(timeout.as_secs_f64());
     for (name, value) in headers {
-        request.setValue_forHTTPHeaderField(Some(&NSString::from_str(value)), &NSString::from_str(name));
+        request.setValue_forHTTPHeaderField(
+            Some(&NSString::from_str(value)),
+            &NSString::from_str(name),
+        );
     }
     if let Some(body) = body {
         request.setHTTPBody(Some(&NSData::with_bytes(body)));
@@ -179,14 +182,22 @@ pub fn fetch(
                 for key in fields.allKeys().iter() {
                     let (Some(name), Some(value)) = (
                         key.downcast_ref::<NSString>(),
-                        fields.objectForKey(&*key).and_then(|v| v.downcast::<NSString>().ok()),
+                        fields
+                            .objectForKey(&*key)
+                            .and_then(|v| v.downcast::<NSString>().ok()),
                     ) else {
                         continue;
                     };
                     headers.push((name.to_string().to_ascii_lowercase(), value.to_string()));
                 }
-                let body = unsafe { data.as_ref() }.map(|d| d.to_vec()).unwrap_or_default();
-                Ok(Response { status, headers, body })
+                let body = unsafe { data.as_ref() }
+                    .map(|d| d.to_vec())
+                    .unwrap_or_default();
+                Ok(Response {
+                    status,
+                    headers,
+                    body,
+                })
             })();
             let _ = tx.send(outcome);
         },

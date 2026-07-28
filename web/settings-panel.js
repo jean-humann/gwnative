@@ -87,6 +87,43 @@ export const CONTROLS = [
 ];
 
 /**
+ * What to tell the player about build templates, or null when there is nothing
+ * to tell.
+ *
+ * The client's template window has a Save button, and on a client build this
+ * app has not been certified against it does nothing at all: the five file
+ * routines it needs are the ones `src/wasm.rs` patches, and an uncertified
+ * build is served untransformed. Silence there reads as a broken game. It is
+ * not — every other thing the client does is unaffected, which is the part
+ * worth saying in the same breath as the part that is missing.
+ *
+ * Said here rather than in the launcher because it is a state, not an event: a
+ * player who reads it once at a boot they were half-watching still needs
+ * somewhere to go and check, and this panel is where the rest of what this app
+ * decided for them already lives.
+ *
+ * @param {unknown} state `window.__gwnativeTemplateSave` — 'ready', 'uncertified' or 'failed'
+ * @returns {string | null}
+ */
+export function templateSaveNotice(state) {
+  if (state === 'uncertified') {
+    return (
+      'Build templates cannot be saved: this release has not been checked against ' +
+      'the client build ArenaNet is currently shipping. Everything else works, ' +
+      'including the characters and settings already on this Mac. Saving comes ' +
+      'back in a later release of this app.'
+    );
+  }
+  if (state === 'failed') {
+    return (
+      'Build templates cannot be saved: preparing the client for it did not ' +
+      'finish. Everything else works. The Diagnostics window says what failed.'
+    );
+  }
+  return null;
+}
+
+/**
  * The keys whose values differ.
  *
  * A patch is built from this rather than from the whole form, so a panel that
@@ -161,6 +198,13 @@ export function installSettingsPanel({ read, save, showLog, sweep, log }) {
   if (!overlay || !rows || !note || !actions) {
     log('[warn] settings: the panel is not in this page');
     return () => {};
+  }
+
+  const notice = document.getElementById('settings-compat');
+  if (notice) {
+    const sentence = templateSaveNotice(globalThis.__gwnativeTemplateSave);
+    notice.textContent = sentence ?? '';
+    notice.hidden = sentence === null;
   }
 
   /** The `<select>` for each control, by key. */

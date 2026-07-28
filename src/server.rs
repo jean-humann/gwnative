@@ -272,7 +272,8 @@ fn handle(
     {
         note!(
             "[loopback] refused an untokened {} /{}",
-            request.method, request.path
+            request.method,
+            request.path
         );
         respond(stream, 403, "Forbidden", "text/plain", b"forbidden", &[])?;
         return Ok(flow);
@@ -648,7 +649,8 @@ fn handle(
             Ok(reply) => {
                 note!(
                     "[proxy] {} /{route}{tail} -> {}",
-                    request.method, reply.status
+                    request.method,
+                    reply.status
                 );
                 respond_proxy(stream, &reply)?;
                 // `respond_proxy` relays upstream's headers, and upstream's
