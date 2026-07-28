@@ -305,7 +305,16 @@ class Run:
         moment — so this is what the two can be held against each other on.
         """
         value = self.inside.get("firstFrameFromPageLoadMs")
-        return float(value) if isinstance(value, (int, float)) else None
+        if isinstance(value, (int, float)):
+            return float(value)
+        # The inside numbers come from a live process, so a build that quit
+        # before the window closed has none — and reporting "not reached" for a
+        # frame that is sitting there in the log is the harness lying about the
+        # build. The two stages bracket the same interval to within a log line.
+        page, frame = self.stages.get("page running"), self.stages.get("first frame")
+        if page is not None and frame is not None:
+            return frame - page
+        return None
 
     def attribute(self, survivors: set[int]) -> None:
         """Disown the WebKit services that were somebody else's all along.
@@ -505,6 +514,10 @@ GWNATIVE_STAGES = [
     Stage("runtime initialised", re.compile(r"runtime initialised")),
     Stage("first game socket", re.compile(r"\[socket\] \S+: connected")),
     Stage("client downloading", re.compile(r"\[startup\] downloading")),
+    # The page says this the instant it submits, which is the same event the
+    # `gw.boot.first-frame.ms` gauge records. Having it on the timeline as well
+    # means the comparison survives a run that ended before `__diag` was read.
+    Stage("first frame", re.compile(r"first frame presented")),
 ]
 
 # `[gwnative] serving <root> at http://127.0.0.1:38112/index.html`, and on the
@@ -552,7 +565,7 @@ def read_diag(run: Run) -> None:
         # `performance.now()` at the first submit, so the page navigating is
         # zero — the same origin the Electron build's renderer.loaded gives it.
         run.inside["firstFrameFromPageLoadMs"] = round(float(first_frame))
-    else:
+    elif "first frame" not in run.stages:
         run.notes.append(
             "no first frame within the window — the client was still in its own "
             "startup download. A longer --seconds reaches one."
