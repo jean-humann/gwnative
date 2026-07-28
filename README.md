@@ -69,8 +69,13 @@ store instead of fighting over this one.
   which is strictly better here: AppKit also posts
   `NSTextInputContextKeyboardSelectionDidChangeNotification`, so layout switches
   can be observed rather than polled on focus.
-- `TouchEvent` / `Touch` do not exist on macOS WebKit. These backed trackpad
-  tap emulation and resynthesise as `MouseEvent`.
+- `TouchEvent` / `Touch` do not exist on macOS WebKit. They cannot be replaced
+  with `MouseEvent`: the client has no double-click of its own and assembles one
+  from taps, so the tap has to arrive as a touch or not at all. It registers the
+  four touch events unconditionally and its handler only reads — three lists,
+  four modifier flags, a timestamp — so `web/input.js` assembles the touches as
+  plain objects and dispatches a `UIEvent` subclass that answers like a
+  `TouchEvent`.
 - `EXT_disjoint_timer_query_webgl2` and `OVR_multiview2` are absent; neither
   matters for this client.
 - The renderer string is masked to `Apple GPU` rather than Chromium's full ANGLE

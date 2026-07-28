@@ -21,6 +21,62 @@ const POINTER_ROAM = 16;
 const MAX_POINTER_REGRABS = 4;
 
 /**
+ * One synthetic finger.
+ *
+ * macOS WebKit has no `Touch` constructor — it is Chromium and iOS WebKit only
+ * — so the object is assembled by hand. It carries the fields a real `Touch`
+ * would, though the client marshals only the identifier and the three
+ * coordinate pairs: a reader that reaches past those should find the value a
+ * real touch would have had rather than `undefined`. It is a plain extensible
+ * object because the client's handler writes `isChanged` and `onTarget` onto
+ * every touch it is handed.
+ *
+ * @typedef {{
+ *   identifier: number, target: EventTarget,
+ *   clientX: number, clientY: number, pageX: number, pageY: number,
+ *   screenX: number, screenY: number,
+ *   radiusX: number, radiusY: number, rotationAngle: number, force: number,
+ * }} SyntheticTouch
+ */
+
+/**
+ * A touch event for a browser that cannot construct one.
+ *
+ * `TouchEvent` is absent here for the same reason `Touch` is, but the client
+ * registers `touchstart` and its three siblings unconditionally, and its
+ * handler only ever *reads* — the three touch lists, the four modifier flags,
+ * and the timestamp every event already has. So what it receives does not have
+ * to be a `TouchEvent`; it has to answer like one. `dispatchEvent` refuses
+ * anything that is not an `Event`, hence a subclass, and `UIEvent` is the
+ * interface a real `TouchEvent` extends.
+ *
+ * Without this the whole tap path was a `ReferenceError` on the first line that
+ * ran, which is a double-click that silently does nothing.
+ */
+class SyntheticTouchEvent extends UIEvent {
+  /**
+   * @param {'touchstart' | 'touchmove' | 'touchend' | 'touchcancel'} type
+   * @param {{
+   *   touches: SyntheticTouch[],
+   *   targetTouches: SyntheticTouch[],
+   *   changedTouches: SyntheticTouch[],
+   * }} lists
+   */
+  constructor(type, lists) {
+    super(type, { bubbles: true, cancelable: true, composed: true });
+    this.touches = lists.touches;
+    this.targetTouches = lists.targetTouches;
+    this.changedTouches = lists.changedTouches;
+    // Marshalled into the event struct the client reads. A real TouchEvent
+    // built without them reports false, and a synthesised tap carries none.
+    this.ctrlKey = false;
+    this.shiftKey = false;
+    this.altKey = false;
+    this.metaKey = false;
+  }
+}
+
+/**
  * @param {{
  *   canvas: HTMLCanvasElement,
  *   touchMode?: 'off' | 'dbltap' | 'translate' | 'augment',
@@ -32,14 +88,14 @@ export function installGameInput({ canvas, touchMode = 'off', log }) {
   const heldKeys = new Map();
   /** @type {Map<number, Record<string, any>>} */
   const heldButtons = new Map();
-  /** @type {Map<number, Touch>} */
+  /** @type {Map<number, SyntheticTouch>} */
   const syntheticTouches = new Map();
   /** @type {Set<ReturnType<typeof setTimeout>>} */
   const tapTimers = new Set();
   /** @type {{ x: number, y: number } | null} */
   let pendingTap = null;
   let touchId = 0;
-  /** @type {Touch | null} */
+  /** @type {SyntheticTouch | null} */
   let activeTouch = null;
   /** @type {{ x: number, y: number } | null} */
   let virtualCursor = null;
@@ -82,8 +138,11 @@ export function installGameInput({ canvas, touchMode = 'off', log }) {
     tapTimers.clear();
   };
 
-  /** @param {number} x @param {number} y @param {number} identifier */
-  const makeTouch = (x, y, identifier) => new Touch({
+  /**
+   * @param {number} x @param {number} y @param {number} identifier
+   * @returns {SyntheticTouch}
+   */
+  const makeTouch = (x, y, identifier) => ({
     identifier,
     target: canvas,
     clientX: x,
@@ -100,33 +159,30 @@ export function installGameInput({ canvas, touchMode = 'off', log }) {
 
   /**
    * @param {'touchstart' | 'touchmove' | 'touchend' | 'touchcancel'} type
-   * @param {Touch} touch
+   * @param {SyntheticTouch} touch
    */
   const sendTouch = (type, touch) => {
     const ended = type === 'touchend' || type === 'touchcancel';
-    canvas.dispatchEvent(new TouchEvent(type, {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
+    canvas.dispatchEvent(new SyntheticTouchEvent(type, {
       touches: ended ? [] : [touch],
       targetTouches: ended ? [] : [touch],
       changedTouches: [touch],
     }));
   };
 
-  /** @param {Touch} touch */
+  /** @param {SyntheticTouch} touch */
   const startTouch = (touch) => {
     syntheticTouches.set(touch.identifier, touch);
     sendTouch('touchstart', touch);
   };
-  /** @param {Touch} touch */
+  /** @param {SyntheticTouch} touch */
   const moveTouch = (touch) => {
     syntheticTouches.set(touch.identifier, touch);
     sendTouch('touchmove', touch);
   };
   /**
    * @param {'touchend' | 'touchcancel'} type
-   * @param {Touch} touch
+   * @param {SyntheticTouch} touch
    */
   const finishTouch = (type, touch) => {
     syntheticTouches.delete(touch.identifier);
