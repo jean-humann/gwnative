@@ -21,6 +21,7 @@ use crate::cache::{
 use crate::error::{Error, Result};
 use crate::manifest::{ContentHash, Manifest};
 use crate::patch::Client;
+use crate::qos;
 
 /// ArenaNet sees at most this many concurrent requests from us, no matter how
 /// many reads the client has in flight.
@@ -128,6 +129,9 @@ pub struct ChunkStore {
     /// Whether `touched` is still accumulating. Checked before the lock, so a
     /// sealed list costs a relaxed load per read rather than a mutex.
     recording: AtomicBool,
+    /// Whether anything is on screen yet. Decides what class the fetch threads
+    /// run at — see [`fetch_class`](ChunkStore::fetch_class).
+    playing: AtomicBool,
     /// Hashes whose cached bytes have been checked against them this session.
     ///
     /// A 4 GB cache sitting on disk for months is exactly where bit rot shows
@@ -249,6 +253,7 @@ impl ChunkStore {
             readahead: Readahead::default(),
             touched: Mutex::default(),
             recording: AtomicBool::new(true),
+            playing: AtomicBool::new(false),
             verified: Mutex::default(),
             handles: Mutex::default(),
         })
@@ -576,6 +581,30 @@ impl ChunkStore {
         self.readahead.wake.notify_all();
     }
 
+    /// What class the fetch threads should be running at right now.
+    ///
+    /// Before the first frame there is no game to protect and the player is
+    /// watching a progress bar whose whole content is these threads, so they
+    /// are the interactive path and say so. After it, the same threads are
+    /// topping a cache up behind someone who is playing, and utility is right:
+    /// efficiency cores, out of the way of the frame.
+    ///
+    /// The class buys more than core selection, which is what makes this worth
+    /// getting right: on Apple platforms it also decides where the transfer
+    /// sits in the system's network scheduling, and the fetch threads are the
+    /// ones asking. The symptom that pointed here is measured — a sweep that
+    /// had settled into 4 MiB/s, while a `curl` at the default class pulled
+    /// the same eight chunks from the same host in 0.23 s, so neither the
+    /// network nor the CDN was the limit at that moment. How much of the gap
+    /// the class accounts for is what the full-download race decides.
+    fn fetch_class(&self) -> qos::Class {
+        if self.playing.load(Ordering::Relaxed) {
+            qos::Class::Utility
+        } else {
+            qos::Class::UserInitiated
+        }
+    }
+
     /// Fetch a little way ahead of wherever the client is reading.
     ///
     /// Idle until a read moves the window, so it costs a parked thread and
@@ -587,8 +616,9 @@ impl ChunkStore {
         for _ in 0..READAHEAD_WORKERS {
             let store = Arc::clone(self);
             thread::spawn(move || {
-                crate::qos::set(crate::qos::Class::Utility);
+                let mut class = qos::Following::start(store.fetch_class());
                 loop {
+                    class.now(store.fetch_class());
                     let index = {
                         let mut window = store.readahead.window.lock().unwrap();
                         while window.next >= window.limit {
@@ -617,6 +647,11 @@ impl ChunkStore {
     ///
     /// Idempotent, because nothing stops the page saying so twice.
     pub fn seal_boot_list(&self) {
+        // The same signal decides what the fetch threads run at from here on:
+        // there is a game on screen now, and they stop being the thing the
+        // player is waiting for. Set before the idempotence check, because a
+        // second report still means the frame happened.
+        self.playing.store(true, Ordering::Relaxed);
         if !self.recording.swap(false, Ordering::SeqCst) {
             return;
         }
@@ -694,8 +729,11 @@ impl ChunkStore {
             let store = Arc::clone(self);
             let chunks = Arc::clone(&chunks);
             thread::spawn(move || {
-                crate::qos::set(crate::qos::Class::Utility);
+                // Always the launch path when it runs at all: the warm-up
+                // exists to be the thing the first frame is waiting for.
+                let mut class = qos::Following::start(store.fetch_class());
                 for &index in chunks.iter().skip(worker).step_by(MAX_PREFETCH_FETCHES) {
+                    class.now(store.fetch_class());
                     let _permit = store.prefetch_permits.acquire();
                     if let Err(e) = store.ensure(index) {
                         // The list is a guess about a previous session. A chunk
@@ -752,19 +790,23 @@ impl ChunkStore {
             let outstanding = Arc::clone(&outstanding);
             thread::spawn(move || {
                 // The sweep decompresses and hashes its way through 4 GB, and
-                // nobody is waiting on any particular chunk of it. At the
-                // default class the scheduler puts that on performance cores
-                // beside WebContent and the GPU process; utility puts it on
-                // efficiency cores, where a throughput job with a progress bar
-                // belongs. `prefetch_permits` rations these threads' share of
-                // the network; this rations their share of the package.
-                crate::qos::set(crate::qos::Class::Utility);
+                // whether that is background work depends entirely on when it
+                // is running. Started from the launcher's "download everything
+                // first", it *is* the launch: nothing else is happening, no
+                // frame is being competed with, and the player is watching a
+                // bar that measures exactly these threads. Started later, or
+                // still running once the client is up, it is a top-up behind a
+                // game and belongs on efficiency cores. `fetch_class` is that
+                // distinction; `prefetch_permits` rations these threads' share
+                // of the network either way.
+                let mut class = qos::Following::start(store.fetch_class());
                 let total = store.chunk_count();
                 let mut index = worker;
                 while index < total {
                     if store.prefetch.stop.load(Ordering::Relaxed) {
                         break;
                     }
+                    class.now(store.fetch_class());
                     // A cached chunk costs a stat, not a request, so the common
                     // resume case sweeps the whole list almost instantly.
                     let _permit = store.prefetch_permits.acquire();
@@ -1070,6 +1112,25 @@ mod tests {
             cache_dir,
         )
         .expect("the store should open over an empty cache")
+    }
+
+    /// The fetch threads are the launch until there is a frame, and background
+    /// work afterwards. Getting this backwards is invisible in a test that only
+    /// checks bytes: it costs throughput on the one run nobody can afford it
+    /// on, so the flip is asserted directly.
+    #[test]
+    fn the_fetchers_stop_being_the_launch_once_a_frame_lands() {
+        let temp = TempDir::new("fetch-class");
+        let store = store_of(temp.0.join("chunks"), 8);
+        assert!(
+            matches!(store.fetch_class(), qos::Class::UserInitiated),
+            "before a first frame the fetchers are what the player is waiting for"
+        );
+        store.seal_boot_list();
+        assert!(
+            matches!(store.fetch_class(), qos::Class::Utility),
+            "after it they are competing with a game"
+        );
     }
 
     #[test]
