@@ -605,6 +605,19 @@ impl ChunkStore {
         }
     }
 
+    /// The page is loading from the top again.
+    ///
+    /// The mirror of the latch [`seal_boot_list`](Self::seal_boot_list) sets.
+    /// Whatever was on screen is gone — a ⌘R, or a client that failed and
+    /// asked to start over — so a download still running is once again the
+    /// thing the player is waiting on rather than a top-up behind a frame.
+    /// Without this the class latched at the first frame outlived the game it
+    /// was set for, and the reload that exists for a client which has already
+    /// gone wrong would fetch from the bottom of the queue.
+    pub fn back_to_waiting(&self) {
+        self.playing.store(false, Ordering::Relaxed);
+    }
+
     /// Fetch a little way ahead of wherever the client is reading.
     ///
     /// Idle until a read moves the window, so it costs a parked thread and
@@ -1130,6 +1143,11 @@ mod tests {
         assert!(
             matches!(store.fetch_class(), qos::Class::Utility),
             "after it they are competing with a game"
+        );
+        store.back_to_waiting();
+        assert!(
+            matches!(store.fetch_class(), qos::Class::UserInitiated),
+            "a reload puts the player back in front of a launch"
         );
     }
 
