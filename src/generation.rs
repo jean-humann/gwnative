@@ -408,11 +408,23 @@ fn check(path: &Path, expected: &Artifact) -> std::result::Result<(), String> {
     if found.hash != expected.hash {
         return Err(format!(
             "content is {}…, {}… recorded",
-            &found.hash[..16],
-            &expected.hash[..16]
+            short(&found.hash),
+            short(&expected.hash)
         ));
     }
     Ok(())
+}
+
+/// Enough of a digest to tell two apart in a log line.
+///
+/// Written to be total rather than to slice, because one of these two hashes
+/// did not come from `hash_file` — it came out of `state.json`, which is a file
+/// in Application Support that this module's own opening paragraph says can rot.
+/// A record that still parses as JSON but holds a truncated digest is exactly
+/// the corruption `check` exists to catch, and `&hash[..16]` would panic
+/// reporting it. Hex is ASCII, so there is no character boundary to miss.
+fn short(hash: &str) -> &str {
+    hash.get(..16).unwrap_or(hash)
 }
 
 #[cfg(test)]
@@ -583,6 +595,46 @@ mod tests {
         assert_eq!(store.roll_back(&root), None);
         assert!(store.unsound(&root, &NAMES).is_empty());
         assert!(!store.rejected("first"));
+    }
+
+    /// The record is a file in Application Support, and this module opens by
+    /// saying what a year in Application Support does to files. One that still
+    /// parses as JSON but holds a truncated digest has to come back as a
+    /// mismatch — the thing `check` is for — rather than as a panic on the
+    /// launch path.
+    #[test]
+    fn a_record_holding_a_truncated_digest_is_a_mismatch_not_a_crash() {
+        let temp = TempDir::new("generation-short-digest");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "good");
+        drop(store);
+
+        let path = state.join("state.json");
+        let record = fs::read_to_string(&path).unwrap();
+        let corrupt = regex_free_replace(&record);
+        fs::write(&path, corrupt).unwrap();
+
+        let store = Store::open(state);
+        assert_eq!(store.unsound(&root, &NAMES), NAMES.to_vec());
+    }
+
+    /// Cut every recorded digest down to four characters, leaving the JSON
+    /// valid and every length intact — so the only thing wrong with the record
+    /// is the field `check` reads last.
+    fn regex_free_replace(record: &str) -> String {
+        let mut out = String::new();
+        for (i, part) in record.split(r#""hash": ""#).enumerate() {
+            if i > 0 {
+                out.push_str(r#""hash": ""#);
+                let end = part.find('"').expect("a hash is a quoted string");
+                out.push_str(&part[..4]);
+                out.push_str(&part[end..]);
+                continue;
+            }
+            out.push_str(part);
+        }
+        out
     }
 
     #[test]
