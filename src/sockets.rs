@@ -64,8 +64,19 @@ impl Drop for Slot {
     }
 }
 
-fn escape(text: &str) -> String {
-    text.replace('\\', r"\\").replace('"', "\\\"")
+/// One `error` frame, built by the JSON encoder rather than spelled out here.
+///
+/// The message is not ours: [`net::connect`] names the destination back in
+/// `NameNotAllowed` and `BadDestination`, and that destination is a query-string
+/// parameter the page chose, percent-decoded — so it holds whatever a query
+/// string can hold, control characters included. Escaping `\` and `"` by hand
+/// and stopping there leaves a raw newline sitting inside a JSON string, which
+/// is not JSON at all: `JSON.parse` in the page throws, and the reason the
+/// socket failed is lost at the one moment it is worth having. `serde_json`
+/// already builds every other JSON body in this crate and knows the rest of the
+/// escapes.
+fn error_frame(message: &str) -> String {
+    serde_json::json!({ "type": "error", "message": message }).to_string()
 }
 
 /// Per-packet tracing, off unless `GWNATIVE_TRACE_SOCKETS` is set.
@@ -135,10 +146,7 @@ pub fn bridge(
     });
 
     let Some(_slot) = registry.claim() else {
-        let _ = sink.send(
-            TEXT,
-            br#"{"type":"error","message":"too many open sockets"}"#,
-        );
+        let _ = sink.send(TEXT, error_frame("too many open sockets").as_bytes());
         sink.close();
         return;
     };
@@ -147,14 +155,7 @@ pub fn bridge(
         Ok(stream) => stream,
         Err(e) => {
             note!("[socket] {destination}: {e}");
-            let _ = sink.send(
-                TEXT,
-                format!(
-                    r#"{{"type":"error","message":"{}"}}"#,
-                    escape(&e.to_string())
-                )
-                .as_bytes(),
-            );
+            let _ = sink.send(TEXT, error_frame(&e.to_string()).as_bytes());
             sink.close();
             return;
         }
@@ -236,4 +237,32 @@ pub fn bridge(
         "[socket] {destination}: closed after {sent} bytes up, {} down",
         downstream.load(Ordering::Relaxed)
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The page parses this frame to find out why its socket never opened, so a
+    /// destination that makes the frame unparseable costs it the diagnosis —
+    /// `?to=` is where the destination comes from, and a query string carries
+    /// bytes a hand-written escaper does not cover.
+    #[test]
+    fn an_error_frame_is_json_whatever_the_message_holds() {
+        for message in [
+            "a\nb is not an ArenaNet name",
+            "quote \" and backslash \\ together",
+            "tab\tand a bell \u{7}",
+            "malformed destination: \u{1}\u{2}\u{3}",
+            "resolve failed: naïve.example.com",
+        ] {
+            let frame = error_frame(message);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&frame).unwrap_or_else(|e| panic!("{frame:?}: {e}"));
+            assert_eq!(parsed["type"], "error");
+            // Round-tripped, not merely well-formed: an escaper that dropped the
+            // offending bytes would also parse.
+            assert_eq!(parsed["message"], message);
+        }
+    }
 }
