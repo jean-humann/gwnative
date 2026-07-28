@@ -1,0 +1,100 @@
+# Every push and every pull request, on the only hardware this project targets.
+#
+# What this job is for is the things a local `cargo test` on one machine cannot
+# notice: a file that was never committed, a formatting or lint rule that this
+# machine's toolchain is older or newer than, and a build that only works
+# because of something in ~/.cargo. It runs on a clean checkout with nothing
+# else on it, which is the whole point.
+#
+# What it deliberately does not do is sign, notarize or publish anything. Those
+# need the Developer ID private key, and that key is not going into the secret
+# store of a public repository — see scripts/release, which runs on the machine
+# that already has it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So a workflow change can be tried without inventing a commit for it.
+  workflow_dispatch:
+
+# A push to a branch with a pull request open triggers both. The newer run is
+# the one anybody cares about, and the older one is holding a macOS runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace is the difference between "a test failed" and knowing where. It
+  # costs nothing on a run that passes.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    # Apple Silicon. This project builds one arm64 slice, links against AppKit
+    # and WebKit, and its tests talk to the macOS keychain and to loopback — an
+    # Intel runner would be testing a build nobody ships and a machine nobody
+    # runs it on.
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # scripts/bundle fills CFBundleVersion from the commit count, and the
+          # default shallow checkout would make that 1 on every run — which is
+          # harmless here but would quietly become wrong the day anything reads
+          # it back.
+          fetch-depth: 0
+
+      # rust-toolchain.toml pins the channel, the components and both targets,
+      # including the wasm32 one build.rs compiles the companion module for. The
+      # runner's preinstalled rustup honours that file, so this step is only
+      # making the install happen now rather than inside the first cargo command
+      # where its output would be mixed into a build log.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # Warnings are failures here and nowhere else. Locally a warning is
+      # something you read on the way past; on a shared branch it is something
+      # that accumulates until nobody reads any of them.
+      - name: Lints
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Includes tests/web.rs, which shells out to `node --test` for the page
+      # scripts. Node is preinstalled on the macOS runners and the suite has no
+      # npm dependencies at all, so there is nothing to install and no lockfile
+      # to go stale.
+      #
+      # The tests that reach api.github.com are #[ignore]d and stay that way: a
+      # pull request should not fail because GitHub was rate limiting the
+      # runner's shared address.
+      - name: Tests
+        run: cargo test
+
+      # The release profile is a different compilation — fat LTO, one codegen
+      # unit, panic=abort — and it is the one that gets published. A warning
+      # that only appears under it, or an LTO failure, should not first be seen
+      # by scripts/release.
+      - name: Release build
+        run: cargo build --release
+
+      # Assembling the bundle is itself something that can break: a plist that
+      # no longer substitutes, an icon that was not committed, a file the copy
+      # loop stopped matching. Signing is skipped because the runner has no
+      # certificate; scripts/bundle says so and carries on, which is what makes
+      # this step meaningful without one.
+      - name: Bundle
+        run: |
+          scripts/bundle
+          test -f "dist/Guild Wars.app/Contents/Resources/AppIcon.icns"
+          test -f "dist/Guild Wars.app/Contents/MacOS/gwnative"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
+            "dist/Guild Wars.app/Contents/Info.plist"
