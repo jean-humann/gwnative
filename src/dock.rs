@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSApplication, NSBezierPath, NSColor, NSView};
 use objc2_foundation::{
     MainThreadMarker, NSActivityOptions, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize,
@@ -126,6 +126,37 @@ thread_local! {
     /// times a second. Each `begin` claims the next generation, and a tick
     /// holding an older one stops instead of rescheduling.
     static GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The bundle's icon, carried in the binary as well.
+///
+/// A bundle gets its icon from `CFBundleIconFile` and needs nothing from us.
+/// `cargo run` produces no bundle, and that is the documented way to run this
+/// during development *and* the path `scripts/signed-run` exists for — so
+/// without this the Dock shows the blank generic application, and the download
+/// progress in `Tile` is drawn over that blank. One file for both, so the two
+/// cannot disagree; `.icns` rather than a PNG because it carries every size and
+/// AppKit picks between them.
+const ICON: &[u8] = include_bytes!("../packaging/AppIcon.icns");
+
+/// Install [`ICON`] as the running application's icon.
+///
+/// Unconditional, rather than only when no bundle declared one. It is the same
+/// artwork either way, and setting it also settles the case of a Dock that has
+/// cached the generic icon from an earlier build — which it does, per bundle
+/// path, for as long as it likes.
+pub fn set_icon(mtm: MainThreadMarker) {
+    let data = objc2_foundation::NSData::with_bytes(ICON);
+    let Some(image) = objc2_app_kit::NSImage::initWithData(objc2_app_kit::NSImage::alloc(), &data)
+    else {
+        // Only reachable if the committed .icns stopped being one. The app has
+        // an icon to fall back on and no reason to stop starting.
+        note!("[gwnative] the built-in application icon could not be read");
+        return;
+    };
+    // SAFETY: main thread, and the argument is an image this function has just
+    // built and still owns. AppKit copies what it needs from it.
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
 }
 
 /// Follow `store`'s full download on the Dock icon until it finishes.

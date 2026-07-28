@@ -22,6 +22,15 @@
 	<key>CFBundleIdentifier</key>
 	<string>com.gwnative.app</string>
 
+	<!--
+	  Resources/AppIcon.icns, named without its extension because that is the
+	  form Launch Services has always taken here. Built by scripts/icon from
+	  packaging/icon.png; the same file is embedded in the binary and installed
+	  at launch, so a build run straight from cargo has the icon too.
+	-->
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 
