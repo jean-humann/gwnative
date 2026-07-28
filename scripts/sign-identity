@@ -5,10 +5,22 @@
 # developer's account, and these files are committed. `GWNATIVE_SIGN_IDENTITY`
 # overrides the search for anyone with more than one certificate installed.
 #
-# Shared by scripts/signed-run and scripts/bundle so a bare `cargo run` build
-# and a packaged one are signed by the same identity. They have to be: the
-# keychain matches the saved login against the signature, so two identities
-# would mean two applications and one of them without an account.
+# Shared by scripts/signed-run, scripts/bundle and scripts/release so that a
+# bare `cargo run` build, a packaged one and a published one are signed by the
+# same identity. They have to be: the keychain matches the saved login against
+# the signature, so two identities would mean two applications and one of them
+# without an account.
+#
+# Developer ID first, because it is the only identity Apple will notarize and
+# therefore the only one a published build can carry. Preferring it *everywhere*
+# rather than only in the release path is the point — if development signed with
+# Apple Development and releases with Developer ID, the designated requirement
+# would differ between them and every player moving from one to the other would
+# be asked to sign in again. One certificate, one requirement, one saved login.
+#
+# Changing which certificate is preferred is itself that event, once: the first
+# build after this file started answering differently is a new application to
+# the keychain, and the login has to be re-entered. It does not recur.
 set -e
 
 if [ -n "$GWNATIVE_SIGN_IDENTITY" ]; then
@@ -18,12 +30,15 @@ fi
 
 identities=$(security find-identity -v -p codesigning 2>/dev/null || true)
 
-# Prefer a development certificate; fall back to whatever is installed, which
-# on a machine with only a self-signed certificate is still stable across
-# rebuilds and so still does the job.
-identity=$(echo "$identities" | sed -n 's/.*"\(Apple Development:.*\)"/\1/p' | head -1)
-if [ -z "$identity" ]; then
-	identity=$(echo "$identities" | sed -n 's/.*"\(.*\)"/\1/p' | head -1)
-fi
+# In preference order. The last fallback is whatever is installed, which on a
+# machine with only a self-signed certificate is still stable across rebuilds
+# and so still keeps the saved login readable — it just cannot be notarized.
+for prefix in "Developer ID Application:" "Apple Development:"; do
+	identity=$(echo "$identities" | sed -n "s/.*\"\($prefix.*\)\"/\1/p" | head -1)
+	if [ -n "$identity" ]; then
+		echo "$identity"
+		exit 0
+	fi
+done
 
-echo "$identity"
+echo "$identities" | sed -n 's/.*"\(.*\)"/\1/p' | head -1

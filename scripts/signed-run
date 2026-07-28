@@ -10,9 +10,16 @@
 #
 # Signing with a real certificate replaces that with
 #   identifier "com.gwnative.app" and anchor apple generic
-#   and certificate leaf[subject.CN] = "Apple Development: ..."
+#   and certificate leaf[subject.CN] = "Developer ID Application: ..."
 # which does not mention the CDHash and so survives rebuilds. It survives
-# certificate renewal too: the leaf is matched by common name, not by hash.
+# certificate renewal too: the leaf is matched by common name, not by hash. The
+# common name is scripts/sign-identity's business and not this file's; what
+# matters here is that it is the same one scripts/bundle uses.
+#
+# No --options runtime, unlike the bundle. This is the path a debugger, `sample`
+# and Instruments are pointed at, and the hardened runtime's first rule is that
+# they may not be. The bundle gets the runtime plus get-task-allow so that it
+# can be both profiled and, with that entitlement dropped, notarized.
 #
 # Wired up as the cargo runner in .cargo/config.toml so `cargo run` cannot leave
 # an unsigned binary behind. `cargo build` on its own still can, which is why
