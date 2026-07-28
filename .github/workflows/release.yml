@@ -123,8 +123,20 @@ jobs:
           # The link from the leaf to the Apple Root the system already trusts.
           # A keychain built from nothing has no intermediates, and without them
           # the identity is present but untrusted — see packaging/certs/README.md.
+          #
+          # A .p12 export may or may not carry the chain alongside the leaf,
+          # depending on what the person exporting it ticked. When it does, this
+          # is importing a certificate that is already there, and `security`
+          # calls that an error. It is not one — the keychain is in exactly the
+          # state the next line wants — so that single case is tolerated and
+          # every other failure still stops the job.
           for ca in packaging/certs/*.cer; do
-            security import "$ca" -k "$keychain" -t cert
+            if ! out=$(security import "$ca" -k "$keychain" -t cert 2>&1); then
+              case $out in
+                *"already exists"*) echo "${ca##*/}: already in the keychain" ;;
+                *) echo "$out" >&2; exit 1 ;;
+              esac
+            fi
           done
 
           # Stops the "codesign wants to access key" prompt that has nobody to
