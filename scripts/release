@@ -29,11 +29,10 @@
 #
 # Usage: scripts/release
 # Environment:
-#   GWNATIVE_NOTARY_PROFILE  keychain profile holding the Apple ID credentials
+#   GWNATIVE_NOTARY_PROFILE  keychain profile holding the Apple credentials
 #                            (default: gwnative). Create it yourself, once:
 #     xcrun notarytool store-credentials gwnative \
-#         --apple-id <your-apple-id> --team-id <your-team-id> \
-#         --password <an app-specific password from appleid.apple.com>
+#         --key <AuthKey_XXXX.p8> --key-id <key id> --issuer <issuer uuid>
 #   GWNATIVE_SIGN_IDENTITY   overrides scripts/sign-identity
 set -e
 
@@ -86,11 +85,13 @@ say "signing as $identity"
 # than after the upload.
 xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1 ||
 	die "no usable notarization credentials in keychain profile \"$profile\".
-    Create it with:
-      xcrun notarytool store-credentials $profile --apple-id <apple-id> \\
-          --team-id <team-id> --password <app-specific-password>
-    The password is an app-specific one made at appleid.apple.com; the Apple ID
-    password itself will not work. Set GWNATIVE_NOTARY_PROFILE for another name."
+    Create it with an App Store Connect API key:
+      xcrun notarytool store-credentials $profile --key <AuthKey_XXXX.p8> \\
+          --key-id <key id> --issuer <issuer uuid>
+    The key comes from App Store Connect > Users and Access > Integrations, and
+    needs the Developer ID role. An Apple ID and an app-specific password also
+    work (--apple-id/--team-id/--password) but tie releases to one person's
+    account. Set GWNATIVE_NOTARY_PROFILE for another profile name."
 
 # A release is a claim about a commit. Publishing from a tree with edits in it
 # means what someone downloads matches no revision in the history.

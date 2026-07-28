@@ -1061,13 +1061,16 @@ releases:
 
 ```sh
 xcrun notarytool store-credentials gwnative \
-    --apple-id <apple-id> --team-id <team-id> --password <app-specific-password>
+    --key <AuthKey_XXXX.p8> --key-id <key id> --issuer <issuer uuid>
 ```
 
-The password is an app-specific one from appleid.apple.com — the Apple ID
-password itself is refused. `GWNATIVE_NOTARY_PROFILE` names a different profile.
-Nothing in this repository holds an Apple ID, a password or a key, and nothing
-should: the script reads the profile by name and the keychain answers.
+That is an App Store Connect API key, from Users and Access > Integrations,
+with the Developer ID role. An Apple ID and an app-specific password work too
+(`--apple-id/--team-id/--password`), but they tie every release to one person's
+account login and cannot be revoked without disturbing it. `GWNATIVE_NOTARY_PROFILE`
+names a different profile. Nothing in this repository holds a key, a password or
+an Apple ID, and nothing should: the script reads the profile by name and the
+keychain answers.
 
 The preflight refuses a development certificate, proves the credentials still
 work with a one-second call, and stops on a dirty working tree — all before a
@@ -1088,19 +1091,44 @@ From CI: push the tag and approve the run.
 
 Approve is the word. This is a public repository and a Developer ID certificate
 signs everything its owner ships, not only this project, so the release job
-declares `environment: release` and that environment needs required reviewers
-configured on it or the line is decoration. Anyone who can land a workflow file
-can otherwise read every secret in it. For the same reason the job runs no
+declares `environment: release`. That environment carries a required reviewer
+and a deployment branch policy limiting it to `v*` tags — without both, the line
+is decoration and anyone who can land a workflow file can read every secret in
+it. Protection rules live in repository settings rather than in this file, so
+they are worth checking rather than assuming:
+
+```sh
+gh api repos/jean-humann/gwnative/environments/release \
+    --jq '.protection_rules[].type'
+```
+
+For the same reason the job runs no
 third-party actions at all — no cache, no toolchain action, no release action —
 since each would be someone else's code in a process that can reach a signing
 key, and the cache is worth about two minutes.
 
-The secrets it reads are `MACOS_CERTIFICATE_P12` (base64 of a `.p12` export of
-the Developer ID Application certificate and its key), `MACOS_CERTIFICATE_PASSWORD`,
-`APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`. The keychain the job
-builds from them is created in `RUNNER_TEMP`, made default so the scripts find
-it exactly as they do on a developer's machine, and deleted in an `if: always()`
-step so it does not outlive a cancelled run.
+Five secrets, named as they are wherever they came from so that moving one is a
+copy and never a rename:
+
+| Secret | What it is |
+| --- | --- |
+| `APPLE_DEVELOPER_ID_APPLICATION_P12` | base64 of a `.p12` export of the Developer ID Application certificate and its key |
+| `APPLE_DEVELOPER_ID_PASSWORD` | the export password for that `.p12` |
+| `APPLE_NOTARY_KEY_P8` | base64 of the App Store Connect API key file |
+| `APPLE_NOTARY_KEY_ID` | that key's ID |
+| `APPLE_NOTARY_KEY_ISSUER` | the issuer UUID it belongs to |
+
+The keychain the job builds from them is created in `RUNNER_TEMP`, made default
+so the scripts find it exactly as they do on a developer's machine, and deleted
+in an `if: always()` step so it does not outlive a cancelled run. The private
+key is imported without `-A`, so `codesign` can use it and nothing else in the
+job can read it back out.
+
+The two certificates in `packaging/certs` are imported alongside it. They are
+Apple's public Developer ID intermediates and they are committed rather than
+fetched, because a keychain created from nothing has no path from the leaf to
+the Apple Root — the identity is present, `find-identity` marks it
+`CSSMERR_TP_NOT_TRUSTED`, and `codesign` declines it. See the README there.
 
 ## The update check, and what it will not do
 
