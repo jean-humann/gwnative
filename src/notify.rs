@@ -83,6 +83,7 @@ pub fn local(name: &str, callback: Callback) {
 ///
 /// `name` must be a live `CFStringRef`.
 pub unsafe fn distributed(name: *const c_void, callback: Callback, suspension: i32) {
+    // SAFETY: the caller has promised `name` is a live `CFStringRef`.
     unsafe {
         add(
             CFNotificationCenterGetDistributedCenter(),
@@ -99,6 +100,9 @@ pub unsafe fn distributed(name: *const c_void, callback: Callback, suspension: i
 /// `CFStringRef` that outlives the observer — which, since nothing here ever
 /// removes one, means for the rest of the process.
 unsafe fn add(center: CenterRef, name: *const c_void, callback: Callback, suspension: i32) {
+    // SAFETY: the caller has promised the centre and the name. The observer
+    // pointer is null and the object filter is null, both of which Core
+    // Foundation documents as "any".
     unsafe {
         CFNotificationCenterAddObserver(
             center,
