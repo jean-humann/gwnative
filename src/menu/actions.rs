@@ -109,6 +109,15 @@ define_class!(
             );
         }
 
+        /// Open the built-in telemetry and build tools.
+        #[unsafe(method(gwOpenTools:))]
+        fn open_tools(&self, _sender: Option<&AnyObject>) {
+            self.evaluate(
+                "window.dispatchEvent(new CustomEvent('gw:command', \
+                 { detail: { name: 'tools-open' } }));",
+            );
+        }
+
         #[unsafe(method(gwResetWindow:))]
         fn reset_window(&self, _sender: Option<&AnyObject>) {
             window::reset(MainThreadMarker::from(self));

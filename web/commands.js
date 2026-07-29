@@ -69,6 +69,7 @@ onCommand('audio-unmute', () => {
 // a native panel would have to be told when the page's idea of a setting
 // changed, which is a second copy of the same four values.
 onCommand('settings-open', () => window.gwOpenSettings?.());
+onCommand('tools-open', () => window.gwOpenTools?.());
 
 // Help → User Guide. In the page for the same reason as the panel, plus one of
 // its own: the guide describes this build's settings and this build's

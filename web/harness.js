@@ -569,7 +569,7 @@ Module = {
     log(`build info: program=${info.programId} build=${info.buildId}`);
   },
 
-  isMobile: false,
+  isMobile: launchOptions.mockSteamDeck === true,
   requestFullScreen: () => Module.canvas.requestFullscreen?.(),
   requestFullscreen: () => Module.canvas.requestFullscreen?.(),
 
@@ -688,7 +688,7 @@ function appendGlue() {
   try {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
-      start, panel, data, compat, guide, gameApi, overlay, metrics,
+      start, panel, data, compat, guide, gameApi, overlay, tools, hotkeys, metrics,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -707,6 +707,8 @@ function appendGlue() {
       import('./guide.js'),
       import('./game-api.js'),
       import('./overlay.js'),
+      import('./tools-panel.js'),
+      import('./hotkeys.js'),
       import('./diagnostics.js'),
     ]);
     host = {
@@ -727,6 +729,8 @@ function appendGlue() {
       ...guide,
       ...gameApi,
       ...overlay,
+      ...tools,
+      ...hotkeys,
     };
     // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
     // contract could plausibly want for something else.
@@ -755,6 +759,22 @@ function appendGlue() {
   };
   window.gwGameApi = host.installGameApi({ log });
   window.gwOverlays = host.createOverlayManager({ document, log });
+  window.gwOpenTools = host.installToolsPanel({
+    document,
+    overlays: window.gwOverlays,
+    log,
+  });
+  window.gwHotkeys = host.createHotkeyEngine(window);
+  window.gwHotkeys.register({
+    id: 'companion-tools',
+    chord: 'Command+Shift+T',
+    run: () => window.gwOpenTools?.(),
+  });
+  window.gwHotkeys.register({
+    id: 'overlay-layout',
+    chord: 'Command+Shift+O',
+    run: () => window.gwOverlays?.edit(!window.gwOverlays.editing()),
+  });
 
   // The panel is wired before the client exists, so ⌘, answers from the first
   // moment the page is up rather than only once the game has booted — which is

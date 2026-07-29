@@ -89,7 +89,13 @@ export function createOverlayManager({
     return editMode;
   };
 
-  const register = ({ id, title, position = { x: 16, y: 16 }, render }) => {
+  const register = ({
+    id,
+    title,
+    position = { x: 16, y: 16 },
+    visible = true,
+    render,
+  }) => {
     if (!ID.test(id)) throw new Error(`invalid overlay widget id ${JSON.stringify(id)}`);
     if (widgets.has(id)) throw new Error(`overlay widget ${id} is already registered`);
     if (typeof render !== 'function') throw new Error(`overlay widget ${id} has no renderer`);
@@ -109,7 +115,7 @@ export function createOverlayManager({
       'font:12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace',
       'user-select:none',
     ].join(';');
-    element.hidden = saved?.visible === false;
+    element.hidden = saved ? saved.visible === false : !visible;
 
     const header = document.createElement('header');
     header.textContent = title || id;
@@ -158,6 +164,7 @@ export function createOverlayManager({
         element.hidden = !visible;
         persist();
       },
+      isVisible: () => !element.hidden,
       dispose() {
         widgets.delete(id);
         element.remove();

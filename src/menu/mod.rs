@@ -226,6 +226,14 @@ fn view_menu(mtm: MainThreadMarker, actions: &Actions) -> Retained<NSMenuItem> {
             &ours(
                 mtm,
                 actions,
+                "Companion Tools…",
+                sel!(gwOpenTools:),
+                "t",
+                Some(command | NSEventModifierFlags::Shift),
+            ),
+            &ours(
+                mtm,
+                actions,
                 "Toggle Diagnostics",
                 sel!(gwToggleDiagnostics:),
                 "",

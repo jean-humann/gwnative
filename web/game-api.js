@@ -76,6 +76,7 @@ export function installGameApi({ log, interval = 250 }) {
     version: 1,
     publish(state) {
       pending = publicState(state);
+      window.dispatchEvent(new CustomEvent('gwnative:state', { detail: pending }));
       schedule();
     },
     endpoint: '__game/v1',
