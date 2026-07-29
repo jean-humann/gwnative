@@ -33,8 +33,9 @@ into its page. `serve` prints the address and token for diagnostics:
 
 | Method and path | Result |
 | --- | --- |
-| `GET /__game/v1` | Version, transport, state-domain, and action capabilities |
+| `GET /__game/v1` | Version, long-poll transport, state-domain, and action capabilities |
 | `GET /__game/v1/state` | Latest validated envelope, or 404 before publication |
+| `GET /__game/v1/state?after=REVISION&waitMs=MILLISECONDS` | Wait up to 15 seconds for a newer revision, or return 404 |
 | `PUT /__game/v1/state` | Internal page-to-host publisher; not an external game write |
 | Any `/__game/v1/actions` request | 409; no write action is certified |
 
@@ -73,6 +74,10 @@ and bounded. Text fields are length- and control-character-checked.
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account data,
 inventory, chat, party, quest, or action surface.
+
+Long polling sleeps in the native server until the page publishes a newer
+revision. A consumer can therefore follow live state without a timer repeatedly
+waking the single-threaded WebAssembly client.
 
 ## Overlay registry
 

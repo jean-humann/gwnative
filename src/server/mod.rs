@@ -32,6 +32,7 @@ mod content;
 
 use crate::chunks::ChunkStore;
 use crate::diagnostics::Recorder;
+use crate::e2e_api;
 use crate::game_api;
 use crate::generation;
 use crate::http::{MAX_BODY_BYTES, POLICY, Request, policy, read_request, text};
@@ -104,6 +105,7 @@ struct Context {
     credential_account: String,
     mods: Option<Arc<mods::Catalog>>,
     game_api: Arc<game_api::Hub>,
+    e2e: Option<Arc<e2e_api::Hub>>,
 }
 
 /// A browser uses only a small connection pool. This ceiling leaves ample room
@@ -148,6 +150,8 @@ pub struct Config {
     pub port: u16,
     pub credential_account: String,
     pub mods: Option<Arc<mods::Catalog>>,
+    /// Create the test-only event and action queues.
+    pub e2e: bool,
 }
 
 pub fn spawn(config: Config) -> std::io::Result<Loopback> {
@@ -162,6 +166,7 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
         port,
         credential_account,
         mods,
+        e2e,
     } = config;
     let listener = bind(port)?;
     let addr = listener.local_addr()?;
@@ -181,6 +186,7 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
         credential_account,
         mods,
         game_api: Arc::default(),
+        e2e: e2e.then(|| Arc::new(e2e_api::Hub::default())),
     });
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -413,6 +419,7 @@ mod tests {
             port: PORT,
             credential_account: "login".into(),
             mods: None,
+            e2e: false,
         })
         .unwrap();
         let addr = loopback.addr;
@@ -482,6 +489,7 @@ mod tests {
             port: PORT,
             credential_account: "login".into(),
             mods: None,
+            e2e: false,
         })
         .unwrap();
         let address = loopback.addr;
@@ -505,6 +513,81 @@ mod tests {
             request(address, "POST", "/__game/v1/actions", Some(token), "{}").0,
             409,
         );
+    }
+
+    #[test]
+    fn the_e2e_api_is_opt_in_tokened_and_finite() {
+        let temp = TempDir::new("server-e2e-api");
+        let dir = temp.0.clone();
+        let token = "test-token";
+        let loopback = spawn(Config {
+            root: dir.clone(),
+            snapshot: None,
+            recorder: Recorder::open(dir.join("diagnostics")),
+            derived_wasm: None,
+            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            generations: Arc::new(generation::Store::open(dir.join("generations"))),
+            token: token.into(),
+            port: PORT,
+            credential_account: "login".into(),
+            mods: None,
+            e2e: true,
+        })
+        .unwrap();
+        let address = loopback.addr;
+
+        assert_eq!(request(address, "GET", "/__e2e/v1", None, "").0, 403);
+        let (status, body) = request(address, "GET", "/__e2e/v1", Some(token), "");
+        assert_eq!(status, 200);
+        assert!(body.contains(r#""longPoll":true"#), "{body}");
+        assert!(body.contains(r#""javascript""#), "{body}");
+        assert!(
+            !body.contains("password"),
+            "the description names credential material: {body}"
+        );
+
+        assert_eq!(
+            request(
+                address,
+                "POST",
+                "/__e2e/v1/actions",
+                Some(token),
+                r#"{"action":"click","x":1,"y":2}"#,
+            )
+            .0,
+            400,
+        );
+        let (status, action) = request(
+            address,
+            "POST",
+            "/__e2e/v1/actions",
+            Some(token),
+            r#"{"action":"activate"}"#,
+        );
+        assert_eq!(status, 200);
+        assert!(action.contains(r#""sequence":1"#), "{action}");
+        let (status, actions) =
+            request(address, "GET", "/__e2e/v1/actions?after=0", Some(token), "");
+        assert_eq!(status, 200);
+        assert!(actions.contains(r#""action":"activate""#), "{actions}");
+
+        assert_eq!(
+            request(
+                address,
+                "POST",
+                "/__e2e/v1/events",
+                Some(token),
+                r#"{"kind":"credentials-offered","detail":{"accountSet":true,"passwordSet":true}}"#,
+            )
+            .0,
+            200,
+        );
+        let (_, events) = request(address, "GET", "/__e2e/v1/events?after=0", Some(token), "");
+        assert!(
+            events.contains(r#""kind":"credentials-offered""#),
+            "{events}"
+        );
+        assert!(!events.contains("player@example"), "{events}");
     }
 
     /// The route the settings panel's "Clear Game Data…" reaches.
@@ -533,6 +616,7 @@ mod tests {
             port: PORT,
             credential_account: "login".into(),
             mods: None,
+            e2e: false,
         })
         .unwrap();
         let addr = loopback.addr;
@@ -581,6 +665,7 @@ mod tests {
             port: PORT,
             credential_account: "login".into(),
             mods: None,
+            e2e: false,
         })
         .unwrap();
         let addr = loopback.addr;

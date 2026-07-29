@@ -149,12 +149,14 @@ fn preamble(
     module: &wasm::Module,
     invocation: &cli::Invocation,
 ) -> String {
+    let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
     format!(
         "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
          window.__gwnativeTemplateSave = {};\nwindow.__gwnativeClientBuild = {};\n\
          window.__gwnativeUpdates = {};\nwindow.__gwnativeAutoInstall = {};\n\
-         window.__gwnativeEnhancements = {};\nwindow.__gwnativeLaunch = {};",
+         window.__gwnativeEnhancements = {};\nwindow.__gwnativeLaunch = {};\n\
+         window.__gwnativeE2E = {e2e};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
