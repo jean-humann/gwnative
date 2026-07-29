@@ -68,6 +68,13 @@ describe('user guide', () => {
     assert.match(text(), /ArenaNet’s servers|held by\s+ArenaNet/);
   });
 
+  it('explains which accounts use Steam and where its credential is kept', () => {
+    const body = text();
+    assert.match(body, /Steam-purchased accounts/i);
+    assert.match(body, /Mac Keychain/i);
+    assert.match(body, /signing out removes/i);
+  });
+
   it('identifies the project as unofficial and carries the required legal notice', () => {
     const body = text();
     assert.match(body, /independent, unofficial interoperability project/i);

@@ -42,6 +42,7 @@ mod scratch;
 mod server;
 mod settings;
 mod sockets;
+mod steam;
 mod transport;
 mod updater;
 mod wasm;

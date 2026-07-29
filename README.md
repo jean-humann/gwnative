@@ -55,7 +55,8 @@ gwnative is playable. It:
 - streams the 4.2 GB game image on demand or downloads it in full;
 - bridges the client's HTTP and game sockets through a restricted native
   network layer;
-- stores the saved login in the macOS Keychain;
+- supports ArenaNet and Steam-purchased accounts, storing saved credentials in
+  the macOS Keychain;
 - supports Retina rendering, high-refresh displays, macOS keyboard layouts,
   double-click translation, pointer lock, and native window state;
 - repairs build-template operations on client builds that have been explicitly
@@ -70,6 +71,8 @@ gwnative is playable. It:
 1. [Download the latest disk image](https://github.com/jean-humann/gwnative/releases/latest).
 2. Open it and drag **Guild Wars** to **Applications**.
 3. Open **Guild Wars** and choose how to store the game image.
+4. Sign in with your ArenaNet account, or choose **Sign in with Steam** for a
+   Steam-purchased account.
 
 The first launch downloads the small client artifacts and asks how to handle the
 game image:

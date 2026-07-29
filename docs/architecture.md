@@ -26,6 +26,7 @@ flowchart LR
     Native --> Keychain["macOS Keychain"]
     Native <--> Patch["ArenaNet patch/CDN services"]
     Native <--> Game["ArenaNet game services"]
+    Native <--> Steam["Steam OAuth"]
     Native --> Disk["Application Support\nchunks, settings, logs, rollback"]
 ```
 
@@ -106,6 +107,30 @@ Every host response carries a content-security policy, COOP/COEP/CORP, and
 `wasm-unsafe-eval`, and blob workers) but denies objects, frames, base URL
 changes, forms, and off-origin resource loads. A navigation delegate rejects
 top-level navigation away from the exact loopback origin.
+
+### Steam authentication boundary
+
+Steam is the only federated provider gwnative advertises to the Reforged
+client. The client supplies an explicit `silent` flag when it asks for an auth
+token. A silent request can only read a valid token from Keychain; it cannot
+open UI. A non-silent request is the player choosing the Steam button and is the
+only path that opens the OAuth sheet.
+
+The sheet is a separate WKWebView with a non-persistent website data store and
+no injected loopback capability token. Its native delegates:
+
+- allow top-level HTTPS navigation only on Steam- and Valve-owned suffixes;
+- refuse embedded credentials, non-default ports, popups, downloads, capture,
+  motion, and file-selection surfaces;
+- intercept the exact HTTPS Guild Wars redirect before loading it;
+- require the attempt's unguessable OAuth `state`; and
+- settle cancellation or WebKit termination back to the client.
+
+Concurrent interactive requests join the same attempt. Sign-out detaches every
+older waiter before closing the sheet and deleting the Keychain item, so a late
+OAuth callback cannot restore a token after clear. The token has its own
+Keychain item and one-year maximum local lifetime; it is not stored alongside
+ArenaNet email/password credentials or written to logs.
 
 ## Client artifacts and generation rollback
 
@@ -233,10 +258,10 @@ See the [performance guide](performance.md) for measurement semantics.
 | Network bridges | `src/net.rs`, `src/sockets.rs`, `src/transport.rs` |
 | Patching and generations | `src/patch.rs`, `src/manifest.rs`, `src/generation.rs` |
 | Snapshot cache | `src/chunks/`, `src/cache.rs`, `src/disk.rs`, `src/qos.rs` |
-| Credentials and settings | `src/keychain.rs`, `src/settings.rs`, `src/paths.rs` |
+| Credentials and settings | `src/keychain.rs`, `src/steam.rs`, `src/settings.rs`, `src/paths.rs` |
 | WebAssembly transforms | `src/wasm/`, `src/companion-kernel/lib.rs`, `build.rs` |
 | Diagnostics | `src/diagnostics.rs`, `src/report.rs`, `web/diagnostics.js`, `web/memory.js` |
-| Web harness | `web/harness.js`, `web/graphics.js`, `web/audio.js`, `web/filesystem.js`, `web/input.js` |
+| Web harness | `web/harness.js`, `web/steam.js`, `web/graphics.js`, `web/audio.js`, `web/filesystem.js`, `web/input.js` |
 | Player UI | `web/launcher.js`, `web/settings-panel.js`, `web/guide.js`, `web/loading.js` |
 | Packaging and release | `packaging/`, `scripts/bundle`, `scripts/release`, `scripts/publish`, `scripts/appcast` |
 

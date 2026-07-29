@@ -289,6 +289,83 @@ impl Vault for System {
     }
 }
 
+/// A second generic-password item, for a secret whose lifecycle is not the
+/// email/password pair above.
+///
+/// Kept behind this module so every secret gets the same two properties:
+/// keychain prompts are suppressed, and an item left by another signing
+/// identity is replaced rather than trapping the player behind an ACL it
+/// cannot satisfy.
+struct NamedSystem {
+    service: &'static str,
+    account: &'static str,
+}
+
+impl Vault for NamedSystem {
+    fn get(&self) -> Result<Vec<u8>, Error> {
+        let _silent = Silent::new();
+        get_generic_password(self.service, self.account)
+    }
+
+    fn set(&self, value: &[u8]) -> Result<(), Error> {
+        let _silent = Silent::new();
+        set_generic_password(self.service, self.account, value)
+    }
+
+    fn delete(&self) -> Result<(), Error> {
+        let _silent = Silent::new();
+        delete_generic_password(self.service, self.account)
+    }
+}
+
+/// Read an independently named secret without ever raising a keychain prompt.
+///
+/// `subject` is diagnostic prose, never secret material.
+pub(crate) fn load_secret(
+    service: &'static str,
+    account: &'static str,
+    subject: &str,
+) -> Option<Vec<u8>> {
+    let vault = NamedSystem { service, account };
+    match vault.get() {
+        Ok(raw) => Some(raw),
+        Err(e) => {
+            match Denial::of(&e) {
+                _ if e.code() == ITEM_NOT_FOUND => {}
+                Some(denial) => {
+                    note!("[keychain] {subject}: {}", denial.help());
+                    if denial != Denial::Canceled && !stably_signed() {
+                        note!("[keychain] {DEV_HELP}");
+                    }
+                }
+                None => note!("[keychain] could not read {subject}: {e}"),
+            }
+            None
+        }
+    }
+}
+
+/// Write an independently named secret, replacing an inaccessible old item
+/// under this build's signing identity when necessary.
+pub(crate) fn store_secret(
+    service: &'static str,
+    account: &'static str,
+    value: &[u8],
+) -> Result<(), String> {
+    let vault = NamedSystem { service, account };
+    store_bytes_in(&vault, value, service)
+}
+
+/// Delete an independently named secret. Absence is already the desired state.
+pub(crate) fn clear_secret(
+    service: &'static str,
+    account: &'static str,
+    subject: &str,
+) -> Result<(), String> {
+    let vault = NamedSystem { service, account };
+    clear_bytes_in(&vault, subject)
+}
+
 pub fn load() -> Option<Credentials> {
     load_from(&System)
 }
@@ -304,10 +381,14 @@ pub fn clear() -> Result<(), String> {
 }
 
 fn clear_in(vault: &impl Vault) -> Result<(), String> {
+    clear_bytes_in(vault, "saved login")
+}
+
+fn clear_bytes_in(vault: &impl Vault, subject: &str) -> Result<(), String> {
     match vault.delete() {
         Ok(()) => Ok(()),
         Err(e) if e.code() == ITEM_NOT_FOUND => Ok(()),
-        Err(e) => Err(format!("the saved login could not be deleted ({e})")),
+        Err(e) => Err(format!("the {subject} could not be deleted ({e})")),
     }
 }
 
@@ -351,7 +432,11 @@ fn store_in(vault: &impl Vault, credentials: &Credentials) -> Result<(), String>
         return Err("credentials are too long to store".into());
     }
     let encoded = serde_json::to_vec(credentials).map_err(|e| e.to_string())?;
-    match vault.set(&encoded) {
+    store_bytes_in(vault, &encoded, SERVICE)
+}
+
+fn store_bytes_in(vault: &impl Vault, encoded: &[u8], service: &str) -> Result<(), String> {
+    match vault.set(encoded) {
         Ok(()) => Ok(()),
         // Saving over an existing item is an update, and an update asks the
         // same permission a read does. So an item left by a differently signed
@@ -366,8 +451,8 @@ fn store_in(vault: &impl Vault, credentials: &Credentials) -> Result<(), String>
         // condition — no third attempt would help, and the only thing left to
         // say is what to remove by hand.
         Err(e) if Denial::of(&e).is_some() => {
-            vault.delete().map_err(|e| by_hand(&e))?;
-            vault.set(&encoded).map_err(|e| by_hand(&e))
+            vault.delete().map_err(|e| by_hand(&e, service))?;
+            vault.set(encoded).map_err(|e| by_hand(&e, service))
         }
         Err(e) => Err(e.to_string()),
     }
@@ -378,9 +463,9 @@ fn store_in(vault: &impl Vault, credentials: &Credentials) -> Result<(), String>
 /// Deliberately says nothing about code signatures: by the time this fires the
 /// cause could equally be a dismissed prompt or a locked screen, and the one
 /// instruction that works for all three is to remove the item.
-fn by_hand(e: &Error) -> String {
+fn by_hand(e: &Error, service: &str) -> String {
     format!(
-        "the saved login could not be replaced ({e}); delete \"{SERVICE}\" in \
+        "the saved secret could not be replaced ({e}); delete \"{service}\" in \
          Keychain Access, then sign in again"
     )
 }

@@ -418,6 +418,27 @@ mod tests {
         );
         assert_eq!(request(addr, "DELETE", "/__settings", auth, "").0, 405);
 
+        // Steam authentication inherits the same capability gate. A malformed
+        // request is rejected before it can touch Keychain or open AppKit, so
+        // this also exercises the route without depending on a developer's
+        // real saved account.
+        assert_eq!(
+            request(addr, "POST", "/__steam", None, r#"{"silent":true}"#).0,
+            403,
+        );
+        assert_eq!(
+            request(
+                addr,
+                "POST",
+                "/__steam",
+                auth,
+                r#"{"silent":"not-a-boolean"}"#,
+            )
+            .0,
+            400,
+        );
+        assert_eq!(request(addr, "GET", "/__steam", auth, "").0, 405);
+
         // A refused patch must leave what was already saved alone.
         let (_, body) = request(addr, "GET", "/__settings", auth, "");
         assert!(body.contains(r#""renderScale":2"#), "{body}");

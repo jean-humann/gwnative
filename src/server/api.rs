@@ -19,7 +19,7 @@ use std::sync::Arc;
 use super::{Context, Flow, tracing};
 use crate::chunks::ChunkStore;
 use crate::http::{Request, json, no_content, respond, text, token_matches};
-use crate::{app, cache, diagnostics, disk, dock, keychain, net, relaunch, ws};
+use crate::{app, cache, diagnostics, disk, dock, keychain, net, relaunch, steam, ws};
 
 /// Room to leave behind after a full download.
 ///
@@ -72,6 +72,7 @@ pub(super) fn serve(
         }
         "__dns" => dns(request, stream)?,
         "__credentials" => credentials(request, stream)?,
+        "__steam" => steam_session(request, stream)?,
         "__settings" => settings(request, stream, context)?,
         "__socket" => return socket(request, stream, flow).map(Some),
         "__diag" => diag(request, stream, context)?,
@@ -240,6 +241,52 @@ fn credentials(request: &Request, stream: &mut TcpStream) -> std::io::Result<()>
             }
         },
         _ => not_allowed(stream, "GET, PUT, DELETE"),
+    }
+}
+
+/// The Steam OAuth session, separate from the ArenaNet email/password item.
+///
+/// POST is used for both reads because an interactive request can open UI and
+/// therefore is not a cacheable retrieval. The route never logs or reflects a
+/// token except in its token-gated JSON response.
+fn steam_session(request: &Request, stream: &mut TcpStream) -> std::io::Result<()> {
+    match request.method.as_str() {
+        "POST" => {
+            let asked = serde_json::from_slice::<steam::Request>(&request.body);
+            match asked {
+                Ok(asked) => match steam::resolve(asked.silent) {
+                    Some(answer) => {
+                        let body = serde_json::to_vec(&answer).unwrap_or_default();
+                        json(stream, 200, &body)
+                    }
+                    None => text(stream, 404, "no Steam session available"),
+                },
+                Err(e) => text(stream, 400, &format!("invalid Steam session request: {e}")),
+            }
+        }
+        "PUT" => {
+            let stored = serde_json::from_slice(&request.body)
+                .map_err(|e| e.to_string())
+                .and_then(|value: steam::Storeback| steam::storeback(value));
+            match stored {
+                Ok(()) => no_content(stream),
+                Err(e) => {
+                    note!("[steam] the session expiry could not be refreshed: {e}");
+                    text(stream, 400, &e)
+                }
+            }
+        }
+        "DELETE" => match steam::clear() {
+            Ok(()) => {
+                note!("[steam] the saved session was cleared");
+                no_content(stream)
+            }
+            Err(e) => {
+                note!("[steam] the saved session could not be cleared: {e}");
+                text(stream, 500, &e)
+            }
+        },
+        _ => not_allowed(stream, "POST, PUT, DELETE"),
     }
 }
 

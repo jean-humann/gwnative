@@ -496,9 +496,20 @@ Module = {
     },
   },
 
-  // No federated auth: reporting no providers falls back to email/password.
+  // Steam-purchased accounts have no ArenaNet email/password. Advertising the
+  // one provider the native host can complete adds its button beside the
+  // unchanged email/password form.
   login: {
-    hasProvider: () => false,
+    hasProvider: (name) => host?.hasSteamProvider(name) ?? false,
+    getAuthToken: (name, options) => host.getSteamAuthToken(name, options, { log }),
+  },
+
+  // The client reports account-service state through this sibling of `login`.
+  // A storeback can refresh expiry only when it names the token already held;
+  // sign-out removes the Keychain item and cancels an unfinished OAuth sheet.
+  nativeAccount: {
+    storeAccountData: (token, expiry) => host.storeSteamAccountData(token, expiry),
+    clearAccountData: () => host.clearSteamAccountData(),
   },
 
   // onDemand streams chunks as the client asks for them, which is what the
@@ -642,7 +653,7 @@ function appendGlue() {
   try {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
-      start, panel, data, compat, guide, metrics,
+      start, panel, data, compat, guide, steam, metrics,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -659,6 +670,7 @@ function appendGlue() {
       import('./game-data.js'),
       import('./compatibility.js'),
       import('./guide.js'),
+      import('./steam.js'),
       import('./diagnostics.js'),
     ]);
     host = {
@@ -677,6 +689,7 @@ function appendGlue() {
       ...data,
       ...compat,
       ...guide,
+      ...steam,
     };
     // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
     // contract could plausibly want for something else.

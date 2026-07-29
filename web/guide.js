@@ -22,9 +22,14 @@ export const GUIDE = [
   {
     heading: 'Signing in',
     body: [
-      'Use the same ArenaNet account you would use anywhere else. The login goes ' +
-        'to ArenaNet, not to this app; nothing about your account is stored on this Mac ' +
-        'beyond what the game itself writes.',
+      'Use the email and password fields for an ArenaNet account. If you bought Guild ' +
+        'Wars through Steam, choose Sign in with Steam instead; Steam-purchased accounts ' +
+        'do not have an ArenaNet email and password to enter here.',
+      'Steam opens in a separate temporary sheet. It has no address bar, so this app ' +
+        'confines its top-level page to Steam- and Valve-owned addresses instead. If the ' +
+        'sheet is blank or looks broken, close it rather than entering a password. The ' +
+        'resulting access token is kept in the Mac Keychain, not browser storage or logs, ' +
+        'and signing out removes the local copy without unlinking the accounts.',
       'Characters, settings, hero builds and storage all live on ArenaNet’s servers. ' +
         'Nothing on this Mac holds them, which is why anything here can be deleted and ' +
         'rebuilt without losing a character.',

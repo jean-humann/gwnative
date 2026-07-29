@@ -18,7 +18,8 @@ gwnative requires Apple Silicon and macOS 15.2 or newer.
 2. Open it and drag **Guild Wars** to **Applications**.
 3. Open **Guild Wars**.
 4. Choose **Quick Start** or **Full Game** when asked.
-5. Sign in with the ArenaNet account used by the game.
+5. Sign in with the ArenaNet account used by the game, or choose **Sign in with
+   Steam** for a Steam-purchased account.
 
 The application fetches the official JavaScript and WebAssembly client from
 ArenaNet. Characters, storage, account settings, and other server-side game
@@ -40,6 +41,31 @@ refused when it would leave less than 2 GiB of usable disk space.
 The choice can be changed at any time under **Settings → Game data**. Pausing a
 full download keeps the Full Game choice and resumes later; **Switch to Quick
 Start** changes the saved mode.
+
+## Sign in
+
+Use the email and password fields for an ArenaNet account. If Guild Wars was
+purchased through Steam, choose **Sign in with Steam** instead: those accounts
+do not have an ArenaNet email and password to enter here.
+
+Steam sign-in opens a separate sheet owned by gwnative. A macOS sheet has no
+address bar, so its origin cannot be verified by eye. The native host instead
+allows its top-level page to visit only Steam- or Valve-owned HTTPS domains.
+The sheet uses a temporary WebKit data store, refuses popups, downloads, and
+device permissions, and intercepts its exact Guild Wars return URL before that
+page loads. If the sheet is blank or looks broken, close it rather than entering
+a Steam password.
+
+The resulting Steam OAuth access token is a long-lived bearer credential.
+gwnative stores it as a separate item in macOS Keychain and replays it until it
+expires or the game rejects it. The token is never written to WebKit storage,
+the settings file, environment variables, diagnostics, or problem reports.
+Signing out clears the local token; it does not unlink the Steam and Guild Wars
+accounts.
+
+**This flow signs in to a Steam account already linked to Guild Wars. It cannot
+create or change that link.** If Steam accepts the sign-in but Guild Wars does
+not accept the account, use [Guild Wars Support](https://help.guildwars.com/).
 
 ## Settings
 
@@ -116,8 +142,9 @@ Stable builds are offered stable releases only. Recognised prerelease tags are
 ## Local data
 
 The host's ordinary filesystem state lives below
-`~/Library/Application Support/gwnative`. The saved login lives separately in
-the macOS login Keychain, and WebKit page data uses the roots described below.
+`~/Library/Application Support/gwnative`. Saved ArenaNet credentials and the
+separate Steam session live in the macOS login Keychain, and WebKit page data
+uses the roots described below.
 
 | Path | Contents |
 | --- | --- |
@@ -201,11 +228,12 @@ termination becomes a visible error instead of an infinite reload loop.
 
 ### Saved login is missing
 
-Keychain access is tied to the application's signing identity. Moving the same
-signed app does not matter, but changing the bundle identifier or signing
+Keychain access is tied to the application's signing identity. This applies
+independently to an ArenaNet saved login and a saved Steam session. Moving the
+same signed app does not matter, but changing the bundle identifier or signing
 certificate does. gwnative suppresses the macOS account-password prompt and
-falls back to the game's normal sign-in form. Signing in once recreates the
-item for the current identity.
+falls back to the game's normal sign-in choices. Signing in once recreates the
+relevant item for the current identity.
 
 Development builds without a stable signing certificate can appear as a new
 application after every rebuild. See the
