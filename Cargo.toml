@@ -3,7 +3,7 @@ name = "gwnative"
 version = "0.1.3"
 edition = "2024"
 rust-version = "1.90"
-description = "Native macOS host for the Guild Wars WebAssembly client"
+description = "Unofficial native macOS host for the Guild Wars Reforged WebAssembly client"
 license = "GPL-2.0-or-later"
 # Read at compile time by `src/release.rs`, and the switch for two features
 # rather than a note in a manifest: the Help menu's website item and the update

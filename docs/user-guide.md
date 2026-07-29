@@ -4,6 +4,11 @@ This guide covers installation, settings, local data, updates, and recovery.
 The application includes a shorter offline version under **Help → Guild Wars
 Guide**.
 
+gwnative is an independent, unofficial interoperability project for Guild Wars
+Reforged. It is not affiliated with or endorsed by ArenaNet or NCSOFT, and it
+does not bundle the official client or game data. See the [legal
+notice](../NOTICE.md).
+
 ## Install and start
 
 gwnative requires Apple Silicon and macOS 15.2 or newer.

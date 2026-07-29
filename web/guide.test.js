@@ -68,6 +68,14 @@ describe('user guide', () => {
     assert.match(text(), /ArenaNet’s servers|held by\s+ArenaNet/);
   });
 
+  it('identifies the project as unofficial and carries the required legal notice', () => {
+    const body = text();
+    assert.match(body, /independent, unofficial interoperability project/i);
+    assert.match(body, /Guild Wars Reforged/);
+    assert.match(body, /© ArenaNet LLC\. All rights reserved\./);
+    assert.match(body, /trademarks or registered trademarks of NCSOFT Corporation/);
+  });
+
   // ⌘⇧M is the one control in this app with no button, no menu item a player
   // will stumble over mid-stutter, and a hard timing requirement: it raises the
   // sampling rate for the ten seconds *after* it, so pressing it once the game

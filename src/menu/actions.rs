@@ -58,9 +58,16 @@ const STORE_URL: &str = "https://store.guildwars.com/";
 /// whose game this is, and that nobody official is behind this window.
 const CREDITS: &str = concat!(
     env!("CARGO_PKG_DESCRIPTION"),
-    ".\n\nGuild Wars is a trademark of NCSOFT Corporation. This is an unofficial \
-     client and is not affiliated with, or endorsed by, NCSOFT or ArenaNet.\n\n\
-     Licensed ",
+    ".\n\nAn independent, unofficial interoperability project. Not affiliated with, \
+     endorsed, sponsored, or approved by ArenaNet or NCSOFT.\n\n\
+     Guild Wars Reforged and its game material are not gwnative project material and \
+     are not covered by its licence.\n\n\
+     © ArenaNet LLC. All rights reserved. NCSOFT, ArenaNet, Guild Wars, Guild Wars 2, \
+     GW2, Heart of Thorns, Path of Fire, End of Dragons, Secrets of the Obscure, \
+     Janthir Wilds, Visions of Eternity, and all associated logos, designs, and \
+     composite marks are trademarks or registered trademarks of NCSOFT Corporation. \
+     All other trademarks are the property of their respective owners.\n\n\
+     gwnative is licensed ",
     env!("CARGO_PKG_LICENSE"),
     "."
 );

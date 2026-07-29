@@ -109,6 +109,8 @@ jobs:
         run: |
           scripts/bundle
           test -f "dist/Guild Wars.app/Contents/Resources/AppIcon.icns"
+          test -f "dist/Guild Wars.app/Contents/Resources/LICENSE"
+          test -f "dist/Guild Wars.app/Contents/Resources/NOTICE.md"
           test -f "dist/Guild Wars.app/Contents/MacOS/gwnative"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
             "dist/Guild Wars.app/Contents/Info.plist"

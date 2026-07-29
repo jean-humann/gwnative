@@ -3,8 +3,13 @@
 [![CI](https://github.com/jean-humann/gwnative/actions/workflows/ci.yml/badge.svg)](https://github.com/jean-humann/gwnative/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/jean-humann/gwnative)](https://github.com/jean-humann/gwnative/releases/latest)
 
-A native macOS host for the Guild Wars WebAssembly client. One Rust binary
-drives AppKit and WKWebView directly, without an embedded browser distribution.
+An unofficial native macOS host for the Guild Wars Reforged WebAssembly client.
+One Rust binary drives AppKit and WKWebView directly, without an embedded
+browser distribution.
+
+gwnative is an independent interoperability project. It is not affiliated with,
+endorsed, sponsored, or approved by ArenaNet or NCSOFT. See the
+[legal notice](NOTICE.md) for ownership, trademark, and game-material details.
 
 gwnative was inspired by [gwonmac](https://github.com/Mat4m0/gwonmac), whose
 work made this native host possible. The renderer harness began from that
@@ -89,6 +94,7 @@ are in the [development guide](docs/development.md).
 | [Performance](docs/performance.md) | Reproducible measurements, baselines, and measured design decisions |
 | [Release guide](docs/releasing.md) | Bundling, signing, notarization, Sparkle, CI, and publication |
 | [Contributing](CONTRIBUTING.md) | Change workflow and documentation expectations |
+| [Legal notice](NOTICE.md) | Unofficial-project disclosure, game-material ownership, and trademarks |
 
 The application also ships an offline user guide under **Help → Guild Wars
 Guide**. It describes the exact build currently running; this repository's user
@@ -96,4 +102,7 @@ guide adds developer-facing paths and recovery details.
 
 ## Licence
 
-GPL-2.0-or-later, matching the upstream project. See [LICENSE](LICENSE).
+The gwnative source code is GPL-2.0-or-later, matching the upstream project.
+That licence does not cover Guild Wars names, client code, game data, artwork,
+audio, logos, or other proprietary material. See [LICENSE](LICENSE) and the
+[legal notice](NOTICE.md).

@@ -67,4 +67,12 @@ describe('the page', () => {
       );
     }
   });
+
+  it('labels the launcher as an unofficial project without waiting for JavaScript', () => {
+    assert.match(html, /id="launcher-legal"/);
+    assert.match(html, /<title>Guild Wars — Unofficial macOS host<\/title>/);
+    assert.match(html, /Independent, unofficial project/);
+    assert.match(html, /ArenaNet or NCSOFT/);
+    assert.match(html, /Guild Wars Reforged/);
+  });
 });

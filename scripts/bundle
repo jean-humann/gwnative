@@ -48,6 +48,11 @@ cp target/release/gwnative "$app/Contents/MacOS/gwnative"
 # so they cannot drift.
 cp packaging/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
+# Keep the source-code licence and the separate game-material notice inside the
+# distributed application. Neither is useful only in the checkout that built
+# it, and the latter is the durable copy behind the shorter in-app disclosure.
+cp LICENSE NOTICE.md "$app/Contents/Resources/"
+
 # The shell only. Gw.jspi.js, Gw.jspi.wasm and version.json are the client
 # itself, fetched from ArenaNet against the live manifest; shipping a copy would
 # freeze the game at whatever build this was packaged from, because the patch

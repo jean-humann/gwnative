@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Guild Wars</title>
+<title>Guild Wars — Unofficial macOS host</title>
 <style>
   :root { color-scheme: dark; }
   html, body {
@@ -101,6 +101,10 @@
   }
   #launcher button:hover { background: #45475a; }
   #launcher button.primary { border-color: #d9b25c; }
+  #launcher-legal {
+    max-width: 60em; margin-top: 10px;
+    color: #6c7086; font-size: 10px; line-height: 1.4;
+  }
   /* Same red as the failure overlay's. Stopping a download and clearing the
      cache are the two buttons in this app that throw work away, and they should
      not look like the ones beside them. */
@@ -288,6 +292,14 @@
   <div id="launcher-rail" hidden><div id="launcher-rail-fill"></div></div>
   <div id="launcher-detail"></div>
   <div id="launcher-actions"></div>
+  <!-- Static rather than filled by JavaScript: the disclosure must still be
+       present when the client, a module, or the network fails to load. The
+       complete prescribed notice is in Help → Guild Wars Guide and About. -->
+  <div id="launcher-legal">
+    Independent, unofficial project. Not affiliated with or endorsed by
+    ArenaNet or NCSOFT. Guild Wars Reforged and associated game material belong
+    to their respective owners.
+  </div>
 </div>
 <!-- Filled in by settings-panel.js, opened from the Settings… menu item. The
      rows and the tabs are built rather than written out because the panel's
