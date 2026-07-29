@@ -77,7 +77,6 @@ pub struct LegacyOptions {
     pub mute: bool,
     pub diagnostics: bool,
     pub performance: bool,
-    pub log: bool,
     pub mock_steam_deck: bool,
     pub no_patch_ui: bool,
     pub reset_preferences: bool,
@@ -171,9 +170,7 @@ impl Invocation {
         serde_json::json!({
             "profile": self.profile.as_deref().unwrap_or("default"),
             "autologin": self.legacy.autologin,
-            "email": self.legacy.email,
             "credentials": credentials,
-            "character": self.legacy.character,
             "fps": self.legacy.fps,
             "mute": self.legacy.mute,
             "diagnostics": self.legacy.diagnostics,
@@ -392,12 +389,19 @@ where
                 set_once(&mut invocation.legacy.fps, value, option)?;
             }
             "-stress" => {
-                let _ = parse_number::<u32>(
-                    take_value(&args, &mut index, option, inline)?,
-                    option,
-                    1,
-                    100_000,
-                )?;
+                let _milliseconds = match inline {
+                    Some(value) => parse_number::<u32>(value, option, 0, 100_000)?,
+                    None if args
+                        .get(index)
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .is_some() =>
+                    {
+                        let value = &args[index];
+                        index += 1;
+                        parse_number::<u32>(value, option, 0, 100_000)?
+                    }
+                    None => 0,
+                };
                 unsupported(
                     &mut invocation,
                     option,
@@ -459,7 +463,6 @@ where
             "-diag" => invocation.legacy.diagnostics = true,
             "-perf" => invocation.legacy.performance = true,
             "-log" => {
-                invocation.legacy.log = true;
                 invocation.verbose = true;
                 translated(
                     &mut invocation,
@@ -472,7 +475,11 @@ where
                 option,
                 "the WebAssembly client exposes no screenshot-format launch hook",
             ),
-            "-fqdn" => no_known_effect(&mut invocation, option),
+            "-fqdn" => unsupported(
+                &mut invocation,
+                option,
+                "authentication routing is owned by the current client and restricted native network bridge",
+            ),
             "-lodfull" => unsupported(
                 &mut invocation,
                 option,
@@ -534,10 +541,15 @@ where
             "cannot be combined with sync, -image, or -update",
         ));
     }
-    if invocation.new_instance && invocation.profile.is_none() {
+    if invocation.new_instance
+        && invocation
+            .profile
+            .as_deref()
+            .is_none_or(|profile| profile == "default")
+    {
         return Err(value_error(
             "--new-instance",
-            "requires --profile so storage and credentials remain isolated",
+            "requires a non-default --profile so storage and credentials remain isolated",
         ));
     }
     if invocation.jobs.is_some()
@@ -547,6 +559,18 @@ where
             "--jobs",
             "is only meaningful with -image or repair",
         ));
+    }
+    if invocation.legacy.email.is_some() != invocation.legacy.password.is_some() {
+        let option = if invocation.legacy.email.is_some() {
+            "-email"
+        } else {
+            "-password"
+        };
+        unsupported(
+            &mut invocation,
+            option,
+            "invocation credentials require both -email and -password in the current client",
+        );
     }
     Ok(invocation)
 }
@@ -780,6 +804,11 @@ mod tests {
     fn isolated_instances_require_a_profile() {
         assert!(parse_str(&["--new-instance"]).unwrap_err().failed);
         assert!(
+            parse_str(&["--profile", "default", "--new-instance"])
+                .unwrap_err()
+                .failed
+        );
+        assert!(
             parse_str(&["--new-instance", "--profile", "second"])
                 .unwrap()
                 .new_instance
@@ -807,6 +836,23 @@ mod tests {
         let debug = format!("{parsed:?}");
         assert!(!debug.contains("hunter2"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn partial_invocation_credentials_are_explained_not_injected() {
+        for args in [
+            &["-email", "player@example.test"][..],
+            &["-password", "secret"][..],
+        ] {
+            let parsed = parse_str(args).unwrap();
+            assert!(
+                parsed
+                    .notices
+                    .iter()
+                    .any(|notice| notice.kind == NoticeKind::Unsupported)
+            );
+            assert!(parsed.client_json()["credentials"].is_null());
+        }
     }
 
     #[test]
@@ -876,14 +922,17 @@ mod tests {
             parsed
                 .notices
                 .iter()
-                .any(|notice| notice.kind == NoticeKind::NoKnownEffect)
+                .all(|notice| notice.kind == NoticeKind::Unsupported)
         );
-        assert!(
-            parsed
-                .notices
-                .iter()
-                .any(|notice| notice.kind == NoticeKind::Unsupported)
-        );
+    }
+
+    #[test]
+    fn stress_accepts_the_official_optional_zero_count() {
+        for args in [&["-stress"][..], &["-stress", "0"][..], &["-stress=10"][..]] {
+            let parsed = parse_str(args).unwrap();
+            assert_eq!(parsed.notices.len(), 1);
+            assert_eq!(parsed.notices[0].kind, NoticeKind::Unsupported);
+        }
     }
 
     #[test]
