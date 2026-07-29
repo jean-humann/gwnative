@@ -85,116 +85,209 @@ pub(super) struct KnownBuild {
     pub bridges: &'static [StubBridge],
 }
 
-pub(super) const BUILDS: &[KnownBuild] = &[KnownBuild {
-    sha256: "b0319704f3072d6948a66026a35af5eb0af12b48d70986783c293e7c77e98483",
-    output_sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-    import_count: 219,
-    carrier_import: 207,
-    bridges: &[
-        // PathCreateDirectory(path, recursive) -> error. `i32.const 2` is
-        // ERROR_FILE_NOT_FOUND, returned unconditionally.
-        StubBridge {
-            kind: BridgeKind::EnsureDirectory,
-            stub_function: 185,
-            stub_body: Some(&[0x00, 0x41, 0x02, 0x0b]),
-            call_sites: &[
-                CallSite {
+pub(super) const BUILDS: &[KnownBuild] = &[
+    KnownBuild {
+        sha256: "b0319704f3072d6948a66026a35af5eb0af12b48d70986783c293e7c77e98483",
+        output_sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
+        import_count: 219,
+        carrier_import: 207,
+        bridges: &[
+            // PathCreateDirectory(path, recursive) -> error. `i32.const 2` is
+            // ERROR_FILE_NOT_FOUND, returned unconditionally.
+            StubBridge {
+                kind: BridgeKind::EnsureDirectory,
+                stub_function: 185,
+                stub_body: Some(&[0x00, 0x41, 0x02, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9538,
+                        body_offset: 171,
+                    }, // template save
+                    CallSite {
+                        local_function: 11525,
+                        body_offset: 142,
+                    }, // chat log
+                    CallSite {
+                        local_function: 12214,
+                        body_offset: 127,
+                    }, // screenshot
+                ],
+            },
+            // FindFiles(out, pattern, flags) -> void. An empty body leaves the
+            // caller's list zeroed, so every directory reads as empty.
+            StubBridge {
+                kind: BridgeKind::FindFiles,
+                stub_function: 186,
+                stub_body: Some(&[0x00, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9527,
+                        body_offset: 157,
+                    }, // skills list
+                    CallSite {
+                        local_function: 9528,
+                        body_offset: 157,
+                    }, // equipment list
+                    CallSite {
+                        local_function: 11525,
+                        body_offset: 210,
+                    }, // chat log
+                    CallSite {
+                        local_function: 12214,
+                        body_offset: 419,
+                    }, // screenshot
+                ],
+            },
+            // FileBaseName(dst, _, baseDir, _, path, dstChars) -> written.
+            // `i32.const 0` leaves the caller reading uninitialised stack. Only the
+            // two template lists are repointed; the model paths that also call it
+            // keep the fallback branch they take today.
+            StubBridge {
+                kind: BridgeKind::FileBaseName,
+                stub_function: 197,
+                stub_body: Some(&[0x00, 0x41, 0x00, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9527,
+                        body_offset: 276,
+                    },
+                    CallSite {
+                        local_function: 9528,
+                        body_offset: 278,
+                    },
+                ],
+            },
+            // DeleteFile(path) -> deleted. Not a silent stub like the others: the
+            // body is `assert("not implemented")` followed by `unreachable`, so
+            // deleting a build aborted the client outright.
+            StubBridge {
+                kind: BridgeKind::DeleteFile,
+                stub_function: 333,
+                stub_body: Some(&[
+                    0x00, //
+                    0x41, 0x9e, 0x87, 0xc5, 0x80, 0x00, //
+                    0x41, 0x80, 0xbb, 0xc3, 0x80, 0x00, //
+                    0x41, 0xc8, 0x06, //
+                    0x10, 0xc2, 0x82, 0x80, 0x80, 0x00, //
+                    0x00, //
+                    0x0b,
+                ]),
+                call_sites: &[CallSite {
+                    local_function: 459,
+                    body_offset: 201,
+                }],
+            },
+            // File::Open(path, mode, err). Mode 1 is meant to open an existing
+            // file, and 9757 uses it to ask whether a rename's destination is
+            // already taken — but in this build mode 1 opens O_RDWR|O_CREAT, the
+            // same as the write mode. The probe creates the file it is testing for,
+            // reports it present, and refuses every rename.
+            //
+            // Only the probe is repointed. The write call five instructions later
+            // keeps the real function, and so does the load path.
+            StubBridge {
+                kind: BridgeKind::FileExists,
+                stub_function: 552,
+                stub_body: None,
+                call_sites: &[CallSite {
                     local_function: 9538,
-                    body_offset: 171,
-                }, // template save
-                CallSite {
-                    local_function: 11525,
-                    body_offset: 142,
-                }, // chat log
-                CallSite {
-                    local_function: 12214,
-                    body_offset: 127,
-                }, // screenshot
-            ],
-        },
-        // FindFiles(out, pattern, flags) -> void. An empty body leaves the
-        // caller's list zeroed, so every directory reads as empty.
-        StubBridge {
-            kind: BridgeKind::FindFiles,
-            stub_function: 186,
-            stub_body: Some(&[0x00, 0x0b]),
-            call_sites: &[
-                CallSite {
-                    local_function: 9527,
-                    body_offset: 157,
-                }, // skills list
-                CallSite {
-                    local_function: 9528,
-                    body_offset: 157,
-                }, // equipment list
-                CallSite {
-                    local_function: 11525,
-                    body_offset: 210,
-                }, // chat log
-                CallSite {
-                    local_function: 12214,
-                    body_offset: 419,
-                }, // screenshot
-            ],
-        },
-        // FileBaseName(dst, _, baseDir, _, path, dstChars) -> written.
-        // `i32.const 0` leaves the caller reading uninitialised stack. Only the
-        // two template lists are repointed; the model paths that also call it
-        // keep the fallback branch they take today.
-        StubBridge {
-            kind: BridgeKind::FileBaseName,
-            stub_function: 197,
-            stub_body: Some(&[0x00, 0x41, 0x00, 0x0b]),
-            call_sites: &[
-                CallSite {
-                    local_function: 9527,
-                    body_offset: 276,
-                },
-                CallSite {
-                    local_function: 9528,
-                    body_offset: 278,
-                },
-            ],
-        },
-        // DeleteFile(path) -> deleted. Not a silent stub like the others: the
-        // body is `assert("not implemented")` followed by `unreachable`, so
-        // deleting a build aborted the client outright.
-        StubBridge {
-            kind: BridgeKind::DeleteFile,
-            stub_function: 333,
-            stub_body: Some(&[
-                0x00, //
-                0x41, 0x9e, 0x87, 0xc5, 0x80, 0x00, //
-                0x41, 0x80, 0xbb, 0xc3, 0x80, 0x00, //
-                0x41, 0xc8, 0x06, //
-                0x10, 0xc2, 0x82, 0x80, 0x80, 0x00, //
-                0x00, //
-                0x0b,
-            ]),
-            call_sites: &[CallSite {
-                local_function: 459,
-                body_offset: 201,
-            }],
-        },
-        // File::Open(path, mode, err). Mode 1 is meant to open an existing
-        // file, and 9757 uses it to ask whether a rename's destination is
-        // already taken — but in this build mode 1 opens O_RDWR|O_CREAT, the
-        // same as the write mode. The probe creates the file it is testing for,
-        // reports it present, and refuses every rename.
-        //
-        // Only the probe is repointed. The write call five instructions later
-        // keeps the real function, and so does the load path.
-        StubBridge {
-            kind: BridgeKind::FileExists,
-            stub_function: 552,
-            stub_body: None,
-            call_sites: &[CallSite {
-                local_function: 9538,
-                body_offset: 201,
-            }],
-        },
-    ],
-}];
+                    body_offset: 201,
+                }],
+            },
+        ],
+    },
+    KnownBuild {
+        sha256: "3039ca5489eb2bddb38844d275320e3ac070baf01b5b888fc2062982e343f3a8",
+        output_sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
+        import_count: 219,
+        carrier_import: 207,
+        bridges: &[
+            StubBridge {
+                kind: BridgeKind::EnsureDirectory,
+                stub_function: 185,
+                stub_body: Some(&[0x00, 0x41, 0x02, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9541,
+                        body_offset: 171,
+                    },
+                    CallSite {
+                        local_function: 11528,
+                        body_offset: 142,
+                    },
+                    CallSite {
+                        local_function: 12217,
+                        body_offset: 127,
+                    },
+                ],
+            },
+            StubBridge {
+                kind: BridgeKind::FindFiles,
+                stub_function: 186,
+                stub_body: Some(&[0x00, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9530,
+                        body_offset: 157,
+                    },
+                    CallSite {
+                        local_function: 9531,
+                        body_offset: 157,
+                    },
+                    CallSite {
+                        local_function: 11528,
+                        body_offset: 210,
+                    },
+                    CallSite {
+                        local_function: 12217,
+                        body_offset: 419,
+                    },
+                ],
+            },
+            StubBridge {
+                kind: BridgeKind::FileBaseName,
+                stub_function: 197,
+                stub_body: Some(&[0x00, 0x41, 0x00, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9530,
+                        body_offset: 276,
+                    },
+                    CallSite {
+                        local_function: 9531,
+                        body_offset: 278,
+                    },
+                ],
+            },
+            StubBridge {
+                kind: BridgeKind::DeleteFile,
+                stub_function: 333,
+                stub_body: Some(&[
+                    0x00, //
+                    0x41, 0xca, 0x87, 0xc5, 0x80, 0x00, //
+                    0x41, 0xa3, 0xbb, 0xc3, 0x80, 0x00, //
+                    0x41, 0xc8, 0x06, //
+                    0x10, 0xc2, 0x82, 0x80, 0x80, 0x00, //
+                    0x00, //
+                    0x0b,
+                ]),
+                call_sites: &[CallSite {
+                    local_function: 459,
+                    body_offset: 201,
+                }],
+            },
+            StubBridge {
+                kind: BridgeKind::FileExists,
+                stub_function: 552,
+                stub_body: None,
+                call_sites: &[CallSite {
+                    local_function: 9541,
+                    body_offset: 201,
+                }],
+            },
+        ],
+    },
+];
 
 pub(super) fn find_build(sha256: &str) -> Option<&'static KnownBuild> {
     BUILDS.iter().find(|build| build.sha256 == sha256)
@@ -320,48 +413,92 @@ pub(super) struct EnhancementBuild {
     pub layout: EnhancementLayout,
 }
 
-pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[EnhancementBuild {
-    sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-    output_sha256: "903967df89f33e3b632b3ee1718d0b0ad5b2947ae7103e25df10f544eebe9232",
-    import_count: 219,
-    program_id: 1,
-    build_id: 38771,
-    hook_function: 446,
-    hook_params: &[0x7f],
-    hook_results: &[],
-    table_slot: 0,
-    layout: EnhancementLayout {
-        context_root: 0x5a_0e20,
-        agent_array: 0x5a_4d98,
-        manual_target_agent_id: 0x5a_388c,
-        automatic_target_agent_id: 0x5a_3888,
-        game_context_slot: 6,
-        character_context: 0x44,
-        map_id: 0x198,
-        is_explorable: 0x19c,
-        current_map_id: 0x234,
-        current_instance_type: 0x23c,
-        player_number: 0x2ac,
-        agent_id: 0x2c,
-        agent_x: 0x74,
-        agent_y: 0x78,
-        agent_type: 0x9c,
-        agent_player_number: 0xf4,
-        agent_model_type: 0xf6,
-        cursor_active_art: 0x5a_1620,
-        cursor_software_model: 0x5a_1624,
-        cursor_show_count: 0x5a_1628,
-        cursor_color_buffer: 0x29_8d90,
-        cursor_art_hotspot: 0x00,
-        cursor_art_texture: 0x0c,
-        cursor_handle_key: 0x08,
-        cursor_handle_object: 0x00,
-        cursor_view_texture: 0x08,
-        cursor_texture_type: 0x0c,
-        cursor_texture_width: 0x14,
-        cursor_texture_height: 0x18,
+pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
+    EnhancementBuild {
+        sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
+        output_sha256: "903967df89f33e3b632b3ee1718d0b0ad5b2947ae7103e25df10f544eebe9232",
+        import_count: 219,
+        program_id: 1,
+        build_id: 38771,
+        hook_function: 446,
+        hook_params: &[0x7f],
+        hook_results: &[],
+        table_slot: 0,
+        layout: EnhancementLayout {
+            context_root: 0x5a_0e20,
+            agent_array: 0x5a_4d98,
+            manual_target_agent_id: 0x5a_388c,
+            automatic_target_agent_id: 0x5a_3888,
+            game_context_slot: 6,
+            character_context: 0x44,
+            map_id: 0x198,
+            is_explorable: 0x19c,
+            current_map_id: 0x234,
+            current_instance_type: 0x23c,
+            player_number: 0x2ac,
+            agent_id: 0x2c,
+            agent_x: 0x74,
+            agent_y: 0x78,
+            agent_type: 0x9c,
+            agent_player_number: 0xf4,
+            agent_model_type: 0xf6,
+            cursor_active_art: 0x5a_1620,
+            cursor_software_model: 0x5a_1624,
+            cursor_show_count: 0x5a_1628,
+            cursor_color_buffer: 0x29_8d90,
+            cursor_art_hotspot: 0x00,
+            cursor_art_texture: 0x0c,
+            cursor_handle_key: 0x08,
+            cursor_handle_object: 0x00,
+            cursor_view_texture: 0x08,
+            cursor_texture_type: 0x0c,
+            cursor_texture_width: 0x14,
+            cursor_texture_height: 0x18,
+        },
     },
-}];
+    EnhancementBuild {
+        sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
+        output_sha256: "61810ea1c1f20002ac082759de4bbb4d4ab5b0b1abff719ec9f8989103e501fc",
+        import_count: 219,
+        program_id: 1,
+        build_id: 38790,
+        hook_function: 446,
+        hook_params: &[0x7f],
+        hook_results: &[],
+        table_slot: 0,
+        layout: EnhancementLayout {
+            context_root: 0x5a_0f10,
+            agent_array: 0x5a_4e88,
+            manual_target_agent_id: 0x5a_397c,
+            automatic_target_agent_id: 0x5a_3978,
+            game_context_slot: 6,
+            character_context: 0x44,
+            map_id: 0x198,
+            is_explorable: 0x19c,
+            current_map_id: 0x234,
+            current_instance_type: 0x23c,
+            player_number: 0x2ac,
+            agent_id: 0x2c,
+            agent_x: 0x74,
+            agent_y: 0x78,
+            agent_type: 0x9c,
+            agent_player_number: 0xf4,
+            agent_model_type: 0xf6,
+            cursor_active_art: 0x5a_1710,
+            cursor_software_model: 0x5a_1714,
+            cursor_show_count: 0x5a_1718,
+            cursor_color_buffer: 0x29_8e80,
+            cursor_art_hotspot: 0x00,
+            cursor_art_texture: 0x0c,
+            cursor_handle_key: 0x08,
+            cursor_handle_object: 0x00,
+            cursor_view_texture: 0x08,
+            cursor_texture_type: 0x0c,
+            cursor_texture_width: 0x14,
+            cursor_texture_height: 0x18,
+        },
+    },
+];
 
 pub(super) fn find_enhancement_build(sha256: &str) -> Option<&'static EnhancementBuild> {
     ENHANCEMENT_BUILDS
