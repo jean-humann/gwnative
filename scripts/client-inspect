@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Inspect a local JSPI/WASM client pair without emitting client contents."""
+
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tools.client_analyzer import inspect_main
+
+raise SystemExit(inspect_main())

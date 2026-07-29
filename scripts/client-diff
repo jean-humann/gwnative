@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Compare two local JSPI/WASM client pairs structurally."""
+
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tools.client_analyzer import diff_main
+
+raise SystemExit(diff_main())

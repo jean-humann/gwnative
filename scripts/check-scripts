@@ -16,5 +16,14 @@ for script in \
 	sh -n "$script"
 done
 
-python3 -m py_compile scripts/benchmark scripts/check-docs scripts/e2e
+python3 -m py_compile \
+	scripts/benchmark \
+	scripts/check-docs \
+	scripts/client-certify \
+	scripts/client-diff \
+	scripts/client-inspect \
+	scripts/e2e \
+	tools/client_analyzer.py \
+	tools/test_client_analyzer.py
+python3 -m unittest tools.test_client_analyzer
 echo "scripts: shell and Python syntax ok"
