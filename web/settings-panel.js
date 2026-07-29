@@ -345,6 +345,29 @@ export async function applyLive(keys, settings, page) {
 }
 
 /**
+ * Persist a patch, then attempt the independent live side effect.
+ *
+ * A rejected save still rejects. Once persistence succeeds, a refused live
+ * action is data rather than a save failure: the caller must say that the
+ * setting is on disk even though this session could not apply it.
+ *
+ * @param {string[]} keys
+ * @param {Record<string, unknown>} patch
+ * @param {{ save: (patch: object) => Promise<Record<string, unknown>>,
+ *           showLog: (on: boolean) => void,
+ *           sweep: (action: 'start' | 'stop') => Promise<unknown> }} page
+ */
+export async function saveAndApply(keys, patch, page) {
+  const saved = await page.save(patch);
+  try {
+    await applyLive(keys, saved, page);
+    return { saved, liveError: null };
+  } catch (liveError) {
+    return { saved, liveError };
+  }
+}
+
+/**
  * Wire the panel to the document and publish the opener.
  *
  * @param {{
@@ -529,29 +552,35 @@ export function installSettingsPanel({
       return;
     }
     const patch = Object.fromEntries(keys.map((key) => [key, after[key]]));
+    let outcome;
     try {
-      const saved = await save(patch);
-      // Awaited inside the same try: a sweep the host refuses for want of disk
-      // space says so in the body, and that refusal is the one the player most
-      // needs to see rather than a silent no-op.
-      await applyLive(keys, saved, { showLog, sweep });
-      diagnostics.count('gw.settings.saved');
-      for (const key of keys) diagnostics.count(`gw.settings.changed.${key}`);
-      if (needsRelaunch(keys)) {
-        // Deliberately not closed. The change is saved and doing nothing, and
-        // the panel is where the player is looking; closing it and mentioning
-        // the restart in the log would be telling the one place they are not.
-        offerRestart(keys);
-        return;
-      }
-      close();
+      outcome = await saveAndApply(keys, patch, { save, showLog, sweep });
     } catch (error) {
       // Left open, deliberately: the player's choice is still on screen and a
       // closed panel would have thrown it away along with the explanation.
       note.textContent = `Not saved: ${error}`;
       diagnostics.count('gw.settings.save-failed');
       log(`[warn] settings: ${error}`);
+      return;
     }
+
+    diagnostics.count('gw.settings.saved');
+    for (const key of keys) diagnostics.count(`gw.settings.changed.${key}`);
+    if (outcome.liveError !== null) {
+      note.textContent = `Saved, but could not apply now: ${outcome.liveError}`;
+      diagnostics.count('gw.settings.apply-failed');
+      log(`[warn] settings: saved, but the live action failed: ${outcome.liveError}`);
+      if (needsRelaunch(keys)) offerRestart(keys);
+      return;
+    }
+    if (needsRelaunch(keys)) {
+      // Deliberately not closed. The change is saved and doing nothing, and
+      // the panel is where the player is looking; closing it and mentioning
+      // the restart in the log would be telling the one place they are not.
+      offerRestart(keys);
+      return;
+    }
+    close();
   };
 
   const button = (label, run, primary, danger) => {

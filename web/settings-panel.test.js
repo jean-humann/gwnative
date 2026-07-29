@@ -123,6 +123,34 @@ describe('settings panel', () => {
     );
   });
 
+  it('does not turn a failed live action into a failed save', async () => {
+    const saved = { ...current, dataStrategy: 'full' };
+    const outcome = await panel.saveAndApply(
+      ['dataStrategy'],
+      { dataStrategy: 'full' },
+      {
+        save: async () => saved,
+        showLog: () => {},
+        sweep: async () => {
+          throw new Error('not enough room');
+        },
+      },
+    );
+    assert.equal(outcome.saved, saved);
+    assert.match(String(outcome.liveError), /not enough room/);
+
+    await assert.rejects(
+      panel.saveAndApply(['dataStrategy'], { dataStrategy: 'full' }, {
+        save: async () => {
+          throw new Error('disk is read-only');
+        },
+        showLog: () => {},
+        sweep: async () => assert.fail('nothing live runs before the save succeeds'),
+      }),
+      /disk is read-only/,
+    );
+  });
+
   // Every control's choices have to be reachable from the settings the host
   // will accept, or the panel offers something that cannot be saved. The list
   // is `PATCHABLE` in src/settings.rs minus the ones with no sensible control —
