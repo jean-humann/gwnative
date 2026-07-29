@@ -17,6 +17,14 @@
 // player to arrange one was honest but not much use: the setting they just
 // asked for is on disk and inert, and the only thing standing between them and
 // it is a quit they have to think of themselves.
+//
+// The panel is in tabs because it outgrew the window. Eight controls, each with
+// a sentence under it, is taller than the game window many people play in — and
+// the old layout centred that column in the viewport, which meant the overflow
+// went off the top as well as the bottom and the part off the top could not be
+// scrolled to at all. The first setting was not merely hard to reach, it was
+// unreachable. Tabs keep any one view short enough to fit; the dialog scrolls
+// inside itself for the sizes where even that is not enough.
 
 import { templateSaveNotice } from './compatibility.js';
 import * as diagnostics from './diagnostics.js';
@@ -32,12 +40,37 @@ const DATA_POLL_MS = 2000;
  * @typedef {{
  *   key: string,
  *   label: string,
+ *   group: string,
  *   note?: string,
  *   live: boolean,
  *   when?: (host: Record<string, unknown>) => boolean,
  *   choices: Choice[],
  * }} Control
+ * @typedef {{ id: string, label: string }} Group
  */
+
+/**
+ * The tabs, in the order they are shown.
+ *
+ * Four rather than one per topic. A tab per control would be a worse index than
+ * the scrolling list it replaced — the point is to have few enough that a player
+ * can see all of them at once and guess right the first time.
+ *
+ * `data` is where the game image lives, and the storage figure and the button
+ * that deletes it move there with it: the setting and the gigabytes it governs
+ * are the same subject, and they were two cards apart.
+ *
+ * @type {Group[]}
+ */
+export const GROUPS = [
+  { id: 'general', label: 'General' },
+  { id: 'tools', label: 'Tools' },
+  { id: 'data', label: 'Game data' },
+  { id: 'updates', label: 'Updates' },
+];
+
+/** The tab the game image, the storage figure and Clear Game Data share. */
+const DATA_GROUP = 'data';
 
 /**
  * What the panel offers, in the order it offers it.
@@ -51,6 +84,7 @@ const DATA_POLL_MS = 2000;
 export const CONTROLS = [
   {
     key: 'renderScale',
+    group: 'general',
     label: 'Render scale',
     note: 'Lower is faster. 2× is one game pixel per display pixel on a Retina screen.',
     live: false,
@@ -68,6 +102,7 @@ export const CONTROLS = [
   // silently turns the mouse off. Each option now says what it costs.
   {
     key: 'touchMode',
+    group: 'general',
     label: 'Double-click',
     note: 'The game has no double-click of its own; it is built from taps. '
       + 'Leave this on unless you are working out where a problem comes from.',
@@ -81,6 +116,7 @@ export const CONTROLS = [
   },
   {
     key: 'showDiagnostics',
+    group: 'general',
     label: 'Diagnostics overlay',
     note: 'The same log the Diagnostics menu item shows.',
     live: true,
@@ -89,19 +125,29 @@ export const CONTROLS = [
       { value: true, label: 'Shown' },
     ],
   },
+  // Named for the launcher's two answers rather than described afresh. The
+  // panel used to say "Stream on demand" and "Download in full" for the two
+  // things the launcher calls Quick Start and Full Game, which left the setting
+  // looking like a different subject from the question it answers — the row is
+  // the only place that choice can be revisited, and it read as unrelated to
+  // the one screen it undoes.
   {
     key: 'dataStrategy',
-    label: 'Game image',
-    note: 'Streaming fetches each piece as the game asks for it. A full download is 4.2 GB.',
+    group: 'data',
+    label: 'Mode',
+    note: 'Quick Start fetches each area the first time you go there. Full Game '
+      + 'downloads all 4.2 GB first and then never touches the network for game '
+      + 'data again.',
     live: true,
     choices: [
       { value: null, label: 'Ask at the next launch' },
-      { value: 'quick', label: 'Stream on demand' },
-      { value: 'full', label: 'Download in full' },
+      { value: 'quick', label: 'Quick Start — stream as needed' },
+      { value: 'full', label: 'Full Game — download everything' },
     ],
   },
   {
     key: 'autoCheckUpdates',
+    group: 'updates',
     label: 'Update check',
     note: 'Asks once a day, at launch, and stays quiet unless there is a newer release.',
     live: true,
@@ -117,6 +163,7 @@ export const CONTROLS = [
   },
   {
     key: 'autoInstallUpdates',
+    group: 'updates',
     label: 'Installing updates',
     note: 'An update installs the next time you quit. Nothing is downloaded '
       + 'while you are playing unless the check above is on.',
@@ -139,6 +186,7 @@ export const CONTROLS = [
   // the two controls it would be speaking for.
   {
     key: 'nativeCursor',
+    group: 'tools',
     label: 'Game cursor',
     note: 'Draws the game\'s own cursor as the pointer, so it moves with the '
       + 'mouse instead of with the frame rate.',
@@ -150,6 +198,7 @@ export const CONTROLS = [
   },
   {
     key: 'targetReadout',
+    group: 'tools',
     label: 'Target distance',
     note: 'Shows how far away your target is, and which range band that is, '
       + 'above the game.',
@@ -175,6 +224,48 @@ export const CONTROLS = [
  */
 export function offered(host = globalThis) {
   return CONTROLS.filter((control) => !control.when || control.when(host));
+}
+
+/**
+ * The tabs this build shows, each with the controls that belong to it.
+ *
+ * Empty ones are dropped rather than shown disabled. A `cargo run` build offers
+ * neither update control, and an Updates tab that opens onto nothing is a worse
+ * answer than no tab at all — the same reasoning that hides the controls
+ * themselves.
+ *
+ * @param {Record<string, unknown>} [host] where the host's injections landed
+ * @returns {(Group & { controls: Control[] })[]}
+ */
+export function tabs(host = globalThis) {
+  const shown = offered(host);
+  return GROUPS
+    .map((group) => ({ ...group, controls: shown.filter((c) => c.group === group.id) }))
+    .filter((group) => group.controls.length > 0);
+}
+
+/**
+ * What the footer says once a saved change is waiting for a launch.
+ *
+ * Built from the changed keys rather than written out. The fixed sentence named
+ * the render scale and the gestures, which was true when those were the only two
+ * settings that needed a launch and has been wrong since the tools arrived —
+ * turning the game cursor off and being told the render scale needs a restart
+ * reads as the panel having saved something else.
+ *
+ * @param {string[]} keys the keys that changed, as `changed` returns them
+ * @returns {string}
+ */
+export function relaunchNotice(keys) {
+  const names = CONTROLS
+    .filter((control) => !control.live && keys.includes(control.key))
+    .map((control) => control.label);
+  if (names.length === 0) return 'Saved.';
+  const list = names.length === 1
+    ? names[0]
+    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  const verb = names.length === 1 ? 'takes' : 'take';
+  return `Saved. ${list} ${verb} effect when the app restarts.`;
 }
 
 /**
@@ -274,6 +365,7 @@ export function installSettingsPanel({
   read, save, showLog, sweep, progress, clearData, relaunch, log,
 }) {
   const overlay = document.getElementById('settings');
+  const body = document.getElementById('settings-body');
   const rows = document.getElementById('settings-rows');
   const note = document.getElementById('settings-note');
   const actions = document.getElementById('settings-actions');
@@ -295,11 +387,14 @@ export function installSettingsPanel({
 
   /** The `<select>` for each control, by key. */
   const fields = new Map();
+  /** The row element for each control, by key, so a tab can hide it. */
+  const lines = new Map();
 
   // Read once. What the host injected does not change while the page is up, and
   // a panel whose rows appeared and disappeared between openings would be worse
   // than one that is simply shorter on some builds.
   const controls = offered();
+  const groups = tabs();
 
   // The value round-trips through an index rather than through the option's
   // value attribute, which is a string: `false` and `null` would both come back
@@ -330,6 +425,57 @@ export function installSettingsPanel({
 
     row.append(label, select, hint);
     rows.append(row);
+    lines.set(control.key, row);
+  }
+
+  // Every row is built once and shown or hidden, rather than rebuilt per tab.
+  // A `<select>` carries the player's unsaved choice, and rebuilding would throw
+  // that away every time they looked at another tab — Cancel is the only thing
+  // that should discard a pending change.
+  const tabList = document.getElementById('settings-tabs');
+  /** The tab currently shown, remembered across openings. */
+  let active = groups[0]?.id ?? '';
+  /** The `<button>` for each tab, by group id. */
+  const chips = new Map();
+
+  const showTab = (id) => {
+    active = id;
+    for (const control of controls) lines.get(control.key).hidden = control.group !== id;
+    for (const [group, chip] of chips) {
+      chip.setAttribute('aria-selected', String(group === id));
+      // Only the selected tab is in the tab order, which is how a tablist is
+      // meant to behave: Tab moves past the strip to the form, and the arrow
+      // keys below move within it.
+      chip.tabIndex = group === id ? 0 : -1;
+    }
+    syncData();
+    // A tab whose rows are shorter than the last one leaves the body scrolled
+    // into space that no longer exists.
+    body?.scrollTo(0, 0);
+  };
+
+  if (tabList) {
+    for (const group of groups) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.textContent = group.label;
+      chip.setAttribute('role', 'tab');
+      chip.addEventListener('click', () => showTab(group.id));
+      chips.set(group.id, chip);
+      tabList.append(chip);
+    }
+    // One tab is not a choice, and a strip showing it would only take room from
+    // a panel that is short of it.
+    tabList.hidden = groups.length < 2;
+    tabList.addEventListener('keydown', (event) => {
+      const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+      if (step === 0) return;
+      event.preventDefault();
+      const at = groups.findIndex((group) => group.id === active);
+      const next = groups[(at + step + groups.length) % groups.length];
+      showTab(next.id);
+      chips.get(next.id)?.focus();
+    });
   }
 
   const say = (sentence) => {
@@ -351,10 +497,20 @@ export function installSettingsPanel({
     say('');
     offerSaving();
     offerClearing();
-    watchData();
+    showTab(active);
     overlay.hidden = false;
-    fields.get(controls[0].key).focus();
+    // The first control of the tab being shown, not of the panel: the tab is
+    // remembered between openings, and focusing a row on another one would
+    // scroll a hidden part of the form into view and leave the keyboard
+    // somewhere the player is not looking.
+    first(active)?.focus();
     diagnostics.count('gw.settings.opened');
+  };
+
+  /** The first field on a tab, if it has one. */
+  const first = (id) => {
+    const control = controls.find((c) => c.group === id);
+    return control && fields.get(control.key);
   };
 
   const close = () => {
@@ -387,7 +543,7 @@ export function installSettingsPanel({
         // Deliberately not closed. The change is saved and doing nothing, and
         // the panel is where the player is looking; closing it and mentioning
         // the restart in the log would be telling the one place they are not.
-        offerRestart();
+        offerRestart(keys);
         return;
       }
       close();
@@ -415,11 +571,12 @@ export function installSettingsPanel({
 
   // The game image, as a figure and a way to be rid of it.
   //
-  // Deliberately below the Save row and not part of it. Everything above is a
-  // preference that a Cancel takes back; this deletes gigabytes and cannot be
-  // taken back, so it does not share a button row with a form — and it acts the
-  // moment it is confirmed rather than waiting to be saved, because there is no
-  // version of "clear the cache" that should sit pending until Save is pressed.
+  // On the tab that owns the setting it belongs to, and still below the form
+  // rather than inside it: everything in the grid is a preference that a Cancel
+  // takes back; this deletes gigabytes and cannot be taken back, so it does not
+  // share a button row with a form — and it acts the moment it is confirmed
+  // rather than waiting to be saved, because there is no version of "clear the
+  // cache" that should sit pending until Save is pressed.
   const section = document.getElementById('settings-data');
   const line = document.getElementById('settings-data-line');
   const dataActions = document.getElementById('settings-data-actions');
@@ -427,6 +584,30 @@ export function installSettingsPanel({
 
   /** The poll that keeps the figure moving while the panel sits open. */
   let watching = null;
+  /** Whether the host has answered about the game image at all. */
+  let dataKnown = true;
+
+  /**
+   * Show the card only where it belongs, and poll only while it is on screen.
+   *
+   * Two conditions, one place. The card is hidden both by being on another tab
+   * and by there being nothing to report, and having each caller decide left
+   * `refreshData` un-hiding it on top of a tab that does not own it.
+   */
+  function syncData() {
+    if (!dataOffered) return;
+    if (active !== DATA_GROUP) {
+      section.hidden = true;
+      stopWatching();
+      return;
+    }
+    // Every visit to the tab is a fresh attempt, which is why `dataKnown` gates
+    // the card and not the poll. A host that failed to answer once may answer
+    // now, and latching the card shut for the rest of the session would report
+    // a loopback hiccup as a build with no game data at all.
+    section.hidden = !dataKnown;
+    watchData();
+  }
 
   const refreshData = async () => {
     let info = null;
@@ -434,15 +615,19 @@ export function installSettingsPanel({
       info = await progress();
     } catch (error) {
       // A build with no snapshot store, or a host that stopped answering. The
-      // section is about data that may not exist, so it goes away rather than
+      // card is about data that may not exist, so it goes away rather than
       // offering to clear something nothing can report on.
+      dataKnown = false;
       stopWatching();
       section.hidden = true;
       log(`settings: no game data to report on (${error})`);
       return;
     }
+    dataKnown = true;
     line.textContent = dataLine(info);
-    section.hidden = false;
+    // A tab switch can land while a poll is in flight, so where the card
+    // belongs is asked again rather than assumed from the host having answered.
+    section.hidden = active !== DATA_GROUP;
   };
 
   const watchData = () => {
@@ -513,8 +698,10 @@ export function installSettingsPanel({
    * written either way, and the only question still open is when it starts
    * counting.
    */
-  const offerRestart = () => {
-    say('Saved. The render scale and gestures take effect when the app restarts.');
+  let waiting = [];
+  const offerRestart = (keys = waiting) => {
+    waiting = keys;
+    say(relaunchNotice(keys));
     actions.replaceChildren(button('Later', close), button('Restart Now', restart, true));
   };
 
@@ -547,7 +734,9 @@ export function installSettingsPanel({
       event.stopPropagation();
       close();
     }
-    if (event.key === 'Enter') {
+    // A tab is a button: Enter and Space activate it, and letting the keystroke
+    // carry on to `apply` would save and close the panel on the way past.
+    if (event.key === 'Enter' && !tabList?.contains(event.target)) {
       event.stopPropagation();
       void apply();
     }
