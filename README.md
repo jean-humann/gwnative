@@ -102,6 +102,7 @@ are in the [development guide](docs/development.md).
 | [Profiles](docs/profiles.md) | Isolation, shared storage, concurrent instances, and removal |
 | [Mods](docs/mods.md) | `.gwmod` format, validation, trust model, and runtime contract |
 | [Game API](docs/game-api.md) | Versioned read-only state, token boundary, overlays, and hotkeys |
+| [Interoperability map](docs/interoperability-map.md) | Reproducible GWCA, Py4GW, JSPI, WASM, and gwnative API inventory |
 | [Feature compatibility](docs/feature-compatibility.md) | Upstream comparison, certification policy, and roadmap |
 | [Architecture](docs/architecture.md) | Trust boundaries, boot flow, storage, networking, WebAssembly transforms, and module map |
 | [Development](docs/development.md) | Toolchain, commands, tests, debugging, and environment variables |

@@ -26,12 +26,15 @@ polished native macOS launcher and companion-tool experience. gwnative is an
 independent Rust/AppKit implementation; it does not embed or reproduce
 gwonmac's source.
 
-## GWToolbox++ and Daybreak
+## GWToolbox++, Py4GW, and Daybreak
 
 [GWToolbox++](https://github.com/gwdevhub/GWToolboxpp) and
-[Daybreak](https://github.com/gwdevhub/Daybreak) are long-running sources of
-ideas about overlays, build libraries, profiles, launch workflows, plugins, and
-versioned game integration. Their breadth informs the
+[Daybreak](https://github.com/gwdevhub/Daybreak), together with
+[Py4GW Reforged](https://github.com/apoguita/Py4GW_Reforged) and its
+[native backend](https://github.com/apoguita/Py4GW_Reforged_Native), are
+sources of ideas and public interface evidence for overlays, build libraries,
+profiles, launch workflows, plugins, and versioned game integration. Their
+breadth informs the
 [feature compatibility review](docs/feature-compatibility.md).
 
 These projects target different client and operating-system boundaries. A

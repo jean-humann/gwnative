@@ -187,8 +187,9 @@ scripts/client-certify /path/to/Gw.jspi.wasm
 Add `--json` to any command for a stable, versioned report. `client-inspect`
 lists section sizes, imports, exports, exact function-body hashes, and referenced
 `Module` contract names. `client-diff` reports section changes, exact body reuse,
-the dominant function-index shift, and JSPI contract additions/removals.
-Neither command prints function bodies, data segments, or client source.
+the dominant function-index shift, export retargeting separately from contract
+changes, and nested JSPI path additions/removals. Neither command prints
+function bodies, data segments, or client source.
 
 `client-certify` reads the fail-closed registry in `src/wasm/builds.rs`. It can
 also verify locally produced stages without writing them into the checkout:
@@ -203,6 +204,29 @@ Certification is hash equality, not a similarity score. Structural diff output
 is evidence for review, but a new build remains unsupported until its transform
 anchors, live memory layout, runtime program/build identity, and output hashes
 have been independently checked and committed.
+
+## Cross-project API inventory
+
+Use fresh, separate upstream checkouts to regenerate the names-only
+interoperability report:
+
+```sh
+scripts/api-surface \
+  --gwtoolbox /path/to/GWToolboxpp \
+  --py4gw /path/to/Py4GW_Reforged \
+  --py4gw-native /path/to/Py4GW_Reforged_Native \
+  --jspi-wasm /path/to/Gw.jspi.wasm \
+  --jspi-js /path/to/Gw.jspi.js \
+  --asyncify-wasm /path/to/Gw.wasm \
+  --json
+```
+
+Without `--json`, the command prints only totals. The versioned JSON includes
+source commits and public interface names but excludes native signature bytes,
+offset values, assertions, WASM bodies, and data segments. It performs no
+network access and never modifies an upstream checkout. See the
+[interoperability surface map](interoperability-map.md) for the reviewed
+revisions, JSPI/Asyncify distinction, domain matrix, and promotion rules.
 
 ## Environment variables
 
@@ -320,7 +344,7 @@ the hardened runtime remains enabled. Published bundles omit it.
 | `tests/web.rs` | Cargo bridge to Node's test runner |
 | `packaging/` | Bundle metadata, icon, Sparkle, certificates, and entitlements |
 | `scripts/` | Benchmark, bundle, signing, notarization, feed, and publication tools |
-| `tools/` | Dependency-free JSPI/WASM metadata analysis and unit tests |
+| `tools/` | Dependency-free JSPI/WASM and cross-project API metadata analysis |
 | `.github/workflows/` | Read-only CI and approval-gated release automation |
 
 The fuller component mapping and runtime contracts are in

@@ -1,10 +1,12 @@
 # Feature compatibility and roadmap
 
-This review compares gwnative with four community projects at the revisions
+This review compares gwnative with community projects at the revisions
 inspected for this work:
 
 - [`gw_in_browser` at `a1487a0`](https://github.com/gwdevhub/gw_in_browser/tree/a1487a0683628ce186748510205d16be5c89caaa);
 - [`GWToolbox++` at `ca20ae7`](https://github.com/gwdevhub/GWToolboxpp/tree/ca20ae743551fd24f4fd0653e8a64d5e5b55a820);
+- [`Py4GW Reforged` at `20bb274`](https://github.com/apoguita/Py4GW_Reforged/tree/20bb2747fc0fffe3573baa6c8015e1bc523662b7);
+- [`Py4GW Reforged Native` at `6b74fdc`](https://github.com/apoguita/Py4GW_Reforged_Native/tree/6b74fdc8a0fc64b2fdf85df99165e25f0dffa067);
 - [`Daybreak` at `d800a63`](https://github.com/gwdevhub/Daybreak/tree/d800a630b5f0599c825bd4ddf9461bc702614fcd);
 - [`gwonmac` at `3295a95`](https://github.com/Mat4m0/gwonmac/tree/3295a95a804ef49e8db95b7d839436bfc826152b).
 
@@ -12,6 +14,8 @@ It is a capability review, not a promise of source compatibility. GWToolbox++
 and parts of Daybreak integrate with the native Windows client through
 injection and GWCA. gwnative hosts ArenaNet's WebAssembly client in WebKit.
 Offsets, hooks, rendering, and policy boundaries therefore differ.
+The names-only, reproducible comparison is in the
+[interoperability surface map](interoperability-map.md).
 
 ## Current result
 

@@ -106,3 +106,7 @@ local UI callbacks. It never synthesizes game input.
 The build library treats template codes as opaque strings. It supports up to
 500 entries and 12 members per team, with validated import/export JSON. It does
 not apply builds to the game because no write operation is certified.
+
+The broader GWCA, Py4GW, JSPI, and WebAssembly research inventory is documented
+in the [interoperability surface map](interoperability-map.md). A mapped name is
+not part of this API until it passes the certification gate described there.

@@ -18,13 +18,19 @@ done
 
 python3 -m py_compile \
 	scripts/benchmark \
+	scripts/api-surface \
 	scripts/check-docs \
 	scripts/client-certify \
 	scripts/client-diff \
 	scripts/client-inspect \
 	scripts/e2e \
 	tools/client_analyzer.py \
+	tools/api_surface.py \
+	tools/test_api_surface.py \
 	tools/test_client_analyzer.py \
 	tools/test_e2e_runner.py
-python3 -m unittest tools.test_client_analyzer tools.test_e2e_runner
+python3 -m unittest \
+	tools.test_api_surface \
+	tools.test_client_analyzer \
+	tools.test_e2e_runner
 echo "scripts: shell and Python syntax ok"
