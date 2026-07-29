@@ -229,6 +229,7 @@ JSON settings profile mirrors them for the web settings panel.
 - A failed feed/signature step leaves the GitHub release as a draft.
 - `scripts/appcast` refuses a key that does not match the committed public key.
 - Re-running `scripts/publish` replaces assets on an existing draft.
+- `scripts/publish` refuses to replace assets after a release is public.
 - Do not rotate `SPARKLE_PRIVATE_KEY` as routine incident recovery. Restore the
   backed-up key or plan a manual reinstall transition.
 - Never make a release from a dirty tree; the artifact must correspond to a

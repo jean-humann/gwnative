@@ -40,6 +40,17 @@ version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
 [ "$tag" = "v$version" ] ||
 	die "tag $tag does not match version $version in Cargo.toml"
 
+# appcast.xml takes its build number and repository URL from this checkout.
+# Require the exact tagged source that produced the release, with no local
+# edits able to change either value after the artifact was signed.
+[ -z "$(git status --porcelain 2>/dev/null)" ] ||
+	die "the working tree has uncommitted changes; publish from the tagged source"
+tag_commit=$(git rev-parse --verify "$tag^{commit}" 2>/dev/null) ||
+	die "tag $tag does not exist in this checkout"
+head_commit=$(git rev-parse --verify HEAD)
+[ "$tag_commit" = "$head_commit" ] ||
+	die "tag $tag points at $tag_commit, but this checkout is $head_commit"
+
 dmg="$root/dist/gwnative-$version.dmg"
 zip="$root/dist/gwnative-$version.zip"
 [ -f "$dmg" ] || die "$dmg does not exist; run scripts/release first"
@@ -49,7 +60,9 @@ zip="$root/dist/gwnative-$version.zip"
 # Re-runnable on purpose: the step this most often has to be repeated after is
 # an upload that failed halfway, and re-cutting the release would throw away the
 # notes somebody may have edited by then.
-if gh release view "$tag" >/dev/null 2>&1; then
+if release_is_draft=$(gh release view "$tag" --json isDraft -q .isDraft 2>/dev/null); then
+	[ "$release_is_draft" = true ] ||
+		die "$tag is already public; refusing to replace live update assets"
 	say "$tag exists already; replacing its files"
 	gh release upload "$tag" "$dmg" "$zip" --clobber
 else
