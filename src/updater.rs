@@ -41,6 +41,10 @@
 //! where Sparkle has no stored answer and the player's existing opt-in would
 //! otherwise be lost, and [`follow`], which is a player moving the switch in the
 //! panel a moment ago.
+//!
+//! What is copied is what the player asked for, not what Sparkle will do about
+//! it tonight — the two differ, and copying the wrong one silently discards an
+//! opt-in. See [`intent`].
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -117,28 +121,21 @@ pub fn start(_mtm: MainThreadMarker, store: &Arc<settings::Store>) -> bool {
     // answer wins wherever there is one, and the profile fills in where there
     // is not — which is the launch after this shipped, and a fresh install.
     let profile = store.get();
-    let stored = switches(&updater);
-    let wanted = (
-        if default_set(CHECKS_DEFAULT) {
-            stored.0
-        } else {
-            profile.auto_check_updates
-        },
-        if default_set(DOWNLOADS_DEFAULT) {
-            stored.1
-        } else {
-            profile.auto_install_updates
-        },
+    let stored = intent(&updater);
+    let wanted = reconcile(
+        (profile.auto_check_updates, profile.auto_install_updates),
+        stored,
+        (default_set(CHECKS_DEFAULT), default_set(DOWNLOADS_DEFAULT)),
     );
     if wanted != stored {
         set_switches(&updater, wanted);
     }
 
-    // Read back rather than assume. What Sparkle reports is what it will act
-    // on, and it is allowed to disagree with what it was just told:
-    // `automaticallyDownloadsUpdates` is false whenever checking is off,
-    // whatever the stored value says.
-    let (checks, downloads) = switches(&updater);
+    // Read back rather than assume: `set_switches` may not have run, and where
+    // it did the framework is entitled to have stored something else. [`intent`]
+    // rather than [`switches`], because this is what the settings panel will
+    // show and the panel shows what was asked for.
+    let (checks, downloads) = intent(&updater);
     store.remember_update_preferences(checks, downloads);
     note!(
         "[sparkle] the updater is running (checks: {}, installs on its own: {})",
@@ -193,7 +190,7 @@ extern "C" fn apply(context: *mut c_void) {
     let wanted = *unsafe { Box::from_raw(context.cast::<(bool, bool)>()) };
     RUNNING.with(|running| {
         if let Some(updater) = running.borrow().as_ref()
-            && switches(updater) != wanted
+            && intent(updater) != wanted
         {
             set_switches(updater, wanted);
             note!(
@@ -252,7 +249,7 @@ fn build() -> Option<Retained<AnyObject>> {
     }
 }
 
-/// Read both switches.
+/// Read both switches as Sparkle will act on them.
 fn switches(updater: &AnyObject) -> (bool, bool) {
     // SAFETY: main thread; two `BOOL` properties the header declares, neither
     // taking an argument.
@@ -261,6 +258,43 @@ fn switches(updater: &AnyObject) -> (bool, bool) {
         let downloads: Bool = msg_send![updater, automaticallyDownloadsUpdates];
         (checks.as_bool(), downloads.as_bool())
     }
+}
+
+/// Read both switches as the player last set them, which is not the same thing.
+///
+/// `automaticallyDownloadsUpdates` answers with the effective behaviour rather
+/// than the stored one: it is false whenever checking is off, however it was
+/// last set. That is the right answer to "will anything download tonight" and
+/// the wrong one to write into the profile, because writing it loses the
+/// opt-in. A player who turns checking off has a launch persist "installs on
+/// its own: no" over their yes, and turning checking back on then finds the
+/// answer already changed for them — measured, not theorised.
+///
+/// So the stored value is read from the default Sparkle itself writes it to,
+/// and the property is consulted only where nothing is stored. Checking needs
+/// none of this; its property reports what it was set to.
+fn intent(updater: &AnyObject) -> (bool, bool) {
+    let (checks, downloads) = switches(updater);
+    if !default_set(DOWNLOADS_DEFAULT) {
+        return (checks, downloads);
+    }
+    let key = NSString::from_str(DOWNLOADS_DEFAULT);
+    let stored = NSUserDefaults::standardUserDefaults().boolForKey(&key);
+    (checks, stored)
+}
+
+/// Which of the two answers to keep, for each switch independently.
+///
+/// `answered` is whether Sparkle has a stored answer at all. Where it has one it
+/// wins, because its own interface can change it and this profile must not
+/// overwrite what the player just ticked there. Where it has none — a fresh
+/// install, or the first launch after Sparkle shipped — the profile is all there
+/// is, and it carries an opt-in that predates the framework.
+fn reconcile(profile: (bool, bool), stored: (bool, bool), answered: (bool, bool)) -> (bool, bool) {
+    (
+        if answered.0 { stored.0 } else { profile.0 },
+        if answered.1 { stored.1 } else { profile.1 },
+    )
 }
 
 /// Write both switches. Persists in the application's user defaults, which is
@@ -292,4 +326,56 @@ fn default_set(key: &str) -> bool {
     NSUserDefaults::standardUserDefaults()
         .objectForKey(&key)
         .is_some()
+}
+
+// Only [`reconcile`] is testable here, and it is the only part worth testing:
+// everything else in this module is a message to a class that exists in a
+// bundle and nowhere else, so a test binary can reach none of it. What these
+// cover is the decision that runs once per launch and is invisible when it is
+// wrong — the profile and the framework disagreeing about who asked for what.
+#[cfg(test)]
+mod tests {
+    use super::reconcile;
+
+    const NEITHER: (bool, bool) = (false, false);
+    const BOTH: (bool, bool) = (true, true);
+
+    // The launch after Sparkle shipped. The framework has stored nothing, so
+    // whatever the player opted into before it existed is what starts.
+    #[test]
+    fn an_opt_in_that_predates_sparkle_survives_meeting_it() {
+        assert_eq!(reconcile((true, false), NEITHER, NEITHER), (true, false));
+        assert_eq!(reconcile(BOTH, NEITHER, NEITHER), BOTH);
+        assert_eq!(reconcile(NEITHER, BOTH, NEITHER), NEITHER);
+    }
+
+    // Sparkle's update window can turn both of these on itself, and a launch
+    // that pushed the profile over the top would undo the box the player ticked
+    // there a moment ago.
+    #[test]
+    fn what_sparkle_has_been_told_outranks_the_profile() {
+        assert_eq!(reconcile(NEITHER, BOTH, BOTH), BOTH);
+        assert_eq!(reconcile(BOTH, NEITHER, BOTH), NEITHER);
+    }
+
+    // Two switches, two independent answers: Sparkle is asked about checking
+    // when it is first run and about installing only later, so one being stored
+    // says nothing about the other.
+    #[test]
+    fn each_switch_is_decided_on_its_own() {
+        assert_eq!(reconcile(BOTH, NEITHER, (true, false)), (false, true));
+        assert_eq!(reconcile(BOTH, NEITHER, (false, true)), (true, false));
+    }
+
+    // The regression this module was fixed for. Checking off does not mean the
+    // player took back the install opt-in — Sparkle reports it as off because
+    // nothing can install when nothing checks, and persisting that report would
+    // turn "not now" into "no", so that turning checking back on would find the
+    // answer already changed.
+    #[test]
+    fn turning_checking_off_does_not_take_back_the_install_opt_in() {
+        assert_eq!(reconcile(BOTH, (false, true), BOTH), (false, true));
+        // And back on again, with the opt-in still where the player left it.
+        assert_eq!(reconcile((true, true), (true, true), BOTH), BOTH);
+    }
 }
