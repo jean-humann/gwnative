@@ -28,6 +28,16 @@ export function publicState(state) {
   for (const field of PUBLIC_FIELDS) {
     if (state?.[field] !== undefined) result[field] = state[field];
   }
+  // The fixed companion block always contains numeric target slots. Zeroes
+  // are padding when the target flag is clear, not a partial public target.
+  // Rust requires absence in that state so a consumer cannot confuse agent 0
+  // at (0, 0) with a real target.
+  if (result.targetValid === false) {
+    delete result.targetId;
+    delete result.targetX;
+    delete result.targetY;
+    delete result.distance;
+  }
   return Object.freeze(result);
 }
 
