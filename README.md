@@ -105,7 +105,7 @@ guide adds developer-facing paths and recovery details.
 
 ## Licence
 
-The gwnative source code is GPL-2.0-or-later, matching the upstream project.
-That licence does not cover Guild Wars names, client code, game data, artwork,
-audio, logos, or other proprietary material. See [LICENSE](LICENSE) and the
+The gwnative source code is distributed under GPL-2.0-or-later. That licence
+does not cover Guild Wars names, client code, game data, artwork, audio, logos,
+or other proprietary material. See [LICENSE](LICENSE) and the
 [legal notice](NOTICE.md).
