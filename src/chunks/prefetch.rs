@@ -13,12 +13,19 @@
 //! and they run at the class [`fetch_class`] picks, which is the launch itself
 //! until a frame lands and background work afterwards.
 //!
+//! [`start_verify`] is the odd one out and lives here anyway, because it is
+//! the same shape over the same list asking the opposite question: not what is
+//! missing, but whether what is already here is real. It is the only thing in
+//! the crate that re-hashes a chunk nobody asked for, and it runs on exactly
+//! one occasion — a launch that told the player the download was finished.
+//!
 //! [`warm_boot`]: ChunkStore::warm_boot
 //! [`start_readahead`]: ChunkStore::start_readahead
 //! [`start_full_download`]: ChunkStore::start_full_download
+//! [`start_verify`]: ChunkStore::start_verify
 //! [`fetch_class`]: ChunkStore::fetch_class
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -71,6 +78,15 @@ const READAHEAD_WORKERS: usize = 8;
 /// fill.
 const READAHEAD_CHUNKS: usize = 48;
 
+/// Threads that read the cache back and check it.
+///
+/// Fewer than [`MAX_PREFETCH_FETCHES`], and not rationed by permits, because
+/// this pass never touches the network: it reads the volume and hashes what it
+/// finds. Past the point where the disk is saturated more threads only buy
+/// context switches, and eight keeps every performance core fed on the
+/// machines this ships to.
+const VERIFY_WORKERS: usize = 8;
+
 /// The window of chunks readahead workers are allowed to fetch.
 ///
 /// `next` is where the workers have got to and `limit` is one past the last
@@ -100,6 +116,12 @@ pub(super) struct Prefetch {
     total: AtomicU64,
     running: AtomicBool,
     stop: AtomicBool,
+    /// The integrity pass. Its own counters because it runs *before* a sweep
+    /// rather than as part of one, and the launcher draws both.
+    verify_done: AtomicU64,
+    verify_total: AtomicU64,
+    verify_repaired: AtomicU64,
+    verifying: AtomicBool,
 }
 
 impl ChunkStore {
@@ -398,12 +420,111 @@ impl ChunkStore {
         );
         true
     }
+
+    /// `(checked, total, running, discarded)` for the current or last check.
+    pub fn verify_progress(&self) -> (u64, u64, bool, u64) {
+        (
+            self.prefetch.verify_done.load(Ordering::Relaxed),
+            self.prefetch.verify_total.load(Ordering::Relaxed),
+            self.prefetch.verifying.load(Ordering::Relaxed),
+            self.prefetch.verify_repaired.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Read every cached chunk back and prove it still hashes right.
+    ///
+    /// A one-shot beside the sweep rather than a part of it, because the sweep
+    /// deliberately trusts a `stat` (see [`ensure`](Self::ensure)) — that is
+    /// what makes resuming a 4 GB download cost seconds instead of minutes, and
+    /// folding a re-hash into it would undo the decision on every resume. This
+    /// runs where the cost is worth paying: once, before a launch that told the
+    /// player the network was done with. A filename proves residency; only
+    /// this proves the bytes.
+    ///
+    /// Repair is [`read_cached`](Self::read_cached)'s doing, not this one's. It
+    /// already unlinks a chunk that fails, which drops it back out of residency
+    /// — so the sweep that follows a non-zero return refetches exactly what was
+    /// discarded, and the pass needs no repair path of its own.
+    ///
+    /// Returns `false` if a check is already running.
+    pub fn start_verify(self: &Arc<Self>) -> bool {
+        if self.prefetch.verifying.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+
+        // Deduplicated up front, on this thread. A snapshot repeats chunks —
+        // one all-zero block stands in for thousands of indices — and hashing
+        // the same file once per occurrence would multiply the pass by the
+        // repetition factor while proving nothing the first read did not.
+        let mut seen = HashSet::new();
+        let mut work = Vec::new();
+        for index in 0..self.chunk_count() {
+            let Ok(hash) = self.chunk_hash(index) else {
+                continue;
+            };
+            if seen.insert(hash) {
+                work.push(index);
+            }
+        }
+        drop(seen);
+
+        self.prefetch.stop.store(false, Ordering::Relaxed);
+        self.prefetch.verify_done.store(0, Ordering::Relaxed);
+        self.prefetch.verify_repaired.store(0, Ordering::Relaxed);
+        self.prefetch
+            .verify_total
+            .store(work.len() as u64, Ordering::Relaxed);
+
+        note!("[gwnative] checking {} distinct chunks", work.len());
+        let work = Arc::new(work);
+        let outstanding = Arc::new(AtomicU64::new(VERIFY_WORKERS as u64));
+        for worker in 0..VERIFY_WORKERS {
+            let store = Arc::clone(self);
+            let work = Arc::clone(&work);
+            let outstanding = Arc::clone(&outstanding);
+            thread::spawn(move || {
+                let mut class = qos::Following::start(store.fetch_class());
+                let mut at = worker;
+                while at < work.len() {
+                    // Shares the sweep's flag, which is what "Switch to Quick
+                    // Start" wants: whichever of the two is running, the button
+                    // that abandons the full image stops it.
+                    if store.prefetch.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    class.now(store.fetch_class());
+                    let index = work[at];
+                    if let Ok(hash) = store.chunk_hash(index)
+                        && let Ok(expected) = store.chunk_length(index)
+                        // A chunk that was never fetched is not a failure — it
+                        // is the sweep's work, and counting it as damage would
+                        // report an interrupted download as a corrupt one.
+                        && store.cached_len(&hash) == Some(expected)
+                        && store.read_cached(&hash, expected).is_none()
+                    {
+                        store
+                            .prefetch
+                            .verify_repaired
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    store.prefetch.verify_done.fetch_add(1, Ordering::Relaxed);
+                    at += VERIFY_WORKERS;
+                }
+                if outstanding.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    store.prefetch.verifying.store(false, Ordering::SeqCst);
+                    let (done, total, _, repaired) = store.verify_progress();
+                    note!("[gwnative] check finished: {done}/{total} chunks, {repaired} discarded");
+                }
+            });
+        }
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunks::fixture::store_of;
+    use crate::chunks::fixture::{store_of, store_of_content};
     use crate::scratch::TempDir;
 
     /// The fetch threads are the launch until there is a frame, and background
@@ -476,5 +597,111 @@ mod tests {
         // again every time the client read it.
         store.advance_readahead(4);
         assert_eq!(window(), (1, 5), "the end of the file opens no window");
+    }
+
+    /// A store over `chunks`, with those same chunks already in its cache —
+    /// the state a resumed full install is in before anything looks at it.
+    fn planted(name: &str, chunks: &[&[u8]]) -> (TempDir, Arc<ChunkStore>) {
+        let temp = TempDir::new(name);
+        let store = Arc::new(store_of_content(temp.0.join("chunks"), chunks));
+        for (index, bytes) in chunks.iter().enumerate() {
+            let path = store.cache_path(&store.chunk_hash(index).unwrap());
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, bytes).unwrap();
+        }
+        (temp, store)
+    }
+
+    /// Wait for the pass to report itself finished.
+    ///
+    /// It runs on eight threads that outlive the call that spawned them, so
+    /// there is nothing to join; the flag they clear is the same one the page
+    /// polls, which makes waiting on it the thing the tests should assert
+    /// against anyway.
+    fn settled(store: &ChunkStore) -> (u64, u64, bool, u64) {
+        for _ in 0..2000 {
+            let progress = store.verify_progress();
+            if !progress.2 {
+                return progress;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the check never finished");
+    }
+
+    #[test]
+    fn the_check_leaves_a_cache_that_still_hashes_right_alone() {
+        let (_temp, store) = planted("verify-clean", &[&[b'a'; 1024], &[b'b'; 1024]]);
+
+        assert!(store.start_verify());
+        let (done, total, _, discarded) = settled(&store);
+        assert_eq!((done, total, discarded), (2, 2, 0));
+        assert_eq!(store.resident_count(), 2, "nothing was thrown away");
+    }
+
+    #[test]
+    fn the_check_throws_away_a_chunk_whose_bytes_have_changed() {
+        let (_temp, store) = planted("verify-rot", &[&[b'a'; 1024], &[b'b'; 1024]]);
+        // Same length, different bytes. This is exactly what a `stat` cannot
+        // see and the whole reason the pass exists: to the sweep, and to
+        // `resident_count`, this file is a complete chunk.
+        let rotten = store.cache_path(&store.chunk_hash(1).unwrap());
+        fs::write(&rotten, [b'x'; 1024]).unwrap();
+        assert_eq!(store.resident_count(), 2, "residency cannot tell yet");
+
+        assert!(store.start_verify());
+        let (done, total, _, discarded) = settled(&store);
+        assert_eq!((done, total, discarded), (2, 2, 1));
+        assert!(!rotten.exists(), "the bad copy is gone");
+        assert_eq!(
+            store.resident_count(),
+            1,
+            "which is what puts it back in front of the sweep"
+        );
+    }
+
+    #[test]
+    fn a_chunk_that_was_never_fetched_is_not_damage() {
+        let (_temp, store) = planted("verify-partial", &[&[b'a'; 1024], &[b'b'; 1024]]);
+        // Half a download, which is the ordinary state of an interrupted one.
+        fs::remove_file(store.cache_path(&store.chunk_hash(1).unwrap())).unwrap();
+
+        assert!(store.start_verify());
+        let (done, total, _, discarded) = settled(&store);
+        assert_eq!((done, total), (2, 2), "every distinct chunk is looked at");
+        assert_eq!(discarded, 0, "an unfinished download is not a corrupt one");
+    }
+
+    #[test]
+    fn a_chunk_the_snapshot_repeats_is_checked_once() {
+        // Four indices over two distinct chunks — a snapshot in miniature,
+        // where one all-zero block stands in for thousands of places. Hashing
+        // per index would be twice the work here and orders of magnitude more
+        // on the real thing, for the same answer.
+        let (_temp, store) = planted(
+            "verify-dedup",
+            &[&[b'a'; 1024], &[b'b'; 1024], &[b'a'; 1024], &[b'b'; 1024]],
+        );
+
+        assert_eq!(store.chunk_count(), 4);
+        assert!(store.start_verify());
+        let (done, total, _, discarded) = settled(&store);
+        assert_eq!((done, total, discarded), (2, 2, 0), "two, not four");
+    }
+
+    #[test]
+    fn a_second_check_does_not_start_on_top_of_the_first() {
+        let (_temp, store) = planted("verify-once", &[&[b'a'; 1024]]);
+
+        // The flag is set by hand rather than by racing a real pass: what is
+        // being asserted is what the latch does, not how fast eight threads
+        // get through one chunk, and a test that depends on losing that race
+        // is a test that passes on a slow machine and flakes on a fast one.
+        store.prefetch.verifying.store(true, Ordering::SeqCst);
+        assert!(!store.start_verify(), "one is already running");
+
+        store.prefetch.verifying.store(false, Ordering::SeqCst);
+        assert!(store.start_verify(), "and it clears for the next launch");
+        settled(&store);
     }
 }

@@ -690,6 +690,15 @@ touching the network for game data again is a real preference. So the launcher
 asks, once, and records the answer in `dataStrategy` — where `null` is a third
 state distinct from either answer, meaning nobody has been asked yet.
 
+The two answers are called **Quick Start** and **Full Game**, and they are
+called that in all three places they appear: the launcher's prose, its buttons,
+and the Settings row that undoes the choice. That is a fix rather than a
+description. The screen used to describe the two modes without naming either,
+the buttons said one thing and the setting said another, and the row that is the
+only way to revisit the decision read as a different subject from the screen it
+overrides — which is why the first report of this was that the setting did not
+exist. It did; nothing connected it to the question it answers.
+
 It is asked after the snapshot's size is known and before `appendGlue()`, which
 is the last moment there is anywhere to ask: once the client is built it owns
 the canvas and the keyboard. The overlay is the `#failure` overlay's twin for
@@ -723,12 +732,75 @@ the game rather than the download that caused it.
 Utility QoS, and holds at most three of the eight fetch permits, so it yields to
 the reads the game is blocked on rather than queueing in front of them; letting
 it continue under a session that has started playing is the whole point of
-having built it that way. **Stop downloading** is the one that ends it, and it
-rewrites the setting so the question is not asked again.
+having built it that way.
+
+Beside it are **Pause** and **Switch to Quick Start**, which used to be one
+button answering two questions with the same word. A player who wants their
+evening back and a player who wants their bandwidth back for ten minutes both
+pressed *Stop*, and both got the first one's answer written to `dataStrategy` —
+so the second one's next launch never resumed. Only Switch to Quick Start
+rewrites the setting now. Pause stops the sweep and touches nothing else, which
+means the next launch picks it up exactly where this one left it; the host
+needed no change for that, because `POST /__prefetch?stop` never wrote the
+setting in the first place. The launcher did.
+
+Pausing is the one way this screen stays up with nothing moving, so the watcher
+that treats `running: false` as "the sweep gave up, let them play" has to know
+the difference. The flag is set before the stop and cleared after the resume,
+both so a poll landing mid-toggle cannot read a pause as a failure and boot the
+game out from under it.
+
+### Residency is a filename; the check is what makes it a promise
+
+A Full Game launch that finds the cache complete used to boot straight through,
+on the strength of 16023 files existing with the right names. Nothing had read
+them. That is fine for a Quick Start session — it verifies each chunk on the
+read that wants it, and pays nothing extra to do so, because it was going to
+read the chunk anyway — but Full Game is the one launch that promised the
+network was finished with, and a truncated write or a bad block turns that
+promise into a hash mismatch several zones later, with no download running to
+repair it.
+
+So `POST /__prefetch?verify` reads the cache back and hashes it, and the same
+`GET /__prefetch` the download bar already polls carries `verifying`,
+`verified`, `verifyTotal` and `discarded` beside the sweep's numbers — one
+timer on the page for both, which never run at once anyway. It is a separate
+one-shot rather than a phase of the sweep, deliberately: the sweep
+trusts a `stat`, which is what makes resuming a 4 GB download cost seconds
+instead of minutes, and folding a re-hash into it would undo that decision on
+every resume. This runs on exactly one occasion instead — before a launch that
+believes it is complete.
+
+It is built on the same `read_cached` every demand read uses, which already
+unlinks a chunk that fails. That is the entire repair path: unlinking drops the
+chunk out of residency, the image stops being complete, and the ordinary
+download screen behind this one refetches precisely what was discarded. The pass
+needs no notion of repair of its own, and warms the `verified` set that the
+window `pread`s depend on as a side effect.
+
+Two details it would be easy to get wrong. It walks distinct chunks, not
+indices — one all-zero block stands in for thousands of places in a snapshot,
+and hashing per index would multiply the pass by the repetition factor while
+proving nothing the first read did not; `verifyTotal` is therefore a smaller
+number than `total` and the bar must be drawn against it. And a chunk that was
+never fetched is not damage: an interrupted download reported as a corrupt one
+would be a lie told at the worst possible moment.
+
+Eight threads rather than the sweep's thirty-two, and no permits, because this
+one never touches the network — past the point where the volume is saturated,
+more threads buy context switches. Measured over a cold 1.0 GB slice of a real
+chunk cache on this machine, hashing is 500 MB/s on one core and 1.33 GB/s
+across eight, which puts a full 4.2 GB image at roughly three seconds — a third
+of it CPU and the rest waiting on the volume, which is why the thread count
+matters more than the digest does. The disk check the POST applies to a download
+is skipped here for the same kind of reason: this pass writes nothing and can
+only ever free space, so refusing it for want of room would refuse it on exactly
+the full volume where an interrupted write is likeliest to have left damage.
 
 Nothing here can prevent a boot. A missing progress route, three failed polls in
-a row, a sweep that ends early, a setting that will not save — every path ends
-in the client starting, because streaming works whether or not any of it does.
+a row, a sweep that ends early, a check that will not start or cannot be
+watched, a setting that will not save — every path ends in the client starting,
+because streaming works whether or not any of it does.
 
 Measured on a half-populated cache: `launcher: downloading, 8485/16023 chunks
 already cached`, and thirty seconds later the cache held 9458 chunk files rather
