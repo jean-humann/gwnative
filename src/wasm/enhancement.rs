@@ -481,7 +481,9 @@ mod tests {
     /// looking for a cached copy that a clean checkout would not have.
     #[test]
     fn the_certified_client_transforms_to_the_certified_output() {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("web/Gw.jspi.wasm");
+        let base = std::env::var_os("GWNATIVE_CLIENT_WASM")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("web/Gw.jspi.wasm"));
         let Ok(official) = fs::read(&base) else {
             note!("skipping: {} has not been fetched", base.display());
             return;

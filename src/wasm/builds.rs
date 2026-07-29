@@ -287,6 +287,99 @@ pub(super) const BUILDS: &[KnownBuild] = &[
             },
         ],
     },
+    KnownBuild {
+        sha256: "cbbc8052014f035a458aa20797fa8150ff4028d1332c0015186fda73c76df14c",
+        // Filled from the byte-exact transform after every anchor below was
+        // checked against this source hash.
+        output_sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
+        import_count: 219,
+        carrier_import: 207,
+        bridges: &[
+            StubBridge {
+                kind: BridgeKind::EnsureDirectory,
+                stub_function: 185,
+                stub_body: Some(&[0x00, 0x41, 0x02, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9541,
+                        body_offset: 171,
+                    },
+                    CallSite {
+                        local_function: 11528,
+                        body_offset: 142,
+                    },
+                    CallSite {
+                        local_function: 12217,
+                        body_offset: 127,
+                    },
+                ],
+            },
+            StubBridge {
+                kind: BridgeKind::FindFiles,
+                stub_function: 186,
+                stub_body: Some(&[0x00, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9530,
+                        body_offset: 157,
+                    },
+                    CallSite {
+                        local_function: 9531,
+                        body_offset: 157,
+                    },
+                    CallSite {
+                        local_function: 11528,
+                        body_offset: 210,
+                    },
+                    CallSite {
+                        local_function: 12217,
+                        body_offset: 419,
+                    },
+                ],
+            },
+            StubBridge {
+                kind: BridgeKind::FileBaseName,
+                stub_function: 197,
+                stub_body: Some(&[0x00, 0x41, 0x00, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9530,
+                        body_offset: 276,
+                    },
+                    CallSite {
+                        local_function: 9531,
+                        body_offset: 278,
+                    },
+                ],
+            },
+            StubBridge {
+                kind: BridgeKind::DeleteFile,
+                stub_function: 333,
+                stub_body: Some(&[
+                    0x00, //
+                    0x41, 0xca, 0x87, 0xc5, 0x80, 0x00, //
+                    0x41, 0xa3, 0xbb, 0xc3, 0x80, 0x00, //
+                    0x41, 0xc8, 0x06, //
+                    0x10, 0xc2, 0x82, 0x80, 0x80, 0x00, //
+                    0x00, //
+                    0x0b,
+                ]),
+                call_sites: &[CallSite {
+                    local_function: 459,
+                    body_offset: 201,
+                }],
+            },
+            StubBridge {
+                kind: BridgeKind::FileExists,
+                stub_function: 552,
+                stub_body: None,
+                call_sites: &[CallSite {
+                    local_function: 9541,
+                    body_offset: 201,
+                }],
+            },
+        ],
+    },
 ];
 
 pub(super) fn find_build(sha256: &str) -> Option<&'static KnownBuild> {
@@ -488,6 +581,48 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             cursor_software_model: 0x5a_1714,
             cursor_show_count: 0x5a_1718,
             cursor_color_buffer: 0x29_8e80,
+            cursor_art_hotspot: 0x00,
+            cursor_art_texture: 0x0c,
+            cursor_handle_key: 0x08,
+            cursor_handle_object: 0x00,
+            cursor_view_texture: 0x08,
+            cursor_texture_type: 0x0c,
+            cursor_texture_width: 0x14,
+            cursor_texture_height: 0x18,
+        },
+    },
+    EnhancementBuild {
+        sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
+        output_sha256: "7d3a19483ff9b5d01f8432e1477d4a6ecceacb1dc1c838ad5af7554405be885d",
+        import_count: 219,
+        program_id: 1,
+        build_id: 38795,
+        hook_function: 446,
+        hook_params: &[0x7f],
+        hook_results: &[],
+        table_slot: 0,
+        layout: EnhancementLayout {
+            context_root: 0x5a_0ee0,
+            agent_array: 0x5a_4e58,
+            manual_target_agent_id: 0x5a_394c,
+            automatic_target_agent_id: 0x5a_3948,
+            game_context_slot: 6,
+            character_context: 0x44,
+            map_id: 0x198,
+            is_explorable: 0x19c,
+            current_map_id: 0x234,
+            current_instance_type: 0x23c,
+            player_number: 0x2ac,
+            agent_id: 0x2c,
+            agent_x: 0x74,
+            agent_y: 0x78,
+            agent_type: 0x9c,
+            agent_player_number: 0xf4,
+            agent_model_type: 0xf6,
+            cursor_active_art: 0x5a_16e0,
+            cursor_software_model: 0x5a_16e4,
+            cursor_show_count: 0x5a_16e8,
+            cursor_color_buffer: 0x29_8e50,
             cursor_art_hotspot: 0x00,
             cursor_art_texture: 0x0c,
             cursor_handle_key: 0x08,

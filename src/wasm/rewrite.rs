@@ -217,7 +217,9 @@ mod tests {
     /// a clean checkout — this is the one test that needs an 8.2 MB artifact.
     #[test]
     fn the_real_client_transforms_to_the_certified_output() {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("web/Gw.jspi.wasm");
+        let base = std::env::var_os("GWNATIVE_CLIENT_WASM")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("web/Gw.jspi.wasm"));
         let Ok(input) = fs::read(&base) else {
             note!("skipping: {} has not been fetched", base.display());
             return;
