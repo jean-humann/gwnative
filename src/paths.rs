@@ -8,31 +8,103 @@
 
 use std::path::{Path, PathBuf};
 
-/// `~/Library/Application Support/gwnative`, the one place this app writes.
+use crate::{cli, profile};
+
+/// All writable and selectable locations for one invocation.
+#[derive(Clone, Debug)]
+pub struct Layout {
+    support: PathBuf,
+    web: PathBuf,
+    derived: PathBuf,
+    cache: PathBuf,
+    mods: PathBuf,
+    port: u16,
+}
+
+impl Layout {
+    pub fn new(invocation: &cli::Invocation, profile: &profile::Profile) -> Self {
+        let base_support = base_support_dir();
+        let support = profile.support_dir(&base_support);
+        let cache = invocation
+            .cache_root
+            .clone()
+            .unwrap_or_else(crate::cache::default_cache_dir);
+        let mods = invocation
+            .mod_dir
+            .clone()
+            .unwrap_or_else(|| base_support.join("mods"));
+        let port = invocation
+            .host_port
+            .or_else(|| {
+                std::env::var("GWNATIVE_PORT")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+            })
+            .unwrap_or_else(|| profile.port());
+
+        let web_override = invocation
+            .web_root
+            .clone()
+            .or_else(|| std::env::var("GWNATIVE_WEB_ROOT").ok().map(PathBuf::from));
+        let web = web_override.unwrap_or_else(|| writable_web_root(&support));
+        let derived = support.join("derived");
+        Self {
+            support,
+            web,
+            derived,
+            cache,
+            mods,
+            port,
+        }
+    }
+
+    pub fn support_dir(&self) -> &Path {
+        &self.support
+    }
+
+    pub fn web_root(&self) -> &Path {
+        &self.web
+    }
+
+    pub fn derived_dir(&self) -> &Path {
+        &self.derived
+    }
+
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache
+    }
+
+    pub fn mod_dir(&self) -> &Path {
+        &self.mods
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+/// `~/Library/Application Support/gwnative`, shared profile metadata and
+/// immutable game-image chunks.
 ///
 /// The chunk cache is already a directory inside it — see
 /// [`crate::cache::default_cache_dir`], which explains why it is here rather
 /// than in `~/Library/Caches`.
-pub fn support_dir() -> PathBuf {
+pub fn base_support_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
     PathBuf::from(home).join("Library/Application Support/gwnative")
-}
-
-/// Where derived clients live. Owned outright by the transform, which empties it
-/// whenever it cannot serve the input — an entry is ~8.2 MB, so keeping one per
-/// build the machine has ever seen adds up quickly.
-///
-/// Deliberately not inside the web root: that directory is what the loopback
-/// origin serves, and the derived module is reachable only through the one path
-/// the server maps to it.
-pub fn derived_dir() -> PathBuf {
-    support_dir().join("derived")
 }
 
 /// Verified artifact-certificate updates, separate from derived modules so
 /// clearing one never rolls the other back.
 pub fn certificate_dir() -> PathBuf {
-    support_dir().join("certificates")
+    base_support_dir().join("certificates")
+}
+
+/// The command-line certification root before a launch profile is selected.
+pub fn web_root() -> PathBuf {
+    std::env::var("GWNATIVE_WEB_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| writable_web_root(&base_support_dir()))
 }
 
 /// The directory the loopback origin serves, and the one `patch::sync` fills.
@@ -45,10 +117,7 @@ pub fn certificate_dir() -> PathBuf {
 /// silently stops appearing. The bundle's copy is a seed for a writable root
 /// instead, refreshed on every launch so an upgraded app ships an upgraded
 /// shell.
-pub fn web_root() -> PathBuf {
-    if let Ok(dir) = std::env::var("GWNATIVE_WEB_ROOT") {
-        return PathBuf::from(dir);
-    }
+fn writable_web_root(support: &Path) -> PathBuf {
     let exe = std::env::current_exe().expect("a running process has a path on macOS");
     let seed = exe
         .parent()
@@ -58,7 +127,7 @@ pub fn web_root() -> PathBuf {
     let Some(seed) = seed else {
         return PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web");
     };
-    let live = support_dir().join("web");
+    let live = support.join("web");
     if let Err(e) = seed_web(&seed, &live) {
         // Reported rather than fatal, and still the root we return: a partial
         // seed leaves the missing file to be noticed by whatever needed it,
@@ -67,6 +136,52 @@ pub fn web_root() -> PathBuf {
         note!("[gwnative] could not lay out {}: {e}", live.display());
     }
     live
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli;
+
+    #[test]
+    fn named_profiles_isolate_mutable_state_and_share_chunks_and_mods() {
+        let invocation = cli::parse(["--profile", "iron"]).unwrap();
+        let profile = profile::Profile {
+            format_version: 1,
+            id: "iron".into(),
+            display_name: "Iron".into(),
+            color: "#000000".into(),
+            created_at: 0,
+        };
+        let layout = Layout::new(&invocation, &profile);
+        assert!(layout.support_dir().ends_with("gwnative/profiles/iron"));
+        assert!(layout.cache_dir().ends_with("gwnative/chunks"));
+        assert!(layout.mod_dir().ends_with("gwnative/mods"));
+        assert_ne!(layout.port(), 38112);
+    }
+
+    #[test]
+    fn command_line_locations_and_port_win() {
+        let invocation = cli::parse([
+            "--profile",
+            "iron",
+            "--cache",
+            "/tmp/gw-cache",
+            "--mods",
+            "/tmp/gw-mods",
+            "--dir",
+            "/tmp/gw-web",
+            "--host-port",
+            "39000",
+        ])
+        .unwrap();
+        let profile = profile::Profile::default_profile();
+        let layout = Layout::new(&invocation, &profile);
+        assert_eq!(layout.cache_dir(), Path::new("/tmp/gw-cache"));
+        assert_eq!(layout.mod_dir(), Path::new("/tmp/gw-mods"));
+        assert_eq!(layout.web_root(), Path::new("/tmp/gw-web"));
+        assert_eq!(layout.port(), 39000);
+    }
 }
 
 /// Copy the bundle's shell files over the live web root.
