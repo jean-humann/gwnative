@@ -43,21 +43,32 @@ const note = (text) => {
  * side changes. Deletion blocks while a connection is open, so this only runs
  * from a failed boot, where the client is not holding one.
  */
-const wipe = async () => {
+export const wipe = async () => {
   const names = (await indexedDB.databases?.())?.map((db) => db.name) ?? [MOUNT];
+  const targets = names.filter(Boolean);
   await Promise.all(
-    names.filter(Boolean).map(
+    targets.map(
       (name) =>
-        new Promise((resolve) => {
-          const request = indexedDB.deleteDatabase(name);
-          request.onsuccess = request.onerror = () => resolve();
-          // A live connection elsewhere would park this forever, and a reset
-          // the player is watching has to end one way or the other.
-          request.onblocked = () => resolve();
+        new Promise((resolve, reject) => {
+          let request;
+          try {
+            request = indexedDB.deleteDatabase(name);
+          } catch (error) {
+            reject(error);
+            return;
+          }
+          request.onsuccess = () => resolve();
+          request.onerror = () =>
+            reject(request.error ?? new Error(`IndexedDB refused to delete ${name}`));
+          // A live connection elsewhere would park this forever. It is not a
+          // successful reset: tell the player so instead of reloading into the
+          // same database and the same failure.
+          request.onblocked = () =>
+            reject(new Error(`${name} is still open and could not be deleted`));
         }),
     ),
   );
-  return names.length;
+  return targets.length;
 };
 
 const RESET_WARNING =
