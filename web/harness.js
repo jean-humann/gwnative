@@ -99,6 +99,8 @@ const requestedFps = Number.isInteger(launchOptions.fps) && launchOptions.fps > 
 const requestedFrameMs = requestedFps ? 1000 / requestedFps : 0;
 const BOOT_FRAME_MS = 16;
 let bootRescueActive = true;
+let makeFrameCadence = null;
+const frameCadences = new WeakMap();
 {
   const raf = window.requestAnimationFrame.bind(window);
   const invoke = (callback, timestamp) => {
@@ -109,7 +111,6 @@ let bootRescueActive = true;
       frameAudit?.endAnimationFrame(frame);
     }
   };
-  let lastFrame = Number.NEGATIVE_INFINITY;
   window.requestAnimationFrame = (callback) => {
     if (!bootRescueActive) {
       if (!requestedFrameMs && !frameAudit?.enabled) {
@@ -123,9 +124,13 @@ let bootRescueActive = true;
       if (!requestedFrameMs) {
         return raf((timestamp) => invoke(callback, timestamp));
       }
+      let cadence = frameCadences.get(callback);
+      if (!cadence) {
+        cadence = makeFrameCadence?.() ?? { accept: () => true };
+        frameCadences.set(callback, cadence);
+      }
       const limited = (timestamp) => {
-        if (timestamp - lastFrame + 0.05 >= requestedFrameMs) {
-          lastFrame = timestamp;
+        if (cadence.accept(timestamp)) {
           invoke(callback, timestamp);
         } else {
           raf(limited);
@@ -754,8 +759,8 @@ function reportTransformFailure() {
   try {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
-      start, panel, data, compat, guide, gameApi, overlay, tools, hotkeys, e2e, metrics, runtime,
-      audit,
+      frameRate, start, panel, data, compat, guide, gameApi, overlay, tools, hotkeys, e2e, metrics,
+      runtime, audit,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -767,6 +772,7 @@ function reportTransformFailure() {
       import('./input.js'),
       import('./template-save.js'),
       import('./settings.js'),
+      import('./frame-rate.js'),
       import('./launcher.js'),
       import('./settings-panel.js'),
       import('./game-data.js'),
@@ -792,6 +798,7 @@ function reportTransformFailure() {
       ...input,
       ...templates,
       ...prefs,
+      ...frameRate,
       ...start,
       ...panel,
       ...data,
@@ -879,6 +886,7 @@ function reportTransformFailure() {
   // which is what the host already does for a client-module change.
   const settings = host.currentSettings();
   renderScale = settings.renderScale;
+  makeFrameCadence = () => host.createFrameCadence(requestedFrameMs);
   if (settings.showDiagnostics || launchOptions.diagnostics || launchOptions.performance) {
     window.gwLog(true);
   }
@@ -939,7 +947,11 @@ function reportTransformFailure() {
       enhancements: String(window.__gwnativeEnhancements ?? 'off'),
       templateSave: String(window.__gwnativeTemplateSave ?? 'off'),
     }).catch(() => {});
-    void host.runAppE2E({
+    // The runner invokes this only after the client has either reached the
+    // game or explicitly skipped gameplay. Exercising every overlay while the
+    // single-threaded client is still booting makes the test itself a source
+    // of startup stalls and closes the panel before a live widget can render.
+    window.gwRunAppE2E = () => host.runAppE2E({
       window,
       document,
       storage: window.localStorage,
@@ -948,14 +960,6 @@ function reportTransformFailure() {
       openSettings: window.gwOpenSettings,
       openGuide: window.gwOpenGuide,
       log,
-    }).then(() => {
-      void window.gwE2E?.report('app-pass').catch(() => {});
-    }).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      log(`[e2e] app FAIL: ${message}`);
-      void window.gwE2E?.report('app-fail', {
-        message: String(message).replace(/[\p{Cc}\p{Cf}]+/gu, ' ').trim().slice(0, 160),
-      }).catch(() => {});
     });
   }
   // ArenaNet's glue never dials its own API hosts. Outside Capacitor it folds
@@ -968,21 +972,44 @@ function reportTransformFailure() {
   const PROXY_LABELS = new Set(['webgate', 'account', 'help', 'store', 'www']);
   const open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    const routedOpen = (path, target) => {
+      log(`api: ${method} ${path}`);
+      this.addEventListener('loadend', () => {
+        const length = this.getResponseHeader('content-length') ?? 'unknown';
+        log(`api: ${method} ${path} -> ${this.status} (${length} bytes)`);
+        if (window.__gwnativeE2E === true && this.response instanceof ArrayBuffer) {
+          // Schema only: element names establish which logical response the
+          // client received without putting credentials, tokens, or even
+          // response values into an E2E log.
+          const source = new TextDecoder().decode(this.response);
+          const tags = [...source.matchAll(/<\s*\/?\s*([A-Za-z_][\w:.-]*)/g)]
+            .map((match) => match[1])
+            .filter((tag, index, all) => all.indexOf(tag) === index)
+            .slice(0, 16);
+          log(`api schema: ${path} <${tags.join('> <')}>`);
+          if (path === '/webgate/my_account/token.xml') {
+            void window.gwE2E?.report('login-response', {
+              status: this.status,
+              bytes: this.response.byteLength,
+            }).catch(() => {});
+          }
+        }
+      }, { once: true });
+      return open.call(this, method, target, ...rest);
+    };
     try {
       const target = new URL(url, location.href);
       const routed = target.pathname.replace(/^\/+/, '').split('/')[0] ?? '';
       const label = target.hostname.split('.')[0] ?? '';
       // Root-relative, so it resolves against this origin — port included.
       if (PROXY_LABELS.has(routed)) {
-        log(`api: ${method} ${target.pathname}`);
-        return open.call(this, method, `${target.pathname}${target.search}`, ...rest);
+        return routedOpen(target.pathname, `${target.pathname}${target.search}`);
       }
       // A request the glue left alone because it was handed an explicit proxy
       // host. Same five names, so it belongs on the same route.
       if (PROXY_LABELS.has(label) && target.hostname !== location.hostname) {
-        log(`api: ${method} /${label}${target.pathname}`);
-        return open.call(
-          this, method, `/${label}${target.pathname}${target.search}`, ...rest);
+        const path = `/${label}${target.pathname}`;
+        return routedOpen(path, `${path}${target.search}`);
       }
     } catch {
       // Not a URL this can classify, so it is not one of the five.

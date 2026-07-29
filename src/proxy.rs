@@ -17,6 +17,7 @@
 //! domain. The page can put any path it likes in front of us, and this is the one
 //! place in the host that will open a connection to an arbitrary name on demand.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::transport;
@@ -70,6 +71,38 @@ pub struct Reply {
     pub body: Vec<u8>,
 }
 
+fn tracing() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("GWNATIVE_TRACE_PROXY").is_some())
+}
+
+fn trace_contract(
+    method: &str,
+    route: &str,
+    tail: &str,
+    request: &[(&str, &str)],
+    response: &transport::Response,
+) {
+    if !tracing() {
+        return;
+    }
+    let mut request_names: Vec<_> = request.iter().map(|(name, _)| *name).collect();
+    request_names.sort_unstable();
+    request_names.dedup();
+    let mut response_names: Vec<_> = response
+        .headers
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    response_names.sort_unstable();
+    response_names.dedup();
+    note!(
+        "[proxy] contract {method} /{route}{tail}: request [{}], response [{}]",
+        request_names.join(", "),
+        response_names.join(", ")
+    );
+}
+
 /// The host a route label stands for, or `None` if it is not one of the five.
 pub fn host(route: &str) -> Option<&'static str> {
     ROUTES
@@ -119,6 +152,7 @@ pub fn forward(
         matches!(method, "POST" | "PUT").then_some(body),
         TIMEOUT,
     )?;
+    trace_contract(method, route, tail, &forwarded, &response);
 
     let mut out = Vec::new();
     for (name, value) in response.headers {

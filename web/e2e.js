@@ -83,69 +83,64 @@ const cleanMessage = (value) =>
 const wait = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+const targetName = (window, canvas, candidate) => {
+  if (!candidate || candidate === canvas) return 'canvas';
+  const kind = Object.entries(window.Module?.oskInput ?? {})
+    .find(([, input]) => input === candidate)?.[0];
+  return kind ? `${kind}-proxy` : 'text-proxy';
+};
+
 /**
- * Deliver one action from the native E2E vocabulary to the generated client.
+ * Focus the only target a forthcoming native action is allowed to reach.
  *
- * These are DOM input events, which is the interface Emscripten itself wires
- * to the game. The native API cannot name arbitrary keys or coordinates, and
- * this side checks the same bounds again before anything is dispatched.
+ * This does not dispatch input. Its acknowledgement is what lets the host send
+ * the trusted AppKit event without racing the page's action long poll.
+ */
+export function prepareNativeE2EAction(action, { window, canvas }) {
+  assert(Number.isSafeInteger(action?.sequence) && action.sequence > 0,
+    'E2E action has no valid sequence');
+  assert(
+    action.action === 'activate' || action.action === 'move-forward',
+    'E2E native action is not in the allowed vocabulary',
+  );
+  const activeInput = window.Module?.oskActiveInput;
+  const target = action.action === 'activate' && activeInput ? activeInput : canvas;
+  target.focus?.();
+  return targetName(window, canvas, target);
+}
+
+/**
+ * Deliver one page-owned action from the E2E vocabulary.
+ *
+ * Gameplay input is delivered as an AppKit event by the native host. Keeping
+ * it out of this function means a test cannot accidentally regress to an
+ * untrusted constructed `KeyboardEvent`, which WebKit and the client are both
+ * allowed to treat differently from real input.
  *
  * @param {{ sequence: number, action: string, durationMs: number }} action
  * @param {{
  *   window: Window,
  *   canvas: HTMLCanvasElement,
- *   KeyboardEvent?: typeof globalThis.KeyboardEvent,
- *   sleep?: (milliseconds: number) => Promise<void>,
  * }} options
- * @returns {Promise<'canvas' | 'text-proxy'>}
+ * @returns {Promise<{
+ *   target: 'app-ui',
+ *   activeTarget: 'canvas' | `${string}-proxy`,
+ * }>}
  */
 export async function executeE2EAction(action, {
   window,
   canvas,
-  KeyboardEvent = window.KeyboardEvent,
-  sleep = wait,
 }) {
   assert(Number.isSafeInteger(action?.sequence) && action.sequence > 0,
     'E2E action has no valid sequence');
-  const spec = action.action === 'activate'
-    ? { key: 'Enter', code: 'Enter', keyCode: 13, minimum: 40, maximum: 40 }
-    : action.action === 'move-forward'
-      ? { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38, minimum: 50, maximum: 1_000 }
-      : null;
-  assert(spec, 'E2E action is not in the allowed vocabulary');
-  assert(
-    Number.isSafeInteger(action.durationMs)
-      && action.durationMs >= spec.minimum
-      && action.durationMs <= spec.maximum,
-    `E2E ${action.action} duration is outside its bound`,
-  );
-
-  const activeInput = window.Module?.oskActiveInput;
-  const target = action.action === 'activate' && activeInput ? activeInput : canvas;
-  const targetName = target === canvas ? 'canvas' : 'text-proxy';
-  target.focus?.();
-  const keyboard = (type) => {
-    const event = new KeyboardEvent(type, {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      key: spec.key,
-      code: spec.code,
-      location: 0,
-    });
-    // WebKit leaves the legacy fields at zero on a constructed KeyboardEvent.
-    // Emscripten copies all three into its C event, and the generated client
-    // still reads them, so the test event must carry the same values as a real
-    // key from the window server.
-    for (const name of ['keyCode', 'which']) {
-      Object.defineProperty(event, name, { value: spec.keyCode });
-    }
-    return event;
+  assert(action.action === 'test-ui', 'gameplay actions are native-only');
+  assert(action.durationMs === 0, 'E2E test-ui duration is outside its bound');
+  assert(typeof window.gwRunAppE2E === 'function', 'app UI test is not installed');
+  await window.gwRunAppE2E();
+  return {
+    target: 'app-ui',
+    activeTarget: targetName(window, canvas, window.Module?.oskActiveInput),
   };
-  target.dispatchEvent(keyboard('keydown'));
-  await sleep(action.durationMs);
-  target.dispatchEvent(keyboard('keyup'));
-  return targetName;
 }
 
 /**
@@ -181,6 +176,36 @@ export function installE2EBridge({
   let lastFailure = '';
   let trafficAction = 0;
   const trafficReported = new Set();
+  const preparedNativeActions = [];
+  let activeNativeAction = null;
+  const nativeKey = (kind, event) => {
+    if (!event.isTrusted) return;
+    const code = event.code === 'Enter'
+      ? 'enter'
+      : event.code === 'ArrowUp'
+        ? 'arrow-up'
+        : 'other';
+    if (kind === 'native-key-observed') {
+      const prepared = preparedNativeActions[0];
+      if (!prepared || prepared.code !== code || activeNativeAction) return;
+      activeNativeAction = preparedNativeActions.shift();
+    } else if (!activeNativeAction || activeNativeAction.code !== code) {
+      return;
+    }
+    const keyCode = Number.isInteger(event.keyCode) && event.keyCode >= 0
+      ? event.keyCode
+      : 0;
+    void report(kind, {
+      actionSequence: activeNativeAction.sequence,
+      code,
+      keyCode,
+    }).catch(() => {});
+    if (kind === 'native-key-released') activeNativeAction = null;
+  };
+  const nativeKeyDown = (event) => nativeKey('native-key-observed', event);
+  const nativeKeyUp = (event) => nativeKey('native-key-released', event);
+  window.addEventListener('keydown', nativeKeyDown, true);
+  window.addEventListener('keyup', nativeKeyUp, true);
 
   const report = async (kind, detail = {}) => {
     const response = await fetch('__e2e/v1/events', {
@@ -207,19 +232,46 @@ export function installE2EBridge({
           after = action.sequence;
           trafficAction = action.sequence;
           trafficReported.clear();
+          // Native gameplay delivery has its own copy of this command. The
+          // page focuses the client's finite input target and acknowledges it
+          // before AppKit is woken, then only observes resulting socket traffic.
+          if (action.action !== 'test-ui') {
+            const target = prepareNativeE2EAction(action, { window, canvas });
+            const prepared = {
+              sequence: action.sequence,
+              code: action.action === 'activate' ? 'enter' : 'arrow-up',
+            };
+            preparedNativeActions.push(prepared);
+            try {
+              await report('action-prepared', {
+                actionSequence: action.sequence,
+                action: action.action,
+                target,
+              });
+            } catch (error) {
+              const index = preparedNativeActions.indexOf(prepared);
+              if (index >= 0) preparedNativeActions.splice(index, 1);
+              throw error;
+            }
+            continue;
+          }
           let target = 'canvas';
+          let activeTarget = 'canvas';
           try {
-            target = await executeE2EAction(action, { window, canvas });
+            ({ target, activeTarget } =
+              await executeE2EAction(action, { window, canvas }));
             await report('action-complete', {
               actionSequence: action.sequence,
               action: action.action,
               target,
+              activeTarget,
             });
           } catch (error) {
             await report('action-fail', {
               actionSequence: action.sequence,
               action: action.action,
               target,
+              activeTarget,
               message: cleanMessage(error instanceof Error ? error.message : error),
             });
           }
@@ -248,6 +300,8 @@ export function installE2EBridge({
     stopped = true;
     controller?.abort();
     window.removeEventListener('gwnative:state', gameState);
+    window.removeEventListener('keydown', nativeKeyDown, true);
+    window.removeEventListener('keyup', nativeKeyUp, true);
   };
   window.addEventListener('pagehide', stop, { once: true });
   void report('bridge-ready').catch((error) => {
@@ -269,9 +323,17 @@ export function installE2EBridge({
     }).catch(() => {});
   };
 
+  const connection = (socketId) => {
+    if (trafficAction <= 0) return;
+    void report('socket-open', {
+      actionSequence: trafficAction,
+      socketId,
+    }).catch(() => {});
+  };
+
   void pump();
 
-  return Object.freeze({ report, traffic, stop });
+  return Object.freeze({ report, traffic, connection, stop });
 }
 
 const setValue = (field, value) => {

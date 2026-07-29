@@ -32,6 +32,7 @@ mod layout;
 mod manifest;
 mod menu;
 mod mods;
+mod native_e2e;
 mod net;
 mod notify;
 mod patch;
@@ -294,6 +295,9 @@ fn main() {
         }
     }
     let settings = Arc::new(settings::Store::open(settings_path));
+    let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
+    let e2e_plain_client = e2e && std::env::var_os("GWNATIVE_E2E_PLAIN_CLIENT").is_some();
+    let e2e_original_client = e2e && std::env::var_os("GWNATIVE_E2E_ORIGINAL_CLIENT").is_some();
 
     // Derive the client that can save a template, if this is a build we have
     // certified, and layer optional enhancements on top when the player has
@@ -308,11 +312,8 @@ fn main() {
     // The companion supplies the versioned read-only game API even when its
     // optional presentation tools are off. Unknown builds still run the
     // official module unchanged; only this API remains unavailable.
-    let enhance = true;
-    let wasm::Prepared {
-        derived: derived_wasm,
-        module,
-    } = match wasm::prepare(
+    let enhance = !e2e_plain_client && !e2e_original_client;
+    let mut prepared = match wasm::prepare(
         &root,
         paths.derived_dir(),
         &paths::certificate_dir(),
@@ -325,10 +326,17 @@ fn main() {
             wasm::failed(enhance)
         }
     };
+    if e2e_original_client {
+        prepared = wasm::failed(false);
+        note!("[gwnative] E2E isolation: serving ArenaNet's original client module");
+    }
+    let wasm::Prepared {
+        derived: derived_wasm,
+        module,
+    } = prepared;
     module.logs();
 
     let token = session_token();
-    let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
     let loopback = match server::spawn(server::Config {
         root: root.clone(),
         snapshot,
@@ -854,6 +862,9 @@ fn run_windowed(
 
     window.makeKeyAndOrderFront(None);
     app.activate();
+    if let Some(hub) = &loopback.e2e {
+        native_e2e::install(&window, &webview, Arc::clone(hub));
+    }
     // The last thing before the thread stops being ours. `app::request_quit`
     // reads this to know a `terminate:` will be heard.
     app::about_to_run();
