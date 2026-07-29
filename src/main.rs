@@ -230,7 +230,7 @@ fn main() {
 
     // Started before the window so that whatever the shell costs to build is
     // in the record too.
-    let recorder = diagnostics::Recorder::open(diagnostics::default_log_dir());
+    let recorder = diagnostics::Recorder::open(paths.support_dir().join("diagnostics"));
     // First line in the file, so a log sent on by a player says which Mac and
     // which build it came from without anybody having to write back and ask.
     recorder.session();
@@ -466,13 +466,22 @@ fn hold_the_only_instance(
     windowed: bool,
     paths: &paths::Layout,
     new_instance: bool,
-) -> instance::Instance {
-    let lock_name = if new_instance {
-        format!("gwnative-{}.lock", std::process::id())
-    } else {
-        "gwnative.lock".into()
-    };
-    let lock_path = paths.support_dir().join(lock_name);
+) -> (instance::Instance, Option<instance::Instance>) {
+    let profile_path = paths.support_dir().join("gwnative.lock");
+    if new_instance {
+        return (acquire_instance(windowed, &profile_path), None);
+    }
+
+    let global_path = paths::base_support_dir().join("gwnative.lock");
+    if profile_path == global_path {
+        return (acquire_instance(windowed, &global_path), None);
+    }
+    let global = acquire_instance(windowed, &global_path);
+    let profile = acquire_instance(windowed, &profile_path);
+    (profile, Some(global))
+}
+
+fn acquire_instance(windowed: bool, lock_path: &Path) -> instance::Instance {
     // A relaunch is started by the app it replaces, so for a moment there
     // really are two — and this is the one that has to wait for the other.
     let patience = if relaunch::is_successor() {
@@ -480,12 +489,12 @@ fn hold_the_only_instance(
     } else {
         std::time::Duration::ZERO
     };
-    match instance::acquire(&lock_path, patience) {
+    match instance::acquire(lock_path, patience) {
         Ok(held) => held,
         Err(reason) => {
             note!("[gwnative] {reason}");
             if windowed
-                && let Some(pid) = instance::holder(&lock_path)
+                && let Some(pid) = instance::holder(lock_path)
                 && let Some(mtm) = MainThreadMarker::new()
             {
                 let _ = mtm;

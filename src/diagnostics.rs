@@ -509,11 +509,6 @@ pub fn spawn_sampler(
     });
 }
 
-pub fn default_log_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
-    PathBuf::from(home).join("Library/Application Support/gwnative/diagnostics")
-}
-
 /// Fold a `{"count": {...}, "gauge": {...}, "peak": {...}}` body from the page
 /// into the registry. Unknown buckets and non-numeric values are dropped
 /// rather than refused — the page must not be able to fail a launch by
