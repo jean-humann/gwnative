@@ -405,6 +405,13 @@ fn prefetch(
     if request.method == "POST" {
         if request.query == "stop" {
             store.stop_full_download();
+        } else if request.query == "verify" {
+            // Ahead of the disk check, which asks what a download would still
+            // have to write: this one writes nothing, and can only ever free
+            // space by discarding what fails. Refusing it for want of room
+            // would refuse the check on exactly the full volume where an
+            // interrupted write is likeliest to have left damage.
+            store.start_verify();
         } else if let Some(free) = free.filter(|free| *free < needed) {
             // Refused rather than started-and-abandoned: a sweep that runs
             // until the volume fills takes the rest of the machine down with
@@ -433,6 +440,11 @@ fn prefetch(
     // the only number that moves when a sweep is re-walking ground it already
     // has, which is what "running but not advancing" looks like from the page.
     let (fetched, _, running) = store.prefetch_progress();
+    // Reported on every poll rather than from a route of its own, so the page
+    // draws the check and the sweep from one timer. They never run at once —
+    // the check is what a full launch does before deciding whether a sweep is
+    // needed — but the page should not have to know that to render.
+    let (checked, verify_total, verifying, discarded) = store.verify_progress();
     let cached = store.resident_count();
     let total = store.chunk_count();
     let chunk_size = store.chunk_size();
@@ -449,6 +461,12 @@ fn prefetch(
         "chunkSize": chunk_size,
         "outstanding": outstanding,
         "needed": needed,
+        "verifying": verifying,
+        "verified": checked,
+        // Distinct chunks, not indices, so it is smaller than `total` and must
+        // not be drawn against it. The page has its own denominator here.
+        "verifyTotal": verify_total,
+        "discarded": discarded,
         // `null` rather than a guess when the volume will not say: the page
         // treats not knowing as no reason to stop, which is the same thing it
         // does when this whole route is missing. `None` encodes as `null` with

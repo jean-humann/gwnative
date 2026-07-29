@@ -38,6 +38,24 @@ pub(super) fn store_of(cache_dir: PathBuf, count: usize) -> ChunkStore {
     open(&hashes, (count * 1024) as u64, cache_dir)
 }
 
+/// A store whose manifest describes chunks the caller is about to write.
+///
+/// The two above hand out invented hashes, which is all a question about
+/// residency needs — nothing reads those bytes back. The integrity pass does,
+/// and has to agree with them, so these hashes are the real digests of
+/// `chunks`. Repeating a slice gives a snapshot that repeats a chunk, which is
+/// the case the pass deduplicates.
+pub(super) fn store_of_content(cache_dir: PathBuf, chunks: &[&[u8]]) -> ChunkStore {
+    use md5::Digest as _;
+    let size: u64 = chunks.iter().map(|bytes| bytes.len() as u64).sum();
+    let hashes = chunks
+        .iter()
+        .map(|bytes| format!(r#""{}""#, hex::encode(md5::Md5::digest(bytes))))
+        .collect::<Vec<_>>()
+        .join(",");
+    open(&hashes, size, cache_dir)
+}
+
 fn open(hashes: &str, size: u64, cache_dir: PathBuf) -> ChunkStore {
     let manifest = Manifest::parse(
         format!(

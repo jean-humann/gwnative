@@ -27,12 +27,23 @@ export async function snapshotProgress() {
 }
 
 /**
- * Start or stop the background sweep. Returns the same progress shape.
+ * The query each action is spelled as. One place, because the launcher asks for
+ * all three and a typo would read as the default — starting a 4.2 GB download
+ * where a stop or a check was meant.
+ */
+const ACTIONS = { start: '__prefetch', stop: '__prefetch?stop', verify: '__prefetch?verify' };
+
+/**
+ * Start or stop the background sweep, or start the integrity check.
  *
- * @param {'start' | 'stop'} action
+ * Returns the same progress shape as {@link snapshotProgress} — including
+ * `verifying`, `verified`, `verifyTotal` and `discarded`, which is how a caller
+ * follows the check it just asked for without a second round trip.
+ *
+ * @param {'start' | 'stop' | 'verify'} action
  */
 export async function sweepSnapshot(action) {
-  const response = await fetch(action === 'stop' ? '__prefetch?stop' : '__prefetch', {
+  const response = await fetch(ACTIONS[action] ?? ACTIONS.start, {
     method: 'POST',
     headers: headers(),
   });
