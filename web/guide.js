@@ -23,11 +23,11 @@ export const GUIDE = [
     heading: 'Signing in',
     body: [
       'Use the same ArenaNet account you would use anywhere else. The login goes ' +
-        'to ArenaNet, not to this app; nothing about your account is stored on this Mac ' +
-        'beyond what the game itself writes.',
+        'to ArenaNet, not to this app. If you ask the game to remember the login, this ' +
+        'app keeps those credentials in the macOS Keychain for the selected profile.',
       'Characters, settings, hero builds and storage all live on ArenaNet’s servers. ' +
-        'Nothing on this Mac holds them, which is why anything here can be deleted and ' +
-        'rebuilt without losing a character.',
+        'Nothing in gwnative’s cache owns that server-side account state, which is why ' +
+        'the downloaded game image can be deleted and rebuilt without losing a character.',
     ],
   },
   {
@@ -107,6 +107,20 @@ export const GUIDE = [
         'the client ArenaNet is shipping, the same recognition build templates need. On a ' +
         'client build this release has not been checked against, they stay off and the app ' +
         'says so in the diagnostics overlay.',
+    ],
+  },
+  {
+    heading: 'Companion tools',
+    body: [
+      'View → Companion Tools… or ⌘⇧T opens the clock, session timer, target and frame ' +
+        'rate widgets plus a build and team library. Widgets are off until selected. ' +
+        'Use Edit layout or ⌘⇧O to move them.',
+      'The library names, groups, imports and exports template codes in this profile. ' +
+        'It does not apply them to the game. Party, inventory, chat and quest tools are ' +
+        'listed honestly as unavailable until this app has a certified layout for the ' +
+        'exact client ArenaNet is shipping.',
+      'These hotkeys open local interface only. They never synthesize game input, and ' +
+        'unattended gameplay automation is not part of the companion tools.',
     ],
   },
   {

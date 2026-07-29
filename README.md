@@ -12,11 +12,13 @@ endorsed, sponsored, or approved by ArenaNet or NCSOFT. See the
 [legal notice](NOTICE.md) for ownership, trademark, and game-material details.
 
 gwnative was made possible by
-[gw_in_browser](https://github.com/gwdevhub/gw_in_browser), created by
-[Marc Henderkes](https://github.com/henderkes). The renderer harness traces
-back to that work. The native macOS direction was later inspired by
+[gw_in_browser](https://github.com/gwdevhub/gw_in_browser), primarily authored
+by [Marc Henderkes](https://github.com/henderkes), with contributions from
+[Jon](https://github.com/3vcloud). The renderer harness traces back to that
+work. The native macOS direction was later inspired by
 [gwonmac](https://github.com/Mat4m0/gwonmac); the host itself is an independent
-Rust implementation.
+Rust implementation. See [Acknowledgements](ACKNOWLEDGEMENTS.md) for the full
+project lineage.
 
 ## Requirements
 
@@ -40,6 +42,10 @@ gwnative is playable. It:
   double-click translation, pointer lock, and native window state;
 - repairs build-template operations on client builds that have been explicitly
   certified;
+- recognises the official Guild Wars command line and isolates named profiles;
+- validates explicitly selected `.gwmod` sessions before loading them;
+- exposes a versioned read-only player/map/target API and movable companion
+  widgets;
 - offers an optional native game cursor and target-distance readout;
 - records structured diagnostics and can produce a redacted problem report;
 - rolls back a newly downloaded client that never reaches a first frame; and
@@ -92,12 +98,18 @@ are in the [development guide](docs/development.md).
 | Document | Audience and scope |
 | --- | --- |
 | [User guide](docs/user-guide.md) | Installation, settings, data, updates, and recovery |
+| [Command line](docs/command-line.md) | Native commands and complete Guild Wars switch compatibility |
+| [Profiles](docs/profiles.md) | Isolation, shared storage, concurrent instances, and removal |
+| [Mods](docs/mods.md) | `.gwmod` format, validation, trust model, and runtime contract |
+| [Game API](docs/game-api.md) | Versioned read-only state, token boundary, overlays, and hotkeys |
+| [Feature compatibility](docs/feature-compatibility.md) | Upstream comparison, certification policy, and roadmap |
 | [Architecture](docs/architecture.md) | Trust boundaries, boot flow, storage, networking, WebAssembly transforms, and module map |
 | [Development](docs/development.md) | Toolchain, commands, tests, debugging, and environment variables |
 | [Performance](docs/performance.md) | Reproducible measurements, baselines, and measured design decisions |
 | [Release guide](docs/releasing.md) | Bundling, signing, notarization, Sparkle, CI, and publication |
 | [Contributing](CONTRIBUTING.md) | Change workflow and documentation expectations |
 | [Legal notice](NOTICE.md) | Unofficial-project disclosure, game-material ownership, and trademarks |
+| [Acknowledgements](ACKNOWLEDGEMENTS.md) | Community projects and authors that made or inspired this work |
 
 The application also ships an offline user guide under **Help → Guild Wars
 Guide**. It describes the exact build currently running; this repository's user

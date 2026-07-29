@@ -17,9 +17,11 @@ flowchart LR
     subgraph WebKit["WebKit processes"]
         Harness["Web harness\ninput, graphics, audio, filesystem"]
         Client["ArenaNet client\nGw.jspi.js + Gw.jspi.wasm"]
-        Companion["Optional companion WASM\nread-only game state"]
+        Companion["Certified companion WASM\nread-only game state"]
+        Mods["Explicit selected mods\ntrusted shared memory"]
         Harness <--> Client
         Client --> Companion
+        Client <--> Mods
     end
 
     Origin <--> Harness
@@ -45,27 +47,33 @@ launcher, settings UI, and metrics.
 
 `src/main.rs` orders launch phases by dependency:
 
-1. Parse no command, `sync`, `serve`, help, or version before opening anything.
-2. Acquire the per-support-directory single-instance lock.
-3. Check whether the current code-signing identity can use the Keychain item.
-4. Select a writable web root.
-5. Load the cached manifest and revalidate it in the background, or fetch a
+1. Parse the command, native options, and Guild Wars compatibility switches
+   before opening anything.
+2. Select or create the profile and validate any explicit mod session.
+3. Acquire the profile lock and, for a primary launch, the global instance
+   lock.
+4. Check whether the current code-signing identity can use the profile's
+   Keychain item.
+5. Select a writable profile web root.
+6. Load the cached manifest and revalidate it in the background, or fetch a
    current manifest for an explicit sync.
-6. Roll back an unproven client, verify installed artifacts, and fetch missing
+7. Roll back an unproven client, verify installed artifacts, and fetch missing
    or newer artifacts.
-7. Open the game-image chunk store, consume a pending clear request, replay the
+8. Open the game-image chunk store, consume a pending clear request, replay the
    boot prefetch list, and start cursor-based readahead.
-8. Start diagnostics and load settings.
-9. Prepare certified WebAssembly transforms when available.
-10. Start the loopback origin and inject its session token, current keyboard
+9. Complete a requested local-image import, full image, or repair operation.
+10. Start diagnostics and load profile settings.
+11. Prepare certified WebAssembly transforms when available.
+12. Start the loopback origin and inject its session token, current keyboard
     layout, settings, update capabilities, and module state at document start.
-11. Create the WKWebView, window, menu, native event bridges, renderer recovery,
+13. Create the WKWebView, window, menu, native event bridges, renderer recovery,
     and application lifecycle delegate.
-12. Mark the client generation proven and seal the boot chunk list when the
+14. Mark the client generation proven and seal the boot chunk list when the
     page reports its first frame.
 
-The `sync` command exits after artifact installation. The `serve` command stops
-after step 10 and prints `<address> <session-token>` on stdout.
+The `sync`, `repair`, and classic `-image` operations exit before creating a
+window. The `serve` command stops after the loopback starts and prints
+`<address> <session-token>` on stdout.
 
 ## Loopback origin and trust model
 
@@ -106,6 +114,20 @@ Every host response carries a content-security policy, COOP/COEP/CORP, and
 `wasm-unsafe-eval`, and blob workers) but denies objects, frames, base URL
 changes, forms, and off-origin resource loads. A navigation delegate rejects
 top-level navigation away from the exact loopback origin.
+
+## Profile boundaries
+
+The default profile preserves the original support directory, Keychain account,
+and port. A named profile moves mutable support files below `profiles/<id>`,
+uses `login:<id>` in Keychain, and receives a deterministic loopback port.
+Because WebKit keys IndexedDB and local storage by origin, the stable port also
+isolates page data, overlays, and the build library.
+
+Content-addressed snapshot chunks and the mod discovery directory remain
+shared. A second instance bypasses only the global primary lock and requires an
+explicit non-default profile. Its profile lock is still mandatory, preventing
+an accidental pair of writers to the same settings, window, and page origin.
+See [Profiles](profiles.md) for the storage map.
 
 ## Client artifacts and generation rollback
 
@@ -185,6 +207,20 @@ before rendering it. Installation allocates through the client's own allocator,
 instantiates the companion, fills the table slot, and only then enables the
 hook.
 
+The validated companion state is narrowed into the versioned v1 map, player,
+and target schema. The page publishes no faster than four times per second and
+Rust validates it again before making it available on token-gated loopback
+routes. There is no certified action endpoint. The overlay registry and
+Companion Tools consume the same read-only state; see
+[Game API and overlays](game-api.md).
+
+Explicit mods follow a separate trust path. `src/mods.rs` parses the selected
+format-1 manifest and ZIP structure, resolves nested dependencies, enforces
+resource limits, and hashes every module before WebKit starts. The page checks
+the catalog and SHA-256 again, instantiates modules in dependency order against
+game memory and earlier exports, and calls `mod_init`. Shared memory means the
+module is trusted even after package validation; see [Mods](mods.md).
+
 ## WebKit and native integration
 
 WKWebView lacks several Chromium APIs the client assumes:
@@ -233,8 +269,10 @@ See the [performance guide](performance.md) for measurement semantics.
 | Network bridges | `src/net.rs`, `src/sockets.rs`, `src/transport.rs` |
 | Patching and generations | `src/patch.rs`, `src/manifest.rs`, `src/generation.rs` |
 | Snapshot cache | `src/chunks/`, `src/cache.rs`, `src/disk.rs`, `src/qos.rs` |
-| Credentials and settings | `src/keychain.rs`, `src/settings.rs`, `src/paths.rs` |
+| Profiles, credentials, settings | `src/profile.rs`, `src/keychain.rs`, `src/settings.rs`, `src/paths.rs` |
 | WebAssembly transforms | `src/wasm/`, `src/companion-kernel/lib.rs`, `build.rs` |
+| Mods and game API | `src/mods.rs`, `src/game_api.rs`, `web/mod-runtime.js`, `web/game-api.js` |
+| Overlays and tools | `web/overlay.js`, `web/tools-panel.js`, `web/build-library.js`, `web/hotkeys.js` |
 | Diagnostics | `src/diagnostics.rs`, `src/report.rs`, `web/diagnostics.js`, `web/memory.js` |
 | Web harness | `web/harness.js`, `web/graphics.js`, `web/audio.js`, `web/filesystem.js`, `web/input.js` |
 | Player UI | `web/launcher.js`, `web/settings-panel.js`, `web/guide.js`, `web/loading.js` |
@@ -251,3 +289,7 @@ See the [performance guide](performance.md) for measurement semantics.
   launch.
 - Development and packaged builds use separate WebKit storage roots.
 - The loopback port fallback changes the page origin for that session.
+- Named-profile port hashes can collide; an explicit port resolves the launch
+  but selects another page origin.
+- A validated mod still shares writable game memory and must be trusted by the
+  player.
