@@ -23,6 +23,7 @@ Run the same checks as CI:
 
 ```sh
 scripts/check-docs
+scripts/check-scripts
 cargo deny check
 msrv="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)"
 rustup toolchain install "$msrv" --profile minimal \

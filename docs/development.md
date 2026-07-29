@@ -88,6 +88,7 @@ CI runs:
 
 ```sh
 scripts/check-docs
+scripts/check-scripts
 cargo deny check
 msrv="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)"
 rustup toolchain install "$msrv" --profile minimal \
@@ -100,15 +101,16 @@ cargo build --release
 scripts/bundle
 ```
 
-The dependency policy requires
-[`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) and checks the
-shipped target for advisories, duplicate or wildcard dependencies, licences,
-and nonstandard sources. The separate `cargo check` uses the `rust-version`
-declared in `Cargo.toml`, so changing the compiler floor changes the check
-instead of leaving a second version constant behind. The Rust suite contains
-unit and socket-level integration tests. One ignored test reaches the GitHub API
-and is excluded from the default run. The `tests/web.rs` integration test
-invokes:
+The script check parses every repository-owned shell and Python maintenance
+script without executing release or packaging effects. The dependency policy
+requires [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) and checks
+the shipped target for advisories, duplicate or wildcard dependencies,
+licences, and nonstandard sources. The separate `cargo check` uses the
+`rust-version` declared in `Cargo.toml`, so changing the compiler floor changes
+the check instead of leaving a second version constant behind. The Rust suite
+contains unit and socket-level integration tests. One ignored test reaches the
+GitHub API and is excluded from the default run. The `tests/web.rs` integration
+test invokes:
 
 ```sh
 node --test "*.test.js"

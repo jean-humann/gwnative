@@ -1,0 +1,20 @@
+#!/bin/sh
+# Parse repository-owned maintenance scripts without executing their effects.
+set -e
+
+cd "$(dirname "$0")/.."
+
+for script in \
+	scripts/appcast \
+	scripts/bundle \
+	scripts/check-scripts \
+	scripts/icon \
+	scripts/publish \
+	scripts/release \
+	scripts/sign-identity \
+	scripts/signed-run; do
+	sh -n "$script"
+done
+
+python3 -m py_compile scripts/benchmark scripts/check-docs
+echo "scripts: shell and Python syntax ok"

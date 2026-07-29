@@ -96,6 +96,9 @@ jobs:
       - name: Documentation
         run: python3 scripts/check-docs
 
+      - name: Maintenance scripts
+        run: scripts/check-scripts
+
       - name: Formatting
         run: cargo fmt --all --check
 
