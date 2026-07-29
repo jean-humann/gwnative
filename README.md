@@ -24,7 +24,7 @@ Rust application. AppKit and WKWebView provide the platform directly, without
 an embedded browser distribution, Windows, Wine, or a virtual machine.
 
 <p align="center">
-  <img src="docs/assets/first-run.png" width="900" alt="gwnative offering Quick Start and Full Game on first launch">
+  <img src="docs/assets/game-login.jpg" width="1000" alt="Guild Wars Reforged running in a native gwnative window">
 </p>
 
 gwnative is an independent interoperability project. It is not affiliated with,
@@ -77,6 +77,15 @@ game image:
 - **Quick Start** streams areas when first needed and keeps them.
 - **Full Game** downloads and verifies missing chunks in the background. You can
   wait for it to finish or start playing while it continues.
+
+<details>
+<summary>See the first-launch storage choice</summary>
+
+<p align="center">
+  <img src="docs/assets/first-run.png" width="800" alt="gwnative offering Quick Start and Full Game on first launch">
+</p>
+
+</details>
 
 See the [user guide](docs/user-guide.md) for settings, storage, updates, and
 troubleshooting.
