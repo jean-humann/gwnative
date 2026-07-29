@@ -89,6 +89,14 @@ window.addEventListener('unhandledrejection', (e) => forward(`[unhandled] ${e.re
 // touching any vendored code. The handle returned while the wrapper is armed is
 // not a usable frame id, which is safe only because the client never cancels a
 // frame — cancelAnimationFrame appears in neither generated glue file.
+const launchOptions =
+  window.__gwnativeLaunch && typeof window.__gwnativeLaunch === 'object'
+    ? window.__gwnativeLaunch
+    : {};
+const requestedFps = Number.isInteger(launchOptions.fps) && launchOptions.fps > 0
+  ? launchOptions.fps
+  : 0;
+const requestedFrameMs = requestedFps ? 1000 / requestedFps : 0;
 const BOOT_FRAME_MS = 16;
 let bootRescueActive = true;
 {
@@ -101,16 +109,30 @@ let bootRescueActive = true;
       frameAudit?.endAnimationFrame(frame);
     }
   };
+  let lastFrame = Number.NEGATIVE_INFINITY;
   window.requestAnimationFrame = (callback) => {
     if (!bootRescueActive) {
-      if (!frameAudit?.enabled) {
+      if (!requestedFrameMs && !frameAudit?.enabled) {
         // First frame has been presented; hand the native function back for
-        // good unless a diagnostic run needs callback boundaries.
+        // good unless a compatibility cap or diagnostic run needs callback
+        // boundaries.
         window.requestAnimationFrame = raf;
         raf(callback);
         return 0;
       }
-      return raf((timestamp) => invoke(callback, timestamp));
+      if (!requestedFrameMs) {
+        return raf((timestamp) => invoke(callback, timestamp));
+      }
+      const limited = (timestamp) => {
+        if (timestamp - lastFrame + 0.05 >= requestedFrameMs) {
+          lastFrame = timestamp;
+          invoke(callback, timestamp);
+        } else {
+          raf(limited);
+        }
+      };
+      raf(limited);
+      return 0;
     }
     let taken = false;
     const run = (timestamp) => {
@@ -307,7 +329,9 @@ const credentials = (method, body) => {
 /// 150 ms — long enough to lose that race — and the symptom is a login screen
 /// with "Remember Account Name" ticked and nothing in the field. Started at load
 /// it is minutes early instead.
-let saved = null;
+let saved = launchOptions.credentials
+  ? Promise.resolve({ ...launchOptions.credentials })
+  : null;
 
 const readSaved = () => {
   saved ??= credentials('GET').then((response) => {
@@ -806,7 +830,9 @@ function reportTransformFailure() {
   // which is what the host already does for a client-module change.
   const settings = host.currentSettings();
   renderScale = settings.renderScale;
-  if (settings.showDiagnostics) window.gwLog(true);
+  if (settings.showDiagnostics || launchOptions.diagnostics || launchOptions.performance) {
+    window.gwLog(true);
+  }
   // Said out loud for the same reason input.js announces its touch mode: the
   // render scale is the one setting whose effect is a cost rather than a
   // control, so a session's log has to record which one it was paying.
@@ -882,6 +908,7 @@ function reportTransformFailure() {
   // window.AudioContext when the client first opens a device, and this has to
   // be what it finds there.
   window.gwAudio = host.installGameAudio();
+  if (launchOptions.mute) window.gwAudio.setGameAudioMuted(true);
 
   // preRun, so it only has to precede the glue that appendGlue() loads below.
   host.installGameFilesystem({

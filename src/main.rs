@@ -33,6 +33,7 @@ mod net;
 mod notify;
 mod patch;
 mod paths;
+mod profile;
 mod proxy;
 mod qos;
 mod relaunch;
@@ -69,8 +70,8 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 fn main() {
     // Before anything is opened, downloaded or locked: a question about this
     // executable deserves an answer and not a launch.
-    let command = match cli::parse(std::env::args_os().skip(1)) {
-        Ok(command) => command,
+    let invocation = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(invocation) => invocation,
         Err(exit) => {
             let out: &mut dyn std::io::Write = if exit.failed {
                 &mut std::io::stderr()
@@ -81,8 +82,18 @@ fn main() {
             std::process::exit(i32::from(exit.failed) * 2);
         }
     };
+    for notice in &invocation.notices {
+        note!(
+            "[gwnative] {}: {} ({:?})",
+            notice.option,
+            notice.message,
+            notice.kind
+        );
+    }
+    let command = invocation.command;
     if command == cli::Command::Certify {
-        match wasm::certificate_candidate(&paths::web_root()) {
+        let root = invocation.web_root.clone().unwrap_or_else(paths::web_root);
+        match wasm::certificate_candidate(&root) {
             Ok(candidate) => println!("{candidate}"),
             Err(reason) => {
                 eprintln!("{reason}");
@@ -91,27 +102,57 @@ fn main() {
         }
         return;
     }
-    let force_sync = command == cli::Command::Sync;
+    let base_support = paths::base_support_dir();
+    if command == cli::Command::Profiles {
+        for profile in profile::list(&base_support) {
+            println!(
+                "{}\t{}\t{}\t{}",
+                profile.id,
+                profile.display_name,
+                profile.color,
+                profile.port()
+            );
+        }
+        return;
+    }
+    let profile = match profile::select(&base_support, invocation.profile.as_deref()) {
+        Ok(profile) => profile,
+        Err(reason) => {
+            note!("[gwnative] {reason}");
+            std::process::exit(2);
+        }
+    };
+    let paths = paths::Layout::new(&invocation, &profile);
+    let force_sync = matches!(command, cli::Command::Sync | cli::Command::Repair);
     let headless = command == cli::Command::Serve;
+    if command == cli::Command::Mods {
+        note!(
+            "[gwnative] no mod bundles found in {}",
+            paths.mod_dir().display()
+        );
+        return;
+    }
     // The two commands above are the runs with a terminal attached. Everything
     // that would otherwise put a message on screen asks this first.
     let windowed = !headless && !force_sync;
 
     // Held for as long as the process lives; the kernel takes it back if the
     // process does not.
-    let _instance = hold_the_only_instance(windowed);
+    let _instance = hold_the_only_instance(windowed, &paths, invocation.new_instance);
 
     // Before the client can ask for the login, so the reason it will not get one
     // is on screen ahead of the dialog rather than after it.
     keychain::check_identity();
 
-    let root = paths::web_root();
+    let root = paths.web_root().to_owned();
     // One client and one manifest, for everything below that needs either.
-    let client = patch::Client::from_env();
-    let manifest = load_manifest(&client, force_sync);
+    let client = patch::Client::from_env().with_offline(invocation.offline);
+    let manifest = load_manifest(&client, force_sync, paths.support_dir(), invocation.offline);
     let revalidate = manifest
         .as_ref()
-        .is_ok_and(|(_, source)| !matches!(source, patch::Source::Service));
+        .is_ok_and(|(_, source)| !matches!(source, patch::Source::Service))
+        && !invocation.offline
+        && !invocation.no_update;
 
     let generations = install_client(
         &root,
@@ -121,6 +162,7 @@ fn main() {
             .map(|(manifest, source)| (manifest, *source)),
         force_sync,
         windowed,
+        paths.support_dir(),
     );
     if force_sync {
         return;
@@ -129,14 +171,16 @@ fn main() {
     // being installed above; refreshing that file concurrently could otherwise
     // promote a newer manifest over the artifacts fetched from the older one.
     if revalidate {
-        revalidate_manifest();
+        revalidate_manifest(paths.support_dir().to_owned());
     }
     // Snapshot chunks must come from the manifest promoted with the client that
     // is actually on disk. `manifest` may be a newer pending offer whose client
     // download failed, or one that rollback just refused.
-    let active_manifest = client.active_manifest(&paths::support_dir());
+    let active_manifest = client.active_manifest(paths.support_dir());
     let snapshot = match active_manifest {
-        Ok(manifest) => open_and_warm_snapshot(client, manifest),
+        Ok(manifest) => {
+            open_and_warm_snapshot(client, manifest, paths.cache_dir(), invocation.no_prefetch)
+        }
         // Without a manifest there is no chunk list, so there is no snapshot —
         // the same outcome as failing to open one, reported the same way.
         Err(e) => {
@@ -167,9 +211,18 @@ fn main() {
     // first frame, so asking the page to fetch them later would mean booting
     // once at the wrong scale and correcting it in front of the player. Which
     // client module to derive is settled here too — see below.
-    let settings = Arc::new(settings::Store::open(
-        paths::support_dir().join("settings.json"),
-    ));
+    let settings_path = paths.support_dir().join("settings.json");
+    if invocation.legacy.reset_preferences {
+        match settings::reset(&settings_path) {
+            Ok(true) => note!(
+                "[gwnative] local preferences reset; previous values kept at {}",
+                settings_path.with_extension("json.reset").display()
+            ),
+            Ok(false) => {}
+            Err(error) => note!("[gwnative] local preferences could not be reset: {error}"),
+        }
+    }
+    let settings = Arc::new(settings::Store::open(settings_path));
 
     // Derive the client that can save a template, if this is a build we have
     // certified, and layer optional enhancements on top when the player has
@@ -187,7 +240,7 @@ fn main() {
         module,
     } = match wasm::prepare(
         &root,
-        &paths::derived_dir(),
+        paths.derived_dir(),
         &paths::certificate_dir(),
         enhance,
         &generations,
@@ -209,6 +262,8 @@ fn main() {
         settings,
         generations,
         token.clone(),
+        paths.port(),
+        profile.keychain_account(),
     ) {
         Ok(loopback) => loopback,
         // Nothing downstream has an answer to this: the client is a page, and
@@ -237,7 +292,7 @@ fn main() {
     if headless {
         park_headless(&loopback, &token);
     }
-    run_windowed(&loopback, &token, &module);
+    run_windowed(&loopback, &token, &module, &invocation, paths.support_dir());
 }
 
 /// Take the single-instance lock, or hand the running app the foreground.
@@ -247,8 +302,17 @@ fn main() {
 /// one that is already open, not like nothing happening; raising it by pid
 /// rather than bundle id works in development too, where there is no bundle to
 /// identify.
-fn hold_the_only_instance(windowed: bool) -> instance::Instance {
-    let lock_path = paths::support_dir().join("gwnative.lock");
+fn hold_the_only_instance(
+    windowed: bool,
+    paths: &paths::Layout,
+    new_instance: bool,
+) -> instance::Instance {
+    let lock_name = if new_instance {
+        format!("gwnative-{}.lock", std::process::id())
+    } else {
+        "gwnative.lock".into()
+    };
+    let lock_path = paths.support_dir().join(lock_name);
     // A relaunch is started by the app it replaces, so for a moment there
     // really are two — and this is the one that has to wait for the other.
     let patience = if relaunch::is_successor() {
@@ -290,14 +354,21 @@ fn hold_the_only_instance(windowed: bool) -> instance::Instance {
 fn load_manifest(
     client: &patch::Client,
     force_sync: bool,
+    support_dir: &Path,
+    offline: bool,
 ) -> error::Result<(manifest::Manifest, patch::Source)> {
-    let dir = paths::support_dir();
+    let dir = support_dir;
+    if offline {
+        return client
+            .cached_manifest(dir)
+            .map(|manifest| (manifest, patch::Source::Active));
+    }
     if force_sync {
         return client
-            .fetch_manifest(&dir)
+            .fetch_manifest(dir)
             .map(|manifest| (manifest, patch::Source::Service));
     }
-    client.manifest(&dir)
+    client.manifest(dir)
 }
 
 /// Make the web root hold a client this build can run, and return the record
@@ -319,10 +390,9 @@ fn install_client(
     manifest: Result<(&manifest::Manifest, patch::Source), &error::Error>,
     force_sync: bool,
     windowed: bool,
+    support_dir: &Path,
 ) -> Arc<generation::Store> {
-    let generations = Arc::new(generation::Store::open(
-        paths::support_dir().join("generations"),
-    ));
+    let generations = Arc::new(generation::Store::open(support_dir.join("generations")));
     match generations.recover(root) {
         generation::Recovery::None => {}
         generation::Recovery::InstallationRestored => note!(
@@ -442,6 +512,7 @@ fn install_client(
             manifest,
             offered,
             force_sync,
+            support_dir,
         )
         .err()
         .map(|e| e.to_string()),
@@ -490,8 +561,10 @@ fn should_activate_pending_manifest(
 fn open_and_warm_snapshot(
     client: patch::Client,
     manifest: manifest::Manifest,
+    cache_dir: &Path,
+    no_prefetch: bool,
 ) -> Option<Arc<chunks::ChunkStore>> {
-    let cache_dir = cache::default_cache_dir();
+    let cache_dir = cache_dir.to_owned();
     // Before the store opens, which is the only moment this is safe: from here
     // on the directory has a readahead thread, a prefetch thread and up to
     // forty-eight fetches holding descriptors into it. See `cache::request_clear`
@@ -507,10 +580,14 @@ fn open_and_warm_snapshot(
             // Pull what the last boot needed while the window is still being
             // built. By the time the client asks, the chunks that gate the
             // first frame are already local.
-            store.warm_boot();
+            if !no_prefetch {
+                store.warm_boot();
+            }
             // And on the launch that has no list to replay — the first one —
             // stay a little ahead of wherever the client is reading instead.
-            store.start_readahead();
+            if !no_prefetch {
+                store.start_readahead();
+            }
             Some(store)
         }
         Err(e) => {
@@ -539,7 +616,13 @@ fn park_headless(loopback: &server::Loopback, token: &str) -> ! {
 
 /// Build the window and hand the thread to AppKit. Returns once the app has
 /// terminated.
-fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module) {
+fn run_windowed(
+    loopback: &server::Loopback,
+    token: &str,
+    module: &wasm::Module,
+    invocation: &cli::Invocation,
+    support_dir: &Path,
+) {
     let mtm = MainThreadMarker::new().expect("main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -564,8 +647,14 @@ fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module)
         token,
         &loopback.settings.get(),
         module,
+        invocation,
     );
-    let window = window::open(mtm, &webview, paths::support_dir().join("window.json"));
+    let window = window::open(
+        mtm,
+        &webview,
+        support_dir.join("window.json"),
+        invocation.legacy.window_mode,
+    );
     activation_cover::install(&webview, &window, loopback.recorder.clone());
 
     // After the window, not before: two of the menu's items are requests to the
@@ -589,7 +678,9 @@ fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module)
     // item uses, and off this thread — the request takes up to five seconds and
     // the page is loading. A no-op unless the player asked to be told; see
     // [`release::due`].
-    menu::check_for_updates_at_launch(&loopback.settings);
+    if !invocation.no_update {
+        menu::check_for_updates_at_launch(&loopback.settings);
+    }
 
     window.makeKeyAndOrderFront(None);
     app.activate();
@@ -611,11 +702,11 @@ fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module)
 /// keeps a socket busy until the patch client's request timeout and then goes
 /// away, which is the correct amount of fuss to make about a check nobody is
 /// waiting on.
-fn revalidate_manifest() {
-    std::thread::spawn(|| {
+fn revalidate_manifest(support_dir: std::path::PathBuf) {
+    std::thread::spawn(move || {
         qos::set(qos::Class::Utility);
         let client = patch::Client::from_env();
-        match client.revalidate(&paths::support_dir()) {
+        match client.revalidate(&support_dir) {
             // The next launch opens on this pending offer, sees it names a build
             // that is not the one on disk, and installs the matching artifact
             // set before promoting the manifest. See [`patch::Client::revalidate`].
@@ -647,6 +738,7 @@ fn sync(
     manifest: &manifest::Manifest,
     offered: &str,
     force: bool,
+    support_dir: &Path,
 ) -> error::Result<()> {
     if unsound.is_empty() {
         note!("[gwnative] installing client generation {offered}");
@@ -696,7 +788,7 @@ fn sync(
             return Err(error);
         }
     };
-    if let Err(error) = client.activate_manifest(&paths::support_dir()) {
+    if let Err(error) = client.activate_manifest(support_dir) {
         if matches!(
             generations.recover(root),
             generation::Recovery::InstallationRestored

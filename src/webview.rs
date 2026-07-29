@@ -18,7 +18,7 @@ use objc2_app_kit::NSColor;
 use objc2_foundation::{MainThreadMarker, NSRect, NSString, NSURL, NSURLRequest};
 use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration};
 
-use crate::{layout, release, settings, wasm};
+use crate::{cli, layout, release, settings, wasm};
 
 /// WebKit feature flags this host turns off because each conflicts with a
 /// running game's timing or background-download contract.
@@ -163,6 +163,7 @@ fn preamble(
     prefer_60_fps: bool,
     preserve_drawing_buffer: bool,
     frame_isolation: bool,
+    invocation: &cli::Invocation,
 ) -> String {
     let forced_runtime = std::env::var("GWNATIVE_CLIENT_RUNTIME")
         .ok()
@@ -176,7 +177,8 @@ fn preamble(
          window.__gwnativeEnhancements = \"off\";\n\
          window.__gwnativeEnhancementManifest = null;\nwindow.__gwnativeClientRuntime = {};\n\
          window.__gwnativeFrameAuditEnabled = {};\nwindow.__gwnativePrefer60FPS = {};\n\
-         window.__gwnativePreserveDrawingBuffer = {};\nwindow.__gwnativeFrameIsolation = {};",
+         window.__gwnativePreserveDrawingBuffer = {};\nwindow.__gwnativeFrameIsolation = {};\n\
+         window.__gwnativeLaunch = {};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
@@ -197,6 +199,7 @@ fn preamble(
         serde_json::Value::from(prefer_60_fps),
         serde_json::Value::from(preserve_drawing_buffer),
         serde_json::Value::from(frame_isolation),
+        invocation.client_json(),
     )
 }
 
@@ -207,6 +210,7 @@ pub fn make(
     token: &str,
     settings: &settings::Settings,
     module: &wasm::Module,
+    invocation: &cli::Invocation,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
     let frame_audit = env_flag("GWNATIVE_FRAME_AUDIT");
@@ -242,6 +246,7 @@ pub fn make(
                 prefer_60_fps,
                 preserve_drawing_buffer,
                 frame_isolation,
+                invocation,
             )),
             WKUserScriptInjectionTime::AtDocumentStart,
             true,
