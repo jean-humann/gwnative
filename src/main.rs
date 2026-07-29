@@ -22,6 +22,7 @@ mod diagnostics;
 mod disk;
 mod dock;
 mod error;
+mod game_api;
 mod generation;
 mod http;
 mod instance;
@@ -303,7 +304,10 @@ fn main() {
     // clicks Save in the client's template window and watches nothing happen is
     // owed a sentence about why, and the log is not where they will look for
     // it; `settings-panel.js` is what turns this into that sentence.
-    let enhance = settings.get().enhancements_enabled();
+    // The companion supplies the versioned read-only game API even when its
+    // optional presentation tools are off. Unknown builds still run the
+    // official module unchanged; only this API remains unavailable.
+    let enhance = true;
     let wasm::Prepared {
         derived: derived_wasm,
         module,

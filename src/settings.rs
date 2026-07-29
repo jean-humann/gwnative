@@ -132,18 +132,6 @@ pub struct Settings {
     pub target_readout: bool,
 }
 
-impl Settings {
-    /// Whether this launch needs the enhanced client module.
-    ///
-    /// Derived rather than stored, and deliberately so. A `enhancementsEnabled`
-    /// field could say no while a tool it governs said yes, and nothing in the
-    /// file would say which of the two the session actually obeyed. Asking the
-    /// tools directly means the question cannot have two answers.
-    pub fn enhancements_enabled(&self) -> bool {
-        self.native_cursor || self.target_readout
-    }
-}
-
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -750,29 +738,6 @@ mod tests {
                 "{refused:?} is not a client sha256"
             );
         }
-    }
-
-    /// The launch reads one question off two switches, and the answer decides
-    /// which client module is served. A stored master flag would be a third
-    /// place for the same fact to live, and the one that could disagree.
-    #[test]
-    fn whether_the_tools_are_wanted_is_read_off_the_tools_themselves() {
-        // The default profile wants them: the native cursor is on.
-        assert!(Settings::default().enhancements_enabled());
-
-        let off = patch(Settings::default(), &json!({"nativeCursor": false})).unwrap();
-        assert!(!off.enhancements_enabled(), "no tool is on");
-        let readout = patch(off.clone(), &json!({"targetReadout": true})).unwrap();
-        assert!(readout.enhancements_enabled(), "one tool is enough");
-        assert!(!off.target_readout, "the default readout is off");
-
-        assert!(patch(Settings::default(), &json!({"nativeCursor": "yes"})).is_err());
-
-        let (_dir, path) = scratch("tools");
-        assert!(
-            Store::open(path).get().native_cursor,
-            "a profile that has never been written still gets the default",
-        );
     }
 
     /// Written by the host and by nothing else, and readable by the next

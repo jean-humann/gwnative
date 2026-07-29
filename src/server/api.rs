@@ -79,6 +79,13 @@ pub(super) fn serve(
         }
         "__mods" => mod_manifest(request, stream, context)?,
         path if path.starts_with("__mods/") => mod_module(request, stream, context, path)?,
+        "__game/v1" => game_description(request, stream, context)?,
+        "__game/v1/state" => game_state(request, stream, context)?,
+        "__game/v1/actions" => text(
+            stream,
+            409,
+            "no write operation is certified for this client build",
+        )?,
         "__socket" => return socket(request, stream, flow).map(Some),
         "__diag" => diag(request, stream, context)?,
         "__resident" => match &context.snapshot {
@@ -165,6 +172,37 @@ pub(super) fn serve(
         }
     }
     Ok(Some(flow))
+}
+
+fn game_description(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+) -> std::io::Result<()> {
+    if request.method != "GET" {
+        return not_allowed(stream, "GET");
+    }
+    json(stream, 200, &context.game_api.description_json())
+}
+
+fn game_state(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
+    match request.method.as_str() {
+        "GET" => match context.game_api.state_json() {
+            Some(state) => json(stream, 200, &state),
+            None => text(stream, 404, "no certified game state has been published"),
+        },
+        "PUT" => match context.game_api.publish(&request.body) {
+            Ok(revision) => json(
+                stream,
+                200,
+                serde_json::json!({"revision": revision})
+                    .to_string()
+                    .as_bytes(),
+            ),
+            Err(reason) => text(stream, 400, &reason),
+        },
+        _ => not_allowed(stream, "GET, PUT"),
+    }
 }
 
 fn mod_manifest(

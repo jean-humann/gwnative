@@ -117,6 +117,7 @@ function observeSnapshots(runtime, cursor, readout, observeState, observeGame) {
         runtime.rejectedSnapshots += 1;
       }
       window.gwCompanionState = state;
+      window.gwGameApi?.publish(state);
       const now = performance.now();
       // The companion's own tick rate, which is the game's main loop rate and
       // not this page's frame rate. Worth knowing separately: a client that
@@ -152,12 +153,13 @@ function observeSnapshots(runtime, cursor, readout, observeState, observeGame) {
  * @param {WebAssembly.Instance} instance
  * @param {unknown} manifestValue
  * @param {{ nativeCursor: boolean, targetReadout: boolean,
- *           runtime: 'jspi' | 'asyncify' }} selection
+ *           runtime: 'jspi' | 'asyncify', stateApi?: boolean }} selection
  */
 export async function installEnhancements(instance, manifestValue, selection) {
+  const observeState = selection.targetReadout || selection.stateApi === true;
   const featureFlags =
     (selection.nativeCursor ? FEATURE_NATIVE_CURSOR : 0)
-    | (selection.targetReadout ? FEATURE_TARGET_READOUT : 0);
+    | (observeState ? FEATURE_TARGET_READOUT : 0);
   if (featureFlags === 0) return null;
 
   const manifest = decodeManifest(manifestValue);
@@ -219,7 +221,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
     // The client's own allocator, so these are inside the memory the companion
     // is about to be instantiated over. Nothing the page allocates for itself
     // would be visible from there at all.
-    if (selection.targetReadout) {
+    if (observeState) {
       snapshotPointer = Number(exports.malloc(COMPANION_SNAPSHOT_BYTES));
     }
     configPointer = Number(exports.malloc(manifest.configBytes));
@@ -234,7 +236,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
       !configPointer
       || !statePointer
       || !stackAllocationPointer
-      || (selection.targetReadout && !snapshotPointer)
+      || (observeState && !snapshotPointer)
       || (selection.nativeCursor && !cursorPointer)
     ) {
       throw new Error('the client would not allocate the companion regions');
@@ -288,7 +290,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
       statePointer,
       COMPANION_STATE_BYTES,
       snapshotPointer,
-      selection.targetReadout ? COMPANION_SNAPSHOT_BYTES : 0,
+      observeState ? COMPANION_SNAPSHOT_BYTES : 0,
       configPointer,
       manifest.configBytes,
       cursorPointer,
@@ -365,7 +367,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
       runtime,
       cursor,
       readout,
-      selection.targetReadout,
+      observeState,
       observeGame,
     );
 

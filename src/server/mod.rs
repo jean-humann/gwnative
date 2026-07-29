@@ -32,6 +32,7 @@ mod content;
 
 use crate::chunks::ChunkStore;
 use crate::diagnostics::Recorder;
+use crate::game_api;
 use crate::generation;
 use crate::http::{MAX_BODY_BYTES, POLICY, Request, policy, read_request, text};
 use crate::mods;
@@ -103,6 +104,7 @@ struct Context {
     /// existing default-profile credentials keep working.
     credential_account: String,
     mods: Option<Arc<mods::Catalog>>,
+    game_api: Arc<game_api::Hub>,
 }
 
 /// A browser uses only a small connection pool. This ceiling leaves ample room
@@ -179,6 +181,7 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
         token,
         credential_account,
         mods,
+        game_api: Arc::default(),
     });
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -462,6 +465,47 @@ mod tests {
         // A name nobody serves is named as such, rather than refused by the
         // static file server as though it might have been a path.
         assert_eq!(request(addr, "GET", "/__nonesuch", auth, "").0, 404);
+    }
+
+    #[test]
+    fn the_game_api_is_tokened_versioned_and_read_only() {
+        let temp = TempDir::new("server-game-api");
+        let dir = temp.0.clone();
+        let token = "test-token";
+        let loopback = spawn(Config {
+            root: dir.clone(),
+            snapshot: None,
+            recorder: Recorder::open(dir.join("diagnostics")),
+            derived_wasm: wasm::DerivedModules::default(),
+            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            generations: Arc::new(generation::Store::open(dir.join("generations"))),
+            token: token.into(),
+            port: PORT,
+            credential_account: "login".into(),
+            mods: None,
+        })
+        .unwrap();
+        let address = loopback.addr;
+        assert_eq!(request(address, "GET", "/__game/v1", None, "").0, 403);
+        assert_eq!(
+            request(
+                address,
+                "PUT",
+                "/__game/v1/state",
+                Some(token),
+                r#"{"status":"ready","mapId":1,"playerId":2,"playerX":0,"playerY":0,"targetValid":false}"#,
+            )
+            .0,
+            200,
+        );
+        let (status, body) = request(address, "GET", "/__game/v1/state", Some(token), "");
+        assert_eq!(status, 200);
+        assert!(body.contains(r#""apiVersion":1"#), "{body}");
+        assert!(body.contains(r#""mapId":1"#), "{body}");
+        assert_eq!(
+            request(address, "POST", "/__game/v1/actions", Some(token), "{}").0,
+            409,
+        );
     }
 
     /// The route the settings panel's "Clear Game Data…" reaches.

@@ -80,6 +80,10 @@ onCommand('settings-open', () => window.gwOpenSettings?.());
 // from the app it is meant to explain.
 onCommand('guide-open', () => window.gwOpenGuide?.());
 
+// Developer and mod layout mode. No built-in shortcut yet; the public command
+// keeps the operation inside the same vocabulary as every other host action.
+onCommand('overlay-edit', ({ enabled }) => window.gwOverlays?.edit(enabled));
+
 // ⌘⇧M. The host has already written the mark; this is the page's half.
 //
 // Metrics here are batched on a one-second timer, so left alone the counters
