@@ -193,6 +193,7 @@ impl Invocation {
             "resetPreferences": self.legacy.reset_preferences,
             "resetMap": self.legacy.reset_map,
             "stressRuns": self.legacy.stress_runs,
+            "modsEnabled": self.modfile.is_some(),
         })
     }
 }
