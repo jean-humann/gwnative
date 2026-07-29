@@ -35,8 +35,11 @@ SECTION_NAMES = {
 }
 IMPORT_KINDS = {0: "function", 1: "table", 2: "memory", 3: "global", 4: "tag"}
 EXPORT_KINDS = IMPORT_KINDS
-MODULE_PROPERTY = re.compile(
-    rb"""\bModule(?:\.([A-Za-z_$][\w$]*)|\[\s*(['"])([^'"]+)\2\s*\])"""
+MODULE_PATH = re.compile(
+    rb"""\bModule(?:(?:\.[A-Za-z_$][\w$]*)|(?:\[\s*(['"])[^'"]+\1\s*\]))+"""
+)
+MODULE_PATH_SEGMENT = re.compile(
+    rb"""(?:\.([A-Za-z_$][\w$]*))|(?:\[\s*(['"])([^'"]+)\2\s*\])"""
 )
 
 
@@ -231,15 +234,21 @@ def inspect_wasm(path: Path) -> dict[str, Any]:
 
 def inspect_jspi(path: Path) -> dict[str, Any]:
     data = path.read_bytes()
-    properties = {
-        (match.group(1) or match.group(3)).decode("utf-8", "replace")
-        for match in MODULE_PROPERTY.finditer(data)
-    }
+    paths = set()
+    for path_match in MODULE_PATH.finditer(data):
+        segments = [
+            (segment.group(1) or segment.group(3)).decode("utf-8", "replace")
+            for segment in MODULE_PATH_SEGMENT.finditer(path_match.group())
+        ]
+        if segments:
+            paths.add(".".join(segments))
+    properties = {path.partition(".")[0] for path in paths}
     return {
         "path": str(path),
         "sha256": sha256_bytes(data),
         "size": len(data),
         "moduleProperties": sorted(properties),
+        "modulePaths": sorted(paths),
         "jspi": {
             "suspending": b"WebAssembly.Suspending" in data,
             "promising": b"WebAssembly.promising" in data,
@@ -261,14 +270,36 @@ def _section_signature(section: dict[str, Any]) -> tuple[int, str]:
     return section["id"], section.get("customName", "")
 
 
-def _named_items(values: list[dict[str, Any]]) -> set[str]:
-    result = set()
-    for value in values:
-        if "module" in value:
-            result.add(f"{value['kind']}:{value['module']}.{value['name']}")
-        else:
-            result.add(f"{value['kind']}:{value['name']}@{value['index']}")
-    return result
+def _named_imports(values: list[dict[str, Any]]) -> set[str]:
+    return {
+        f"{value['kind']}:{value['module']}.{value['name']}" for value in values
+    }
+
+
+def _named_exports(values: list[dict[str, Any]]) -> set[str]:
+    return {f"{value['kind']}:{value['name']}" for value in values}
+
+
+def _retargeted_exports(
+    before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    old = {
+        (value["kind"], value["name"]): value["index"]
+        for value in before
+    }
+    new = {
+        (value["kind"], value["name"]): value["index"]
+        for value in after
+    }
+    return [
+        {
+            "export": f"{kind}:{name}",
+            "beforeIndex": old[(kind, name)],
+            "afterIndex": new[(kind, name)],
+        }
+        for kind, name in sorted(old.keys() & new.keys())
+        if old[(kind, name)] != new[(kind, name)]
+    ]
 
 
 def diff_reports(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
@@ -329,27 +360,34 @@ def diff_reports(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any
             },
             "sections": section_changes,
             "importsAdded": sorted(
-                _named_items(new["imports"]) - _named_items(old["imports"])
+                _named_imports(new["imports"]) - _named_imports(old["imports"])
             ),
             "importsRemoved": sorted(
-                _named_items(old["imports"]) - _named_items(new["imports"])
+                _named_imports(old["imports"]) - _named_imports(new["imports"])
             ),
             "exportsAdded": sorted(
-                _named_items(new["exports"]) - _named_items(old["exports"])
+                _named_exports(new["exports"]) - _named_exports(old["exports"])
             ),
             "exportsRemoved": sorted(
-                _named_items(old["exports"]) - _named_items(new["exports"])
+                _named_exports(old["exports"]) - _named_exports(new["exports"])
+            ),
+            "exportsRetargeted": _retargeted_exports(
+                old["exports"], new["exports"]
             ),
         },
     }
     if "jspi" in before and "jspi" in after:
         old_properties = set(before["jspi"]["moduleProperties"])
         new_properties = set(after["jspi"]["moduleProperties"])
+        old_paths = set(before["jspi"]["modulePaths"])
+        new_paths = set(after["jspi"]["modulePaths"])
         result["jspi"] = {
             "beforeSha256": before["jspi"]["sha256"],
             "afterSha256": after["jspi"]["sha256"],
             "modulePropertiesAdded": sorted(new_properties - old_properties),
             "modulePropertiesRemoved": sorted(old_properties - new_properties),
+            "modulePathsAdded": sorted(new_paths - old_paths),
+            "modulePathsRemoved": sorted(old_paths - new_paths),
             "beforeCapabilities": before["jspi"]["jspi"],
             "afterCapabilities": after["jspi"]["jspi"],
         }
@@ -516,7 +554,8 @@ def inspect_main(argv: list[str] | None = None) -> int:
         jspi = report["jspi"]
         summary += (
             f"\nJSPI {jspi['sha256']} ({jspi['size']} bytes): "
-            f"{len(jspi['moduleProperties'])} Module properties"
+            f"{len(jspi['moduleProperties'])} Module properties, "
+            f"{len(jspi['modulePaths'])} referenced paths"
         )
     _write(report, args.json, summary)
     return 0
