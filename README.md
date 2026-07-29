@@ -11,9 +11,12 @@ gwnative is an independent interoperability project. It is not affiliated with,
 endorsed, sponsored, or approved by ArenaNet or NCSOFT. See the
 [legal notice](NOTICE.md) for ownership, trademark, and game-material details.
 
-gwnative was inspired by [gwonmac](https://github.com/Mat4m0/gwonmac), whose
-work made this native host possible. The renderer harness began from that
-project; the host itself is an independent Rust implementation.
+gwnative was made possible by
+[gw_in_browser](https://github.com/gwdevhub/gw_in_browser), created by
+[Marc Henderkes](https://github.com/henderkes). The renderer harness traces
+back to that work. The native macOS direction was later inspired by
+[gwonmac](https://github.com/Mat4m0/gwonmac); the host itself is an independent
+Rust implementation.
 
 ## Requirements
 
