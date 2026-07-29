@@ -30,7 +30,7 @@ use objc2_foundation::{
 };
 use objc2_web_kit::WKWebView;
 
-use crate::{app, diagnostics, release, report, settings, window};
+use crate::{app, diagnostics, release, report, settings, updater, window};
 
 /// Whether a check is already running or already on screen.
 ///
@@ -208,12 +208,18 @@ define_class!(
 
         /// Ask whether the project has published something newer.
         ///
-        /// The request takes up to five seconds and this is the thread drawing
+        /// Sparkle answers this where it is loaded, and answers it far better:
+        /// a window with the release notes in it, and a button that installs.
+        /// What follows is the fallback for every build that is not a bundle —
+        /// the request takes up to five seconds and this is the thread drawing
         /// the game, so a worker asks and the answer comes back to the main
-        /// queue to be shown. Offered only on a build that says where it was
-        /// published from — see [`super::updates_offered`].
+        /// queue to be shown. Offered only on a build that can answer at all —
+        /// see [`super::updates_offered`].
         #[unsafe(method(gwCheckForUpdates:))]
         fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            if updater::check() {
+                return;
+            }
             ask(Arc::clone(&self.ivars().settings), Requested::ByThePlayer);
         }
 
@@ -307,6 +313,12 @@ fn ask(settings: Arc<settings::Store>, who: Requested) {
 /// that is not due, which is all of them by default — see
 /// [`crate::settings::Settings::auto_check_updates`], off in a fresh profile.
 pub fn at_launch(settings: &Arc<settings::Store>) {
+    // Sparkle keeps its own schedule, in its own preference, and started it
+    // when the updater did. Asking GitHub as well would be a second request
+    // about the same question, answered in a worse alert.
+    if updater::started() {
+        return;
+    }
     // Nothing to compare against, so there is no request worth making. The same
     // rule that keeps the menu item off this build.
     if !super::updates_offered() {

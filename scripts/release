@@ -98,6 +98,18 @@ xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1 ||
 [ -z "$(git status --porcelain 2>/dev/null)" ] ||
 	die "the working tree has uncommitted changes; commit or stash them first"
 
+# Not fatal, and said here rather than at the end so that it is read before the
+# build rather than after it. A bundle built without the key has no feed URL in
+# its Info.plist and no updater, which is a working application — it is the one
+# this project shipped before Sparkle — and it is not what anyone cutting a
+# release meant to build.
+[ -f packaging/sparkle/public-key.txt ] || {
+	say "warning: packaging/sparkle/public-key.txt is missing. This build will"
+	say "  carry no update feed, and scripts/publish will have nothing to sign"
+	say "  one with. Players will be told that a new version exists and left to"
+	say "  download it themselves. See the updater section of README.md."
+}
+
 # ------------------------------------------------------------------- build ---
 say "building $version"
 mkdir -p "$root/dist"
@@ -146,11 +158,24 @@ spctl --assess --type execute --verbose=2 "$app" 2>&1 |
 	sed 's/^/[release] /' >&2
 
 # ----------------------------------------------------------------- package ---
-# A disk image rather than the zip, because a zip has nowhere to put the "drag
-# this to Applications" that says where the application goes — and one run from
+# Two artifacts, because two different things install this.
+#
+# The disk image is for a person. A zip has nowhere to put the "drag this to
+# Applications" that says where the application goes — and one run from
 # ~/Downloads is one macOS moves into a randomised read-only path the first time
 # it is opened, which is App Translocation and looks like the app losing its own
 # files.
+#
+# The zip is for Sparkle, which unpacks an archive and swaps the bundle with
+# nobody watching. It is rebuilt rather than reused: the copy that went to Apple
+# was made before the ticket existed, so a bundle unpacked from it carries no
+# ticket, and that is the unidentified-developer refusal on any machine that
+# happens to be offline — in exactly the case where there is no one to answer a
+# dialog.
+say "rebuilding ${zip##*/} from the stapled bundle"
+rm -f "$zip"
+ditto -c -k --keepParent "$app" "$zip"
+
 say "building $dmg"
 staging=$root/dist/dmg
 rm -rf "$staging" "$dmg"
@@ -174,10 +199,14 @@ notarize "$dmg"
 xcrun stapler staple "$dmg" 2>&1 | sed 's/^/[release] /' >&2
 xcrun stapler validate "$dmg" 2>&1 | sed 's/^/[release] /' >&2
 
-rm -f "$zip" "$root/dist/notarytool.log"
+rm -f "$root/dist/notarytool.log"
 
 say "$dmg"
-say "the update check compares published tags, so publish it under one:"
+say "$zip"
+# scripts/publish rather than `gh release create`, because a release is now
+# three files and the third one has to be signed and uploaded before the other
+# two become visible. See the note at the top of that script.
+say "both belong to a tag, and the update feed is built from the release itself:"
 say "  git tag -s v$version -m \"Guild Wars $version\""
 say "  git push origin v$version"
-say "  gh release create v$version \"$dmg\" --title \"Guild Wars $version\""
+say "  scripts/publish v$version"

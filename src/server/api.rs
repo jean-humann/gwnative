@@ -254,6 +254,16 @@ fn settings(request: &Request, stream: &mut TcpStream, context: &Context) -> std
                 .and_then(|raw| context.settings.apply(&raw));
             match applied {
                 Ok(settings) => {
+                    // The updater keeps the two update switches itself, so a
+                    // patch that moved either has to reach it. Sent for every
+                    // accepted patch rather than only those two: the comparison
+                    // that decides whether anything actually changed has to
+                    // happen on the main thread anyway, where the properties
+                    // can be read. A build with no updater drops it.
+                    crate::updater::follow(
+                        settings.auto_check_updates,
+                        settings.auto_install_updates,
+                    );
                     let body = serde_json::to_vec(&settings).unwrap_or_default();
                     json(stream, 200, &body)
                 }

@@ -149,7 +149,8 @@ fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -
         "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
          window.__gwnativeTemplateSave = {};\nwindow.__gwnativeClientBuild = {};\n\
-         window.__gwnativeUpdates = {};\nwindow.__gwnativeEnhancements = {};",
+         window.__gwnativeUpdates = {};\nwindow.__gwnativeAutoInstall = {};\n\
+         window.__gwnativeEnhancements = {};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
@@ -160,7 +161,12 @@ fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -
         // Updates…", answered once and injected so the settings panel does not
         // offer a switch for something this build cannot do. A page that guessed
         // would offer it on every build, including the ones with nowhere to look.
-        serde_json::Value::from(release::repository().is_some()),
+        serde_json::Value::from(crate::updater::available() || release::repository().is_some()),
+        // The narrower of the two. Checking can be offered by either update
+        // path; installing without being asked is Sparkle's alone, and a switch
+        // for it on a build that only knows how to open a web page would be a
+        // promise nothing could keep.
+        serde_json::Value::from(crate::updater::available()),
         serde_json::Value::from(module.enhancements),
     )
 }
