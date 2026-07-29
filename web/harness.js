@@ -488,7 +488,10 @@ Module = {
       saved = Promise.resolve({ username, password });
     },
     async clearCredentials() {
-      await credentials('DELETE');
+      const response = await credentials('DELETE');
+      if (!response.ok) {
+        throw new Error((await response.text()) || `credential deletion failed: ${response.status}`);
+      }
       saved = Promise.resolve(null);
     },
   },

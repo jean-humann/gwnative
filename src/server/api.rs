@@ -229,11 +229,16 @@ fn credentials(request: &Request, stream: &mut TcpStream) -> std::io::Result<()>
                 }
             }
         }
-        "DELETE" => {
-            keychain::clear();
-            note!("[credentials] cleared");
-            no_content(stream)
-        }
+        "DELETE" => match keychain::clear() {
+            Ok(()) => {
+                note!("[credentials] cleared");
+                no_content(stream)
+            }
+            Err(e) => {
+                note!("[credentials] not cleared: {e}");
+                text(stream, 500, &e)
+            }
+        },
         _ => not_allowed(stream, "GET, PUT, DELETE"),
     }
 }

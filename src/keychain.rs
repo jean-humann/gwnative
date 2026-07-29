@@ -277,8 +277,16 @@ pub fn store(credentials: &Credentials) -> Result<(), String> {
 
 /// Deleting what was never there is the caller's intended end state, so a
 /// missing item is not an error worth reporting.
-pub fn clear() {
-    let _ = System.delete();
+pub fn clear() -> Result<(), String> {
+    clear_in(&System)
+}
+
+fn clear_in(vault: &impl Vault) -> Result<(), String> {
+    match vault.delete() {
+        Ok(()) => Ok(()),
+        Err(e) if e.code() == ITEM_NOT_FOUND => Ok(()),
+        Err(e) => Err(format!("the saved login could not be deleted ({e})")),
+    }
 }
 
 fn load_from(vault: &impl Vault) -> Option<Credentials> {
@@ -465,6 +473,23 @@ mod tests {
         let error = store_in(&vault, &credentials()).unwrap_err();
         assert!(error.contains("Keychain Access"), "{error}");
         assert_eq!(vault.calls(), ["set", "delete"], "nothing to write over");
+    }
+
+    #[test]
+    fn clearing_reports_a_delete_that_did_not_happen() {
+        let missing = Fake {
+            delete_answer: Some(ITEM_NOT_FOUND),
+            ..Fake::default()
+        };
+        assert!(clear_in(&missing).is_ok(), "already absent is the goal");
+
+        let refused = Fake {
+            delete_answer: Some(AUTH_FAILED),
+            ..Fake::default()
+        };
+        let error = clear_in(&refused).unwrap_err();
+        assert!(error.contains("could not be deleted"), "{error}");
+        assert_eq!(refused.calls(), ["delete"]);
     }
 
     #[test]
