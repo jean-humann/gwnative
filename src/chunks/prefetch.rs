@@ -361,6 +361,15 @@ impl ChunkStore {
     /// for the same hash, and each one is throttled by `prefetch_permits` so
     /// demand reads keep their share of the pool.
     pub fn start_full_download(self: &Arc<Self>) -> bool {
+        self.start_full_download_with_workers(MAX_PREFETCH_FETCHES)
+    }
+
+    /// Start a full download with an explicit worker bound.
+    ///
+    /// Command-line image and repair operations use this to honour `--jobs`.
+    /// The shared prefetch semaphore remains the hard ceiling, so a requested
+    /// value cannot consume capacity reserved for demand reads.
+    pub fn start_full_download_with_workers(self: &Arc<Self>, workers: usize) -> bool {
         if self.prefetch.running.swap(true, Ordering::SeqCst) {
             return false;
         }
@@ -370,7 +379,7 @@ impl ChunkStore {
             .total
             .store(self.chunk_count() as u64, Ordering::Relaxed);
 
-        let workers = MAX_PREFETCH_FETCHES;
+        let workers = workers.clamp(1, MAX_PREFETCH_FETCHES);
         let outstanding = Arc::new(AtomicU64::new(workers as u64));
         for worker in 0..workers {
             let store = Arc::clone(self);

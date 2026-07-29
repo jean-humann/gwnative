@@ -12,7 +12,7 @@ use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::thread;
 
 use crate::net;
@@ -93,8 +93,17 @@ enum Trace {
     Hex,
 }
 
+static TRACE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+pub fn enable_tracing() {
+    TRACE_OVERRIDE.store(1, Ordering::Relaxed);
+}
+
 fn tracing() -> Trace {
     static MODE: OnceLock<Trace> = OnceLock::new();
+    if TRACE_OVERRIDE.load(Ordering::Relaxed) != 0 {
+        return Trace::Sizes;
+    }
     *MODE.get_or_init(|| match std::env::var("GWNATIVE_TRACE_SOCKETS") {
         Err(_) => Trace::Off,
         Ok(value) if value.eq_ignore_ascii_case("hex") => Trace::Hex,

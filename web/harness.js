@@ -150,9 +150,13 @@ const log = (...values) => {
  * no total to divide by — the rail sweeps instead of parking at a made-up
  * number. `detail` carries rate and ETA when the client supplies them.
  */
-const status = (text, fraction = null, detail = '') => {
+const status = (text, fraction = null, detail = '', force = false) => {
   const el = statusEl();
   if (!el) return;
+  if (launchOptions.noPatchUi && text !== null && !force) {
+    el.hidden = true;
+    return;
+  }
   el.hidden = text === null;
   if (text === null) return;
   document.getElementById('status-label').textContent = text;
@@ -174,7 +178,7 @@ const status = (text, fraction = null, detail = '') => {
  * status line, which is what this used to be in every case.
  */
 const fail = (text) => {
-  status(text);
+  status(text, null, '', true);
   log('[err]', text);
   recovery?.showFailure(text, log);
 };
