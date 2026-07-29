@@ -323,6 +323,25 @@ pub struct Store {
     current: Mutex<Settings>,
 }
 
+/// Move local preferences aside for `-prefresetlocal`.
+///
+/// The command asks for defaults, not irreversible deletion. Keeping the last
+/// file beside the new one makes the operation recoverable without allowing a
+/// backup to accumulate on every invocation.
+pub fn reset(path: &Path) -> std::io::Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let backup = path.with_extension("json.reset");
+    match fs::remove_file(&backup) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::rename(path, backup)?;
+    Ok(true)
+}
+
 impl Store {
     /// Load `path`, or start from defaults.
     ///

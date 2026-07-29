@@ -45,6 +45,7 @@ use crate::sockets::{self, Registry};
 ///
 /// `GWNATIVE_PORT` overrides it, which is also how a second instance gets its
 /// own private store rather than fighting over this one.
+#[cfg(test)]
 const PORT: u16 = 38112;
 
 /// How long a relaunched app waits for its predecessor to close the port, and
@@ -89,6 +90,9 @@ struct Context {
     settings: Arc<settings::Store>,
     generations: Arc<generation::Store>,
     token: String,
+    /// Profile-specific Keychain account name. The service remains stable so
+    /// existing default-profile credentials keep working.
+    credential_account: String,
 }
 
 /// A browser uses only a small connection pool. This ceiling leaves ample room
@@ -130,8 +134,10 @@ pub fn spawn(
     settings: Arc<settings::Store>,
     generations: Arc<generation::Store>,
     token: String,
+    port: u16,
+    credential_account: String,
 ) -> std::io::Result<Loopback> {
-    let listener = bind()?;
+    let listener = bind(port)?;
     let addr = listener.local_addr()?;
     // Before the first response can be written, and only once — a second
     // `spawn` in the same process would be a second origin, which is exactly
@@ -146,6 +152,7 @@ pub fn spawn(
         settings: Arc::clone(&settings),
         generations,
         token,
+        credential_account,
     });
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -186,12 +193,7 @@ pub fn spawn(
 /// Falling back keeps the app launchable, but it is worth saying out loud: the
 /// page will come up on a different origin and so will not find anything it
 /// stored on previous launches.
-fn bind() -> std::io::Result<TcpListener> {
-    let port = std::env::var("GWNATIVE_PORT")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(PORT);
-
+fn bind(port: u16) -> std::io::Result<TcpListener> {
     let deadline = Instant::now() + PORT_PATIENCE;
     loop {
         match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) {
@@ -380,6 +382,8 @@ mod tests {
             Arc::new(settings::Store::open(file.clone())),
             Arc::new(generation::Store::open(dir.join("generations"))),
             token.to_owned(),
+            PORT,
+            "login".into(),
         )
         .unwrap();
         let addr = loopback.addr;
@@ -456,6 +460,8 @@ mod tests {
             Arc::new(settings::Store::open(dir.join("settings.json"))),
             Arc::new(generation::Store::open(dir.join("generations"))),
             token.to_owned(),
+            PORT,
+            "login".into(),
         )
         .unwrap();
         let addr = loopback.addr;
@@ -501,6 +507,8 @@ mod tests {
             Arc::new(settings::Store::open(dir.join("settings.json"))),
             Arc::new(generation::Store::open(dir.join("generations"))),
             token.to_owned(),
+            PORT,
+            "login".into(),
         )
         .unwrap();
         let addr = loopback.addr;

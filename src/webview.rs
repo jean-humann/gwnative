@@ -17,7 +17,7 @@ use objc2::{MainThreadOnly, msg_send};
 use objc2_foundation::{MainThreadMarker, NSRect, NSString, NSURL, NSURLRequest};
 use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration};
 
-use crate::{layout, release, settings, wasm};
+use crate::{cli, layout, release, settings, wasm};
 
 /// WebKit feature flags this host turns off because each conflicts with a
 /// running game's timing or background-download contract.
@@ -143,13 +143,18 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences) {
 /// inside `instantiateWasm`, before anything it could await has happened, and a
 /// tick that arrived a round trip later would have missed the frames it exists
 /// to run in.
-fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -> String {
+fn preamble(
+    token: &str,
+    settings: &settings::Settings,
+    module: &wasm::Module,
+    invocation: &cli::Invocation,
+) -> String {
     format!(
         "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
          window.__gwnativeTemplateSave = {};\nwindow.__gwnativeClientBuild = {};\n\
          window.__gwnativeUpdates = {};\nwindow.__gwnativeAutoInstall = {};\n\
-         window.__gwnativeEnhancements = {};",
+         window.__gwnativeEnhancements = {};\nwindow.__gwnativeLaunch = {};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
@@ -167,6 +172,7 @@ fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -
         // promise nothing could keep.
         serde_json::Value::from(crate::updater::available()),
         serde_json::Value::from(module.enhancements),
+        invocation.client_json(),
     )
 }
 
@@ -177,6 +183,7 @@ pub fn make(
     token: &str,
     settings: &settings::Settings,
     module: &wasm::Module,
+    invocation: &cli::Invocation,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
 
@@ -188,7 +195,7 @@ pub fn make(
     unsafe {
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
             WKUserScript::alloc(mtm),
-            &NSString::from_str(&preamble(token, settings, module)),
+            &NSString::from_str(&preamble(token, settings, module, invocation)),
             WKUserScriptInjectionTime::AtDocumentStart,
             true,
         );

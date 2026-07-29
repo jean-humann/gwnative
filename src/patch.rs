@@ -52,6 +52,7 @@ pub struct Client {
     root: String,
     access_key: String,
     retries: Retries,
+    offline: bool,
 }
 
 /// What the retry ladder in [`Client::fetch`] cost, which is otherwise
@@ -84,7 +85,13 @@ impl Client {
             root: root.trim_end_matches('/').to_owned(),
             access_key,
             retries: Retries::default(),
+            offline: false,
         }
+    }
+
+    pub fn with_offline(mut self, offline: bool) -> Self {
+        self.offline = offline;
+        self
     }
 
     /// Retries so far: attempts after the first, and milliseconds slept between
@@ -144,6 +151,16 @@ impl Client {
             return Ok((manifest, Source::Disk));
         }
         Ok((self.fetch_manifest(dir)?, Source::Service))
+    }
+
+    /// The cached manifest only, for an explicit offline launch.
+    pub fn cached_manifest(&self, dir: &Path) -> Result<Manifest> {
+        let (_, bytes) = read_cache(dir, &self.root).ok_or_else(|| {
+            Error::ManifestFormat(
+                "offline mode needs a manifest from an earlier successful launch".into(),
+            )
+        })?;
+        Manifest::parse(&bytes)
     }
 
     /// Refresh the cached manifest if the service has a different one, and say
@@ -282,6 +299,12 @@ impl Client {
     /// [`Client::fetch`], plus the validator, and with `If-None-Match` when
     /// `known` is set. See [`Fetched`].
     fn fetch_with(&self, url: &str, limit: u64, known: Option<&str>) -> Result<Fetched> {
+        if self.offline {
+            return Err(Error::Transport {
+                url: url.to_owned(),
+                detail: "network access is disabled by --offline".into(),
+            });
+        }
         let mut last = None;
         for attempt in 0..MAX_ATTEMPTS {
             if attempt > 0 {

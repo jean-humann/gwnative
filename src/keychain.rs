@@ -49,7 +49,6 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Shown in Keychain Access as the item's name, so it says what it is.
 const SERVICE: &str = "gwnative (Guild Wars)";
-const ACCOUNT: &str = "login";
 
 /// `errSecItemNotFound`: nothing saved yet. The ordinary state on a first run,
 /// and the only failure here that deserves no comment.
@@ -265,12 +264,12 @@ impl Drop for Silent {
 }
 
 /// The login keychain, which is what every caller outside the tests wants.
-struct System;
+struct System<'a>(&'a str);
 
-impl Vault for System {
+impl Vault for System<'_> {
     fn get(&self) -> Result<Vec<u8>, Error> {
         let _silent = Silent::new();
-        get_generic_password(SERVICE, ACCOUNT)
+        get_generic_password(SERVICE, self.0)
     }
     /// Silent for the same reason `get` is: writing over an existing item is an
     /// update, and an update asks the item's permission exactly as a read does.
@@ -278,29 +277,29 @@ impl Vault for System {
     /// replace, which is what actually fixes the item.
     fn set(&self, value: &[u8]) -> Result<(), Error> {
         let _silent = Silent::new();
-        set_generic_password(SERVICE, ACCOUNT, value)
+        set_generic_password(SERVICE, self.0, value)
     }
     /// Removing an item does not require opening it, so this would not have
     /// prompted. Guarded anyway, so that the rule is "this program does not
     /// raise keychain dialogs" rather than a list of the places it might.
     fn delete(&self) -> Result<(), Error> {
         let _silent = Silent::new();
-        delete_generic_password(SERVICE, ACCOUNT)
+        delete_generic_password(SERVICE, self.0)
     }
 }
 
-pub fn load() -> Option<Credentials> {
-    load_from(&System)
+pub fn load(account: &str) -> Option<Credentials> {
+    load_from(&System(account))
 }
 
-pub fn store(credentials: &Credentials) -> Result<(), String> {
-    store_in(&System, credentials)
+pub fn store(account: &str, credentials: &Credentials) -> Result<(), String> {
+    store_in(&System(account), credentials)
 }
 
 /// Deleting what was never there is the caller's intended end state, so a
 /// missing item is not an error worth reporting.
-pub fn clear() -> Result<(), String> {
-    clear_in(&System)
+pub fn clear(account: &str) -> Result<(), String> {
+    clear_in(&System(account))
 }
 
 fn clear_in(vault: &impl Vault) -> Result<(), String> {
