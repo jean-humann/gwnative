@@ -1,11 +1,31 @@
-# gwnative
+<p align="center">
+  <img src="docs/assets/app-icon.png" width="128" alt="gwnative application icon">
+</p>
 
-[![CI](https://github.com/jean-humann/gwnative/actions/workflows/ci.yml/badge.svg)](https://github.com/jean-humann/gwnative/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/jean-humann/gwnative)](https://github.com/jean-humann/gwnative/releases/latest)
+<h1 align="center">gwnative</h1>
 
-An unofficial native macOS host for the Guild Wars Reforged WebAssembly client.
-One Rust binary drives AppKit and WKWebView directly, without an embedded
-browser distribution.
+<p align="center">
+  A lightweight native macOS host for Guild Wars Reforged on Apple Silicon.
+</p>
+
+<p align="center">
+  <a href="https://github.com/jean-humann/gwnative/releases/latest"><img src="https://img.shields.io/badge/Download_for_macOS-Apple_Silicon-000000?style=for-the-badge&amp;logo=apple&amp;logoColor=white" alt="Download gwnative for macOS"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/jean-humann/gwnative/actions/workflows/ci.yml"><img src="https://github.com/jean-humann/gwnative/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/jean-humann/gwnative/releases/latest"><img src="https://img.shields.io/github/v/release/jean-humann/gwnative" alt="Latest release"></a>
+</p>
+
+<p align="center"><strong>Apple Silicon · macOS 15.2 or newer</strong></p>
+
+gwnative runs the official Guild Wars Reforged WebAssembly client in one native
+Rust application. AppKit and WKWebView provide the platform directly, without
+an embedded browser distribution, Windows, Wine, or a virtual machine.
+
+<p align="center">
+  <img src="docs/assets/first-run.png" width="900" alt="gwnative offering Quick Start and Full Game on first launch">
+</p>
 
 gwnative is an independent interoperability project. It is not affiliated with,
 endorsed, sponsored, or approved by ArenaNet or NCSOFT. See the
@@ -47,9 +67,9 @@ gwnative is playable. It:
 
 ## Install
 
-Download the disk image from the
-[latest release](https://github.com/jean-humann/gwnative/releases/latest), open
-it, and drag **Guild Wars** to **Applications**.
+1. [Download the latest disk image](https://github.com/jean-humann/gwnative/releases/latest).
+2. Open it and drag **Guild Wars** to **Applications**.
+3. Open **Guild Wars** and choose how to store the game image.
 
 The first launch downloads the small client artifacts and asks how to handle the
 game image:
