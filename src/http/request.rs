@@ -6,7 +6,7 @@
 //! kept-alive connection gets parsed as the following request line, and a body
 //! too large to drain safely cannot be drained at all, so the caller closes.
 
-use std::io::BufRead;
+use std::io::{self, BufRead, Read};
 
 pub struct Request {
     pub method: String,
@@ -118,11 +118,43 @@ fn escape_at(bytes: &[u8], at: usize) -> Option<u8> {
 /// a kept-alive connection an oversized body cannot simply be truncated.
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+/// The request head is parsed before the token can be checked, so its budgets
+/// are security boundaries rather than tuning knobs.
+const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
+const MAX_HEADER_LINE_BYTES: usize = 16 * 1024;
+const MAX_REQUEST_HEAD_BYTES: usize = 64 * 1024;
+const MAX_HEADERS: usize = 100;
+
+/// Read at most `limit` bytes of one line.
+///
+/// A line exactly as long as the limit is accepted only when its newline is
+/// already among those bytes. Otherwise one more byte would make it oversized,
+/// and the connection is going to close after the error so nothing needs to be
+/// drained.
+fn bounded_line(reader: &mut impl BufRead, line: &mut String, limit: usize) -> io::Result<usize> {
+    line.clear();
+    if limit == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "HTTP request head is too large",
+        ));
+    }
+    let read = reader.take((limit + 1) as u64).read_line(line)?;
+    if read > limit || (read == limit && !line.ends_with('\n')) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "HTTP line is too large",
+        ));
+    }
+    Ok(read)
+}
+
 /// Read one request, or `None` if the peer closed the connection first — which
 /// on a kept-alive connection is the ordinary way an exchange ends, not a fault.
 pub fn read_request(reader: &mut impl BufRead) -> std::io::Result<Option<Request>> {
     let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
+    let mut head_bytes = bounded_line(reader, &mut line, MAX_REQUEST_LINE_BYTES)?;
+    if head_bytes == 0 {
         return Ok(None);
     }
 
@@ -136,9 +168,17 @@ pub fn read_request(reader: &mut impl BufRead) -> std::io::Result<Option<Request
     let mut headers = Vec::new();
     let mut header = String::new();
     loop {
-        header.clear();
-        if reader.read_line(&mut header)? == 0 || header == "\r\n" || header == "\n" {
+        let remaining = MAX_REQUEST_HEAD_BYTES.saturating_sub(head_bytes);
+        let read = bounded_line(reader, &mut header, MAX_HEADER_LINE_BYTES.min(remaining))?;
+        head_bytes += read;
+        if read == 0 || header == "\r\n" || header == "\n" {
             break;
+        }
+        if headers.len() == MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "too many HTTP headers",
+            ));
         }
         let Some((name, value)) = header.split_once(':') else {
             continue;
@@ -327,5 +367,36 @@ mod tests {
             query("token=fromquery").param("token").as_deref(),
             Some("fromquery")
         );
+    }
+
+    #[test]
+    fn the_request_head_has_hard_byte_and_field_limits() {
+        let oversized_line = format!(
+            "GET /{} HTTP/1.1\r\n\r\n",
+            "x".repeat(MAX_REQUEST_LINE_BYTES)
+        );
+        let error = read_request(&mut std::io::BufReader::new(oversized_line.as_bytes()))
+            .err()
+            .expect("the request line is over budget");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+        let many_headers = format!(
+            "GET / HTTP/1.1\r\n{}\r\n",
+            "X-Test: value\r\n".repeat(MAX_HEADERS + 1)
+        );
+        let error = read_request(&mut std::io::BufReader::new(many_headers.as_bytes()))
+            .err()
+            .expect("the request has too many headers");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+        let oversized_head = format!(
+            "GET / HTTP/1.1\r\n{}\r\n",
+            format!("X-Fill: {}\r\n", "x".repeat(MAX_HEADER_LINE_BYTES - 10))
+                .repeat(MAX_REQUEST_HEAD_BYTES / MAX_HEADER_LINE_BYTES + 1)
+        );
+        let error = read_request(&mut std::io::BufReader::new(oversized_head.as_bytes()))
+            .err()
+            .expect("the request head is over budget");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

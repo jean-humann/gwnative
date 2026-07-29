@@ -23,6 +23,7 @@ use std::io::BufReader;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -90,6 +91,30 @@ struct Context {
     token: String,
 }
 
+/// A browser uses only a small connection pool. This ceiling leaves ample room
+/// for its HTTP and WebSocket traffic while preventing a local process from
+/// turning the one-thread-per-connection design into an unbounded thread farm.
+const MAX_CONNECTIONS: usize = 256;
+
+struct Connection(Arc<AtomicUsize>);
+
+impl Connection {
+    fn claim(active: &Arc<AtomicUsize>) -> Option<Self> {
+        active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_CONNECTIONS).then_some(count + 1)
+            })
+            .ok()?;
+        Some(Self(Arc::clone(active)))
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Serve `root` on 127.0.0.1:<ephemeral> until the process exits.
 ///
 /// `token` gates the credential routes. Loopback is host-wide, not per-user, so
@@ -122,6 +147,7 @@ pub fn spawn(
         generations,
         token,
     });
+    let active = Arc::new(AtomicUsize::new(0));
 
     thread::Builder::new()
         .name("gwnative-loopback".into())
@@ -131,13 +157,20 @@ pub fn spawn(
             qos::set(qos::Class::UserInitiated);
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                let Some(connection) = Connection::claim(&active) else {
+                    continue;
+                };
                 let context = Arc::clone(&context);
                 // One thread per connection. Snapshot reads block on the chunk
-                // store, so they must not share a thread with the page load.
-                thread::spawn(move || {
-                    qos::set(qos::Class::UserInitiated);
-                    let _ = serve(stream, &context);
-                });
+                // store, so they must not share a thread with the page load. The
+                // connection guard also bounds how many such threads can exist.
+                let _ = thread::Builder::new()
+                    .name("gwnative-http".into())
+                    .spawn(move || {
+                        let _connection = connection;
+                        qos::set(qos::Class::UserInitiated);
+                        let _ = serve(stream, &context);
+                    });
             }
         })?;
 
