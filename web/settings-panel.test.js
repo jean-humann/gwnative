@@ -227,6 +227,75 @@ describe('settings panel', () => {
     assert.match(dataFor({ cached: 0, total: 0, chunkSize: 0 }), /No game data/);
   });
 
+  // A control with no group, or one naming a tab that does not exist, is built
+  // into a row that no tab ever shows: present in the DOM, hidden by every
+  // `showTab`, and reachable by nothing. It would look exactly like the bug the
+  // tabs were added to fix.
+  it('puts every control on a tab that exists', () => {
+    const known = new Set(panel.GROUPS.map((group) => group.id));
+    for (const control of panel.CONTROLS) {
+      assert.ok(known.has(control.group), `${control.key} is on no tab (${control.group})`);
+    }
+  });
+
+  it('gives every tab something to show', () => {
+    const used = new Set(panel.CONTROLS.map((control) => control.group));
+    for (const group of panel.GROUPS) {
+      assert.ok(used.has(group.id), `the ${group.label} tab has no controls`);
+    }
+  });
+
+  // A `cargo run` build offers neither update control, and a tab that opens
+  // onto nothing is worse than no tab — the same reasoning that hides the
+  // controls themselves.
+  it('drops a tab this build has nothing to put on', () => {
+    const names = (host) => panel.tabs(host).map((group) => group.id);
+    const full = names({ __gwnativeUpdates: true, __gwnativeAutoInstall: true });
+    assert.deepEqual(full, ['general', 'tools', 'data', 'updates']);
+    assert.deepEqual(names({}), ['general', 'tools', 'data']);
+  });
+
+  it('keeps a tab that kept one of its two controls', () => {
+    const updates = panel.tabs({ __gwnativeUpdates: true, __gwnativeAutoInstall: false })
+      .find((group) => group.id === 'updates');
+    assert.deepEqual(updates.controls.map((control) => control.key), ['autoCheckUpdates']);
+  });
+
+  // The game image and the gigabytes it governs are the same subject, so the
+  // storage card follows the setting onto its tab. Hard-coding `'data'` in the
+  // panel and here is the point: if the setting moves, this fails.
+  it('keeps the game image and the storage card on one tab', () => {
+    const image = panel.CONTROLS.find((control) => control.key === 'dataStrategy');
+    assert.equal(image.group, 'data');
+  });
+
+  // The sentence used to name the render scale and the gestures whatever had
+  // changed, which has been wrong since the tools arrived: turning the game
+  // cursor off and being told the render scale needs a restart reads as the
+  // panel having saved something else.
+  it('names the settings that are actually waiting for a restart', () => {
+    assert.equal(
+      panel.relaunchNotice(['nativeCursor']),
+      'Saved. Game cursor takes effect when the app restarts.',
+    );
+    assert.equal(
+      panel.relaunchNotice(['renderScale', 'touchMode']),
+      'Saved. Render scale and Double-click take effect when the app restarts.',
+    );
+    assert.equal(
+      panel.relaunchNotice(['renderScale', 'nativeCursor', 'targetReadout']),
+      'Saved. Render scale, Game cursor and Target distance take effect when the app restarts.',
+    );
+  });
+
+  // `apply` only reaches the notice when `needsRelaunch` is true, so a live-only
+  // change never gets here — but the sentence must not claim a restart is
+  // pending if one ever does.
+  it('promises no restart for a change that already took effect', () => {
+    assert.equal(panel.relaunchNotice(['showDiagnostics']), 'Saved.');
+    assert.equal(panel.relaunchNotice([]), 'Saved.');
+  });
+
   // Three of the four touch modes stop double-clicking from working, and one
   // of those also withholds every mouse click from the game. That is fine for
   // working out where a problem comes from and ruinous to land on by accident,
