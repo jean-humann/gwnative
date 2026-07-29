@@ -623,8 +623,8 @@ function installTools() {
   const selection = {
     nativeCursor: settings.nativeCursor === true,
     targetReadout: settings.targetReadout === true,
+    stateApi: true,
   };
-  if (!selection.nativeCursor && !selection.targetReadout) return;
   if (window.__gwnativeEnhancements !== 'ready') {
     log(`[warn] enhancements are on but this client is ${window.__gwnativeEnhancements}`);
     return;
@@ -688,7 +688,7 @@ function appendGlue() {
   try {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
-      start, panel, data, compat, guide, metrics,
+      start, panel, data, compat, guide, gameApi, overlay, metrics,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -705,6 +705,8 @@ function appendGlue() {
       import('./game-data.js'),
       import('./compatibility.js'),
       import('./guide.js'),
+      import('./game-api.js'),
+      import('./overlay.js'),
       import('./diagnostics.js'),
     ]);
     host = {
@@ -723,6 +725,8 @@ function appendGlue() {
       ...data,
       ...compat,
       ...guide,
+      ...gameApi,
+      ...overlay,
     };
     // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
     // contract could plausibly want for something else.
@@ -749,6 +753,8 @@ function appendGlue() {
     read: host.readSettings,
     save: host.saveSettings,
   };
+  window.gwGameApi = host.installGameApi({ log });
+  window.gwOverlays = host.createOverlayManager({ document, log });
 
   // The panel is wired before the client exists, so ⌘, answers from the first
   // moment the page is up rather than only once the game has booted — which is

@@ -20,6 +20,7 @@ mod diagnostics;
 mod disk;
 mod dock;
 mod error;
+mod game_api;
 mod generation;
 mod http;
 mod instance;
@@ -247,7 +248,10 @@ fn main() {
     let (derived_wasm, module) = match wasm::prepare(
         &root.join("Gw.jspi.wasm"),
         paths.derived_dir(),
-        settings.get().enhancements_enabled(),
+        // The companion is also the source of the versioned read-only game
+        // API. Its presentation features remain optional, but the certified
+        // snapshot chain is prepared for every supported client build.
+        true,
     ) {
         Ok(wasm::Prepared {
             client,

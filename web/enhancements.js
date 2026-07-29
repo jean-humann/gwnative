@@ -117,6 +117,7 @@ function observeSnapshots(runtime, cursor, readout, observeState) {
         runtime.rejectedSnapshots += 1;
       }
       window.gwCompanionState = state;
+      window.gwGameApi?.publish(state);
       const now = performance.now();
       // The companion's own tick rate, which is the game's main loop rate and
       // not this page's frame rate. Worth knowing separately: a client that
@@ -151,12 +152,13 @@ function observeSnapshots(runtime, cursor, readout, observeState) {
  *
  * @param {WebAssembly.Instance} instance
  * @param {WebAssembly.Module} module
- * @param {{ nativeCursor: boolean, targetReadout: boolean }} selection
+ * @param {{ nativeCursor: boolean, targetReadout: boolean, stateApi?: boolean }} selection
  */
 export async function installEnhancements(instance, module, selection) {
+  const observeState = selection.targetReadout || selection.stateApi === true;
   const featureFlags =
     (selection.nativeCursor ? FEATURE_NATIVE_CURSOR : 0)
-    | (selection.targetReadout ? FEATURE_TARGET_READOUT : 0);
+    | (observeState ? FEATURE_TARGET_READOUT : 0);
   if (featureFlags === 0) return null;
 
   const manifest = decodeManifest(module);
@@ -210,7 +212,7 @@ export async function installEnhancements(instance, module, selection) {
     // The client's own allocator, so these are inside the memory the companion
     // is about to be instantiated over. Nothing the page allocates for itself
     // would be visible from there at all.
-    if (selection.targetReadout) {
+    if (observeState) {
       snapshotPointer = Number(exports.malloc(COMPANION_SNAPSHOT_BYTES));
     }
     configPointer = Number(exports.malloc(manifest.configBytes));
@@ -219,7 +221,7 @@ export async function installEnhancements(instance, module, selection) {
     }
     if (
       !configPointer
-      || (selection.targetReadout && !snapshotPointer)
+      || (observeState && !snapshotPointer)
       || (selection.nativeCursor && !cursorPointer)
     ) {
       throw new Error('the client would not allocate the companion regions');
@@ -248,7 +250,7 @@ export async function installEnhancements(instance, module, selection) {
       || typeof kernel.instance.exports.companion_tick !== 'function'
       || kernelInit(
         snapshotPointer,
-        selection.targetReadout ? COMPANION_SNAPSHOT_BYTES : 0,
+        observeState ? COMPANION_SNAPSHOT_BYTES : 0,
         configPointer,
         manifest.configBytes,
         cursorPointer,
@@ -309,7 +311,7 @@ export async function installEnhancements(instance, module, selection) {
       },
     };
     window.gwCompanionRuntime = runtime;
-    stopObserver = observeSnapshots(runtime, cursor, readout, selection.targetReadout);
+    stopObserver = observeSnapshots(runtime, cursor, readout, observeState);
     // Last: from here the client's main loop is calling into the companion.
     hookSlot.value = manifest.tableSlot + 1;
 
