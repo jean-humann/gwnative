@@ -161,6 +161,9 @@ application: the event channel reports only whether both fields were offered.
 The control plane exists only under `GWNATIVE_E2E`, has no arbitrary JavaScript,
 coordinates, text-entry or credential action, and sleeps between events. It
 does not use screenshots, OCR, Accessibility scripting, or focus polling.
+Gameplay keys originate as bounded AppKit `NSEvent` pairs and enter WKWebView
+through its normal responder chain. Page JavaScript observes the action only to
+associate resulting socket traffic; it cannot synthesize the gameplay event.
 
 The page restores the two profile-local `localStorage` values it touches
 byte-for-byte before the runner stops the process. The test intentionally uses
@@ -168,6 +171,38 @@ the installed client root, because a source checkout can hold an older ignored
 client module than the one the packaged app last downloaded. A newly patched,
 uncertified ArenaNet build can prove the host and input path but cannot honestly
 prove character position until its companion layout has been certified.
+
+## Client inspection and build certification
+
+ArenaNet regenerates the JSPI glue and WebAssembly module together. Keep local
+copies outside the repository and inspect only their metadata:
+
+```sh
+scripts/client-inspect /path/to/Gw.jspi.wasm --jspi /path/to/Gw.jspi.js
+scripts/client-diff /path/to/old.wasm /path/to/new.wasm \
+  --before-jspi /path/to/old.js --after-jspi /path/to/new.js
+scripts/client-certify /path/to/Gw.jspi.wasm
+```
+
+Add `--json` to any command for a stable, versioned report. `client-inspect`
+lists section sizes, imports, exports, exact function-body hashes, and referenced
+`Module` contract names. `client-diff` reports section changes, exact body reuse,
+the dominant function-index shift, and JSPI contract additions/removals.
+Neither command prints function bodies, data segments, or client source.
+
+`client-certify` reads the fail-closed registry in `src/wasm/builds.rs`. It can
+also verify locally produced stages without writing them into the checkout:
+
+```sh
+scripts/client-certify /path/to/Gw.jspi.wasm \
+  --template-output /path/to/template-derived.wasm \
+  --enhanced-output /path/to/companion-derived.wasm
+```
+
+Certification is hash equality, not a similarity score. Structural diff output
+is evidence for review, but a new build remains unsupported until its transform
+anchors, live memory layout, runtime program/build identity, and output hashes
+have been independently checked and committed.
 
 ## Environment variables
 
@@ -181,7 +216,10 @@ All runtime overrides are optional.
 | `GWNATIVE_PORT` | Override loopback port `38112` |
 | `GWNATIVE_PRINT_TOKEN` | Print the injected host-route token to stderr |
 | `GWNATIVE_E2E` | Enable the tokened, finite native test control plane used by `scripts/e2e` |
+| `GWNATIVE_E2E_PLAIN_CLIENT` | E2E isolation: keep template repair but omit the companion transform |
+| `GWNATIVE_E2E_ORIGINAL_CLIENT` | E2E isolation: serve the verified ArenaNet WASM without either transform |
 | `GWNATIVE_TRACE_HTTP` | Log each loopback HTTP request |
+| `GWNATIVE_TRACE_PROXY` | Log proxy request/response header names, never values or bodies |
 | `GWNATIVE_TRACE_SOCKETS` | Log socket frame sizes; value `hex` also logs at most the first 16 bytes |
 | `GWNATIVE_SIGN_IDENTITY` | Select a development or release signing identity |
 | `GWNATIVE_NOTARY_PROFILE` | Select the notarytool Keychain profile for `scripts/release` |
@@ -282,6 +320,7 @@ the hardened runtime remains enabled. Published bundles omit it.
 | `tests/web.rs` | Cargo bridge to Node's test runner |
 | `packaging/` | Bundle metadata, icon, Sparkle, certificates, and entitlements |
 | `scripts/` | Benchmark, bundle, signing, notarization, feed, and publication tools |
+| `tools/` | Dependency-free JSPI/WASM metadata analysis and unit tests |
 | `.github/workflows/` | Read-only CI and approval-gated release automation |
 
 The fuller component mapping and runtime contracts are in
