@@ -7,8 +7,8 @@
 //! `NSEvent`, which enters WKWebView through its normal responder chain.
 //!
 //! The surface remains deliberately narrow: the loopback hub has already
-//! validated either Return for 40 ms or Arrow Up for 50–1000 ms. There is no
-//! arbitrary key, text, coordinate or script interface.
+//! validated one named gameplay key and a bounded hold where applicable. There
+//! is no arbitrary key, text, coordinate or script interface.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -30,6 +30,13 @@ use crate::e2e_api::{Action, Hub};
 
 const RETURN_KEY_CODE: u16 = 36;
 const UP_ARROW_KEY_CODE: u16 = 126;
+const DOWN_ARROW_KEY_CODE: u16 = 125;
+const LEFT_ARROW_KEY_CODE: u16 = 123;
+const RIGHT_ARROW_KEY_CODE: u16 = 124;
+const TAB_KEY_CODE: u16 = 48;
+const SPACE_KEY_CODE: u16 = 49;
+const ESCAPE_KEY_CODE: u16 = 53;
+const ONE_KEY_CODE: u16 = 18;
 
 struct Dispatcher {
     window: Retained<NSWindow>,
@@ -105,6 +112,41 @@ fn deliver(dispatcher: Rc<Dispatcher>, action: Action) {
             characters: "\u{f700}",
             code: UP_ARROW_KEY_CODE,
             modifiers: NSEventModifierFlags::Function,
+        },
+        "move-backward" => Key {
+            characters: "\u{f701}",
+            code: DOWN_ARROW_KEY_CODE,
+            modifiers: NSEventModifierFlags::Function,
+        },
+        "turn-left" => Key {
+            characters: "\u{f702}",
+            code: LEFT_ARROW_KEY_CODE,
+            modifiers: NSEventModifierFlags::Function,
+        },
+        "turn-right" => Key {
+            characters: "\u{f703}",
+            code: RIGHT_ARROW_KEY_CODE,
+            modifiers: NSEventModifierFlags::Function,
+        },
+        "target-next" => Key {
+            characters: "\t",
+            code: TAB_KEY_CODE,
+            modifiers: NSEventModifierFlags::empty(),
+        },
+        "interact" => Key {
+            characters: " ",
+            code: SPACE_KEY_CODE,
+            modifiers: NSEventModifierFlags::empty(),
+        },
+        "cancel" => Key {
+            characters: "\u{1b}",
+            code: ESCAPE_KEY_CODE,
+            modifiers: NSEventModifierFlags::empty(),
+        },
+        "skill-1" => Key {
+            characters: "1",
+            code: ONE_KEY_CODE,
+            modifiers: NSEventModifierFlags::empty(),
         },
         _ => {
             publish(

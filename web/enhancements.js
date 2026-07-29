@@ -15,6 +15,7 @@ import {
   COMPANION_SNAPSHOT_ABI,
   COMPANION_SNAPSHOT_BYTES,
 } from './companion-snapshot.js';
+import { probeLayout } from './layout-probe.js';
 import * as diagnostics from './diagnostics.js';
 import {
   asyncifyStateReader,
@@ -332,6 +333,12 @@ export async function installEnhancements(instance, manifestValue, selection) {
       rejectedSnapshots: 0,
       observerRuns: 0,
       observerSkips: 0,
+      probeLayout() {
+        if (window.__gwnativeE2E !== true) {
+          throw new Error('layout probing is available only during E2E certification');
+        }
+        return probeLayout(exports.memory.buffer, manifest.layoutWords);
+      },
       // Presentation state only: no pixels and no pointer leave this module.
       get cursor() {
         return cursor?.state ?? null;

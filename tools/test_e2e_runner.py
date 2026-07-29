@@ -68,6 +68,64 @@ class EventStreamTests(unittest.TestCase):
             ["socket-open", "client-traffic"],
         )
 
+    def test_traffic_wait_distinguishes_send_from_receive(self) -> None:
+        sent = {
+            "sequence": 1,
+            "kind": "client-traffic",
+            "detail": {
+                "actionSequence": 7,
+                "direction": "send",
+                "socketId": 4,
+                "bytes": 12,
+            },
+        }
+        received = {
+            "sequence": 2,
+            "kind": "client-traffic",
+            "detail": {
+                "actionSequence": 7,
+                "direction": "receive",
+                "socketId": 4,
+                "bytes": 24,
+            },
+        }
+        stream = StubStream([[received, sent]])
+        self.assertEqual(
+            stream.wait_for_action_traffic(7, 0.1, direction="send"),
+            sent,
+        )
+        self.assertEqual(
+            stream.wait_for_action_traffic(7, 0.1, direction="receive"),
+            received,
+        )
+
+
+class GameStateTests(unittest.TestCase):
+    def test_ready_state_requires_two_matching_revisions(self) -> None:
+        states = iter(
+            [
+                {
+                    "revision": 1,
+                    "state": {"status": "waiting", "reason": "game"},
+                },
+                {
+                    "revision": 2,
+                    "state": {"status": "ready", "mapId": 55, "playerId": 4},
+                },
+                {
+                    "revision": 3,
+                    "state": {"status": "ready", "mapId": 55, "playerId": 4},
+                },
+            ]
+        )
+        original = RUNNER.game_state_after
+        RUNNER.game_state_after = lambda *args, **kwargs: next(states)
+        try:
+            ready = RUNNER.wait_for_ready_state("", "", 0, 1)
+        finally:
+            RUNNER.game_state_after = original
+        self.assertEqual(ready["revision"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -117,9 +117,16 @@ describe('end-to-end helpers', () => {
       'canvas',
     );
     assert.equal(focused, 'canvas');
+    assert.equal(
+      prepareNativeE2EAction(
+        { sequence: 3, action: 'target-next', durationMs: 40 },
+        { window, canvas },
+      ),
+      'canvas',
+    );
     assert.throws(
       () => prepareNativeE2EAction(
-        { sequence: 3, action: 'type-password', durationMs: 40 },
+        { sequence: 4, action: 'type-password', durationMs: 40 },
         { window, canvas },
       ),
       /allowed vocabulary/,
@@ -142,6 +149,26 @@ describe('end-to-end helpers', () => {
       { target: 'app-ui', activeTarget: 'canvas' },
     );
     assert.equal(checks, 1);
+  });
+
+  it('runs only the bounded companion layout probe in the page', async () => {
+    const result = Object.freeze({
+      radiusBytes: 2048,
+      contextDeltas: [-48],
+      agentDeltas: [-48],
+      commonDeltas: [-48],
+    });
+    const window = {
+      Module: {},
+      gwCompanionRuntime: { probeLayout: () => result },
+    };
+    assert.deepEqual(
+      await executeE2EAction(
+        { sequence: 1, action: 'probe-layout', durationMs: 0 },
+        { window, canvas: {} },
+      ),
+      { target: 'app-ui', activeTarget: 'canvas', layoutProbe: result },
+    );
   });
 
   it('keeps the action channel dormant in normal launches', () => {
