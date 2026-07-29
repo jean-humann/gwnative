@@ -45,6 +45,7 @@ use security_framework::passwords::{
 };
 use security_framework_sys::keychain::SecKeychainSetUserInteractionAllowed;
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Shown in Keychain Access as the item's name, so it says what it is.
 const SERVICE: &str = "gwnative (Guild Wars)";
@@ -221,18 +222,39 @@ trait Vault {
 /// under this build's signature via [`store_in`], so the cost of a signature
 /// change is one sign-in, once, and never a system password.
 ///
-/// The flag is process-wide, hence a guard rather than a call: restoring it
-/// leaves the process as it was found for anything that legitimately wants to
-/// prompt later, and `Drop` restores it on the panic path too.
-struct Silent;
+/// The flag is process-wide, hence an exclusive guard rather than a call:
+/// restoring it leaves the process as it was found for anything that
+/// legitimately wants to prompt later, and `Drop` restores it on the panic path
+/// too. Exclusivity matters because two overlapping guards would let the first
+/// one to drop re-enable prompts underneath the second operation.
+struct Silent {
+    _exclusive: MutexGuard<'static, ()>,
+}
+
+fn interaction_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 impl Silent {
     fn new() -> Self {
+        let lock = interaction_lock();
+        let exclusive = match lock.lock() {
+            Ok(exclusive) => exclusive,
+            // A panic still ran Silent::drop and restored interaction. The
+            // poisoned bit describes the caller that panicked, not this flag.
+            Err(poisoned) => {
+                lock.clear_poison();
+                poisoned.into_inner()
+            }
+        };
         // Both calls ignore their status: it fails only if there is no
         // keychain services connection at all, in which case the operation
         // being guarded is about to fail anyway and say so properly.
         unsafe { SecKeychainSetUserInteractionAllowed(0) };
-        Self
+        Self {
+            _exclusive: exclusive,
+        }
     }
 }
 
@@ -536,6 +558,32 @@ mod tests {
         // what is checked is that a second guard can still be taken and
         // dropped, i.e. that the first one's Drop ran rather than aborting.
         drop(Silent::new());
+    }
+
+    #[test]
+    fn prompt_suppression_is_exclusive_across_threads() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let first = Silent::new();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _second = Silent::new();
+            entered_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(
+            entered_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "a second operation entered while prompts were disabled by the first"
+        );
+        drop(first);
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the second operation enters once the first restores interaction");
+        second.join().unwrap();
     }
 
     #[test]
