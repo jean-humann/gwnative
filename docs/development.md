@@ -147,13 +147,17 @@ Wars client. The runner:
    and the build library by semantic DOM name;
 4. verifies the token boundary and both versioned API descriptions;
 5. waits for launch milestones over a bounded long-poll channel;
-6. sends only the finite **activate** and **move-forward** test actions; and
-7. when the installed client has a certified state layout, confirms movement
-   through a newer game-state revision.
+6. waits for the client’s own credential-commit callback before activating the
+   selected character;
+7. sends only a finite set of named AppKit actions: activate, forward/backward,
+   left/right, next target, interact, cancel, and skill 1; and
+8. when the installed client has a certified state layout, requires two stable
+   state revisions and confirms bidirectional movement through newer revisions.
 
 ```sh
 scripts/e2e
 scripts/e2e --no-gameplay
+scripts/e2e --auth-timeout 240
 ```
 
 The session token is captured and redacted. Credential values never leave the
@@ -164,13 +168,20 @@ does not use screenshots, OCR, Accessibility scripting, or focus polling.
 Gameplay keys originate as bounded AppKit `NSEvent` pairs and enter WKWebView
 through its normal responder chain. Page JavaScript observes the action only to
 associate resulting socket traffic; it cannot synthesize the gameplay event.
+The disposable client copy is pinned with `--no-update` for the whole run so a
+background artifact refresh cannot change the build between certification and
+input.
 
 The page restores the two profile-local `localStorage` values it touches
 byte-for-byte before the runner stops the process. The test intentionally uses
 the installed client root, because a source checkout can hold an older ignored
 client module than the one the packaged app last downloaded. A newly patched,
 uncertified ArenaNet build can prove the host and input path but cannot honestly
-prove character position until its companion layout has been certified.
+prove character position until its companion layout has been certified. When
+an otherwise certified transform reaches the map without ready telemetry, the
+E2E-only probe scans at most 4 KiB around the pinned globals and reports only
+aligned address deltas that satisfy the existing context and agent invariants;
+it never reports memory contents.
 
 ## Client inspection and build certification
 
@@ -204,6 +215,17 @@ Certification is hash equality, not a similarity score. Structural diff output
 is evidence for review, but a new build remains unsupported until its transform
 anchors, live memory layout, runtime program/build identity, and output hashes
 have been independently checked and committed.
+
+The two real-client transform tests normally use `web/Gw.jspi.wasm` when it is
+present. To certify a separately stored client without copying it into the
+checkout, point them at it explicitly:
+
+```sh
+GWNATIVE_CLIENT_WASM=/path/to/Gw.jspi.wasm \
+  cargo test wasm::rewrite::tests::the_real_client_transforms_to_the_certified_output
+GWNATIVE_CLIENT_WASM=/path/to/Gw.jspi.wasm \
+  cargo test wasm::enhancement::tests::the_certified_client_transforms_to_the_certified_output
+```
 
 ## Cross-project API inventory
 
