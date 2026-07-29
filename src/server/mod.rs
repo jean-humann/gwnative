@@ -67,6 +67,9 @@ pub struct Loopback {
     /// reason: the menu's Mark a Slowdown has to land in the file the page's
     /// own counters are landing in, or the two describe different sessions.
     pub recorder: Arc<Recorder>,
+    /// Present only for a signed E2E launch. The native window consumes its
+    /// finite gameplay queue; the server owns the corresponding HTTP surface.
+    pub e2e: Option<Arc<e2e_api::Hub>>,
 }
 
 /// Per-request tracing, off unless `GWNATIVE_TRACE_HTTP` is set, matching
@@ -174,6 +177,7 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
     // `spawn` in the same process would be a second origin, which is exactly
     // what `instance` exists to prevent.
     let _ = POLICY.set(policy(addr));
+    let e2e = e2e.then(|| Arc::new(e2e_api::Hub::default()));
     let context = Arc::new(Context {
         root,
         snapshot,
@@ -186,7 +190,7 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
         credential_account,
         mods,
         game_api: Arc::default(),
-        e2e: e2e.then(|| Arc::new(e2e_api::Hub::default())),
+        e2e: e2e.clone(),
     });
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -219,6 +223,7 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
         addr,
         settings,
         recorder,
+        e2e,
     })
 }
 

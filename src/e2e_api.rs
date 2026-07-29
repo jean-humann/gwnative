@@ -43,7 +43,9 @@ struct Event {
 #[derive(Default)]
 struct Inner {
     next_action: u64,
-    actions: VecDeque<Action>,
+    page_actions: VecDeque<Action>,
+    native_actions: VecDeque<Action>,
+    prepared_native_actions: VecDeque<u64>,
     next_event: u64,
     events: VecDeque<Event>,
 }
@@ -97,6 +99,10 @@ impl Hub {
                     "minimumDurationMs": 50,
                     "maximumDurationMs": 1000,
                 },
+                {
+                    "name": "test-ui",
+                    "description": "exercise the app-owned panels and widgets",
+                },
             ],
             "prohibited": ["javascript", "coordinates", "text", "credentials"],
         }))
@@ -123,11 +129,17 @@ impl Hub {
                 }
                 duration
             }
+            "test-ui" => {
+                if request.duration_ms.is_some() {
+                    return Err("test-ui does not accept a duration".into());
+                }
+                0
+            }
             _ => return Err("E2E action is not in the allowed vocabulary".into()),
         };
 
         let mut inner = lock(&self.inner);
-        if inner.actions.len() >= MAX_ACTIONS {
+        if inner.page_actions.len() >= MAX_ACTIONS || inner.native_actions.len() >= MAX_ACTIONS {
             return Err("E2E action queue is full".into());
         }
         inner.next_action += 1;
@@ -136,7 +148,13 @@ impl Hub {
             action: request.action,
             duration_ms,
         };
-        inner.actions.push_back(action.clone());
+        // The page observes every action so socket traffic can be associated
+        // with the command that caused it. It executes only `test-ui`; native
+        // gameplay actions have a second, host-owned delivery queue.
+        inner.page_actions.push_back(action.clone());
+        if action.action != "test-ui" {
+            inner.native_actions.push_back(action.clone());
+        }
         self.actions_changed.notify_all();
         serde_json::to_vec(&action).map_err(|error| error.to_string())
     }
@@ -144,27 +162,55 @@ impl Hub {
     pub fn actions_json_after(&self, after: u64, wait_ms: u64) -> Vec<u8> {
         let timeout = Duration::from_millis(wait_ms.min(MAX_WAIT_MS));
         let mut inner = lock(&self.inner);
-        if !inner.actions.iter().any(|action| action.sequence > after) && !timeout.is_zero() {
+        if !inner
+            .page_actions
+            .iter()
+            .any(|action| action.sequence > after)
+            && !timeout.is_zero()
+        {
             inner = wait(&self.actions_changed, inner, timeout, |state| {
-                !state.actions.iter().any(|action| action.sequence > after)
+                !state
+                    .page_actions
+                    .iter()
+                    .any(|action| action.sequence > after)
             });
         }
         while inner
-            .actions
+            .page_actions
             .front()
             .is_some_and(|action| action.sequence <= after)
         {
-            inner.actions.pop_front();
+            inner.page_actions.pop_front();
         }
         // At-most-once delivery is the safer failure mode for input. If this
         // response is lost the runner times out; a reloaded page never repeats
         // an old Enter or movement command.
-        let actions: Vec<_> = inner.actions.drain(..).collect();
+        let actions: Vec<_> = inner.page_actions.drain(..).collect();
         serde_json::to_vec(&serde_json::json!({
             "apiVersion": VERSION,
             "actions": actions,
         }))
         .unwrap_or_default()
+    }
+
+    /// Take the next gameplay command for AppKit delivery.
+    ///
+    /// This deliberately does not block the main thread. A command becomes
+    /// available only after the page acknowledges that its finite input target
+    /// has focus. A normal application never installs the dispatcher and
+    /// therefore never schedules E2E work.
+    pub fn take_native_action(&self) -> Option<Action> {
+        let mut inner = lock(&self.inner);
+        let prepared = inner.prepared_native_actions.pop_front()?;
+        if inner
+            .native_actions
+            .front()
+            .is_some_and(|action| action.sequence == prepared)
+        {
+            inner.native_actions.pop_front()
+        } else {
+            None
+        }
     }
 
     pub fn publish_event(&self, bytes: &[u8]) -> Result<u64, String> {
@@ -174,8 +220,25 @@ impl Hub {
         let request: EventRequest =
             serde_json::from_slice(bytes).map_err(|error| format!("invalid E2E event: {error}"))?;
         validate_event(&request.kind, &request.detail)?;
+        let wake_native = request.kind == "action-prepared";
 
         let mut inner = lock(&self.inner);
+        if wake_native {
+            let prepared_sequence = request.detail["actionSequence"]
+                .as_u64()
+                .expect("validated action-prepared sequence");
+            let prepared_action = request.detail["action"]
+                .as_str()
+                .expect("validated action-prepared name");
+            let prepared_index = inner.prepared_native_actions.len();
+            let Some(queued) = inner.native_actions.get(prepared_index) else {
+                return Err("prepared E2E action has no pending native action".into());
+            };
+            if queued.sequence != prepared_sequence || queued.action != prepared_action {
+                return Err("prepared E2E action does not match the native queue order".into());
+            }
+            inner.prepared_native_actions.push_back(prepared_sequence);
+        }
         inner.next_event += 1;
         let sequence = inner.next_event;
         inner.events.push_back(Event {
@@ -187,6 +250,14 @@ impl Hub {
             inner.events.pop_front();
         }
         self.events_changed.notify_all();
+        drop(inner);
+        // Gameplay actions are woken only after the page has focused the
+        // client's current text proxy or canvas. This keeps the native event
+        // trusted without racing it against the long-poll delivery that tells
+        // the page which finite action is coming.
+        if wake_native {
+            crate::native_e2e::wake();
+        }
         Ok(sequence)
     }
 
@@ -262,7 +333,8 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             )
         }
         "socket-open" => {
-            exact_keys(object, &["socketId"])?;
+            exact_keys(object, &["actionSequence", "socketId"])?;
+            positive_u64_field(object, "actionSequence")?;
             positive_u64_field(object, "socketId")
         }
         "client-traffic" => {
@@ -275,16 +347,48 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             positive_u64_field(object, "bytes")?;
             enum_text_field(object, "direction", &["send", "receive"])
         }
+        "login-response" => {
+            exact_keys(object, &["status", "bytes"])?;
+            u32_field(object, "status")?;
+            positive_u64_field(object, "bytes")
+        }
         "app-fail" => {
             exact_keys(object, &["message"])?;
             safe_text_field(object, "message")
         }
-        "action-complete" => {
+        "action-prepared" => {
             exact_keys(object, &["actionSequence", "action", "target"])?;
+            positive_u64_field(object, "actionSequence")?;
+            match object.get("action").and_then(Value::as_str) {
+                Some("activate" | "move-forward") => {}
+                _ => return Err("prepared E2E action names an unknown action".into()),
+            }
+            target_field(object, "target")
+        }
+        "native-key-observed" | "native-key-released" => {
+            exact_keys(object, &["actionSequence", "code", "keyCode"])?;
+            positive_u64_field(object, "actionSequence")?;
+            enum_text_field(object, "code", &["enter", "arrow-up", "other"])?;
+            u32_field(object, "keyCode")
+        }
+        "action-complete" => {
+            exact_keys(
+                object,
+                &["actionSequence", "action", "target", "activeTarget"],
+            )?;
             action_result(object)
         }
         "action-fail" => {
-            exact_keys(object, &["actionSequence", "action", "target", "message"])?;
+            exact_keys(
+                object,
+                &[
+                    "actionSequence",
+                    "action",
+                    "target",
+                    "activeTarget",
+                    "message",
+                ],
+            )?;
             action_result(object)?;
             safe_text_field(object, "message")
         }
@@ -295,12 +399,22 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
 fn action_result(object: &Map<String, Value>) -> Result<(), String> {
     positive_u64_field(object, "actionSequence")?;
     match object.get("action").and_then(Value::as_str) {
-        Some("activate" | "move-forward") => {}
+        Some("activate" | "move-forward" | "test-ui") => {}
         _ => return Err("E2E action result names an unknown action".into()),
     }
-    match object.get("target").and_then(Value::as_str) {
-        Some("canvas" | "text-proxy") => Ok(()),
-        _ => Err("E2E action result names an unknown target".into()),
+    for name in ["target", "activeTarget"] {
+        target_field(object, name)?;
+    }
+    Ok(())
+}
+
+fn target_field(object: &Map<String, Value>, name: &str) -> Result<(), String> {
+    match object.get(name).and_then(Value::as_str) {
+        Some(
+            "canvas" | "app-ui" | "text-proxy" | "email-proxy" | "password-proxy" | "number-proxy"
+            | "multiline-proxy" | "native-window",
+        ) => Ok(()),
+        _ => Err(format!("E2E event names an unknown {name}")),
     }
 }
 
@@ -408,6 +522,32 @@ mod tests {
     }
 
     #[test]
+    fn only_gameplay_actions_enter_the_native_queue() {
+        let hub = Hub::default();
+        hub.submit_action(br#"{"action":"test-ui"}"#).unwrap();
+        hub.submit_action(br#"{"action":"activate"}"#).unwrap();
+        hub.submit_action(br#"{"action":"move-forward","durationMs":250}"#)
+            .unwrap();
+
+        assert!(hub.take_native_action().is_none());
+        hub.publish_event(
+            br#"{"kind":"action-prepared","detail":{"actionSequence":2,"action":"activate","target":"password-proxy"}}"#,
+        )
+        .unwrap();
+        hub.publish_event(
+            br#"{"kind":"action-prepared","detail":{"actionSequence":3,"action":"move-forward","target":"canvas"}}"#,
+        )
+        .unwrap();
+        let first = hub.take_native_action().unwrap();
+        let second = hub.take_native_action().unwrap();
+        assert_eq!(first.action, "activate");
+        assert_eq!(first.sequence, 2);
+        assert_eq!(second.action, "move-forward");
+        assert_eq!(second.duration_ms, 250);
+        assert!(hub.take_native_action().is_none());
+    }
+
+    #[test]
     fn events_cannot_carry_credentials_or_arbitrary_fields() {
         let hub = Hub::default();
         assert_eq!(
@@ -427,5 +567,43 @@ mod tests {
             hub.publish_event(br#"{"kind":"javascript","detail":{}}"#)
                 .is_err()
         );
+        hub.submit_action(br#"{"action":"activate"}"#).unwrap();
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"action-prepared","detail":{"actionSequence":1,"action":"activate","target":"password-proxy"}}"#,
+            )
+            .is_ok()
+        );
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"action-prepared","detail":{"actionSequence":2,"action":"activate","target":"body"}}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"login-response","detail":{"status":200,"bytes":69,"body":"never"}}"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_prepared_action_must_match_the_native_queue_head() {
+        let hub = Hub::default();
+        hub.submit_action(br#"{"action":"activate"}"#).unwrap();
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"action-prepared","detail":{"actionSequence":2,"action":"activate","target":"password-proxy"}}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"action-prepared","detail":{"actionSequence":1,"action":"move-forward","target":"canvas"}}"#,
+            )
+            .is_err()
+        );
+        assert!(hub.take_native_action().is_none());
     }
 }

@@ -30,6 +30,7 @@ mod layout;
 mod manifest;
 mod menu;
 mod mods;
+mod native_e2e;
 mod net;
 mod notify;
 mod patch;
@@ -263,6 +264,9 @@ fn main() {
         }
     }
     let settings = Arc::new(settings::Store::open(settings_path));
+    let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
+    let e2e_plain_client = e2e && std::env::var_os("GWNATIVE_E2E_PLAIN_CLIENT").is_some();
+    let e2e_original_client = e2e && std::env::var_os("GWNATIVE_E2E_ORIGINAL_CLIENT").is_some();
 
     // Derive the client that can save a template, if this is a build we have
     // certified, and layer optional enhancements on top when the player has
@@ -274,13 +278,13 @@ fn main() {
     // clicks Save in the client's template window and watches nothing happen is
     // owed a sentence about why, and the log is not where they will look for
     // it; `settings-panel.js` is what turns this into that sentence.
-    let (derived_wasm, module) = match wasm::prepare(
+    let (mut derived_wasm, mut module) = match wasm::prepare(
         &root.join("Gw.jspi.wasm"),
         paths.derived_dir(),
         // The companion is also the source of the versioned read-only game
         // API. Its presentation features remain optional, but the certified
         // snapshot chain is prepared for every supported client build.
-        true,
+        !e2e_plain_client && !e2e_original_client,
     ) {
         Ok(wasm::Prepared {
             client,
@@ -321,12 +325,17 @@ fn main() {
             )
         }
     };
+    if e2e_original_client {
+        derived_wasm = None;
+        module.template_save = "off";
+        module.enhancements = wasm::enhancements::OFF;
+        note!("[gwnative] E2E isolation: serving ArenaNet's original client module");
+    }
     if module.enhancements != wasm::enhancements::OFF {
         note!("[gwnative] enhancements: {}", module.enhancements);
     }
 
     let token = session_token();
-    let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
     let loopback = match server::spawn(server::Config {
         root: root.clone(),
         snapshot,
@@ -752,6 +761,9 @@ fn run_windowed(
 
     window.makeKeyAndOrderFront(None);
     app.activate();
+    if let Some(hub) = &loopback.e2e {
+        native_e2e::install(&window, &webview, Arc::clone(hub));
+    }
     // The last thing before the thread stops being ours. `app::request_quit`
     // reads this to know a `terminate:` will be heard.
     app::about_to_run();

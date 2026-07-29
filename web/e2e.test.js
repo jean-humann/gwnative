@@ -5,6 +5,7 @@ import {
   buttonNamed,
   executeE2EAction,
   installE2EBridge,
+  prepareNativeE2EAction,
   restoreStorage,
   snapshotStorage,
 } from './e2e.js';
@@ -59,79 +60,88 @@ describe('end-to-end helpers', () => {
     assert.equal(empty.getItem('gwnative.overlay-layout.v1'), null);
   });
 
-  it('maps only bounded semantic actions onto complete key pairs', async () => {
-    const events = [];
-    const canvas = {
-      focus() {},
-      dispatchEvent(event) {
-        events.push(event);
-        return true;
-      },
-    };
-    class KeyboardEvent {
-      constructor(type, values) {
-        this.type = type;
-        Object.assign(this, values);
-      }
-    }
-    const window = { KeyboardEvent, Module: { canvas } };
-    const target = await executeE2EAction(
-      { sequence: 1, action: 'activate', durationMs: 40 },
-      { window, canvas, sleep: async () => {} },
-    );
-    assert.equal(target, 'canvas');
-    assert.deepEqual(events.map((event) => [
-      event.type,
-      event.key,
-      event.code,
-      event.keyCode,
-      event.which,
-    ]), [
-      ['keydown', 'Enter', 'Enter', 13, 13],
-      ['keyup', 'Enter', 'Enter', 13, 13],
-    ]);
+  it('refuses to synthesize gameplay keyboard events in the page', async () => {
+    const window = { Module: {} };
     await assert.rejects(
       executeE2EAction(
-        { sequence: 2, action: 'javascript', durationMs: 40 },
-        { window, canvas, sleep: async () => {} },
+        { sequence: 1, action: 'activate', durationMs: 40 },
+        { window, canvas: {} },
       ),
-      /allowed vocabulary/,
+      /native-only/,
     );
     await assert.rejects(
       executeE2EAction(
-        { sequence: 3, action: 'move-forward', durationMs: 5_000 },
-        { window, canvas, sleep: async () => {} },
+        { sequence: 2, action: 'move-forward', durationMs: 800 },
+        { window, canvas: {} },
       ),
-      /outside its bound/,
+      /native-only/,
     );
   });
 
-  it('uses the active text proxy for activation', async () => {
-    const targets = [];
-    class KeyboardEvent {
-      constructor(type, values) {
-        this.type = type;
-        Object.assign(this, values);
-      }
-    }
-    const makeTarget = (name) => ({
-      focus() {},
-      dispatchEvent() {
-        targets.push(name);
-        return true;
-      },
-    });
-    const canvas = makeTarget('canvas');
-    const proxy = makeTarget('text-proxy');
-    const window = { KeyboardEvent, Module: { canvas, oskActiveInput: proxy } };
-    assert.equal(
+  it('reports the active text proxy after the page-owned UI check', async () => {
+    const canvas = {};
+    const proxy = {};
+    const window = {
+      Module: { canvas, oskActiveInput: proxy, oskInput: { password: proxy } },
+      gwRunAppE2E: async () => {},
+    };
+    assert.deepEqual(
       await executeE2EAction(
-        { sequence: 1, action: 'activate', durationMs: 40 },
-        { window, canvas, sleep: async () => {} },
+        { sequence: 1, action: 'test-ui', durationMs: 0 },
+        { window, canvas },
       ),
-      'text-proxy',
+      { target: 'app-ui', activeTarget: 'password-proxy' },
     );
-    assert.deepEqual(targets, ['text-proxy', 'text-proxy']);
+  });
+
+  it('prepares only the active text proxy or game canvas for native input', () => {
+    let focused = '';
+    const canvas = { focus: () => { focused = 'canvas'; } };
+    const proxy = { focus: () => { focused = 'password'; } };
+    const window = {
+      Module: { canvas, oskActiveInput: proxy, oskInput: { password: proxy } },
+    };
+    assert.equal(
+      prepareNativeE2EAction(
+        { sequence: 1, action: 'activate', durationMs: 40 },
+        { window, canvas },
+      ),
+      'password-proxy',
+    );
+    assert.equal(focused, 'password');
+    assert.equal(
+      prepareNativeE2EAction(
+        { sequence: 2, action: 'move-forward', durationMs: 800 },
+        { window, canvas },
+      ),
+      'canvas',
+    );
+    assert.equal(focused, 'canvas');
+    assert.throws(
+      () => prepareNativeE2EAction(
+        { sequence: 3, action: 'type-password', durationMs: 40 },
+        { window, canvas },
+      ),
+      /allowed vocabulary/,
+    );
+  });
+
+  it('runs app UI checks without dispatching game input', async () => {
+    let checks = 0;
+    const window = {
+      Module: {},
+      gwRunAppE2E: async () => {
+        checks += 1;
+      },
+    };
+    assert.deepEqual(
+      await executeE2EAction(
+        { sequence: 1, action: 'test-ui', durationMs: 0 },
+        { window, canvas: {}, sleep: async () => {} },
+      ),
+      { target: 'app-ui', activeTarget: 'canvas' },
+    );
+    assert.equal(checks, 1);
   });
 
   it('keeps the action channel dormant in normal launches', () => {

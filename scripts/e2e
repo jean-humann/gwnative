@@ -157,9 +157,10 @@ class EventStream:
     ) -> dict[str, dict[str, object]]:
         deadline = time.monotonic() + timeout
         found: dict[str, dict[str, object]] = {}
+        deferred: list[dict[str, object]] = []
         while time.monotonic() < deadline and not kinds.issubset(found):
             batch = self.next_batch(deadline)
-            for event in batch:
+            for index, event in enumerate(batch):
                 kind = str(event.get("kind", ""))
                 if kind in {"app-fail", "action-fail"}:
                     detail = event.get("detail", {})
@@ -167,13 +168,11 @@ class EventStream:
                 if kind in kinds:
                     found[kind] = event
                 else:
-                    self.pending.append(event)
-            # Events that were not wanted must not make the next read spin on
-            # the same local list forever.
-            if self.pending and not any(
-                str(event.get("kind", "")) in kinds for event in self.pending
-            ):
-                self.pending.clear()
+                    deferred.append(event)
+                if kinds.issubset(found):
+                    deferred.extend(batch[index + 1 :])
+                    break
+        self.pending.extend(deferred)
         missing = kinds.difference(found)
         if missing:
             raise Failure(
@@ -204,16 +203,50 @@ class EventStream:
         self.pending.extend(deferred)
         raise Failure(f"E2E action {sequence} was not acknowledged")
 
+    def wait_for_action_event(
+        self,
+        sequence: int,
+        kind: str,
+        timeout: float,
+    ) -> dict[str, object] | None:
+        deadline = time.monotonic() + timeout
+        deferred: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            batch = self.next_batch(deadline)
+            for index, event in enumerate(batch):
+                event_kind = str(event.get("kind", ""))
+                detail = event.get("detail", {})
+                if event_kind in {"app-fail", "action-fail"}:
+                    raise Failure(
+                        f"{event_kind}: {detail.get('message', 'unknown failure')}"
+                    )
+                if (
+                    event_kind == kind
+                    and detail.get("actionSequence") == sequence
+                ):
+                    self.pending.extend(deferred)
+                    self.pending.extend(batch[index + 1 :])
+                    return event
+                deferred.append(event)
+        self.pending.extend(deferred)
+        return None
+
     def wait_optional(self, kind: str, timeout: float) -> dict[str, object] | None:
         deadline = time.monotonic() + timeout
+        deferred: list[dict[str, object]] = []
         while time.monotonic() < deadline:
-            for event in self.next_batch(deadline):
+            batch = self.next_batch(deadline)
+            for index, event in enumerate(batch):
                 event_kind = str(event.get("kind", ""))
                 if event_kind in {"app-fail", "action-fail"}:
                     detail = event.get("detail", {})
                     raise Failure(f"{event_kind}: {detail.get('message', 'unknown failure')}")
                 if event_kind == kind:
+                    self.pending.extend(deferred)
+                    self.pending.extend(batch[index + 1 :])
                     return event
+                deferred.append(event)
+        self.pending.extend(deferred)
         return None
 
     def wait_for_action_traffic(
@@ -234,6 +267,28 @@ class EventStream:
                     kind == "client-traffic"
                     and detail.get("actionSequence") == sequence
                 ):
+                    self.pending.extend(deferred)
+                    self.pending.extend(batch[index + 1 :])
+                    return event
+                deferred.append(event)
+        self.pending.extend(deferred)
+        return None
+
+    def wait_for_action_connection(
+        self,
+        sequence: int,
+        timeout: float,
+    ) -> dict[str, object] | None:
+        deadline = time.monotonic() + timeout
+        deferred: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            batch = self.next_batch(deadline)
+            for index, event in enumerate(batch):
+                kind = str(event.get("kind", ""))
+                detail = event.get("detail", {})
+                if kind in {"app-fail", "action-fail"}:
+                    raise Failure(f"{kind}: {detail.get('message', 'unknown failure')}")
+                if kind == "socket-open" and detail.get("actionSequence") == sequence:
                     self.pending.extend(deferred)
                     self.pending.extend(batch[index + 1 :])
                     return event
@@ -328,6 +383,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument(
+        "--fps",
+        type=int,
+        help="exercise the optional client frame-rate ceiling",
+    )
+    parser.add_argument(
         "--no-gameplay",
         action="store_true",
         help="stop after Keychain, first-frame, page UI, and API-contract checks",
@@ -362,15 +422,18 @@ def main() -> int:
         environment["GWNATIVE_E2E"] = "1"
         environment["GWNATIVE_PRINT_TOKEN"] = "1"
         environment["GWNATIVE_WEB_ROOT"] = str(web_root)
+        command = [
+            str(ROOT / "scripts/signed-run"),
+            str(ROOT / "target/debug/gwnative"),
+            "-autologin",
+            "-windowed",
+        ]
+        if args.fps is not None:
+            if args.fps <= 0:
+                raise Failure("--fps must be a positive integer")
+            command.extend(["-fps", str(args.fps)])
         process = subprocess.Popen(
-            [
-                str(ROOT / "scripts/signed-run"),
-                str(ROOT / "target/debug/gwnative"),
-                "-autologin",
-                "-windowed",
-                "-fps",
-                "60",
-            ],
+            command,
             cwd=ROOT,
             env=environment,
             stdout=subprocess.PIPE,
@@ -393,7 +456,7 @@ def main() -> int:
             action_names = {
                 action.get("name") for action in description.get("actions", [])
             }
-            if action_names != {"activate", "move-forward"}:
+            if action_names != {"activate", "move-forward", "test-ui"}:
                 raise Failure(f"unexpected E2E action vocabulary: {sorted(action_names)}")
             if description.get("transport", {}).get("longPoll") is not True:
                 raise Failure("the E2E API does not advertise long polling")
@@ -412,36 +475,69 @@ def main() -> int:
                     "client-capabilities",
                     "credentials-offered",
                     "first-frame",
-                    "app-pass",
+                    "startup-complete",
                 },
                 args.timeout,
             )
             credentials = milestones["credentials-offered"].get("detail", {})
             if credentials != {"accountSet": True, "passwordSet": True}:
                 raise Failure("the app did not offer a complete Keychain login to the client")
-            print("[e2e] signed launch, Keychain, first frame, and semantic app UI PASS")
+            print("[e2e] signed launch, Keychain, and first frame PASS")
             print("[e2e] token gates and event-driven API contracts PASS")
 
             if args.no_gameplay:
+                ui = submit_action(origin, token, "test-ui")
+                stream.wait_for_action(ui, 15)
+                print("[e2e] semantic app UI PASS")
                 print("[e2e] PASS (gameplay skipped)")
                 return 0
 
-            # Enter activates the focused game control. A second activation is
-            # enough for the stock login -> selected-character flow without
-            # scanning or clicking the canvas. Each is acknowledged from inside
-            # the WKWebView before the runner advances.
+            # Enter activates the focused game control. Do not send another one
+            # until the client publishes a state that proves it has left the
+            # login dialog: while "Connecting" is open its default control is
+            # Cancel, so a timer-driven second Enter undoes the login under test.
             first = submit_action(origin, token, "activate")
-            stream.wait_for_action(first, 5)
+            activation = stream.wait_for_action(first, 5)
+            detail = activation.get("detail", {})
+            prepared = stream.wait_for_action_event(first, "action-prepared", 1)
+            observed = stream.wait_for_action_event(first, "native-key-observed", 1)
+            released = stream.wait_for_action_event(first, "native-key-released", 1)
+            print(
+                "[e2e] login activation "
+                f"{(prepared or {}).get('detail', {}).get('target', 'unknown')} -> "
+                f"{detail.get('target', 'unknown')} "
+                f"({(observed or {}).get('detail', {}).get('code', 'unobserved')}, "
+                f"keyCode={(observed or {}).get('detail', {}).get('keyCode', 'unknown')}, "
+                f"key-up={'observed' if released else 'missing'})"
+            )
             traffic = stream.wait_for_action_traffic(first, 8)
+            login_response = stream.wait_optional("login-response", 30)
+            connection = (
+                stream.wait_for_action_connection(first, 30)
+                if login_response is not None
+                else None
+            )
 
             ready = game_state_after(origin, token, 0, 0)
             if ready is None or ready.get("state", {}).get("status") != "ready":
-                second = submit_action(origin, token, "activate")
-                stream.wait_for_action(second, 5)
-                traffic = traffic or stream.wait_for_action_traffic(second, 8)
                 capabilities = milestones["client-capabilities"].get("detail", {})
                 if capabilities.get("enhancements") == "ready":
                     stream.wait_optional("game-ready", 60)
+                ready = game_state_after(origin, token, 0, 0)
+
+            state = (ready or {}).get("state", {})
+            if (
+                connection is not None
+                and state.get("status") == "waiting"
+                and state.get("reason") == "game"
+            ):
+                # A new game-service connection plus the certified non-loading
+                # state means the login dialog is gone and character selection
+                # owns Enter. This is the first point where a second activation
+                # cannot hit Connecting's Cancel button.
+                character = submit_action(origin, token, "activate")
+                stream.wait_for_action(character, 5)
+                stream.wait_optional("game-ready", 60)
                 ready = game_state_after(origin, token, 0, 0)
 
             if ready is None or ready.get("state", {}).get("status") != "ready":
@@ -450,15 +546,21 @@ def main() -> int:
                     print(f"[e2e] activation produced client socket {direction} traffic")
                 else:
                     print("[e2e] activation reached the canvas; no post-action socket traffic observed")
+                state = (ready or {}).get("state", {})
+                status = state.get("status", "unavailable")
+                reason = state.get("reason", "none")
                 print(
-                    "[e2e] authenticated gameplay remains unverifiable because this "
-                    "ArenaNet build has no certified state layout"
+                    "[e2e] authenticated gameplay did not become ready "
+                    f"(certified telemetry status={status}, reason={reason})"
                 )
                 print("[e2e] INCONCLUSIVE (gameplay telemetry unavailable)")
                 return 2
 
             before = position(ready)
             revision = int(ready["revision"])
+            ui = submit_action(origin, token, "test-ui")
+            stream.wait_for_action(ui, 15)
+            print("[e2e] in-game app widgets PASS")
             movement = submit_action(origin, token, "move-forward", 800)
             stream.wait_for_action(movement, 5)
             wait_for_position_change(origin, token, before, revision, 15)

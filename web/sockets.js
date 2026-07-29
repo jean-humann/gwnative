@@ -90,7 +90,7 @@ export function createSockets({ log }) {
         if (message.type === 'open') {
           open = true;
           trace('open');
-          void window.gwE2E?.report('socket-open', { socketId: id }).catch(() => {});
+          window.gwE2E?.connection(id);
           for (const bytes of queued.splice(0)) ws.send(bytes);
           socket.onopen?.();
         } else {
