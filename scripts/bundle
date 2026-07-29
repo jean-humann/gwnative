@@ -20,6 +20,17 @@ cd "$(dirname "$0")/.."
 root=$PWD
 app=${1:-$root/dist/Guild Wars.app}
 
+# The next operation replaces this path recursively. Requiring an application
+# bundle name keeps a typo such as `scripts/bundle .` from turning the checkout
+# itself into the output directory and deleting it first.
+case ${app##*/} in
+?*.app) ;;
+*)
+	echo "[bundle] output must be a named .app bundle: $app" >&2
+	exit 1
+	;;
+esac
+
 cargo build --release
 
 rm -rf "$app"
