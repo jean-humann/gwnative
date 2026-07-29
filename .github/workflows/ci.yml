@@ -6,9 +6,9 @@
 # because of something in ~/.cargo. It runs on a clean checkout with nothing
 # else on it, which is the whole point.
 #
-# It has no secrets and no `permissions` beyond the read-only default, because
-# it runs on pull requests from anywhere. Signing, notarizing and publishing are
-# release.yml's, which runs only for a tag and only behind an approval gate.
+# It has no secrets and enforces a read-only token because it runs on pull
+# requests from anywhere. Signing, notarizing and publishing are release.yml's,
+# which runs only for a tag and only behind an approval gate.
 name: CI
 
 on:
@@ -17,6 +17,9 @@ on:
   pull_request:
   # So a workflow change can be tried without inventing a commit for it.
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 # A push to a branch with a pull request open triggers both. The newer run is
 # the one anybody cares about, and the older one is holding a macOS runner.
