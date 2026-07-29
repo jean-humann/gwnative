@@ -36,7 +36,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 # Already in the tree as objc2's dependency. Named here because the chunk store
 # needs plain `fsync`, and every route to it in std is `F_FULLFSYNC` on macOS.
 libc = "0.2"
-base64 = { version = "0.22", default-features = false, features = ["std"] }
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 security-framework = { version = "3", default-features = false }
 # Already in the tree underneath security-framework. Named here for one call it
 # does not wrap — the switch that stops the keychain putting a password dialog
