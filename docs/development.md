@@ -88,6 +88,7 @@ CI runs:
 
 ```sh
 scripts/check-docs
+cargo deny check
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
@@ -95,9 +96,12 @@ cargo build --release
 scripts/bundle
 ```
 
-The Rust suite contains unit and socket-level integration tests. One ignored
-test reaches the GitHub API and is excluded from the default run. The
-`tests/web.rs` integration test invokes:
+The dependency policy requires
+[`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) and checks the
+shipped target for advisories, duplicate or wildcard dependencies, licences,
+and nonstandard sources. The Rust suite contains unit and socket-level
+integration tests. One ignored test reaches the GitHub API and is excluded from
+the default run. The `tests/web.rs` integration test invokes:
 
 ```sh
 node --test "*.test.js"

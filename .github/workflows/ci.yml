@@ -34,6 +34,18 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Dependency policy
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: "1.90.0"
+
   check:
     # Apple Silicon, and the newest image GitHub offers. Both halves matter.
     #

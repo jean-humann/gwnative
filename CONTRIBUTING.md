@@ -23,6 +23,7 @@ Run the same checks as CI:
 
 ```sh
 scripts/check-docs
+cargo deny check
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
@@ -30,8 +31,10 @@ cargo build --release
 scripts/bundle
 ```
 
-`cargo test` runs the JavaScript tests through Node's built-in test runner when
-Node is installed. It prints a skip notice otherwise. CI always has Node.
+`cargo deny check` requires
+[`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny). `cargo test` runs
+the JavaScript tests through Node's built-in test runner when Node is installed.
+It prints a skip notice otherwise. CI always has both tools.
 
 For a documentation-only change, at minimum run `scripts/check-docs`.
 
