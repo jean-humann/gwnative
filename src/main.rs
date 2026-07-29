@@ -91,6 +91,10 @@ fn main() {
             notice.kind
         );
     }
+    if invocation.verbose {
+        server::enable_tracing();
+        sockets::enable_tracing();
+    }
     let command = invocation.command;
     if command == cli::Command::Certify {
         let root = invocation.web_root.clone().unwrap_or_else(paths::web_root);
@@ -193,7 +197,7 @@ fn main() {
         windowed,
         paths.support_dir(),
     );
-    if force_sync {
+    if command == cli::Command::Sync && !invocation.full_image {
         return;
     }
     // Do this only after installation. A pending offer may be the manifest
@@ -207,9 +211,12 @@ fn main() {
     // download failed, or one that rollback just refused.
     let active_manifest = client.active_manifest(paths.support_dir());
     let snapshot = match active_manifest {
-        Ok(manifest) => {
-            open_and_warm_snapshot(client, manifest, paths.cache_dir(), invocation.no_prefetch)
-        }
+        Ok(manifest) => open_and_warm_snapshot(
+            client,
+            manifest,
+            paths.cache_dir(),
+            invocation.no_prefetch || force_sync,
+        ),
         // Without a manifest there is no chunk list, so there is no snapshot —
         // the same outcome as failing to open one, reported the same way.
         Err(e) => {
@@ -217,6 +224,27 @@ fn main() {
             None
         }
     };
+    if let Some(image) = invocation.image_path.as_deref() {
+        let Some(store) = &snapshot else {
+            note!("[gwnative] a local image cannot be imported without a cached manifest");
+            std::process::exit(1);
+        };
+        if let Err(reason) = store.import_image(image) {
+            note!(
+                "[gwnative] local game image {} was refused: {reason}",
+                image.display()
+            );
+            std::process::exit(1);
+        }
+    }
+    if command == cli::Command::Sync {
+        download_snapshot(snapshot, invocation.jobs);
+        return;
+    }
+    if command == cli::Command::Repair {
+        repair_snapshot(snapshot, invocation.jobs);
+        return;
+    }
 
     // Started before the window so that whatever the shell costs to build is
     // in the record too.
@@ -323,6 +351,94 @@ fn main() {
         park_headless(&loopback, &token);
     }
     run_windowed(&loopback, &token, &module, &invocation, paths.support_dir());
+}
+
+fn repair_snapshot(snapshot: Option<Arc<chunks::ChunkStore>>, jobs: Option<usize>) {
+    let Some(snapshot) = snapshot else {
+        note!("[gwnative] game-data repair could not start without a cached manifest");
+        std::process::exit(1);
+    };
+    if !snapshot.start_verify() {
+        note!("[gwnative] a game-data check is already running");
+        return;
+    }
+    let mut reported = u64::MAX;
+    loop {
+        let (checked, total, running, discarded) = snapshot.verify_progress();
+        let percent = checked
+            .saturating_mul(100)
+            .checked_div(total)
+            .unwrap_or(100);
+        if percent != reported {
+            reported = percent;
+            note!("[gwnative] checking cached game data: {checked}/{total} ({percent}%)");
+        }
+        if !running {
+            note!(
+                "[gwnative] game-data check complete: {checked}/{total}, \
+                 {discarded} corrupt chunk(s) discarded for safe refetch"
+            );
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    download_snapshot(Some(snapshot), jobs);
+}
+
+fn download_snapshot(snapshot: Option<Arc<chunks::ChunkStore>>, jobs: Option<usize>) {
+    const DISK_HEADROOM: u64 = 2 * 1024 * 1024 * 1024;
+
+    let Some(snapshot) = snapshot else {
+        note!("[gwnative] the full game image is unavailable without a cached manifest");
+        std::process::exit(1);
+    };
+    let total = snapshot.chunk_count();
+    let resident = snapshot.resident_count();
+    let outstanding = total.saturating_sub(resident) as u64 * snapshot.chunk_size();
+    let needed = outstanding.saturating_add(DISK_HEADROOM);
+    if let Some(free) = disk::available(snapshot.cache_dir()).filter(|free| *free < needed) {
+        note!(
+            "[gwnative] full image refused: {:.1} GB free, {:.1} GB needed",
+            free as f64 / 1e9,
+            needed as f64 / 1e9
+        );
+        std::process::exit(1);
+    }
+    if resident == total {
+        note!("[gwnative] full game image is already present");
+        return;
+    }
+
+    let workers = jobs.unwrap_or(32);
+    if !snapshot.start_full_download_with_workers(workers) {
+        note!("[gwnative] a full-image download is already running");
+    }
+    let mut reported = u64::MAX;
+    loop {
+        let (done, sweep_total, running) = snapshot.prefetch_progress();
+        let percent = done
+            .saturating_mul(100)
+            .checked_div(sweep_total)
+            .unwrap_or(100);
+        if percent != reported {
+            reported = percent;
+            note!("[gwnative] downloading full game image: {done}/{sweep_total} ({percent}%)");
+        }
+        if !running {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    let resident = snapshot.resident_count();
+    if resident != total {
+        let reason = snapshot
+            .last_failure()
+            .unwrap_or_else(|| "one or more chunks could not be cached".into());
+        note!("[gwnative] full game image is incomplete: {resident}/{total} chunks ({reason})");
+        std::process::exit(1);
+    }
+    note!("[gwnative] full game image verified: {resident}/{total} chunks");
 }
 
 /// Take the single-instance lock, or hand the running app the foreground.

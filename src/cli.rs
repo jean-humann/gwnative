@@ -78,17 +78,9 @@ pub struct LegacyOptions {
     pub diagnostics: bool,
     pub performance: bool,
     pub log: bool,
-    pub bitmap_screenshots: bool,
-    pub fully_detailed_models: bool,
-    pub fully_qualified_names: bool,
     pub mock_steam_deck: bool,
     pub no_patch_ui: bool,
-    pub no_shaders: bool,
-    pub no_ui: bool,
-    pub old_fov: bool,
     pub reset_preferences: bool,
-    pub reset_map: bool,
-    pub stress_runs: Option<u32>,
 }
 
 /// Why a recognised option is not an exact implementation of the Windows
@@ -121,6 +113,9 @@ pub struct Invocation {
     pub modfile: Option<PathBuf>,
     pub image_path: Option<PathBuf>,
     pub jobs: Option<usize>,
+    /// Whether the classic `-image` operation should populate the whole game
+    /// image after synchronising the small client artifacts.
+    pub full_image: bool,
     pub offline: bool,
     pub no_update: bool,
     pub no_prefetch: bool,
@@ -143,6 +138,7 @@ impl Default for Invocation {
             modfile: None,
             image_path: None,
             jobs: None,
+            full_image: false,
             offline: false,
             no_update: false,
             no_prefetch: false,
@@ -182,17 +178,8 @@ impl Invocation {
             "mute": self.legacy.mute,
             "diagnostics": self.legacy.diagnostics,
             "performance": self.legacy.performance,
-            "bitmapScreenshots": self.legacy.bitmap_screenshots,
-            "fullyDetailedModels": self.legacy.fully_detailed_models,
-            "fullyQualifiedNames": self.legacy.fully_qualified_names,
             "mockSteamDeck": self.legacy.mock_steam_deck,
             "noPatchUi": self.legacy.no_patch_ui,
-            "noShaders": self.legacy.no_shaders,
-            "noUi": self.legacy.no_ui,
-            "oldFov": self.legacy.old_fov,
-            "resetPreferences": self.legacy.reset_preferences,
-            "resetMap": self.legacy.reset_map,
-            "stressRuns": self.legacy.stress_runs,
             "modsEnabled": self.modfile.is_some(),
         })
     }
@@ -229,7 +216,7 @@ Native options:
   -c, --cache PATH    override the game-data cache
   -m, --mods PATH     discover mod bundles beneath PATH
   -modfile PATH       load an explicit .gwmod session manifest
-  -j, --jobs COUNT    bound parallel preparation work
+  -j, --jobs COUNT    bound -image or repair workers (1–32)
   -i, --image PATH    use a local game image
   --offline           forbid launch-time network refreshes
   --no-update         skip client and application update checks
@@ -343,7 +330,7 @@ where
                     take_value(&args, &mut index, option, inline)?,
                     option,
                     1,
-                    256,
+                    32,
                 )?;
                 set_once(&mut invocation.jobs, value, option)?;
             }
@@ -363,6 +350,11 @@ where
 
             "-autologin" => {
                 no_inline(option, inline, || invocation.legacy.autologin = true)?;
+                translated(
+                    &mut invocation,
+                    option,
+                    "offers the invocation or profile Keychain credentials to the current client",
+                );
             }
             "-email" => {
                 let value = nonempty(take_value(&args, &mut index, option, inline)?, option)?;
@@ -384,6 +376,11 @@ where
             "-character" => {
                 let value = nonempty(take_value(&args, &mut index, option, inline)?, option)?;
                 set_once(&mut invocation.legacy.character, value.to_owned(), option)?;
+                unsupported(
+                    &mut invocation,
+                    option,
+                    "the current WebAssembly client exposes no supported character-selection launch hook",
+                );
             }
             "-fps" => {
                 let value = parse_number::<u16>(
@@ -395,13 +392,17 @@ where
                 set_once(&mut invocation.legacy.fps, value, option)?;
             }
             "-stress" => {
-                let value = parse_number::<u32>(
+                let _ = parse_number::<u32>(
                     take_value(&args, &mut index, option, inline)?,
                     option,
                     1,
                     100_000,
                 )?;
-                set_once(&mut invocation.legacy.stress_runs, value, option)?;
+                unsupported(
+                    &mut invocation,
+                    option,
+                    "the Windows stress harness is not part of the WebAssembly client",
+                );
             }
             "-mock" => {
                 let value = take_value(&args, &mut index, option, inline)?;
@@ -426,10 +427,11 @@ where
             }
             "-image" => {
                 set_command(&mut invocation, &mut command_seen, Command::Sync, option)?;
+                invocation.full_image = true;
                 translated(
                     &mut invocation,
                     option,
-                    "downloads and verifies the complete current client image",
+                    "downloads and verifies the complete current client and game image",
                 );
             }
             "-repair" => {
@@ -456,16 +458,48 @@ where
             }
             "-diag" => invocation.legacy.diagnostics = true,
             "-perf" => invocation.legacy.performance = true,
-            "-log" => invocation.legacy.log = true,
-            "-bmp" => invocation.legacy.bitmap_screenshots = true,
-            "-fqdn" => invocation.legacy.fully_qualified_names = true,
-            "-lodfull" => invocation.legacy.fully_detailed_models = true,
+            "-log" => {
+                invocation.legacy.log = true;
+                invocation.verbose = true;
+                translated(
+                    &mut invocation,
+                    option,
+                    "enables native HTTP and socket-size tracing",
+                );
+            }
+            "-bmp" => unsupported(
+                &mut invocation,
+                option,
+                "the WebAssembly client exposes no screenshot-format launch hook",
+            ),
+            "-fqdn" => no_known_effect(&mut invocation, option),
+            "-lodfull" => unsupported(
+                &mut invocation,
+                option,
+                "the WebAssembly client exposes no supported model-detail launch hook",
+            ),
             "-nopatchui" => invocation.legacy.no_patch_ui = true,
-            "-noshaders" => invocation.legacy.no_shaders = true,
-            "-noui" => invocation.legacy.no_ui = true,
-            "-oldfov" => invocation.legacy.old_fov = true,
+            "-noshaders" => unsupported(
+                &mut invocation,
+                option,
+                "the WebGL client cannot run without its shaders",
+            ),
+            "-noui" => unsupported(
+                &mut invocation,
+                option,
+                "the WebAssembly client exposes no supported user-interface suppression hook",
+            ),
+            "-oldfov" => unsupported(
+                &mut invocation,
+                option,
+                "the WebAssembly client exposes no supported field-of-view launch hook",
+            ),
             "-prefresetlocal" => invocation.legacy.reset_preferences = true,
-            "-resetmap" => invocation.legacy.reset_map = true,
+            "-resetmap" => unsupported(
+                &mut invocation,
+                option,
+                "map state belongs to the current client and has no separately certified reset operation",
+            ),
 
             "-dsound" | "-sndasio" | "-sndwinmm" => unsupported(
                 &mut invocation,
@@ -488,13 +522,7 @@ where
                 "authentication selection is owned by ArenaNet's current WebAssembly client",
             ),
             "-authsrv" | "-exit" | "-map" | "-port" | "-sndfastbuf" => {
-                invocation.notices.push(Notice {
-                    option: option.to_owned(),
-                    kind: NoticeKind::NoKnownEffect,
-                    message:
-                        "the official Guild Wars documentation records no known usable behaviour"
-                            .into(),
-                });
+                no_known_effect(&mut invocation, option);
             }
             _ => return Err(usage_error(raw)),
         }
@@ -510,6 +538,14 @@ where
         return Err(value_error(
             "--new-instance",
             "requires --profile so storage and credentials remain isolated",
+        ));
+    }
+    if invocation.jobs.is_some()
+        && !(invocation.full_image || invocation.command == Command::Repair)
+    {
+        return Err(value_error(
+            "--jobs",
+            "is only meaningful with -image or repair",
         ));
     }
     Ok(invocation)
@@ -634,6 +670,14 @@ fn unsupported(invocation: &mut Invocation, option: &str, message: &str) {
     });
 }
 
+fn no_known_effect(invocation: &mut Invocation, option: &str) {
+    invocation.notices.push(Notice {
+        option: option.to_owned(),
+        kind: NoticeKind::NoKnownEffect,
+        message: "the official Guild Wars documentation records no known usable behaviour".into(),
+    });
+}
+
 fn answer(message: &str) -> Exit {
     Exit {
         message: message.to_owned(),
@@ -707,7 +751,6 @@ mod tests {
             "--cache=/tmp/cache",
             "--modfile",
             "session.json",
-            "--jobs=8",
             "--offline",
             "--debug",
         ])
@@ -716,7 +759,6 @@ mod tests {
         assert_eq!(parsed.host_port, Some(38113));
         assert_eq!(parsed.cache_root, Some(PathBuf::from("/tmp/cache")));
         assert_eq!(parsed.modfile, Some(PathBuf::from("session.json")));
-        assert_eq!(parsed.jobs, Some(8));
         assert!(parsed.offline);
         assert!(parsed.devtools);
     }
@@ -779,6 +821,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.command, Command::Sync);
+        assert!(parsed.full_image);
         assert_eq!(parsed.legacy.fps, Some(144));
         assert!(parsed.legacy.mute);
         assert!(parsed.legacy.diagnostics);
@@ -825,17 +868,29 @@ mod tests {
             "4",
         ])
         .unwrap();
-        assert!(parsed.legacy.bitmap_screenshots);
-        assert!(parsed.legacy.fully_qualified_names);
-        assert!(parsed.legacy.fully_detailed_models);
         assert!(parsed.legacy.mock_steam_deck);
         assert!(parsed.legacy.no_patch_ui);
-        assert!(parsed.legacy.no_shaders);
-        assert!(parsed.legacy.no_ui);
-        assert!(parsed.legacy.old_fov);
         assert!(parsed.legacy.reset_preferences);
-        assert!(parsed.legacy.reset_map);
-        assert_eq!(parsed.legacy.stress_runs, Some(4));
+        assert_eq!(parsed.notices.len(), 8);
+        assert!(
+            parsed
+                .notices
+                .iter()
+                .any(|notice| notice.kind == NoticeKind::NoKnownEffect)
+        );
+        assert!(
+            parsed
+                .notices
+                .iter()
+                .any(|notice| notice.kind == NoticeKind::Unsupported)
+        );
+    }
+
+    #[test]
+    fn worker_bounds_only_apply_to_full_image_operations() {
+        assert_eq!(parse_str(&["-image", "--jobs=8"]).unwrap().jobs, Some(8));
+        assert_eq!(parse_str(&["repair", "--jobs=4"]).unwrap().jobs, Some(4));
+        assert!(parse_str(&["--jobs=8"]).unwrap_err().failed);
     }
 
     #[test]
@@ -845,6 +900,7 @@ mod tests {
             &["-fps", "fast"][..],
             &["-mock", "Phone"][..],
             &["--jobs", "0"][..],
+            &["-image", "--jobs", "33"][..],
             &["--host-port", "70000"][..],
             &["--offline", "sync"][..],
             &["-windowed", "-windowedfullscreen"][..],

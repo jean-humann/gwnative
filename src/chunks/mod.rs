@@ -22,7 +22,7 @@ mod prefetch;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -201,6 +201,51 @@ impl ChunkStore {
     /// How many chunks the snapshot is made of.
     pub fn chunk_count(&self) -> usize {
         self.manifest.files[&self.snapshot].chunk_hashes.len()
+    }
+
+    /// Validate and seed the cache from a raw local snapshot image.
+    ///
+    /// The local file is never trusted by name or size alone. Every manifest
+    /// chunk is hashed before the ordinary atomic cache write makes it visible,
+    /// so a partial, stale, or unrelated image cannot poison later reads.
+    pub fn import_image(&self, path: &Path) -> Result<()> {
+        let file = fs::File::open(path)?;
+        let actual = file.metadata()?.len();
+        let expected = self.snapshot_size();
+        if actual != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{} is {actual} bytes; the current game image is {expected} bytes",
+                    path.display()
+                ),
+            )
+            .into());
+        }
+
+        let mut input = BufReader::new(file);
+        let total = self.chunk_count();
+        let mut reported = usize::MAX;
+        for index in 0..total {
+            let hash = self.chunk_hash(index)?;
+            let length = self.chunk_length(index)?;
+            let mut bytes = vec![0u8; length as usize];
+            input.read_exact(&mut bytes)?;
+            crate::patch::verify(&bytes, &hash)?;
+            self.write_cached(&hash, &bytes)?;
+            self.verified.lock().unwrap().insert(hash);
+
+            let percent = (index + 1).saturating_mul(100) / total.max(1);
+            if percent / 5 != reported / 5 {
+                reported = percent;
+                note!(
+                    "[gwnative] importing local game image: {}/{} ({percent}%)",
+                    index + 1,
+                    total
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Where the cache lives, for anyone who needs to ask the volume about it.
@@ -448,6 +493,23 @@ mod tests {
     use super::*;
     use crate::chunks::fixture::store_of;
     use crate::scratch::TempDir;
+
+    #[test]
+    fn a_local_image_is_verified_before_it_seeds_the_cache() {
+        let temp = TempDir::new("local-image");
+        let bytes = vec![0x5au8; 1024];
+        let store = crate::chunks::fixture::store_of_content(temp.0.join("chunks"), &[&bytes]);
+        let image = temp.0.join("Gw.snapshot");
+        fs::write(&image, &bytes).unwrap();
+
+        store.import_image(&image).unwrap();
+        assert_eq!(store.resident_count(), 1);
+
+        let other = crate::chunks::fixture::store_of_content(temp.0.join("other"), &[&bytes]);
+        fs::write(&image, vec![0xa5u8; 1024]).unwrap();
+        assert!(other.import_image(&image).is_err());
+        assert_eq!(other.resident_count(), 0);
+    }
 
     /// The whole point of taking the permit first. A demand read joins a fetch
     /// already claimed for the chunk it wants, so a speculative fetch holding
