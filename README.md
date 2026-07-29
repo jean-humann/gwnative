@@ -779,12 +779,16 @@ needs no notion of repair of its own, and warms the `verified` set that the
 window `pread`s depend on as a side effect.
 
 Two details it would be easy to get wrong. It walks distinct chunks, not
-indices — one all-zero block stands in for thousands of places in a snapshot,
-and hashing per index would multiply the pass by the repetition factor while
-proving nothing the first read did not; `verifyTotal` is therefore a smaller
-number than `total` and the bar must be drawn against it. And a chunk that was
-never fetched is not damage: an interrupted download reported as a corrupt one
-would be a lie told at the worst possible moment.
+indices, so a repeated chunk is hashed once and `verifyTotal` is the number the
+bar must be drawn against rather than `total`. On the manifest as it ships today
+those two are the same — all 16,167 hashes are distinct, the same fact that
+denies the download a deduplication discount — so the pass costs a full re-hash
+of the image and the deduplication buys nothing. It is kept because it is a
+`HashSet` over a list already in memory, and because the alternative is code
+that quietly does the repetition factor's worth of extra work the first time
+ArenaNet ships a snapshot that repeats. And a chunk that was never fetched is
+not damage: an interrupted download reported as a corrupt one would be a lie
+told at the worst possible moment.
 
 Eight threads rather than the sweep's thirty-two, and no permits, because this
 one never touches the network — past the point where the volume is saturated,

@@ -452,10 +452,15 @@ impl ChunkStore {
             return false;
         }
 
-        // Deduplicated up front, on this thread. A snapshot repeats chunks —
-        // one all-zero block stands in for thousands of indices — and hashing
-        // the same file once per occurrence would multiply the pass by the
-        // repetition factor while proving nothing the first read did not.
+        // Deduplicated up front, on this thread, so a chunk that appears at
+        // several indices is hashed once rather than once per occurrence.
+        //
+        // On the snapshot as it ships today this finds nothing: all 16,167
+        // hashes are distinct, which is the same fact that denies the download
+        // a deduplication discount. It is a `HashSet` over a list already in
+        // memory, so keeping it costs nothing measurable, and the alternative
+        // is a pass that silently does the repetition factor's worth of extra
+        // work the first time a snapshot does repeat.
         let mut seen = HashSet::new();
         let mut work = Vec::new();
         for index in 0..self.chunk_count() {
@@ -674,10 +679,10 @@ mod tests {
 
     #[test]
     fn a_chunk_the_snapshot_repeats_is_checked_once() {
-        // Four indices over two distinct chunks — a snapshot in miniature,
-        // where one all-zero block stands in for thousands of places. Hashing
-        // per index would be twice the work here and orders of magnitude more
-        // on the real thing, for the same answer.
+        // Four indices over two distinct chunks. Today's real snapshot repeats
+        // nothing, so this is the case the deduplication is kept *for* rather
+        // than one it is currently earning its place on — which is exactly why
+        // it needs a test: nothing in production would notice it breaking.
         let (_temp, store) = planted(
             "verify-dedup",
             &[&[b'a'; 1024], &[b'b'; 1024], &[b'a'; 1024], &[b'b'; 1024]],

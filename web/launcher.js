@@ -154,9 +154,11 @@ async function checkImage(log) {
 
   let failures = 0;
   for (;;) {
-    // `verifyTotal` counts distinct chunks and `total` counts indices, so the
-    // bar has to be drawn against the former — the same number the host warned
-    // is not the one beside it.
+    // `verifyTotal` counts distinct chunks and `total` counts indices. They
+    // are equal on today's snapshot, which repeats nothing, but drawing
+    // against `total` would silently start reporting a fraction of the real
+    // progress the day one does — so the bar uses the number the host sent for
+    // it rather than the one that happens to match.
     const total = state.verifyTotal || 1;
     fill.style.width = `${((state.verified / total) * 100).toFixed(1)}%`;
     el('launcher-detail').textContent = `${state.verified} of ${state.verifyTotal} pieces checked`;

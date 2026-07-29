@@ -463,8 +463,10 @@ fn prefetch(
         "needed": needed,
         "verifying": verifying,
         "verified": checked,
-        // Distinct chunks, not indices, so it is smaller than `total` and must
-        // not be drawn against it. The page has its own denominator here.
+        // Distinct chunks, not indices — equal to `total` on a snapshot that
+        // repeats nothing, which today's does, and smaller on one that does
+        // not. Sent as its own field either way so the page never has to guess
+        // which case it is in.
         "verifyTotal": verify_total,
         "discarded": discarded,
         // `null` rather than a guess when the volume will not say: the page
