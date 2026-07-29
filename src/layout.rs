@@ -244,9 +244,8 @@ extern "C" fn layout_changed(
 /// thread that registered for it, and `on_change` ends in `evaluateJavaScript`,
 /// which is main-thread-only.
 ///
-/// Chromium has no layout-change event at all, so gwonmac can only re-read on
-/// focus — which misses a switch made with the game already in front. This is
-/// the one part of the port that is better than what it came from.
+/// The notification matters while the game is already frontmost: polling only
+/// when focus changes would miss a layout switch made in place.
 pub fn watch(on_change: fn(&str)) {
     if ON_CHANGE.set(on_change).is_err() {
         return;

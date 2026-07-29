@@ -40,8 +40,7 @@ use crate::qos;
 /// [`MAX_CONCURRENT_FETCHES`](super::MAX_CONCURRENT_FETCHES), so a full
 /// download always leaves slots free for the reads the game is actually blocked
 /// on. Without the reserve a sweep of 16000 chunks would sit in front of every
-/// demand read and stall rendering — which is the whole reason gwonmac splits
-/// its queue by priority.
+/// demand read and stall rendering.
 ///
 /// Two thirds of the pool, because during the boot warm-up the guesses *are*
 /// the demand: the list being replayed is the very set of chunks the client

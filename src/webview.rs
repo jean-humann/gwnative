@@ -19,8 +19,8 @@ use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebVie
 
 use crate::{layout, release, settings, wasm};
 
-/// WebKit feature flags this host turns off, because each one is a behaviour
-/// Chromium does not have and the Electron build therefore never suffers.
+/// WebKit feature flags this host turns off because each conflicts with a
+/// running game's timing or background-download contract.
 ///
 /// The first is the frame-rate cap: WebKit prefers rendering updates near
 /// 60 Hz even on displays that refresh faster, and the game's main loop is
@@ -34,9 +34,8 @@ use crate::{layout, release, settings, wasm};
 /// download stalled mid-flight (at 2,093 and at 1,485 of ~6,000 chunks) the
 /// moment the machine went unattended, and never resumed — the harness's
 /// timer fallback could not save it, because the process its timers lived in
-/// was itself suspended. The Electron build downloads from its main process
-/// and throttles nothing, so a player who starts the download and walks away
-/// comes back to a finished install; these flags buy the same contract.
+/// was itself suspended. A player who starts the download and walks away must
+/// still come back to a finished install; these flags preserve that contract.
 const DISABLED_FEATURES: [&str; 5] = [
     "PreferPageRenderingUpdatesNear60FPSEnabled",
     "PageVisibilityBasedProcessSuppressionEnabled",
@@ -139,7 +138,7 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences) {
 /// than costing the panel a round trip the first time it opens. The client build
 /// beside it is what the page compares against
 /// [`settings::Settings::compatibility_notice_seen_for`], and is `null` on the
-/// one launch where the module could not be read at all. The GWonMac Tools ride
+/// one launch where the module could not be read at all. Enhancement state rides
 /// alongside for the same reason and one more: the page installs its tick from
 /// inside `instantiateWasm`, before anything it could await has happened, and a
 /// tick that arrived a round trip later would have missed the frames it exists

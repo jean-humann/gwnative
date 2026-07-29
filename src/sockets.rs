@@ -1,11 +1,9 @@
 //! Game TCP sockets, bridged to the page over one WebSocket each.
 //!
-//! There is deliberately no queue in either direction. The Electron host it
-//! replaces buffers outbound payloads and has to defend that buffer with
-//! per-socket and per-owner byte caps; here each direction is a blocking copy
-//! between two sockets on its own thread, so the kernel's own send and receive
-//! windows are the backpressure. Nothing accumulates in the host, so there is
-//! no bound to get wrong.
+//! There is deliberately no queue in either direction. Each direction is a
+//! blocking copy between two sockets on its own thread, so the kernel's send and
+//! receive windows provide backpressure. Nothing accumulates in the host, so
+//! there is no application buffer or byte cap to get wrong.
 
 // Anonymous because `io::Write` is here too and both spell `write!`; the
 // compiler picks by receiver, and only the hex trace uses this one.

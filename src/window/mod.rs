@@ -198,8 +198,7 @@ fn observe(tracker: &mut Tracker) -> State {
 /// that has been unplugged, one too small to grab. What it cannot rescue is the
 /// window a player has merely lost: dragged mostly off the edge, or left full
 /// screen on a machine whose second display went away between sessions. This is
-/// the escape hatch for those, and it is why the Electron build has the same
-/// item in the same menu.
+/// the explicit escape hatch for those cases.
 pub fn reset(mtm: MainThreadMarker) {
     // Cloned out rather than used inside the borrow: every AppKit call below
     // posts a window notification synchronously, and the handlers for those

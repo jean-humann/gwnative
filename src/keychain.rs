@@ -1,13 +1,9 @@
 //! Saved login, held in the login keychain.
 //!
-//! The Electron host this replaces encrypts a JSON file with `safeStorage` and
-//! writes it beside its other state. That still ends at the keychain — it is
-//! where the encryption key lives — but by way of a file the app has to create,
-//! permission, atomically replace and delete, none of which the keychain needs.
-//! A generic-password item is the same secret with none of that: the ACL is the
-//! system's, the item shows up in Keychain Access under its own name, and
-//! deleting it is one call rather than an unlink that has to tolerate a missing
-//! file.
+//! A generic-password item lets macOS own encryption, permissions and
+//! replacement. The ACL is the system's, the item appears in Keychain Access
+//! under its own name, and deletion is one keychain operation rather than a
+//! filesystem transaction.
 //!
 //! One item holds both fields, because the client asks for the pair or for
 //! neither. The account name is not itself a secret, but splitting it out would

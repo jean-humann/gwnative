@@ -400,9 +400,9 @@ export async function resolveDataStrategy(snapshotBytes, { log, save, strategy }
     await sweepSnapshot('stop').catch((error) => log(`[warn] launcher: ${error}`));
     await remember('quick');
   } else if (paused) {
-    // Play now resumes, which is what the Electron build does and the only
-    // reading of three buttons that holds together: Pause is "not while I am
-    // watching this bar", and the way to stop for good is beside it.
+    // Play now resumes: Pause means "not while I am watching this bar", and the
+    // way to stop the background download for good is the Quick Start button
+    // beside it.
     log('launcher: playing now; the paused download picks back up in the background');
     await sweepSnapshot('start').catch((error) => log(`[warn] launcher: ${error}`));
   }

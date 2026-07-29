@@ -20,7 +20,7 @@
 //! `web/template-save.js` answers it against the mounted IDBFS.
 //!
 //! A second transform, [`enhancement`], is layered on top of the first when the
-//! player has turned one of the GWonMac Tools on. It clones the client's main
+//! player has turned on an optional enhancement. It clones the client's main
 //! loop so a companion module can run beside it; the module doc there is the
 //! account of why that is the only extension point the client offers. It is
 //! chained rather than offered as an alternative, so opting in never costs
@@ -135,10 +135,10 @@ pub struct Module {
 /// The derived module for `base`, transforming only when the cache cannot prove
 /// it already holds exactly this output.
 ///
-/// `enhance` is whether any GWonMac Tool is on. It is a parameter rather than a
-/// setting read in here because the decision belongs to the caller: the module
-/// is chosen once, before the page exists, and a launch that changed its mind
-/// halfway would be serving one module and describing another.
+/// `enhance` is whether any optional enhancement is on. It is a parameter rather
+/// than a setting read in here because the decision belongs to the caller: the
+/// module is chosen once, before the page exists, and a launch that changed its
+/// mind halfway would be serving one module and describing another.
 pub fn prepare(base: &Path, cache_root: &Path, enhance: bool) -> Outcome<Prepared> {
     let input = fs::read(base).map_err(|e| format!("template-save: {}: {e}", base.display()))?;
     let input_hash = digest(&input);

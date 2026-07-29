@@ -144,7 +144,7 @@ fn main() {
     ));
 
     // Derive the client that can save a template, if this is a build we have
-    // certified, and layer the GWonMac Tools on top of it when the player has
+    // certified, and layer optional enhancements on top when the player has
     // asked for one. A failure here is never fatal: the untransformed module
     // still plays, it just cannot save, list or delete a build — which is where
     // the client started. See `wasm` for what each derived module changes.
@@ -198,7 +198,7 @@ fn main() {
         }
     };
     if module.enhancements != wasm::enhancements::OFF {
-        note!("[gwnative] GWonMac Tools: {}", module.enhancements);
+        note!("[gwnative] enhancements: {}", module.enhancements);
     }
 
     let token = session_token();

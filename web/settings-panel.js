@@ -3,8 +3,6 @@
 //
 // The host has owned a settings file since the render scale went in, and the
 // page has read it at every boot, but nothing has ever offered to change it.
-// The Electron build has had a settings window all along; this is the same four
-// settings with the same effects.
 //
 // Two of them cannot take effect until the next launch, and the panel says so
 // rather than pretending. The render scale is handed to the client through an
@@ -178,12 +176,12 @@ export const CONTROLS = [
       { value: true, label: 'Install on its own' },
     ],
   },
-  // The GWonMac Tools. Both are relaunch-required for the same reason and it
-  // is not a UI limitation: turning either on changes which client module the
+  // The optional enhancements. Both require a relaunch for the same reason, and
+  // it is not a UI limitation: turning either on changes which client module the
   // host builds and serves, and that is decided before this page exists. There
-  // is deliberately no master switch above them — "are the tools on" is
-  // derived from "is any tool on", so there is nothing that can disagree with
-  // the two controls it would be speaking for.
+  // is deliberately no master switch above them — "are the tools on" is derived
+  // from "is any tool on", so there is nothing that can disagree with the two
+  // controls it would be speaking for.
   {
     key: 'nativeCursor',
     group: 'tools',

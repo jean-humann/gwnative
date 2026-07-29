@@ -88,11 +88,11 @@ export const GUIDE = [
     ],
   },
   {
-    heading: 'GWonMac Tools',
+    heading: 'Enhancements',
     body: [
-      'Two extras in Settings, both off-by-default in the sense that matters: neither ' +
-        'changes the game, and turning both off leaves the client exactly as ArenaNet ' +
-        'shipped it.',
+      'Two read-only extras in Settings. Game cursor is on by default; Target distance ' +
+        'is off. Turning both off removes the optional tools; the separate build-template ' +
+        'repair may still be active.',
       'Game cursor draws the game\'s own pointer as the Mac\'s pointer. The game normally ' +
         'paints its cursor into the picture, which means the cursor arrives with the frame ' +
         'and lags behind your hand whenever the frame rate drops. With this on, the pointer ' +

@@ -4,9 +4,7 @@
 //! problem: it is a JSONL file of several thousand machine-written records with
 //! no header, no environment and no indication of which end is recent. Asking
 //! somebody to attach it is asking them to attach a wall of numbers about a Mac
-//! nobody can identify — and the Electron build's answer, an in-memory event log
-//! rendered on demand, does not apply here because these diagnostics were always
-//! a file.
+//! nobody can identify.
 //!
 //! So this is not an export in that sense. It is a cover sheet: what machine,
 //! what build, what settings, and the tail of the log underneath it, redacted

@@ -741,18 +741,17 @@ mod tests {
     ///
     /// Everything above works from a recorded page, which cannot notice GitHub
     /// renaming a field, or refusing the headers this build sends. Asking the
-    /// live API about a repository that really does publish releases is what
-    /// turns those into a failure here rather than into "could not check for
-    /// updates" on a player's screen. The repository is the sibling project's,
-    /// because it is public, it publishes releases in exactly the tag shapes
-    /// [`parse`] accepts, and it is the same person's to break.
+    /// live API about this project's declared repository is what turns those
+    /// into a failure here rather than into "could not check for updates" on a
+    /// player's screen.
     #[test]
     #[ignore = "reaches api.github.com"]
     fn the_live_endpoint_answers() {
-        // Below everything that project has published, and on a prerelease
-        // channel, so every release on the page is one this install may be
-        // moved to.
-        let notice = ask("Mat4m0/gwonmac", v("0.0.1-alpha.0"));
+        let repository = repository().expect("Cargo.toml declares a GitHub repository");
+        // Below everything this project has published, and on a prerelease
+        // channel, so every release on the page is one this install may be moved
+        // to.
+        let notice = ask(repository, v("0.0.1-alpha.0"));
         let Notice::Available { latest, .. } = notice else {
             panic!("the live check found nothing newer: {notice:?}");
         };
@@ -760,12 +759,10 @@ mod tests {
         // than out of the response.
         assert_eq!(parse(&latest).map(|v| v.to_string()), Some(latest.clone()));
 
-        // The same page, read by a stable install. That project has published
-        // only prereleases so far, so `Current` is the honest answer and the
-        // one this returns today; if it ever ships a stable release this
-        // becomes `Available`, which is equally correct. What it must never be
-        // is `Unknown` — the page was fetched and read either way.
-        let notice = ask("Mat4m0/gwonmac", v("0.0.1"));
+        // The same page, read by a stable install. It may answer `Current` or
+        // `Available` as releases evolve; what it must never be is `Unknown` —
+        // the page was fetched and read either way.
+        let notice = ask(repository, v("0.0.1"));
         assert!(!matches!(notice, Notice::Unknown(_)), "{notice:?}");
     }
 
@@ -773,8 +770,12 @@ mod tests {
     #[test]
     #[ignore = "reaches api.github.com"]
     fn a_repository_with_no_releases_is_an_answer() {
+        let missing = format!(
+            "{}-does-not-exist",
+            repository().expect("Cargo.toml declares a GitHub repository")
+        );
         assert_eq!(
-            ask("Mat4m0/gwnative-does-not-exist", v("0.0.1")),
+            ask(&missing, v("0.0.1")),
             Notice::Unknown(Reason::Server),
             "a repository that is not there is not an up-to-date"
         );

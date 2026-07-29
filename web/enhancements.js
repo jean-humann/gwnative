@@ -1,4 +1,4 @@
-// Installing the GWonMac Tools: the page's half of the enhancement chain.
+// Installing optional enhancements: the page's half of the enhancement chain.
 //
 // By the time anything here runs, the host has already decided the hard part.
 // It read the player's settings, saw that a tool was wanted, derived a client

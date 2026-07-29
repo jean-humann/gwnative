@@ -5,9 +5,10 @@
 //! for through `emscripten_get_device_pixel_ratio`, `touchMode` selects which
 //! gesture translation `input.js` installs, `showDiagnostics` opens the log pane
 //! at boot, `dataStrategy` records the answer to the launcher's one question,
-//! `autoCheckUpdates` and `lastUpdateCheckAt` together decide whether a launch
-//! asks GitHub about itself, and `compatibilityNoticeSeenFor` is which client
-//! build the player has already been warned about. Nothing is stored for a
+//! `autoCheckUpdates`, `autoInstallUpdates` and `lastUpdateCheckAt` describe
+//! update intent and cadence, `compatibilityNoticeSeenFor` is which client build
+//! the player has already been warned about, and `nativeCursor` plus
+//! `targetReadout` select the two optional enhancements. Nothing is stored for a
 //! feature this app does not have — a settings file whose fields nothing reads
 //! is a migration burden that never bought anything.
 //!

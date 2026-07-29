@@ -55,11 +55,11 @@ const FALLBACK = {
   autoInstallUpdates: false,
   lastUpdateCheckAt: null,
   compatibilityNoticeSeenFor: null,
-  // The GWonMac Tools. There is deliberately no master switch beside them:
-  // "are the tools on" is derived from "is any tool on", so a stored master
-  // could disagree with the tools it claims to speak for. Which module the
-  // host serves is decided from these two before this page exists, which is
-  // why both are relaunch-required in the panel.
+  // The optional enhancements. There is deliberately no master switch beside
+  // them: "are the tools on" is derived from "is any tool on", so a stored
+  // master could disagree with the tools it claims to speak for. Which module
+  // the host serves is decided from these two before this page exists, which is
+  // why both require a relaunch in the panel.
   nativeCursor: true,
   targetReadout: false,
 };

@@ -128,13 +128,10 @@ define_class!(
 
         /// Load the page again from the top.
         ///
-        /// Deliberately unguarded, unlike the Electron build, which asks first
-        /// when a game socket is open. That question is worth asking there
-        /// because ⌘R is a browser reflex and Chromium honours it everywhere.
-        /// Here the key equivalent exists only because this item does, so
-        /// nobody arrives at it by muscle memory — and the reload is the escape
-        /// hatch for a client that has already stopped answering, which is
-        /// exactly when a modal asking about sockets is in the way.
+        /// Deliberately unguarded. The key equivalent exists only because this
+        /// menu item does, so it is not an ambient browser shortcut — and reload
+        /// is the escape hatch for a client that has already stopped answering,
+        /// exactly when another modal would be in the way.
         #[unsafe(method(gwReloadGame:))]
         fn reload_game(&self, _sender: Option<&AnyObject>) {
             // SAFETY: main thread — AppKit sends menu actions there.

@@ -57,9 +57,7 @@ window.addEventListener('unhandledrejection', (e) => forward(`[unhandled] ${e.re
 // applies mid-boot, so a first launch left to download while the player walks
 // away froze the moment the screen locked. Measured: a blank-install boot
 // stalled at 2,093 of 6,075 chunks, host idle in accept, the moment user input
-// stopped; it never resumed. The Electron build does not have this failure,
-// because its chunk store downloads from the main process no matter what the
-// renderer is doing.
+// stopped; it never resumed.
 //
 // So until the first frame has been presented, arm a timer alongside every
 // frame request and let whichever arrives first win. While the window is
@@ -289,12 +287,10 @@ const credentials = (method, body) => {
 /// The read is started when this file loads rather than when the client asks
 /// for it, because the client does not wait: it asks for the saved login during
 /// a startup step and builds the login screen when that step completes,
-/// whichever of the two happens first. The Electron host answered from a
-/// decrypted file over IPC in a couple of milliseconds and so always won that
-/// race by accident. This one has to cross the loopback origin and open a
-/// keychain item, whose first read costs about 150 ms — long enough to lose it,
-/// and the symptom is a login screen with "Remember Account Name" ticked and
-/// nothing in the field. Started at load it is minutes early instead.
+/// whichever of the two happens first. Opening the keychain item can cost about
+/// 150 ms — long enough to lose that race — and the symptom is a login screen
+/// with "Remember Account Name" ticked and nothing in the field. Started at load
+/// it is minutes early instead.
 let saved = null;
 
 const readSaved = () => {
@@ -340,7 +336,7 @@ let recovery;
 // `Module.wasmExports`: this build's glue does not export that name, and asking
 // for it does not return undefined — it aborts.
 let gameInstance;
-// Kept beside it because the GWonMac Tools read their manifest off the module
+// Kept beside it because the enhancements read their manifest off the module
 // rather than the instance — `WebAssembly.Module.customSections` — and by the
 // time the runtime is initialised, `instantiateWasm`'s `result` is long gone.
 let gameModule;
@@ -579,7 +575,7 @@ Module = {
 };
 
 /**
- * Install the GWonMac Tools, if this launch is one that has them.
+ * Install optional enhancements, if this launch is one that has them.
  *
  * Three things have to line up, and each one is a different party's decision:
  * the player turned a tool on, the host answered by deriving a client that has
@@ -600,7 +596,7 @@ function installTools() {
   };
   if (!selection.nativeCursor && !selection.targetReadout) return;
   if (window.__gwnativeEnhancements !== 'ready') {
-    log(`[warn] GWonMac Tools are on but this client is ${window.__gwnativeEnhancements}`);
+    log(`[warn] enhancements are on but this client is ${window.__gwnativeEnhancements}`);
     return;
   }
   if (
@@ -608,14 +604,14 @@ function installTools() {
     || !gameModule
     || WebAssembly.Module.customSections(gameModule, 'enhancement_manifest').length !== 1
   ) {
-    log('[warn] GWonMac Tools: the client the page ran carries no manifest');
+    log('[warn] enhancements: the client the page ran carries no manifest');
     return;
   }
   const instance = gameInstance;
   const module = gameModule;
   void import('./enhancements.js')
     .then(({ installEnhancements }) => installEnhancements(instance, module, selection))
-    .catch((error) => log('[warn] GWonMac Tools:', error?.message ?? error));
+    .catch((error) => log('[warn] enhancements:', error?.message ?? error));
 }
 
 function appendGlue() {
@@ -912,11 +908,9 @@ function appendGlue() {
     window.addEventListener(event, () => host.resumeGameAudio(), true);
   }
 
-  // Match the Electron build, where selecting another window silences the
-  // game. That is not something either host implements: it is the client's own
-  // blur callback, registered on the canvas, and Chromium blurs the focused
-  // element when its window resigns key while WKWebView only fires blur on the
-  // window. So the client never hears about it here and keeps playing.
+  // The client registers its blur callback on the canvas, while WKWebView fires
+  // blur on the window when it resigns key. The client therefore never hears
+  // about the transition on its own and keeps playing.
   //
   // The native side is the source of truth — see `src/commands.rs` for why
   // AppKit sees deactivations the page does not — and these are the fallback

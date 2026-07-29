@@ -10,8 +10,7 @@
 //!
 //! Saying which threads are latency-critical and which are merely throughput
 //! work moves that sweep onto efficiency cores and leaves the P-cores to the
-//! game. It is also something Electron structurally cannot do: its equivalent
-//! work runs on libuv's threadpool at whatever QoS the pool was created with.
+//! game.
 //!
 //! What the classes cannot be is a property of the thread's *job*, because the
 //! same job changes meaning: the fetchers filling the cache are the launch

@@ -1,12 +1,11 @@
 //! Outbound HTTPS, through the operating system's stack.
 //!
 //! Every request here goes out over one shared `NSURLSession`, which is the
-//! same CFNetwork machinery Safari uses and the same class of transport the
-//! Electron build gets from Chromium: TLS with ALPN, and HTTP/2 when the
-//! server offers it. That last part is the reason this module exists. The
-//! patch CDN speaks HTTP/2, and on HTTP/2 every concurrent fetch is a stream
-//! on a single warm connection — one TCP handshake, one TLS handshake, one
-//! congestion window that stays hot for the whole download.
+//! same CFNetwork machinery Safari uses: TLS with ALPN, and HTTP/2 when the
+//! server offers it. That last part is the reason this module exists. The patch
+//! CDN speaks HTTP/2, and on HTTP/2 every concurrent fetch is a stream on a
+//! single warm connection — one TCP handshake, one TLS handshake, one congestion
+//! window that stays hot for the whole download.
 //!
 //! The ureq client this replaces spoke HTTP/1.1, where a connection carries
 //! one request at a time, and kept three idle connections per host against

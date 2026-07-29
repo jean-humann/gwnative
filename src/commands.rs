@@ -86,12 +86,11 @@ fn watch_keyboard_layout() {
 /// sees the window resign key every time, including the times the page's own
 /// blur does not fire.
 ///
-/// Audio: the Electron build goes quiet when another window is selected. That
-/// is the client's own doing — it registers a blur callback on the canvas, and
-/// Chromium blurs the focused element when the window resigns key. WebKit only
-/// fires blur on the window, so the client never hears it and keeps playing.
-/// The page has a fallback on `window` blur, but this is the reliable half, for
-/// the same reason it is the reliable half for input.
+/// Audio: the client registers a blur callback on the canvas, but WebKit fires
+/// blur on the window when it resigns key. The client therefore never hears the
+/// transition and keeps playing. The page has a fallback on `window` blur, but
+/// this is the reliable half, for the same reason it is the reliable half for
+/// input.
 ///
 /// The two are watched separately because they are two different questions.
 /// Input follows the *window*: a key stranded by ⌘Tab is stranded whether or not

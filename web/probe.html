@@ -100,7 +100,7 @@ async function probe() {
   try { r['storage.estimate'] = await navigator.storage?.estimate?.(); } catch (e) { r['storage.estimate'] = 'ERR: ' + e; }
   try { r['storage.persist']  = await navigator.storage?.persist?.();  } catch (e) { r['storage.persist']  = 'ERR: ' + e; }
 
-  // --- platform APIs the gwonmac host shim uses -----------------------
+  // --- platform APIs the host shim uses -------------------------------
   t('kbd.getLayoutMap', () => !!(navigator.keyboard && navigator.keyboard.getLayoutMap));
   t('TouchEvent.ctor',  () => { new TouchEvent('touchstart'); return true; });
   t('Touch.ctor',       () => { new Touch({ identifier: 0, target: document.body }); return true; });

@@ -4,10 +4,10 @@
 // the host has to know about: when the first frame reaches the screen, and what
 // device pixel ratio the client should render at.
 //
-// Unlike the Electron host this does NOT route frames through an OffscreenCanvas
-// and transferToImageBitmap. That hop measured 0.20 ms p50 at 3840x2160 on this
-// machine, which buys nothing when the client renders at the canvas's own size —
-// EGL gets the visible canvas directly and the compositor presents it.
+// Frames are not routed through an OffscreenCanvas and transferToImageBitmap.
+// That hop measured 0.20 ms p50 at 3840x2160 on this machine and buys nothing
+// when the client renders at the canvas's own size — EGL gets the visible canvas
+// directly and the compositor presents it.
 
 import * as diagnostics from './diagnostics.js';
 

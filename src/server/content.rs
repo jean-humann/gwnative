@@ -22,10 +22,10 @@ use crate::wasm::{COMPANION_KERNEL, COMPANION_KERNEL_PATH};
 /// Largest span served from one request. The harness asks for far less; this
 /// only stops a stray `Range: bytes=0-` from walking the whole image in one go.
 ///
-/// 8 MiB, the figure gwonmac settled on, not the 32 MiB this used to be. The
-/// body is streamed now so the cap no longer bounds memory, but it still bounds
-/// how long one request occupies a connection and a fetch slot: 32 MiB is 128
-/// chunks, and a demand read arriving behind that waits for all of them.
+/// The body is streamed, so the 8 MiB cap no longer bounds memory, but it still
+/// bounds how long one request occupies a connection and a fetch slot. A 32 MiB
+/// request is 128 chunks, and a demand read arriving behind it waits for all of
+/// them.
 const MAX_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Answer anything that is not a host capability.
