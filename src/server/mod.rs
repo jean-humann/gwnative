@@ -34,6 +34,7 @@ use crate::chunks::ChunkStore;
 use crate::diagnostics::Recorder;
 use crate::generation;
 use crate::http::{MAX_BODY_BYTES, POLICY, Request, policy, read_request, text};
+use crate::mods;
 use crate::qos;
 use crate::relaunch;
 use crate::settings;
@@ -93,6 +94,7 @@ struct Context {
     /// Profile-specific Keychain account name. The service remains stable so
     /// existing default-profile credentials keep working.
     credential_account: String,
+    mods: Option<Arc<mods::Catalog>>,
 }
 
 /// A browser uses only a small connection pool. This ceiling leaves ample room
@@ -126,17 +128,32 @@ impl Drop for Connection {
 /// password — which would make the keychain's own access control decorative.
 /// The page receives the token through an injected script, never over this
 /// socket, so reading the traffic does not yield it.
-pub fn spawn(
-    root: PathBuf,
-    snapshot: Option<Arc<ChunkStore>>,
-    recorder: Arc<Recorder>,
-    derived_wasm: Option<PathBuf>,
-    settings: Arc<settings::Store>,
-    generations: Arc<generation::Store>,
-    token: String,
-    port: u16,
-    credential_account: String,
-) -> std::io::Result<Loopback> {
+pub struct Config {
+    pub root: PathBuf,
+    pub snapshot: Option<Arc<ChunkStore>>,
+    pub recorder: Arc<Recorder>,
+    pub derived_wasm: Option<PathBuf>,
+    pub settings: Arc<settings::Store>,
+    pub generations: Arc<generation::Store>,
+    pub token: String,
+    pub port: u16,
+    pub credential_account: String,
+    pub mods: Option<Arc<mods::Catalog>>,
+}
+
+pub fn spawn(config: Config) -> std::io::Result<Loopback> {
+    let Config {
+        root,
+        snapshot,
+        recorder,
+        derived_wasm,
+        settings,
+        generations,
+        token,
+        port,
+        credential_account,
+        mods,
+    } = config;
     let listener = bind(port)?;
     let addr = listener.local_addr()?;
     // Before the first response can be written, and only once — a second
@@ -153,6 +170,7 @@ pub fn spawn(
         generations,
         token,
         credential_account,
+        mods,
     });
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -374,17 +392,18 @@ mod tests {
         let dir = temp.0.clone();
         let file = dir.join("settings.json");
         let token = "test-token";
-        let loopback = spawn(
-            dir.clone(),
-            None,
-            Recorder::open(dir.join("diagnostics")),
-            None,
-            Arc::new(settings::Store::open(file.clone())),
-            Arc::new(generation::Store::open(dir.join("generations"))),
-            token.to_owned(),
-            PORT,
-            "login".into(),
-        )
+        let loopback = spawn(Config {
+            root: dir.clone(),
+            snapshot: None,
+            recorder: Recorder::open(dir.join("diagnostics")),
+            derived_wasm: None,
+            settings: Arc::new(settings::Store::open(file.clone())),
+            generations: Arc::new(generation::Store::open(dir.join("generations"))),
+            token: token.to_owned(),
+            port: PORT,
+            credential_account: "login".into(),
+            mods: None,
+        })
         .unwrap();
         let addr = loopback.addr;
         let auth = Some(token);
@@ -449,20 +468,21 @@ mod tests {
         let temp = TempDir::new("server-clear");
         let dir = temp.0.clone();
         let token = "test-token";
-        let loopback = spawn(
-            dir.clone(),
+        let loopback = spawn(Config {
+            root: dir.clone(),
             // The interesting half of this test: no store, which is every launch
             // before the manifest is fetched and every launch that failed to get
             // one.
-            None,
-            Recorder::open(dir.join("diagnostics")),
-            None,
-            Arc::new(settings::Store::open(dir.join("settings.json"))),
-            Arc::new(generation::Store::open(dir.join("generations"))),
-            token.to_owned(),
-            PORT,
-            "login".into(),
-        )
+            snapshot: None,
+            recorder: Recorder::open(dir.join("diagnostics")),
+            derived_wasm: None,
+            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            generations: Arc::new(generation::Store::open(dir.join("generations"))),
+            token: token.to_owned(),
+            port: PORT,
+            credential_account: "login".into(),
+            mods: None,
+        })
         .unwrap();
         let addr = loopback.addr;
 
@@ -499,17 +519,18 @@ mod tests {
         let dir = temp.0.clone();
         let token = "test-token";
         let diagnostics = dir.join("diagnostics");
-        let loopback = spawn(
-            dir.clone(),
-            None,
-            Recorder::open(diagnostics.clone()),
-            None,
-            Arc::new(settings::Store::open(dir.join("settings.json"))),
-            Arc::new(generation::Store::open(dir.join("generations"))),
-            token.to_owned(),
-            PORT,
-            "login".into(),
-        )
+        let loopback = spawn(Config {
+            root: dir.clone(),
+            snapshot: None,
+            recorder: Recorder::open(diagnostics.clone()),
+            derived_wasm: None,
+            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            generations: Arc::new(generation::Store::open(dir.join("generations"))),
+            token: token.to_owned(),
+            port: PORT,
+            credential_account: "login".into(),
+            mods: None,
+        })
         .unwrap();
         let addr = loopback.addr;
 

@@ -125,6 +125,29 @@ fn writable_web_root(support: &Path) -> PathBuf {
     live
 }
 
+/// Copy the bundle's shell files over the live web root.
+///
+/// Only what the bundle carries: the client artifacts sit in the same directory
+/// once fetched and must survive. Contents are compared rather than timestamps,
+/// which a copy does not preserve — these are a few tens of kilobytes, so the
+/// comparison costs less than being wrong about it would.
+fn seed_web(seed: &Path, live: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(live)?;
+    for entry in std::fs::read_dir(seed)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let fresh = std::fs::read(entry.path())?;
+        let installed = live.join(entry.file_name());
+        if std::fs::read(&installed).is_ok_and(|current| current == fresh) {
+            continue;
+        }
+        std::fs::write(&installed, &fresh)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,27 +192,4 @@ mod tests {
         assert_eq!(layout.web_root(), Path::new("/tmp/gw-web"));
         assert_eq!(layout.port(), 39000);
     }
-}
-
-/// Copy the bundle's shell files over the live web root.
-///
-/// Only what the bundle carries: the client artifacts sit in the same directory
-/// once fetched and must survive. Contents are compared rather than timestamps,
-/// which a copy does not preserve — these are a few tens of kilobytes, so the
-/// comparison costs less than being wrong about it would.
-fn seed_web(seed: &Path, live: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(live)?;
-    for entry in std::fs::read_dir(seed)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let fresh = std::fs::read(entry.path())?;
-        let installed = live.join(entry.file_name());
-        if std::fs::read(&installed).is_ok_and(|current| current == fresh) {
-            continue;
-        }
-        std::fs::write(&installed, &fresh)?;
-    }
-    Ok(())
 }

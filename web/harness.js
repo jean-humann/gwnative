@@ -360,6 +360,7 @@ let recovery;
 // `Module.wasmExports`: this build's glue does not export that name, and asking
 // for it does not return undefined — it aborts.
 let gameInstance;
+let gameImports;
 // Kept beside it because the enhancements read their manifest off the module
 // rather than the instance — `WebAssembly.Module.customSections` — and by the
 // time the runtime is initialised, `instantiateWasm`'s `result` is long gone.
@@ -373,6 +374,7 @@ Module = {
   // Take over instantiation so the EGL imports can be patched before the
   // client ever calls them.
   instantiateWasm(imports, success) {
+    gameImports = imports;
     host.installGraphics({
       env: imports.env,
       renderScale: () => renderScale,
@@ -576,6 +578,7 @@ Module = {
     log('runtime initialised');
     status('Starting Guild Wars');
     installTools();
+    installMods();
   },
 
   onAbort(reason) {
@@ -639,6 +642,25 @@ function installTools() {
   void import('./enhancements.js')
     .then(({ installEnhancements }) => installEnhancements(instance, module, selection))
     .catch((error) => log('[warn] enhancements:', error?.message ?? error));
+}
+
+function installMods() {
+  if (!launchOptions.modsEnabled) return;
+  if (!gameInstance || !gameImports) {
+    log('[warn] mods: the running game instance is unavailable');
+    return;
+  }
+  void import('./mod-runtime.js')
+    .then(({ installModRuntime }) =>
+      installModRuntime({
+        game: gameInstance,
+        gameImports,
+        log,
+        alert: (message) => log(`[mod alert] ${message}`),
+      }),
+    )
+    .then((loaded) => log(`mods: ${loaded.length} module(s) loaded`))
+    .catch((error) => log('[warn] mods:', error?.message ?? error));
 }
 
 function appendGlue() {

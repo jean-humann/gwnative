@@ -73,6 +73,8 @@ pub(super) fn serve(
         "__dns" => dns(request, stream)?,
         "__credentials" => credentials(request, stream, context)?,
         "__settings" => settings(request, stream, context)?,
+        "__mods" => mod_manifest(request, stream, context)?,
+        path if path.starts_with("__mods/") => mod_module(request, stream, context, path)?,
         "__socket" => return socket(request, stream, flow).map(Some),
         "__diag" => diag(request, stream, context)?,
         "__resident" => match &context.snapshot {
@@ -159,6 +161,54 @@ pub(super) fn serve(
         }
     }
     Ok(Some(flow))
+}
+
+fn mod_manifest(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+) -> std::io::Result<()> {
+    if request.method != "GET" {
+        return not_allowed(stream, "GET");
+    }
+    let Some(catalog) = &context.mods else {
+        return text(stream, 404, "no modfile selected");
+    };
+    json(
+        stream,
+        200,
+        &serde_json::to_vec(&catalog.public_json()).unwrap_or_default(),
+    )
+}
+
+fn mod_module(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+    path: &str,
+) -> std::io::Result<()> {
+    if request.method != "GET" {
+        return not_allowed(stream, "GET");
+    }
+    let Some(catalog) = &context.mods else {
+        return text(stream, 404, "no modfile selected");
+    };
+    let Some(index) = path
+        .strip_prefix("__mods/")
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        return text(stream, 404, "mod module not found");
+    };
+    let Some(module) = catalog.modules.get(index) else {
+        return text(stream, 404, "mod module not found");
+    };
+    respond(
+        stream,
+        200,
+        "application/wasm",
+        &module.bytes,
+        &[("X-Content-SHA256", module.sha256.clone())],
+    )
 }
 
 /// The answer for a route that speaks for the game image on a launch that has

@@ -27,6 +27,7 @@ mod keychain;
 mod layout;
 mod manifest;
 mod menu;
+mod mods;
 mod net;
 mod notify;
 mod patch;
@@ -113,11 +114,39 @@ fn main() {
     let force_sync = matches!(command, cli::Command::Sync | cli::Command::Repair);
     let headless = command == cli::Command::Serve;
     if command == cli::Command::Mods {
-        note!(
-            "[gwnative] no mod bundles found in {}",
-            paths.mod_dir().display()
-        );
+        let discovered = mods::discover(paths.mod_dir());
+        if discovered.is_empty() {
+            note!(
+                "[gwnative] no mod bundles found in {}",
+                paths.mod_dir().display()
+            );
+        }
+        for bundle in discovered {
+            if bundle.valid {
+                println!(
+                    "{}\t{}\t{} module(s)",
+                    bundle.file, bundle.name, bundle.modules
+                );
+            } else {
+                println!(
+                    "{}\tinvalid\t{}",
+                    bundle.file,
+                    bundle.error.as_deref().unwrap_or("unknown error")
+                );
+            }
+        }
         return;
+    }
+    let mods = match invocation.modfile.as_deref().map(mods::load).transpose() {
+        Ok(catalog) => catalog.map(Arc::new),
+        Err(reason) => alert::fatal(false, "The selected modfile is not safe to load", &reason),
+    };
+    if let Some(catalog) = &mods {
+        note!(
+            "[gwnative] modfile {}: {} validated module(s)",
+            catalog.source.display(),
+            catalog.modules.len()
+        );
     }
     // The two commands above are the runs with a terminal attached. Everything
     // that would otherwise put a message on screen asks this first.
@@ -264,17 +293,18 @@ fn main() {
     }
 
     let token = session_token();
-    let loopback = match server::spawn(
-        root.clone(),
+    let loopback = match server::spawn(server::Config {
+        root: root.clone(),
         snapshot,
         recorder,
         derived_wasm,
         settings,
         generations,
-        token.clone(),
-        paths.port(),
-        profile.keychain_account(),
-    ) {
+        token: token.clone(),
+        port: paths.port(),
+        credential_account: profile.keychain_account(),
+        mods,
+    }) {
         Ok(loopback) => loopback,
         // Nothing downstream has an answer to this: the client is a page, and
         // without an origin to serve it from there is no client. `force_sync`
@@ -373,9 +403,9 @@ fn load_manifest(
         return client.cached_manifest(dir);
     }
     if force_sync {
-        return client.fetch_manifest(&dir);
+        return client.fetch_manifest(dir);
     }
-    let (manifest, source) = client.manifest(&dir)?;
+    let (manifest, source) = client.manifest(dir)?;
     if source == patch::Source::Disk && !offline && !no_update {
         revalidate_manifest(support_dir.to_owned());
     }
