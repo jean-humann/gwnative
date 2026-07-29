@@ -478,20 +478,78 @@ pub fn artifacts() -> Vec<&'static str> {
 /// caller has a decision to make from it before any of this runs — see
 /// `generation::identify`, which needs to know which build is on offer while
 /// declining it is still cheap.
+///
+/// The set is failure-atomic: every artifact is downloaded and verified in a
+/// staging directory before any live file moves. Promotion keeps a private copy
+/// of the set it is replacing and restores it if any rename fails, so an `Err`
+/// means `dest` still holds the generation it held on entry.
 pub fn sync_with(
     client: &Client,
     manifest: &Manifest,
     dest: &Path,
 ) -> Result<Vec<(&'static str, u64)>> {
+    let staging = dest.join(format!(".gwnative-client-sync-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&staging);
+    let incoming = staging.join("incoming");
+    fs::create_dir_all(&incoming)?;
+    let _cleanup = RemoveDir(staging.clone());
+
+    let names = artifacts();
     let mut written = Vec::new();
-    for name in artifacts() {
+    for &name in &names {
         // The manifest is a tree; these artifacts must resolve to exactly one
         // path in it, or we would be guessing which copy the client wants.
         let path = manifest.require_unique(name)?.to_owned();
-        client.download(manifest, &path, &dest.join(name))?;
+        client.download(manifest, &path, &incoming.join(name))?;
         written.push((name, manifest.files[&path].size));
     }
+    promote_set(&incoming, &staging.join("replaced"), dest, &names)?;
     Ok(written)
+}
+
+/// Promote a complete staged set, putting the old set back on any failure.
+fn promote_set(incoming: &Path, replaced: &Path, dest: &Path, names: &[&str]) -> Result<()> {
+    fs::create_dir_all(replaced)?;
+    let mut existed = Vec::with_capacity(names.len());
+    // Finish the backup before the first live path changes.
+    for name in names {
+        let live = dest.join(name);
+        let present = live.exists();
+        if present {
+            fs::copy(&live, replaced.join(name))?;
+        }
+        existed.push(present);
+    }
+
+    for (index, name) in names.iter().enumerate() {
+        if let Err(error) = fs::rename(incoming.join(name), dest.join(name)) {
+            for (restore_index, restore_name) in names[..index].iter().enumerate() {
+                let live = dest.join(restore_name);
+                let restored = if existed[restore_index] {
+                    fs::copy(replaced.join(restore_name), &live).map(|_| ())
+                } else {
+                    fs::remove_file(&live)
+                };
+                if let Err(restore_error) = restored {
+                    note!(
+                        "[patch] could not restore {restore_name} after promotion failed: \
+                         {restore_error}"
+                    );
+                }
+            }
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+/// A staging directory is never part of the installed client.
+struct RemoveDir(PathBuf);
+
+impl Drop for RemoveDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Upper bound on the wire size of a chunk. Gzip can expand incompressible
@@ -665,6 +723,29 @@ mod tests {
     fn gzip_limit_allows_incompressible_growth() {
         assert!(encoded_limit(1024, Compression::Gzip) > 1024);
         assert_eq!(encoded_limit(1024, Compression::None), 1024);
+    }
+
+    #[test]
+    fn a_failed_promotion_restores_the_whole_live_set() {
+        let temp = TempDir::new("patch-promote");
+        let live = temp.0.join("live");
+        let incoming = temp.0.join("incoming");
+        let replaced = temp.0.join("replaced");
+        fs::create_dir_all(&live).unwrap();
+        fs::create_dir_all(&incoming).unwrap();
+        for name in artifacts() {
+            fs::write(live.join(name), format!("old {name}")).unwrap();
+        }
+        // The second rename fails after the first one has already landed.
+        fs::write(incoming.join(CLIENT_ARTIFACTS[0]), b"new glue").unwrap();
+
+        assert!(promote_set(&incoming, &replaced, &live, &artifacts()).is_err());
+        for name in artifacts() {
+            assert_eq!(
+                fs::read(live.join(name)).unwrap(),
+                format!("old {name}").as_bytes()
+            );
+        }
     }
 
     /// The ladder itself is not exercised here — one round of it sleeps for two
