@@ -112,6 +112,23 @@ function button(document, label, run, className = '') {
   return element;
 }
 
+/**
+ * Keep the semantic hidden state and the inline layout in agreement.
+ *
+ * The panel is built dynamically, so it cannot use index.html's
+ * `#overlay[hidden] { display:none }` pattern. A `display:flex` inline style
+ * overrides the browser's default rendering for the hidden attribute in
+ * WKWebView; setting only `hidden` therefore leaves the sheet over the game.
+ *
+ * @param {HTMLElement} overlay
+ * @param {boolean} visible
+ */
+export function setPanelVisible(overlay, visible) {
+  overlay.hidden = !visible;
+  overlay.style.display = visible ? 'flex' : 'none';
+  overlay.setAttribute('aria-hidden', visible ? 'false' : 'true');
+}
+
 export function installToolsPanel({
   document,
   overlays,
@@ -132,6 +149,9 @@ export function installToolsPanel({
     'padding:24px',
     'background:#000c',
   ].join(';');
+  // `display:flex` above is the open layout, not the initial state. Make the
+  // inline display agree with `hidden` before the element can be painted.
+  setPanelVisible(overlay, false);
   const dialog = document.createElement('section');
   dialog.setAttribute('role', 'dialog');
   dialog.setAttribute('aria-modal', 'true');
@@ -258,23 +278,30 @@ export function installToolsPanel({
     item.textContent = `${feature.name} — ${feature.status}`;
     statusList.append(item);
   }
-  const close = button(document, 'Done', () => {
-    overlay.hidden = true;
-  }, 'primary');
+  let restoreFocus = null;
+  const dismiss = () => {
+    if (overlay.hidden) return;
+    setPanelVisible(overlay, false);
+    const target = restoreFocus;
+    restoreFocus = null;
+    target?.focus?.();
+  };
+  const close = button(document, 'Done', dismiss, 'primary');
   close.style.marginTop = '12px';
   dialog.append(statusTitle, statusList, close);
   overlay.append(dialog);
   document.body.append(overlay);
 
   const open = () => {
-    overlay.hidden = false;
+    restoreFocus = document.activeElement;
+    setPanelVisible(overlay, true);
     buildName.focus();
   };
   overlay.addEventListener('click', (event) => {
-    if (event.target === overlay) overlay.hidden = true;
+    if (event.target === overlay) dismiss();
   });
   window.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !overlay.hidden) overlay.hidden = true;
+    if (event.key === 'Escape' && !overlay.hidden) dismiss();
   });
   return open;
 }
