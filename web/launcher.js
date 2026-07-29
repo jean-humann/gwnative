@@ -39,6 +39,79 @@ const el = (id) => document.getElementById(id);
 const gb = (bytes) => (bytes / 1e9).toFixed(1);
 
 /**
+ * Wait for the next progress poll, or resolve false as soon as the watcher is
+ * cancelled. Clearing the timer is what prevents a hidden launcher from
+ * leaving one last scheduled wake-up behind.
+ *
+ * @param {AbortSignal} signal
+ */
+function pollDelay(signal) {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const finish = (ready) => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', stopped);
+      resolve(ready);
+    };
+    const stopped = () => finish(false);
+    const timer = setTimeout(() => finish(true), POLL_MS);
+    signal.addEventListener('abort', stopped, { once: true });
+  });
+}
+
+/**
+ * Watch a background sweep until it completes, fails, or is cancelled.
+ *
+ * Kept outside the DOM wiring so cancellation is part of the contract and can
+ * be verified without waiting for a multi-gigabyte download.
+ *
+ * @param {{
+ *   poll: () => Promise<Record<string, number | boolean>>,
+ *   show: (progress: Record<string, number | boolean>) => void,
+ *   log: (...values: unknown[]) => void,
+ *   paused: () => boolean,
+ *   signal: AbortSignal,
+ *   totalBytes: number,
+ *   wait?: (signal: AbortSignal) => Promise<boolean>,
+ * }} options
+ * @returns {Promise<'play' | null>}
+ */
+export async function watchSweep({
+  poll: read, show, log, paused, signal, totalBytes, wait = pollDelay,
+}) {
+  let failures = 0;
+  for (;;) {
+    if (!(await wait(signal)) || signal.aborted) return null;
+    let info;
+    try {
+      info = await read();
+      failures = 0;
+    } catch (error) {
+      if (signal.aborted) return null;
+      if (++failures >= POLL_FAILURES_TOLERATED) {
+        log(`[warn] launcher: lost sight of the download (${error})`);
+        return 'play';
+      }
+      continue;
+    }
+    if (signal.aborted) return null;
+    show(info);
+    if (Number(info.cached) >= Number(info.total)) {
+      log(`launcher: the ${gb(totalBytes)} GB image is fully cached`);
+      return 'play';
+    }
+    // A pause is the one way this screen stays up with nothing moving, so it is
+    // the one `running: false` that is not the sweep having given up.
+    if (!info.running && !paused()) {
+      // The sweep ended without reaching every chunk: some fetch failed hard.
+      // Streaming will pick those up on demand, so this is a note, not a stop.
+      log(`[warn] launcher: the download stopped at ${info.cached}/${info.total} chunks`);
+      return 'play';
+    }
+  }
+}
+
+/**
  * Bytes per second across a window of samples, or null when the samples cannot
  * support a figure — too short a span, or nothing moved in it.
  *
@@ -364,37 +437,21 @@ export async function resolveDataStrategy(snapshotBytes, { log, save, strategy }
 
   // Resolves when the download finishes, when it can no longer be watched, or
   // when the player stops waiting for it — whichever comes first.
-  const watched = (async () => {
-    let failures = 0;
-    for (;;) {
-      await new Promise((resume) => setTimeout(resume, POLL_MS));
-      try {
-        info = await poll();
-        failures = 0;
-      } catch (error) {
-        if (++failures >= POLL_FAILURES_TOLERATED) {
-          log(`[warn] launcher: lost sight of the download (${error})`);
-          return 'play';
-        }
-        continue;
-      }
-      show(info);
-      if (info.cached >= info.total) {
-        log(`launcher: the ${gb(snapshotBytes)} GB image is fully cached`);
-        return 'play';
-      }
-      // A pause is the one way this screen stays up with nothing moving, so it
-      // is the one `running: false` that is not the sweep having given up.
-      if (!info.running && !paused) {
-        // The sweep ended without reaching every chunk: some fetch failed hard.
-        // Streaming will pick those up on demand, so this is a note, not a stop.
-        log(`[warn] launcher: the download stopped at ${info.cached}/${info.total} chunks`);
-        return 'play';
-      }
-    }
-  })();
+  const watcher = new AbortController();
+  const watched = watchSweep({
+    poll,
+    show,
+    log,
+    paused: () => paused,
+    signal: watcher.signal,
+    totalBytes: snapshotBytes,
+  });
 
   const outcome = await Promise.race([pressed, watched]);
+  // Promise.race does not stop its loser. Without this, Play now hid the
+  // launcher while its watcher kept polling and rewriting hidden DOM every
+  // second until the entire image finished downloading.
+  watcher.abort();
   if (outcome === 'quick') {
     log('launcher: switched to Quick Start; streaming on demand from here');
     await sweepSnapshot('stop').catch((error) => log(`[warn] launcher: ${error}`));

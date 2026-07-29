@@ -3,14 +3,14 @@
 // Run by `cargo test` through `tests/web.rs`, or directly with
 // `node --test web/*.test.js`.
 //
-// Only the arithmetic is tested, because only the arithmetic can be wrong in a
-// way a player would act on: a rate taken from too short a window, or an
-// estimate that survives a stall, is a number someone decides to wait on.
+// The arithmetic and the lifetime of its poller are tested: a rate taken from
+// too short a window misleads the player, while a poller that survives the
+// overlay keeps taxing the game after the player has stopped watching it.
 
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { progressLine, rate, remaining } from './launcher.js';
+import { progressLine, rate, remaining, watchSweep } from './launcher.js';
 
 /** A window of samples `mb` megabytes apart, one per second. */
 const steady = (seconds, mbPerSecond, from = 0) =>
@@ -75,5 +75,43 @@ describe('the line under the bar', () => {
       progressLine(4.19e9, 4.2e9, steady(11, 40, 4.15e9)),
       '4.2 of 4.2 GB · 40 MB/s · less than a minute left',
     );
+  });
+});
+
+describe('background sweep watcher', () => {
+  it('stops before another poll when Play now cancels it', async () => {
+    const controller = new AbortController();
+    let polls = 0;
+    const watched = watchSweep({
+      poll: async () => {
+        polls += 1;
+        return { cached: 0, total: 1, chunkSize: 1, running: true };
+      },
+      show: () => assert.fail('a cancelled watcher must not redraw'),
+      log: () => {},
+      paused: () => false,
+      signal: controller.signal,
+      totalBytes: 1,
+    });
+
+    controller.abort();
+    assert.equal(await watched, null);
+    assert.equal(polls, 0);
+  });
+
+  it('still resolves when the visible download completes', async () => {
+    const controller = new AbortController();
+    const shown = [];
+    const outcome = await watchSweep({
+      poll: async () => ({ cached: 2, total: 2, chunkSize: 10, running: false }),
+      show: (progress) => shown.push(progress.cached),
+      log: () => {},
+      paused: () => false,
+      signal: controller.signal,
+      totalBytes: 20,
+      wait: async () => true,
+    });
+    assert.equal(outcome, 'play');
+    assert.deepEqual(shown, [2]);
   });
 });
