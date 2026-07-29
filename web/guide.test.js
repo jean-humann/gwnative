@@ -61,11 +61,12 @@ describe('user guide', () => {
     }
   });
 
-  // The one thing a player could lose sleep over, said plainly and more than
-  // once: nothing on this Mac holds a character, so anything here is safe to
-  // delete.
-  it('says that nothing on this Mac holds an account', () => {
+  // Account state is remote, but saved login credentials really are local in
+  // Keychain. The guide must distinguish the two rather than promise there is
+  // no account-related data on the Mac.
+  it('distinguishes ArenaNet account state from the saved Keychain login', () => {
     assert.match(text(), /ArenaNet’s servers|held by\s+ArenaNet/);
+    assert.match(text(), /macOS Keychain/);
   });
 
   it('identifies the project as unofficial and carries the required legal notice', () => {

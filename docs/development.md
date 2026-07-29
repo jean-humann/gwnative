@@ -32,24 +32,29 @@ Cargo crate: the host transform and companion ABI are built together.
 
 ## Commands
 
-The binary accepts one command:
+The binary accepts one command plus native and Guild Wars-compatible options:
 
 ```text
-gwnative [command]
+gwnative [command] [options]
 
 Commands:
-  (none)         open the window
-  sync           download the client and exit
-  serve          run the origin without a window
-  certify        print an unsigned artifact-family certificate candidate
+  run       open the window (default)
+  sync      refresh client artifacts and exit
+  repair    verify and refill the full game image
+  serve     run the origin without a window
+  certify   print an unsigned artifact-family certificate candidate
+  profiles  list launch profiles
+  mods      validate discovered mod bundles
 ```
 
-It also supports `-h`/`--help` and `-V`/`--version`. Unknown arguments fail
-instead of being ignored. With Cargo, pass application arguments after `--`:
+See the [command-line reference](command-line.md) for native options and the
+complete official-switch compatibility table. Unknown arguments fail instead
+of being ignored. With Cargo, pass application arguments after `--`:
 
 ```sh
 cargo run -- sync
 cargo run -- serve
+cargo run -- --profile test --new-instance
 ```
 
 Use `scripts/client-certify WEB_ROOT` for the guarded certification
@@ -207,6 +212,9 @@ is written to:
 ~/Library/Application Support/gwnative/diagnostics/gwnative.jsonl
 ```
 
+Named profiles use `profiles/<id>/diagnostics/gwnative.jsonl` beneath that
+Application Support root.
+
 Set `GWNATIVE_TRACE_HTTP=1` for loopback routing and
 `GWNATIVE_TRACE_SOCKETS=1` for bridge frame sizes. Both are intentionally off
 because synchronous terminal output can affect boot timing.
@@ -248,7 +256,8 @@ the hardened runtime remains enabled. Published bundles omit it.
 | `src/http/`, `src/server/` | Loopback HTTP parsing, policy, routing, and streaming |
 | `src/wasm/` | Certified WebAssembly codecs and transforms |
 | `src/companion-kernel/` | Embedded read-only companion module |
-| `web/` | Harness, player UI, tests, and live client artifacts |
+| `src/mods.rs`, `src/game_api.rs` | Validated mod catalog and versioned game-state boundary |
+| `web/` | Harness, player UI, overlays, mod runtime, tools, tests, and live client artifacts |
 | `tests/web.rs` | Cargo bridge to Node's test runner |
 | `packaging/` | Bundle metadata, icon, Sparkle, certificates, and entitlements |
 | `scripts/` | Benchmark, bundle, signing, notarization, feed, and publication tools |

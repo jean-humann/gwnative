@@ -18,9 +18,12 @@ flowchart LR
         Harness["Web harness\ninput, graphics, audio, filesystem"]
         Client["ArenaNet client\nJSPI or Asyncify pair"]
         Companion["Optional companion WASM\nread-only game state"]
+        Mods["Explicit selected mods\ntrusted shared memory"]
         Harness <--> Client
         Harness --> Companion
         Companion -. "shared read-only memory" .-> Client
+        Harness --> Mods
+        Mods <--> Client
     end
 
     Origin <--> Harness
@@ -254,6 +257,20 @@ The complete transaction and fallback state model is in
 feed, fast ArenaNet patch workflow, signing boundary and operator runbook are
 detailed in [Client build certification](certification.md).
 
+The validated companion state is narrowed into the versioned v1 map, player,
+and target schema. The page publishes no faster than four times per second and
+Rust validates it again before making it available on token-gated loopback
+routes. There is no certified action endpoint. The overlay registry and
+Companion Tools consume the same read-only state; see
+[Game API and overlays](game-api.md).
+
+Explicit mods follow a separate trust path. `src/mods.rs` parses the selected
+format-1 manifest and ZIP structure, resolves nested dependencies, enforces
+resource limits, and hashes every module before WebKit starts. The page checks
+the catalog and SHA-256 again, instantiates modules in dependency order against
+game memory and earlier exports, and calls `mod_init`. Shared memory means the
+module is trusted even after package validation; see [Mods](mods.md).
+
 ## WebKit and native integration
 
 WKWebView lacks several Chromium APIs the client assumes:
@@ -307,8 +324,10 @@ suspension model and reproduction matrix.
 | Network bridges | `src/net.rs`, `src/sockets.rs`, `src/transport.rs` |
 | Patching and generations | `src/patch.rs`, `src/manifest.rs`, `src/generation.rs` |
 | Snapshot cache | `src/chunks/`, `src/cache.rs`, `src/disk.rs`, `src/qos.rs` |
-| Credentials and settings | `src/keychain.rs`, `src/settings.rs`, `src/paths.rs` |
+| Profiles, credentials, settings | `src/profile.rs`, `src/keychain.rs`, `src/settings.rs`, `src/paths.rs` |
 | WebAssembly transforms | `src/wasm/`, `src/companion-kernel/lib.rs`, `build.rs` |
+| Mods and game API | `src/mods.rs`, `src/game_api.rs`, `web/mod-runtime.js`, `web/game-api.js` |
+| Overlays and tools | `web/overlay.js`, `web/tools-panel.js`, `web/build-library.js`, `web/hotkeys.js` |
 | Diagnostics | `src/diagnostics.rs`, `src/report.rs`, `web/diagnostics.js`, `web/memory.js` |
 | Web harness | `web/harness.js`, `web/graphics.js`, `web/audio.js`, `web/filesystem.js`, `web/input.js` |
 | Player UI | `web/launcher.js`, `web/settings-panel.js`, `web/guide.js`, `web/loading.js` |
@@ -325,3 +344,7 @@ suspension model and reproduction matrix.
   launch.
 - Development and packaged builds use separate WebKit storage roots.
 - The loopback port fallback changes the page origin for that session.
+- Named-profile port hashes can collide; an explicit port resolves the launch
+  but selects another page origin.
+- A validated mod still shares writable game memory and must be trusted by the
+  player.

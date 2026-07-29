@@ -1,0 +1,87 @@
+# Feature compatibility and roadmap
+
+This review compares gwnative with four community projects at the revisions
+inspected for this work:
+
+- [`gw_in_browser` at `a1487a0`](https://github.com/gwdevhub/gw_in_browser/tree/a1487a0683628ce186748510205d16be5c89caaa);
+- [`GWToolbox++` at `ca20ae7`](https://github.com/gwdevhub/GWToolboxpp/tree/ca20ae743551fd24f4fd0653e8a64d5e5b55a820);
+- [`Daybreak` at `d800a63`](https://github.com/gwdevhub/Daybreak/tree/d800a630b5f0599c825bd4ddf9461bc702614fcd);
+- [`gwonmac` at `3295a95`](https://github.com/Mat4m0/gwonmac/tree/3295a95a804ef49e8db95b7d839436bfc826152b).
+
+It is a capability review, not a promise of source compatibility. GWToolbox++
+and parts of Daybreak integrate with the native Windows client through
+injection and GWCA. gwnative hosts ArenaNet's WebAssembly client in WebKit.
+Offsets, hooks, rendering, and policy boundaries therefore differ.
+
+## Current result
+
+| Capability family | Status | gwnative result |
+| --- | --- | --- |
+| Official client/artifact sync | Available | Verified patch manifest, generation rollback, `sync`, `-update` |
+| Streamed or full game image | Available | On-demand content-addressed chunks, resumable full download, `-image`, `repair`, local image import |
+| Guild Wars CLI recognition | Available | Every documented switch parsed; native translations or explicit notices |
+| Isolated launch profiles | Available | Per-profile mutable state, Keychain identity, origin, overlays, and build library |
+| Explicit `.gwmod` sessions | Available | Compatible format, host-side ZIP/graph validation, double hash validation, ordered runtime |
+| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target state |
+| Overlay framework | Available | Profile-local movable widgets and exact-context hotkeys |
+| Clock, session timer, FPS | Available | Built-in Companion Tools widgets |
+| Target distance/range | Available on certified builds | Bounds-checked companion snapshot |
+| Build-template client repair | Available on certified builds | Save/list/rename/delete transform; unknown builds fall back |
+| Build/team library | Available | Profile-local opaque-code library with validated import/export |
+| Game cursor | Available on certified builds | Game bitmap rendered as native pointer |
+| Party, heroes, effects | Needs certified layout | No guessed pointers or partial UI |
+| Map agents, quests, completion | Needs certified layout | Map identity exists; agent/quest structures do not |
+| Inventory and account storage | Needs certified layout | No certified item/bag/storage schema |
+| Chat, party search, trade | Needs certified layout and policy | No chat write or packet injection surface |
+| Skill activation or build application | Read-only only | Codes can be stored; no game action is exposed |
+| Texture/shader packs | Research | WebGL/WASM pipeline differs from native DirectX replacement |
+| Unattended gameplay automation | Blocked | Not exposed through API, hotkeys, overlays, or mods by default |
+
+The same status list is visible in **View → Companion Tools…**. A feature is
+not labelled available merely because an upstream native client can implement
+it.
+
+## Certification gate
+
+A new game-facing domain requires all of the following:
+
+1. exact current-module hash;
+2. documented pointer or function layout for that hash;
+3. bounded read/write semantics and invariants;
+4. fixtures that reject malformed, stale, and partial state;
+5. an API-version decision;
+6. player-visible unavailable state on unknown builds; and
+7. policy review for any action that changes game state.
+
+Read-only state is the default. A user gesture in gwnative is not by itself
+proof that an arbitrary game write is safe. The v1 actions endpoint therefore
+returns 409 until a specific operation passes certification.
+
+## Next implementation slices
+
+The dependency order for further parity is:
+
+1. certify party and skillbar read layouts;
+2. add versioned party/skill state without actions;
+3. build party/build inspection widgets on that schema;
+4. certify map-agent and quest read layouts;
+5. add inventory schemas with strict privacy and size bounds;
+6. research WebGL-native texture replacement without patching unknown modules;
+7. consider narrowly named, user-triggered actions one at a time.
+
+Large upstream windows should not be ported as one monolith. Each slice needs
+its own schema, fixtures, compatibility fallback, and Conventional Commit.
+
+## Explicit non-goals
+
+- DLL injection, Windows process scanning, and GWCA ABI compatibility;
+- remote control of a running account;
+- exposing credentials, chat logs, or inventory through an unauthenticated
+  endpoint;
+- guessing offsets after an ArenaNet update;
+- promising that arbitrary `.gwmod` code is sandboxed; and
+- unattended farming, combat, movement, or trade automation.
+
+See [Game API and overlays](game-api.md), [Mods](mods.md), and
+[Acknowledgements](../ACKNOWLEDGEMENTS.md) for the implemented boundaries and
+project lineage.

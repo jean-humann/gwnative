@@ -1,7 +1,8 @@
-// Shared overlay surface for built-in widgets and explicitly loaded mods.
+// Managed overlay surface for built-in companion widgets.
 //
 // Widgets get one managed element and cannot take over the canvas. Layout is
 // profile-specific because each profile has its own WebKit origin/localStorage.
+// The format-1 mod ABI does not expose this registry yet.
 
 const STORAGE_KEY = 'gwnative.overlay-layout.v1';
 const ID = /^[a-z][a-z0-9-]{0,63}$/;

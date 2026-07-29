@@ -103,6 +103,42 @@ compatibility state; startup never waits for that notice. Loading existing
 templates remains available. A later signed certificate can restore template
 saving on the next launch without an application update.
 
+### Companion Tools
+
+Open **View → Companion Tools…** or press **⌘⇧T** for profile-local companion
+tools:
+
+- movable clock, session timer, target/range, and frame-rate widgets;
+- overlay layout editing, also toggled with **⌘⇧O**;
+- an opaque-code build and team library with validated JSON import/export; and
+- the current compatibility status of researched feature families.
+
+Widget layout and the library follow the selected profile. Build codes are
+stored and organised but never applied to the game: the current versioned API
+has no certified write action.
+
+Party, hero, inventory, quest, chat, and texture features are labelled as
+requiring a certified client layout or further research. Unattended gameplay
+automation is blocked. See [Feature compatibility](feature-compatibility.md)
+and [Game API and overlays](game-api.md).
+
+## Profiles, command line, and mods
+
+`--profile NAME` creates an isolated settings, credential, client, WebKit, and
+tools environment while sharing verified game-image chunks. Use a different
+profile plus `--new-instance` for a concurrent account. See
+[Profiles](profiles.md).
+
+The binary recognises every command-line switch in the official Guild Wars
+reference. Native equivalents are applied and client-inapplicable switches
+print a compatibility explanation. See the complete
+[command-line reference](command-line.md).
+
+Mods are never auto-discovered into a running game. `-modfile PATH` is required
+for each selected session. A mod shares game memory and must be treated as
+trusted code even though its archive and hashes are validated. See
+[Mods](mods.md).
+
 ## Updates
 
 Automatic checks are off until enabled. **Guild Wars → Check for Updates…**
@@ -164,11 +200,14 @@ logs.
 
 ## Diagnostics and problem reports
 
-The host appends structured records to:
+The default profile appends structured records to:
 
 ```text
 ~/Library/Application Support/gwnative/diagnostics/gwnative.jsonl
 ```
+
+A named profile writes below
+`~/Library/Application Support/gwnative/profiles/<id>/diagnostics` instead.
 
 The log rotates at 5 MiB and keeps five files. It combines:
 

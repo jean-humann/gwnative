@@ -14,6 +14,10 @@ material only. It does not grant rights to Guild Wars or Guild Wars Reforged
 names, client code, game data, artwork, audio, logos, or other proprietary
 material.
 
+Community-project lineage and authorship are recorded separately in
+[Acknowledgements](ACKNOWLEDGEMENTS.md). Those acknowledgements do not imply
+endorsement and do not change any upstream project's licence.
+
 ## Application icon
 
 `packaging/icon.png` is the 1024 × 1024 Guild Wars Reforged application
