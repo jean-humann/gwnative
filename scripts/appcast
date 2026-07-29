@@ -61,7 +61,7 @@ signer=packaging/sparkle/sign_update
 [ -f "$key" ] || die "$key does not exist.
     Nothing published from this checkout can be verified without it, and no
     bundle built from it carries a feed URL to begin with — see the updater
-    section of README.md for generating the key once."
+    section of docs/releasing.md for generating the key once."
 
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
 repo=$(sed -n 's|^repository = "\(.*\)"$|\1|p' Cargo.toml | head -1)
@@ -123,8 +123,8 @@ if [ -n "$openssl" ]; then
     SPARKLE_PRIVATE_KEY, or the keychain if it is unset."
 	say "the signature verifies against ${key##*/}"
 else
-	say "no OpenSSL 3 found, so the signature was not checked against" \
-		"${key##*/}. Install one (brew install openssl@3) or set OPENSSL."
+	die "no OpenSSL 3 found, so the signature cannot be checked against
+    ${key##*/}. Install one (brew install openssl@3) or set OPENSSL."
 fi
 
 # ------------------------------------------------------------------ notes ---
