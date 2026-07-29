@@ -61,6 +61,12 @@ describe('settings panel', () => {
     assert.equal(panel.needsRelaunch([]), false);
   });
 
+  it('leaves Enter to the focused control instead of saving globally', () => {
+    assert.equal(panel.overlayKeyAction('Enter'), null);
+    assert.equal(panel.overlayKeyAction(' '), null);
+    assert.equal(panel.overlayKeyAction('Escape'), 'close');
+  });
+
   /** A page that records what the panel asked it to do. */
   const page = () => {
     const shown = [];

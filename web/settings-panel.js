@@ -317,6 +317,20 @@ export function needsRelaunch(keys) {
 }
 
 /**
+ * The shortcuts owned by the overlay rather than its focused control.
+ *
+ * Enter deliberately has no overlay action: buttons already turn it into one
+ * click and selects use it to choose an option. Treating it as a global Save
+ * duplicates button actions and saves as a side effect of Cancel or Restart.
+ *
+ * @param {string} key
+ * @returns {'close' | null}
+ */
+export function overlayKeyAction(key) {
+  return key === 'Escape' ? 'close' : null;
+}
+
+/**
  * Do the part of a saved change that can be done now.
  *
  * Separated from the save because the two fail independently: a page that
@@ -754,18 +768,12 @@ export function installSettingsPanel({
 
   offerSaving();
 
-  // Escape closes and Return saves, which is what every other panel on the
-  // system does. Scoped to the overlay so neither reaches the client.
+  // Escape belongs to the panel. Return belongs to the focused native control:
+  // a button activates once, and a select keeps its platform behaviour.
   overlay.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
+    if (overlayKeyAction(event.key) === 'close') {
       event.stopPropagation();
       close();
-    }
-    // A tab is a button: Enter and Space activate it, and letting the keystroke
-    // carry on to `apply` would save and close the panel on the way past.
-    if (event.key === 'Enter' && !tabList?.contains(event.target)) {
-      event.stopPropagation();
-      void apply();
     }
   });
 
