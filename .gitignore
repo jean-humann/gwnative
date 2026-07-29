@@ -1,6 +1,15 @@
 /target
 /dist
+# Unanchored, because `scripts/bundle` takes an output path and a bundle built
+# anywhere in the tree is still a build artifact.
 *.app
+# Except this one, which is not built here: Sparkle ships `Updater.app` inside
+# its framework, and that is the process that shows the release notes and swaps
+# the application. Ignored, the vendored copy would commit as a framework that
+# loads and can update nothing — and it would only show up on a fresh clone.
+# The directory itself has to be re-included; git will not look inside an
+# excluded one to find a negated file.
+!packaging/sparkle/**/*.app
 .DS_Store
 
 # Game data and client artifacts are fetched from ArenaNet at runtime and are

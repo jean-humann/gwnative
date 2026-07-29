@@ -900,7 +900,8 @@ patch client fetches `Gw.jspi.js`, `Gw.jspi.wasm` and `version.json` from the
 live service and checks them by size and content at every launch, the 4.2 GB
 snapshot is served on
 demand out of the chunk store, the ArenaNet sockets bridge through to the game,
-and the login is kept in the Keychain.
+the login is kept in the Keychain, and a packaged build reads a signed feed to
+find, show and install its own updates.
 
 ## Build
 
@@ -1042,6 +1043,15 @@ It is signed with the same identity and the same `com.gwnative.app` identifier
 as `cargo run` uses, so its designated requirement is byte-for-byte the one the
 keychain already knows and the saved login carries over.
 
+The one capability a bundle has that no `cargo run` build can is
+`Contents/Frameworks/Sparkle.framework`, and with it the ability to install its
+own updates — see [Updating](#updating-and-the-two-paths-it-takes). It is
+thinned to `arm64`, stripped of its XPC services and re-signed innermost-first,
+because a signature seals what is inside it and signing the application before
+its framework produces a seal over the old contents. It is installed only when
+`packaging/sparkle/public-key.txt` exists; without one the bundle is exactly the
+one this project built before Sparkle.
+
 The bundle is signed with the hardened runtime on every build, not only on
 released ones — it is a precondition for notarization, and turning it on at the
 last moment would mean the first build to run under its rules is the one nobody
@@ -1083,7 +1093,14 @@ download progress bar has something to draw over.
 scripts/release
 ```
 
-Builds, signs, notarizes, staples and packages `dist/gwnative-<version>.dmg`.
+Builds, signs, notarizes, staples and packages two files:
+`dist/gwnative-<version>.dmg` for a person to open, and
+`dist/gwnative-<version>.zip` for the updater to install unattended. Both hold
+the same stapled bundle, and the zip is rebuilt from it *after* stapling — the
+copy that went to Apple was made before the ticket existed, and a bundle
+unpacked from that one shows the unidentified-developer refusal on a machine
+that happens to be offline, in exactly the case where nobody is watching.
+
 The difference from `scripts/bundle` is not the build — it is the same binary —
 it is that Gatekeeper has to be willing to open the result on a Mac that has
 never seen this project. Four things have to be true for that: a Developer ID
@@ -1121,9 +1138,17 @@ reimplementing it: a release path only exercised by CI is one nobody can
 reproduce when it breaks, and a local one CI works around is one CI is not
 testing. The workflow's job is to build the environment the script already
 expects — a keychain holding the identity and the notarization profile — and
-then get out of the way. Locally: run the script, then `git tag -s` and `gh
-release create`, which it prints, because tags are what the update check reads.
-From CI: push the tag and approve the run.
+then get out of the way. Locally: run the script, then `git tag -s` and
+`scripts/publish`, which it prints. From CI: push the tag and approve the run.
+
+`scripts/publish` is the second half, and also one implementation for both
+routes. It creates the release as a **draft**, renders the release notes to HTML
+through GitHub's own markdown endpoint, signs the zip, writes `appcast.xml` from
+all three, uploads it, and only then makes the release current. The draft is
+what makes that order possible:
+`releases/latest/download/appcast.xml` is the URL every installed copy asks, so
+the moment a release stops being a draft it becomes the answer — and a release
+that is visible before its feed is uploaded answers with a 404.
 
 Approve is the word. This is a public repository and a Developer ID certificate
 signs everything its owner ships, not only this project, so the release job
@@ -1143,8 +1168,8 @@ third-party actions at all — no cache, no toolchain action, no release action 
 since each would be someone else's code in a process that can reach a signing
 key, and the cache is worth about two minutes.
 
-Five secrets, named as they are wherever they came from so that moving one is a
-copy and never a rename:
+Six secrets. The five Apple ones are named as they are wherever they came from,
+so that moving one is a copy and never a rename:
 
 | Secret | What it is |
 | --- | --- |
@@ -1153,6 +1178,14 @@ copy and never a rename:
 | `APPLE_NOTARY_KEY_P8` | base64 of the App Store Connect API key file |
 | `APPLE_NOTARY_KEY_ID` | that key's ID |
 | `APPLE_NOTARY_KEY_ISSUER` | the issuer UUID it belongs to |
+| `SPARKLE_PRIVATE_KEY` | the EdDSA key that signs updates — see below |
+
+The Apple five are recoverable: a certificate can be revoked and reissued, and
+anyone who reinstalls by hand is unaffected. `SPARKLE_PRIVATE_KEY` is not. Its
+public half is compiled into every copy already installed, so replacing it means
+every one of those copies silently refuses every future update until its owner
+downloads a build by hand. It is the one secret here worth backing up rather
+than only protecting.
 
 The keychain the job builds from them is created in `RUNNER_TEMP`, made default
 so the scripts find it exactly as they do on a developer's machine, and deleted
@@ -1181,33 +1214,110 @@ fetched, because a keychain created from nothing has no path from the leaf to
 the Apple Root — the identity is present, `find-identity` marks it
 `CSSMERR_TP_NOT_TRUSTED`, and `codesign` declines it. See the README there.
 
-## The update check, and what it will not do
+## Updating, and the two paths it takes
 
-The feed is the repository's own release list — `GET /repos/<owner>/<name>/releases`,
-anonymous, one page of a hundred — compared against this build's version.
-`src/release.rs` reads the repository out of `Cargo.toml` at compile time, and a
-build that declares none has neither this check nor the Help menu's website
-item, because an application that offers to show its project page and then shows
-nothing is worse than one with a shorter menu.
+There are two, and which one a build takes is decided by whether Sparkle loaded.
+They are not alternatives anybody chose between: the second exists because the
+first cannot be present in a build that was never packaged.
 
-Tags are the whole interface. `vX.Y.Z`, optionally `-alpha.N`, `-beta.N` or
-`-rc.N`, and anything else on the page is skipped rather than guessed at — a
-stable install is never offered a prerelease, including one whose tag looks
-stable but which was published marked as one. Drafts are not published to
-anybody.
+**In a bundle: Sparkle.** `packaging/sparkle` holds the framework, committed at
+a pinned version with the checksum of the tarball it came from, for the reason
+the certificates next door are committed — a release build should not depend on
+somebody else's web server being up, and a binary fetched during a build is one
+nobody has looked at. `scripts/bundle` thins it to `arm64`, drops the XPC
+services (they exist to reach the network from inside an App Sandbox, and this
+application is not sandboxed), re-signs it innermost-first with the same
+Developer ID, and writes the feed URL and public key into `Info.plist`. 3.0 MB
+becomes 1.6 MB, and the application is 5.1 MB in total.
 
-What it will not do is install anything. There is no updater, no feed to sign,
-no code that replaces this binary with something it downloaded — the one answer
-with anywhere to go opens the releases page, and the button says so. That is the
-reason there is nothing here about verifying an update's signature before
-applying it: applying it is the user's own drag from a notarized disk image,
-checked by Gatekeeper the same way the first install was.
+The feed is a single release asset,
+`releases/latest/download/appcast.xml`, written by `scripts/appcast` at publish
+time. One item long, always the current release: Sparkle shows the notes of the
+item it selects, so a longer feed would buy nothing anybody sees and would cost
+a file that has to be merged on every release. Those notes are the release's
+own, rendered to HTML by GitHub, so the update panel shows what the release page
+shows.
 
-Asked, never volunteered: nothing checks at launch unless `autoCheckUpdates` was
-turned on, and even then only once a day, and even then only a genuinely newer
-version is allowed to interrupt. "Could not check" is never reported as "up to
-date" — being told you are current by a request that never left the machine is
-the one answer that stops you looking again.
+**Everything else: `src/release.rs`.** `cargo run` builds, benchmarks and the
+test harness have no `Contents/Frameworks` to load a framework from. `build.rs`
+links Sparkle *weakly* so they still start, `src/updater.rs` asks the
+Objective-C runtime whether the classes are actually there rather than assuming,
+and when they are not this is what answers the question — the repository's own
+release list, `GET /repos/<owner>/<name>/releases`, anonymous, compared against
+this build's version. Tags are its whole interface: `vX.Y.Z`, optionally
+`-alpha.N`, `-beta.N` or `-rc.N`, and anything else is skipped rather than
+guessed at, so a stable install is never offered a prerelease. It cannot install
+anything; the one answer with anywhere to go opens the releases page, and the
+button says so.
+
+The same fallback covers a bundle built without a signing key, which is what a
+fresh clone produces. No key means no `SUPublicEDKey`, which means no feed URL,
+which means `updater::available()` is false and nothing about the build changed:
+a feed nobody can sign is a feed nothing should trust.
+
+### The two switches
+
+Off by default, both of them, because a launch that asks GitHub about itself is
+doing something on the player's behalf that they did not ask for at that moment.
+
+| Setting | What it allows |
+| --- | --- |
+| `autoCheckUpdates` | looking for a newer build at all |
+| `autoInstallUpdates` | downloading it and installing it on quit, without asking |
+
+Sparkle keeps both in the application's user defaults and says, in as many
+words, not to keep a second copy — because its own update window carries an
+"install automatically in the future" checkbox, and a launch that pushed a
+stored profile over the top would quietly undo the box a player had just ticked.
+This project keeps one anyway, in `settings.json`, because the settings panel is
+a web page and cannot read `NSUserDefaults`. What keeps that honest is the
+direction of the copy: **Sparkle's answer is the truth**, every launch reads it
+and writes the profile to match, and the profile is pushed the other way in
+exactly two cases — the first launch after this shipped, where Sparkle has no
+stored answer and an existing opt-in would otherwise be lost, and a player moving
+the switch in the panel a moment ago.
+
+Asked, never volunteered, either way. On the fallback path nothing checks at
+launch unless `autoCheckUpdates` is on, and even then only once a day, and even
+then only a genuinely newer version is allowed to interrupt. "Could not check"
+is never reported as "up to date" — being told you are current by a request that
+never left the machine is the one answer that stops you looking again.
+
+### The key, generated once
+
+Sparkle verifies every download against the public key compiled into the
+application before it unpacks it, which is what makes installing from a URL this
+project does not control safe. That needs a keypair, and it is the one step
+nobody can do for you: the private half must never be in this repository, in a
+config file, or in anybody's shell history.
+
+```sh
+packaging/sparkle/generate_keys
+```
+
+It writes the private key into your login keychain and prints the public one.
+Put that printed string — the contents of the `<string>` it shows, nothing else
+— in `packaging/sparkle/public-key.txt` and commit it. It is public; it is
+supposed to travel with the source.
+
+```sh
+packaging/sparkle/generate_keys -x private-key.txt
+gh secret set SPARKLE_PRIVATE_KEY < private-key.txt
+rm private-key.txt
+```
+
+That is the copy CI signs with. Delete the file afterwards — the keychain still
+has it, and `generate_keys -p` prints the public half again whenever it is
+needed.
+
+Back it up somewhere you would still have in a year. Losing it is not like
+losing the Developer ID certificate, which can be revoked and reissued: the
+public half is inside every copy already installed, so a new key means every one
+of those copies silently refuses every future update until its owner downloads a
+build by hand. `scripts/appcast` guards the near miss — it verifies each
+signature against `packaging/sparkle/public-key.txt` before writing it into a
+feed, because a release signed with the wrong key is accepted by GitHub, looks
+perfect on the page, and is refused by every client without a word.
 
 ## Continuous integration
 

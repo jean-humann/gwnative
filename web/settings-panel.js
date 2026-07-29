@@ -115,6 +115,22 @@ export const CONTROLS = [
       { value: true, label: 'Once a day, at launch' },
     ],
   },
+  {
+    key: 'autoInstallUpdates',
+    label: 'Installing updates',
+    note: 'An update installs the next time you quit. Nothing is downloaded '
+      + 'while you are playing unless the check above is on.',
+    live: true,
+    // A narrower question than the one above, and a different injection.
+    // Checking can be answered by either update path; installing on its own is
+    // the packaged build's alone, so a `cargo run` build is offered the check
+    // and not this.
+    when: (host) => host.__gwnativeAutoInstall === true,
+    choices: [
+      { value: false, label: 'Ask me first' },
+      { value: true, label: 'Install on its own' },
+    ],
+  },
   // The GWonMac Tools. Both are relaunch-required for the same reason and it
   // is not a UI limitation: turning either on changes which client module the
   // host builds and serves, and that is decided before this page exists. There

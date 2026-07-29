@@ -43,6 +43,7 @@ mod server;
 mod settings;
 mod sockets;
 mod transport;
+mod updater;
 mod wasm;
 mod webview;
 mod window;
@@ -442,6 +443,12 @@ fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module)
     // Before the window: the Dock tile is created with the application, and an
     // icon set afterwards is one the player can watch change.
     dock::set_icon(mtm);
+
+    // Before the web view, because the page is handed the settings it starts
+    // with and the updater is allowed to change two of them: on the first
+    // launch after Sparkle shipped, the profile's opt-in is what seeds it, and
+    // afterwards the updater's own answer is what the panel has to show.
+    updater::start(mtm, &loopback.settings);
 
     // The frame the web view is created at does not matter: `window::open`
     // resizes the window to the remembered one before it is ever shown, and the

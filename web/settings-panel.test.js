@@ -131,6 +131,7 @@ describe('settings panel', () => {
     const keys = panel.CONTROLS.map((control) => control.key);
     assert.deepEqual(keys.sort(), [
       'autoCheckUpdates',
+      'autoInstallUpdates',
       'dataStrategy',
       'nativeCursor',
       'renderScale',
@@ -155,6 +156,21 @@ describe('settings panel', () => {
     // An injection that never happened — a page opened outside the app, or a
     // host older than this file. Absent is not the same as true.
     assert.ok(!keys({}).includes('autoCheckUpdates'));
+  });
+
+  // The two are injected separately because they are two different questions.
+  // A build that can only open a web page can honestly offer to look once a
+  // day; it cannot offer to install anything, and a switch saying otherwise
+  // would be the panel promising what the build cannot do.
+  it('offers unattended installing only where something can install', () => {
+    const keys = (host) => panel.offered(host).map((control) => control.key);
+    const both = keys({ __gwnativeUpdates: true, __gwnativeAutoInstall: true });
+    assert.ok(both.includes('autoCheckUpdates'));
+    assert.ok(both.includes('autoInstallUpdates'));
+    const checkOnly = keys({ __gwnativeUpdates: true, __gwnativeAutoInstall: false });
+    assert.ok(checkOnly.includes('autoCheckUpdates'));
+    assert.ok(!checkOnly.includes('autoInstallUpdates'));
+    assert.ok(!keys({}).includes('autoInstallUpdates'));
   });
 
   // Everything without a `when` is unconditional, and has to stay that way:

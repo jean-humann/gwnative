@@ -177,29 +177,24 @@ jobs:
       - name: Build, sign, notarize and package
         run: scripts/release
 
+      # Unmodified as well, for the same reason. It creates the release as a
+      # draft, renders its notes, signs the archive Sparkle will download,
+      # builds the feed and only then makes any of it visible — see the note at
+      # the top of scripts/publish.
+      #
+      # SPARKLE_PRIVATE_KEY is the one secret here that is this project's alone,
+      # and it is the one that cannot be rotated quietly: it is the private half
+      # of the key compiled into every copy already installed, so replacing it
+      # means every one of them stops accepting updates until its owner installs
+      # a build by hand. Unset is survivable — scripts/appcast fails, the
+      # release is left a draft, and nothing has been published wrong.
       - name: Publish
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           TAG: ${{ inputs.tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          dmg="dist/gwnative-$version.dmg"
-          test -f "$dmg"
-
-          # A tag that names a different version than Cargo.toml declares would
-          # publish a download whose filename, Info.plist and update check all
-          # disagree with the release it is attached to.
-          [ "$TAG" = "v$version" ] ||
-            { echo "tag $TAG does not match version $version in Cargo.toml"; exit 1; }
-
-          # --verify-tag: the release must describe a tag that already exists,
-          # rather than creating one pointing at whatever this job checked out.
-          gh release create "$TAG" "$dmg" \
-            --title "Guild Wars $version" \
-            --generate-notes \
-            --verify-tag
+        run: scripts/publish "$TAG"
 
       # A dry run that says nothing looks the same as one that did nothing.
       # This prints what the publish would have uploaded, and re-reads the
@@ -208,22 +203,40 @@ jobs:
       # actually issued one for.
       - name: What a real run would have published
         if: ${{ inputs.dry_run }}
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           dmg="dist/gwnative-$version.dmg"
+          zip="dist/gwnative-$version.zip"
+
+          # The half of the update path a dry run can actually exercise: that
+          # the secret is present, that sign_update accepts it, and — the part
+          # worth the step — that what it produces verifies against the public
+          # key this build was compiled with. A release signed by the wrong key
+          # is accepted by GitHub, looks correct on the page, and is refused by
+          # every installed copy without a word. Better to find out here.
+          built=ok
+          scripts/appcast "$zip" > dist/appcast.log 2>&1 || built=failed
+
           {
             echo "### Dry run — nothing was published"
             echo
             echo "A real run would have created release \`v$version\` from"
-            echo "\`$dmg\` ($(du -h "$dmg" | cut -f1))."
+            echo "\`$dmg\` ($(du -h "$dmg" | cut -f1)) and"
+            echo "\`$zip\` ($(du -h "$zip" | cut -f1)), plus the update feed."
             echo
             echo '```'
             xcrun stapler validate "$dmg" 2>&1
             spctl --assess --type open --context context:primary-signature \
               --verbose=2 "$dmg" 2>&1 || true
+            echo "update feed: $built"
+            cat dist/appcast.log
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$built" = ok ] || exit 1
 
       # Always, including after a failure: a keychain holding a signing identity
       # should not outlive the job that needed it, and a cancelled run is

@@ -35,11 +35,11 @@ version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
 # wrong in the same way it was wrong before this line existed and no worse.
 build=$(git rev-list --count HEAD 2>/dev/null || echo "$version")
 sed -e "s/__VERSION__/$version/g" -e "s/__BUILD__/$build/g" \
-	packaging/Info.plist > "$app/Contents/Info.plist"
+	packaging/Info.plist >"$app/Contents/Info.plist"
 
 # Pre-bundle-identifier legacy, but Launch Services still reads it and it costs
 # eight bytes.
-printf 'APPL????' > "$app/Contents/PkgInfo"
+printf 'APPL????' >"$app/Contents/PkgInfo"
 
 cp target/release/gwnative "$app/Contents/MacOS/gwnative"
 
@@ -62,6 +62,60 @@ for path in web/*.js web/*.html; do
 	esac
 	cp "$path" "$app/Contents/Resources/web/"
 done
+
+# ------------------------------------------------------------------ updater --
+# Sparkle, and the two Info.plist keys without which it refuses to start. Both
+# conditions have to hold — the framework is committed, so in practice this is
+# asking whether anyone has generated a signing key yet. Without one the bundle
+# is built exactly as it was before Sparkle existed, and src/release.rs remains
+# the update path: a feed nobody can sign is a feed nothing should trust.
+sparkle=
+if [ -d packaging/sparkle/Sparkle.framework ] && [ -f packaging/sparkle/public-key.txt ]; then
+	sparkle="$app/Contents/Frameworks/Sparkle.framework"
+	mkdir -p "$app/Contents/Frameworks"
+	# ditto rather than cp -R: the framework is built out of symlinks, and one
+	# of them (Versions/Current) is what every other one resolves through.
+	ditto packaging/sparkle/Sparkle.framework "$sparkle"
+
+	# The XPC services exist to reach the network and the filesystem from
+	# inside an App Sandbox. This application is not sandboxed, so they are
+	# never loaded — and each is a nested bundle that would otherwise have to
+	# be signed, notarized and stapled for nothing. Both the directory and the
+	# symlink pointing at it, or the bundle keeps a dangling link.
+	rm -rf "$sparkle/Versions/B/XPCServices" "$sparkle/XPCServices"
+
+	# Upstream ships universal. This application has one arm64 slice, so the
+	# other half of every binary here is bytes that could not run even if
+	# something tried. Takes the framework from 3.0 MB to about 1.6 MB.
+	for macho in Sparkle Autoupdate Updater.app/Contents/MacOS/Updater; do
+		lipo -thin arm64 "$sparkle/Versions/B/$macho" \
+			-output "$sparkle/Versions/B/$macho.thin"
+		mv "$sparkle/Versions/B/$macho.thin" "$sparkle/Versions/B/$macho"
+	done
+
+	# MIT asks that the notice travel with the binary, and the framework does
+	# not carry one — upstream keeps LICENSE beside it rather than inside it.
+	cp packaging/sparkle/LICENSE "$app/Contents/Resources/Sparkle-LICENSE.txt"
+
+	# The feed is derived from the repository rather than written out, so the
+	# place the update check looks and the place the Help menu opens cannot
+	# drift apart. `releases/latest/download/` is GitHub's redirect to an asset
+	# of the newest release, which is where the release workflow puts the
+	# appcast — so the URL never has to name a version.
+	feed=$(sed -n 's|^repository = "\(.*\)"$|\1|p' Cargo.toml | head -1)
+	# The two switches, present so that Sparkle does not ask for itself. Left
+	# alone it puts up its own permission prompt on the second launch; this
+	# application already asks the same question in its settings panel, and
+	# being asked twice by two different dialogs is worse than either. False
+	# here is only the starting point — src/updater.rs seeds the real answer
+	# from the profile on the first launch, and Sparkle owns it afterwards.
+	/usr/libexec/PlistBuddy \
+		-c "Add :SUFeedURL string $feed/releases/latest/download/appcast.xml" \
+		-c "Add :SUPublicEDKey string $(cat packaging/sparkle/public-key.txt)" \
+		-c "Add :SUEnableAutomaticChecks bool false" \
+		-c "Add :SUAutomaticallyUpdate bool false" \
+		"$app/Contents/Info.plist" >/dev/null
+fi
 
 # Symbols live beside the bundle rather than inside it: they are half the build
 # output, nothing at runtime reads them, and `sample` and Instruments find a
@@ -109,10 +163,39 @@ else
 	else
 		set -- --timestamp=none --entitlements packaging/debug.entitlements
 	fi
+
+	# Innermost first, and the app last. A signature seals what is inside it, so
+	# signing the bundle before its framework produces a seal over the old
+	# contents and `codesign --verify --deep` reports the framework as modified.
+	#
+	# The nested pieces are signed on their own terms, not this application's:
+	# no --identifier, because each already has one and Sparkle's installer
+	# launches Autoupdate by the identity it was built with, and
+	# --preserve-metadata so the entitlement upstream gives Autoupdate survives
+	# being re-signed. The one thing they do share is --options runtime, which
+	# notarization requires of every executable in the bundle and not only the
+	# main one. Nothing here gets packaging/debug.entitlements: get-task-allow
+	# on a helper that installs software is a wider hole than it is on the game.
+	if [ -n "$sparkle" ]; then
+		[ -n "$GWNATIVE_RELEASE" ] && inner=--timestamp || inner=--timestamp=none
+		for nested in \
+			"$sparkle/Versions/B/Autoupdate" \
+			"$sparkle/Versions/B/Updater.app" \
+			"$sparkle"; do
+			codesign --force --sign "$identity" --options runtime \
+				--preserve-metadata=identifier,entitlements "$inner" "$nested" 2>&1 |
+				sed 's/^/[bundle] /' >&2
+		done
+	fi
+
 	codesign --force --sign "$identity" --identifier com.gwnative.app \
 		--options runtime "$@" "$app" 2>&1 |
 		sed 's/^/[bundle] /' >&2
-	codesign --verify --strict "$app"
+	# --deep here as well as in scripts/release, because the framework is the
+	# first thing this bundle has ever carried that the seal alone does not
+	# prove: --strict checks the app against its own signature, and --deep is
+	# what walks into Contents/Frameworks and checks Sparkle against its.
+	codesign --verify --deep --strict "$app"
 fi
 
 echo "[bundle] $app"

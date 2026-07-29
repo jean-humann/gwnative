@@ -18,12 +18,19 @@
 //! The result is `include_bytes!`d by [`crate::server`] rather than written
 //! into `web/`, so the kernel a build serves is always the one that build
 //! compiled, and no packaging step has to remember to copy it.
+//!
+//! The second half of the file is one link line, for the updater framework —
+//! see [`sparkle`].
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Where the source lives, relative to the package root.
 const KERNEL: &str = "src/companion-kernel/lib.rs";
+
+/// The vendored updater framework, relative to the package root. See
+/// `packaging/sparkle/README.md` for what is in it and where it came from.
+const SPARKLE: &str = "packaging/sparkle";
 
 /// The triple the companion is built for. Named here as well as in
 /// `rust-toolchain.toml` because the toolchain file is what installs it and
@@ -34,6 +41,8 @@ const TARGET: &str = "wasm32-unknown-unknown";
 fn main() {
     println!("cargo::rerun-if-changed={KERNEL}");
     println!("cargo::rerun-if-changed=build.rs");
+
+    sparkle();
 
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"))
         .join("companion-kernel.wasm");
@@ -62,4 +71,48 @@ fn main() {
         ),
         Err(e) => panic!("could not run {}: {e}", Path::new(&rustc).display()),
     }
+}
+
+/// Link the updater framework, weakly, and say where to find it at run time.
+///
+/// Weakly is the whole design. `scripts/bundle` installs Sparkle into
+/// `Contents/Frameworks`, and nothing else does — a `cargo run` build, a
+/// benchmark and the test harness are bare executables with no `../Frameworks`
+/// to look in. A weak link is the one kind dyld is allowed to not find: the
+/// process starts, the classes are simply absent, and [`crate::updater`] asks
+/// the runtime whether they are there rather than assuming. What it does when
+/// they are not is what this project did before Sparkle existed — ask GitHub
+/// and put the answer in an alert.
+///
+/// So the arguments are two facts and one instruction. `-F` is where the
+/// linker reads the framework's headers and stub from now, absolute because a
+/// relative path would be read against whatever directory `rustc` was spawned
+/// in. `-weak_framework` is the link itself. `-rpath` is where *dyld* looks
+/// later, and `@executable_path/../Frameworks` is that path spelled relative to
+/// the binary, so the bundle can be moved, renamed, or opened from a disk image
+/// without the lookup changing.
+///
+/// `-bins` rather than plain `rustc-link-arg`: the test harness is a separate
+/// executable that would take the rpath and never use it, and the classes being
+/// absent under `cargo test` is the case the fallback most needs to stay honest
+/// about.
+fn sparkle() {
+    let root = std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    let dir = PathBuf::from(root).join(SPARKLE);
+    let binary = dir.join("Sparkle.framework/Versions/B/Sparkle");
+    println!("cargo::rerun-if-changed={}", binary.display());
+    if !binary.exists() {
+        // Not a panic. The framework is committed, so this means a checkout
+        // somebody trimmed on purpose — and the build that comes out of it
+        // still runs, still updates, and only does it the older way.
+        println!(
+            "cargo::warning={} is missing; building without Sparkle",
+            dir.display()
+        );
+        return;
+    }
+    println!("cargo::rustc-link-arg-bins=-F{}", dir.display());
+    println!("cargo::rustc-link-arg-bins=-weak_framework");
+    println!("cargo::rustc-link-arg-bins=Sparkle");
+    println!("cargo::rustc-link-arg-bins=-Wl,-rpath,@executable_path/../Frameworks");
 }

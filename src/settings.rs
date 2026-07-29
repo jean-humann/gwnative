@@ -99,10 +99,20 @@ pub struct Settings {
     pub touch_mode: TouchMode,
     pub show_diagnostics: bool,
     pub data_strategy: Option<DataStrategy>,
-    /// Whether a launch may ask GitHub whether this build is the newest one.
-    /// Off unless the player turns it on: see [`crate::release`] for why the
-    /// check is asked for rather than volunteered.
+    /// Whether a launch may look for a newer build. Off unless the player turns
+    /// it on: see [`crate::release`] for why the check is asked for rather than
+    /// volunteered.
     pub auto_check_updates: bool,
+    /// Whether a found update may install itself, without being asked each
+    /// time. Only meaningful in a bundle carrying Sparkle — the fallback check
+    /// has nothing to install with, and the settings panel does not offer the
+    /// switch on a build that cannot honour it.
+    ///
+    /// This field and the one above are the profile's copy of two preferences
+    /// the updater keeps in the application's user defaults, which is where the
+    /// real answer lives. [`crate::updater`] documents which way the copy runs
+    /// and why there are two.
+    pub auto_install_updates: bool,
     /// When the last check — automatic or from the menu — got an answer, in
     /// seconds since the epoch. What makes an opted-in launch ask once a day
     /// rather than once a launch.
@@ -146,6 +156,7 @@ impl Default for Settings {
             show_diagnostics: false,
             data_strategy: None,
             auto_check_updates: false,
+            auto_install_updates: false,
             last_update_check_at: None,
             compatibility_notice_seen_for: None,
             // On: a cursor the compositor draws is the one thing in this app
@@ -171,6 +182,7 @@ struct Wire {
     show_diagnostics: Option<bool>,
     data_strategy: Option<DataStrategy>,
     auto_check_updates: Option<bool>,
+    auto_install_updates: Option<bool>,
     last_update_check_at: Option<u64>,
     compatibility_notice_seen_for: Option<String>,
     native_cursor: Option<bool>,
@@ -193,12 +205,13 @@ struct Wire {
 /// so the write has to come from there. What stops it being abused is the shape
 /// check below — the value must be a client hash, and a build hash the player
 /// has genuinely seen is the only thing that can silence anything.
-const PATCHABLE: [&str; 8] = [
+const PATCHABLE: [&str; 9] = [
     "renderScale",
     "touchMode",
     "showDiagnostics",
     "dataStrategy",
     "autoCheckUpdates",
+    "autoInstallUpdates",
     "compatibilityNoticeSeenFor",
     "nativeCursor",
     "targetReadout",
@@ -252,6 +265,9 @@ fn merge(base: Settings, raw: &serde_json::Value) -> Result<Settings, String> {
     }
     if let Some(auto) = wire.auto_check_updates {
         out.auto_check_updates = auto;
+    }
+    if let Some(auto) = wire.auto_install_updates {
+        out.auto_install_updates = auto;
     }
     if let Some(at) = wire.last_update_check_at {
         out.last_update_check_at = Some(at);
@@ -372,6 +388,33 @@ impl Store {
         match save(&self.path, &next) {
             Ok(()) => *current = next,
             Err(e) => note!("[settings] the update-check time was not saved: {e}"),
+        }
+    }
+
+    /// Copy the updater's two switches into the profile.
+    ///
+    /// Not a patch either, and for the opposite reason to the one above: these
+    /// two *are* patchable, because the settings panel is where they are moved.
+    /// This is the other direction — the launch discovering what the updater
+    /// already thinks, so that the panel shows the answer Sparkle will act on
+    /// rather than the one this file happened to be left with. See
+    /// [`crate::updater`] for why the updater is the one holding the truth.
+    ///
+    /// Silent when they already agree, which is every launch but the ones where
+    /// something changed them from outside the panel.
+    pub fn remember_update_preferences(&self, check: bool, install: bool) {
+        let mut current = self.current.lock().unwrap();
+        if current.auto_check_updates == check && current.auto_install_updates == install {
+            return;
+        }
+        let next = Settings {
+            auto_check_updates: check,
+            auto_install_updates: install,
+            ..current.clone()
+        };
+        match save(&self.path, &next) {
+            Ok(()) => *current = next,
+            Err(e) => note!("[settings] the update preferences were not saved: {e}"),
         }
     }
 }
@@ -585,6 +628,50 @@ mod tests {
         assert!(!parse(&json!({})).unwrap().auto_check_updates);
         let on = patch(Settings::default(), &json!({"autoCheckUpdates": true})).unwrap();
         assert!(on.auto_check_updates);
+    }
+
+    /// The stronger of the two, and the one a profile written before it existed
+    /// has no opinion about — so its default has to be the cautious answer
+    /// rather than "whatever the other switch says".
+    #[test]
+    fn nothing_installs_itself_until_a_player_says_so() {
+        assert!(!Settings::default().auto_install_updates);
+        assert!(!parse(&json!({})).unwrap().auto_install_updates);
+        // The shape of every profile this build inherits: checking was asked
+        // for once, installing was never on offer.
+        let inherited = parse(&json!({"autoCheckUpdates": true})).unwrap();
+        assert!(inherited.auto_check_updates);
+        assert!(!inherited.auto_install_updates);
+
+        let both = patch(inherited, &json!({"autoInstallUpdates": true})).unwrap();
+        assert!(both.auto_install_updates);
+        assert!(patch(both, &json!({"autoInstallUpdates": "yes"})).is_err());
+    }
+
+    /// The direction that makes this file a mirror rather than a second
+    /// opinion. Sparkle's own update window can turn either switch on, and the
+    /// settings panel has to show what it did — see [`crate::updater`] for why
+    /// the updater is the one holding the truth.
+    #[test]
+    fn what_the_updater_decided_is_what_the_panel_reads_back() {
+        let (_dir, path) = scratch("update-preferences");
+        let store = Store::open(path.clone());
+        assert!(!store.get().auto_check_updates);
+        assert!(!store.get().auto_install_updates);
+
+        store.remember_update_preferences(true, true);
+        assert!(store.get().auto_check_updates);
+        assert!(store.get().auto_install_updates);
+        assert_eq!(Store::open(path.clone()).get(), store.get());
+
+        // Two fields, not a reset: a launch that finds the updater disagreeing
+        // must not take the rest of the profile with it.
+        store.apply(&json!({"renderScale": 1})).unwrap();
+        store.remember_update_preferences(false, false);
+        let after = Store::open(path).get();
+        assert_eq!(after.render_scale, 1.0);
+        assert!(!after.auto_check_updates);
+        assert!(!after.auto_install_updates);
     }
 
     /// The two host-owned fields. A page that could write either could tell

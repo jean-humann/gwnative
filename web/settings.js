@@ -21,6 +21,7 @@
  *   showDiagnostics: boolean,
  *   dataStrategy: DataStrategy,
  *   autoCheckUpdates: boolean,
+ *   autoInstallUpdates: boolean,
  *   lastUpdateCheckAt: number | null,
  *   compatibilityNoticeSeenFor: string | null,
  *   nativeCursor: boolean,
@@ -51,6 +52,7 @@ const FALLBACK = {
   showDiagnostics: false,
   dataStrategy: null,
   autoCheckUpdates: false,
+  autoInstallUpdates: false,
   lastUpdateCheckAt: null,
   compatibilityNoticeSeenFor: null,
   // The GWonMac Tools. There is deliberately no master switch beside them:

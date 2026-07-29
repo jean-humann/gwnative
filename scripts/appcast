@@ -1,0 +1,197 @@
+#!/bin/sh
+# Write dist/appcast.xml — the feed the application reads to learn an update
+# exists, what changed in it, and where to get it.
+#
+# The feed is one item long, always the release being published. Sparkle picks
+# the newest item it can install and shows that item's notes, so a longer feed
+# would buy nothing a player ever sees; what it would buy is a file that
+# accumulates, has to be merged on every release, and grows entries pointing at
+# downloads nobody kept. `releases/latest/download/appcast.xml` already means
+# "the current release" — this writes exactly that and nothing else, and links
+# to the releases page for anyone who wants the history.
+#
+# The one thing here that is not bookkeeping is the signature. Sparkle verifies
+# every download against SUPublicEDKey before it unpacks it, which is what makes
+# an update safe to install from a URL over which this project controls nothing:
+# GitHub could serve different bytes and they would be refused. That protection
+# is only as good as the pairing between the key that signs here and the key the
+# bundle carries, and getting that pairing wrong is invisible — the release
+# looks perfect and every client silently refuses it. So the signature is
+# checked against packaging/sparkle/public-key.txt, the same bytes the app was
+# built with, before it is written into a feed.
+#
+# Usage: scripts/appcast <archive> [release-notes.html]
+# Environment:
+#   SPARKLE_PRIVATE_KEY  the EdDSA key as generate_keys printed it. Unset means
+#                        the login keychain, which is where generate_keys put a
+#                        copy — so a developer publishing by hand needs nothing
+#                        in the environment and CI needs one secret.
+#   OPENSSL              an OpenSSL 3 to check the signature with, if the ones
+#                        looked for below are not where they usually are.
+set -e
+
+archive=$1
+notes=$2
+# Resolved before the cd, because they were given relative to wherever this was
+# run from and everything after this line is relative to the repository.
+case $archive in
+"" | /*) ;;
+*) archive=$PWD/$archive ;;
+esac
+case $notes in
+"" | /*) ;;
+*) notes=$PWD/$notes ;;
+esac
+
+cd "$(dirname "$0")/.."
+root=$PWD
+
+say() { echo "[appcast] $*" >&2; }
+die() {
+	say "$*"
+	exit 1
+}
+
+key=packaging/sparkle/public-key.txt
+signer=packaging/sparkle/sign_update
+
+[ -n "$archive" ] || die "usage: scripts/appcast <archive> [release-notes.html]"
+[ -f "$archive" ] || die "$archive does not exist"
+[ -x "$signer" ] || die "$signer is missing; see packaging/sparkle/README.md"
+[ -f "$key" ] || die "$key does not exist.
+    Nothing published from this checkout can be verified without it, and no
+    bundle built from it carries a feed URL to begin with — see the updater
+    section of README.md for generating the key once."
+
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+repo=$(sed -n 's|^repository = "\(.*\)"$|\1|p' Cargo.toml | head -1)
+# The same three facts scripts/bundle put in the Info.plist, read from the same
+# places rather than repeated: an update whose sparkle:version does not match
+# the CFBundleVersion of the build it delivers is offered again on every launch.
+build=$(git rev-list --count HEAD 2>/dev/null || echo "$version")
+minimum=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" \
+	packaging/Info.plist)
+length=$(stat -f%z "$archive")
+url="$repo/releases/download/v$version/${archive##*/}"
+
+# ------------------------------------------------------------------- sign ---
+if [ -n "${SPARKLE_PRIVATE_KEY:-}" ]; then
+	# Through a pipe rather than an argument: anything on a command line is
+	# readable by every other process on the machine for as long as it runs.
+	if ! signature=$(printf '%s' "$SPARKLE_PRIVATE_KEY" |
+		"$signer" -p --ed-key-file - "$archive" 2>&1); then
+		die "sign_update refused the key in SPARKLE_PRIVATE_KEY: $signature"
+	fi
+else
+	say "no SPARKLE_PRIVATE_KEY set; signing with the login keychain"
+	if ! signature=$("$signer" -p "$archive" 2>&1); then
+		die "sign_update found no key in the keychain: $signature"
+	fi
+fi
+
+# ----------------------------------------------------------------- verify ---
+# Public key only. This script never needs the private half for anything except
+# handing it to sign_update, and reconstructing one from the other is not
+# something it should be able to do.
+openssl=
+for candidate in "${OPENSSL:-}" openssl \
+	/opt/homebrew/opt/openssl@3/bin/openssl \
+	/usr/local/opt/openssl@3/bin/openssl; do
+	[ -n "$candidate" ] || continue
+	command -v "$candidate" >/dev/null 2>&1 || continue
+	case $("$candidate" version 2>/dev/null) in
+	"OpenSSL 3"* | "OpenSSL 4"*) openssl=$candidate && break ;;
+	esac
+done
+
+if [ -n "$openssl" ]; then
+	work=$(mktemp -d)
+	trap 'rm -rf "$work"' EXIT INT TERM
+	# Ed25519 public keys have no parameters and a fixed length, so the DER
+	# wrapper OpenSSL wants around one is a constant: SubjectPublicKeyInfo,
+	# algorithm 1.3.101.112, then the 32 bytes themselves.
+	{
+		printf '302a300506032b6570032100' | xxd -r -p
+		base64 -d <"$key"
+	} >"$work/public.der"
+	printf '%s' "$signature" | base64 -d >"$work/signature.bin"
+	"$openssl" pkeyutl -verify -pubin -inkey "$work/public.der" -keyform DER \
+		-rawin -in "$archive" -sigfile "$work/signature.bin" >/dev/null 2>&1 ||
+		die "the signature does not verify against $key.
+    The key that signed this is not the key the application was built to trust,
+    so every copy of it would refuse this update without saying why. Check
+    SPARKLE_PRIVATE_KEY, or the keychain if it is unset."
+	say "the signature verifies against ${key##*/}"
+else
+	say "no OpenSSL 3 found, so the signature was not checked against" \
+		"${key##*/}. Install one (brew install openssl@3) or set OPENSSL."
+fi
+
+# ------------------------------------------------------------------ notes ---
+# Sparkle renders this in a web view. The only styling is what keeps GitHub's
+# markup legible in a small panel — no colours, because `color-scheme` is what
+# lets the view follow the system appearance and a hardcoded palette is how
+# release notes end up black on black.
+if [ -n "$notes" ] && [ -f "$notes" ]; then
+	# ]]> inside the notes would end the CDATA section early and truncate the
+	# feed. Split across two sections instead, which is the standard escape.
+	rendered=$(sed 's|]]>|]]]]><![CDATA[>|g' "$notes")
+else
+	say "no release notes given; the feed will point at the release page"
+	page="$repo/releases/tag/v$version"
+	rendered="<p>See <a href=\"$page\">the release notes</a>.</p>"
+fi
+
+# ------------------------------------------------------------------- feed ---
+mkdir -p "$root/dist"
+out=$root/dist/appcast.xml
+cat >"$out" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Generated by scripts/appcast. Editing this by hand is editing what other
+  people's machines will install; regenerate it instead.
+-->
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+	<channel>
+		<title>Guild Wars</title>
+		<link>$repo/releases/latest/download/appcast.xml</link>
+		<description>Updates for the native macOS build.</description>
+		<language>en</language>
+		<item>
+			<title>Guild Wars $version</title>
+			<pubDate>$(date "+%a, %d %b %Y %H:%M:%S %z")</pubDate>
+			<sparkle:version>$build</sparkle:version>
+			<sparkle:shortVersionString>$version</sparkle:shortVersionString>
+			<sparkle:minimumSystemVersion>$minimum</sparkle:minimumSystemVersion>
+			<sparkle:fullReleaseNotesLink>$repo/releases</sparkle:fullReleaseNotesLink>
+			<description><![CDATA[<style>
+:root { color-scheme: light dark; }
+body { font-family: -apple-system, system-ui, sans-serif; font-size: 13px;
+       line-height: 1.5; margin: 0; }
+h1, h2, h3 { font-size: 13px; margin: 1em 0 0.4em; }
+ul, ol { padding-left: 1.4em; }
+code, pre { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+pre { overflow-x: auto; }
+</style>
+$rendered
+]]></description>
+			<enclosure url="$url"
+				sparkle:version="$build"
+				sparkle:shortVersionString="$version"
+				length="$length"
+				type="application/octet-stream"
+				sparkle:edSignature="$signature"/>
+		</item>
+	</channel>
+</rss>
+XML
+
+# A feed that does not parse is a feed every client drops without a word, and
+# the notes are somebody else's markup pasted into the middle of it.
+if ! problem=$(xmllint --noout "$out" 2>&1); then
+	echo "$problem" | sed 's/^/[appcast] /' >&2
+	die "the generated feed is not well-formed XML"
+fi
+
+say "$out"
+say "  $version (build $build), ${length} bytes at ${url##*/}"

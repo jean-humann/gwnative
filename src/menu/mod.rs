@@ -25,21 +25,22 @@ use objc2_app_kit::{NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSString};
 use objc2_web_kit::WKWebView;
 
-use crate::{diagnostics, release, settings};
+use crate::{diagnostics, release, settings, updater};
 
 use actions::Actions;
 
 pub use actions::at_launch as check_for_updates_at_launch;
 
-/// Whether this build can be compared against anything published.
+/// Whether this build can find out about a newer one.
 ///
-/// Decided by what `Cargo.toml` declares, not by anything that happens at
-/// runtime — so a build with nowhere to look does not offer to look. The
-/// alternative is an item that can only ever answer "this build did not come
-/// from the release process", which is a worse thing to put in a menu than
-/// nothing at all.
+/// Two ways to be able to, and the item appears if either holds: the bundle
+/// carries the updater, or `Cargo.toml` declares where this was published from
+/// and the older check can compare tags. A build with neither does not offer to
+/// look, because the alternative is an item that can only ever answer "this
+/// build did not come from the release process" — a worse thing to put in a
+/// menu than nothing at all.
 fn updates_offered() -> bool {
-    release::repository().is_some()
+    updater::available() || release::repository().is_some()
 }
 
 /// Build the menu bar and hand it to the application. Main thread, before
