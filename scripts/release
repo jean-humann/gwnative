@@ -107,7 +107,7 @@ xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1 ||
 	say "warning: packaging/sparkle/public-key.txt is missing. This build will"
 	say "  carry no update feed, and scripts/publish will have nothing to sign"
 	say "  one with. Players will be told that a new version exists and left to"
-	say "  download it themselves. See the updater section of README.md."
+	say "  download it themselves. See docs/releasing.md."
 }
 
 # ------------------------------------------------------------------- build ---
