@@ -1,5 +1,5 @@
 #!/bin/sh
-# Rebuild packaging/AppIcon.icns from packaging/icon.png.
+# Rebuild the application and README icons from packaging/icon.png.
 #
 # Run when the artwork changes. The .icns is committed, because iconutil is not
 # on every machine that might build this and an icon is a designed thing rather
@@ -22,6 +22,7 @@ set -e
 cd "$(dirname "$0")/.."
 source=packaging/icon.png
 icns=packaging/AppIcon.icns
+readme_icon=docs/assets/app-icon.png
 iconset=$(mktemp -d)/AppIcon.iconset
 mkdir -p "$iconset"
 
@@ -84,6 +85,9 @@ SWIFT
 
 swift "$iconset/../render.swift" "$source" "$iconset"
 iconutil --convert icns --output "$icns" "$iconset"
+mkdir -p "$(dirname "$readme_icon")"
+cp "$iconset/icon_512x512.png" "$readme_icon"
 rm -rf "$(dirname "$iconset")"
 
 echo "[icon] $icns ($(wc -c < "$icns" | tr -d ' ') bytes)"
+echo "[icon] $readme_icon ($(wc -c < "$readme_icon" | tr -d ' ') bytes)"
