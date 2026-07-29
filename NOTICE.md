@@ -14,6 +14,14 @@ material only. It does not grant rights to Guild Wars or Guild Wars Reforged
 names, client code, game data, artwork, audio, logos, or other proprietary
 material.
 
+## Application icon
+
+`packaging/icon.png` is the 1024 × 1024 Guild Wars Reforged application
+artwork published by ArenaNet on the official
+[Apple App Store listing](https://apps.apple.com/app/guild-wars-reforged/id820613069).
+The artwork and Guild Wars marks remain the property of their respective
+owners and are not covered by this project's GPL licence.
+
 ## ArenaNet notice
 
 > © ArenaNet LLC. All rights reserved. NCSOFT, ArenaNet, Guild Wars, Guild

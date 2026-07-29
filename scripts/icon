@@ -6,12 +6,13 @@
 # than a compiled one — regenerating it on each build would put a binary diff in
 # the tree every time somebody upgraded a tool.
 #
-# The one decision here is the margin. macOS draws an app icon inside a grid
-# whose body fills 824 of a 1024 canvas — 80.5% — and everything the Dock shows
-# beside us obeys it. Artwork that fills its canvas edge to edge looks oversized
-# next to Safari and Mail, which is the tell of a ported icon. The source is
-# already a rounded rectangle with its own corners, so all that is missing is
-# the margin, and the ratio holds at every size: 512 draws into 412, 32 into 26.
+# The two decisions here are the margin and the mask. macOS draws an app icon
+# inside a grid whose body fills 824 of a 1024 canvas — 80.5% — and everything
+# the Dock shows beside us obeys it. Artwork that fills its canvas edge to edge
+# looks oversized next to Safari and Mail, which is the tell of a ported icon.
+# Apple's source artwork is an unmasked square because each platform applies
+# its own shape, so the renderer adds the rounded body as well as the margin.
+# The ratios hold at every size: 512 draws into 412, 32 into 26.
 #
 # No baked drop shadow. Apple's own template has one, but its exact blur and
 # offset are not published as numbers, and a guessed shadow reads as a mistake
@@ -49,6 +50,7 @@ let entries: [(Int, String)] = [
 ]
 
 let bodyRatio = 824.0 / 1024.0
+let cornerRatio = 0.20
 
 for (pixels, name) in entries {
     guard let rep = NSBitmapImageRep(
@@ -64,8 +66,14 @@ for (pixels, name) in entries {
     NSGraphicsContext.current?.imageInterpolation = .high
     let body = (Double(pixels) * bodyRatio).rounded()
     let inset = ((Double(pixels) - body) / 2).rounded()
+    let target = NSRect(x: inset, y: inset, width: body, height: body)
+    NSBezierPath(
+        roundedRect: target,
+        xRadius: body * cornerRatio,
+        yRadius: body * cornerRatio
+    ).addClip()
     source.draw(
-        in: NSRect(x: inset, y: inset, width: body, height: body),
+        in: target,
         from: .zero, operation: .sourceOver, fraction: 1
     )
     NSGraphicsContext.restoreGraphicsState()
