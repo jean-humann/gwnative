@@ -184,6 +184,7 @@ fn preamble(
     let forced_runtime = std::env::var("GWNATIVE_CLIENT_RUNTIME")
         .ok()
         .filter(|value| value == "jspi" || value == "asyncify");
+    let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
     format!(
         "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
@@ -194,7 +195,7 @@ fn preamble(
          window.__gwnativeEnhancementManifest = null;\nwindow.__gwnativeClientRuntime = {};\n\
          window.__gwnativeFrameAuditEnabled = {};\nwindow.__gwnativePrefer60FPS = {};\n\
          window.__gwnativePreserveDrawingBuffer = {};\nwindow.__gwnativeFrameIsolation = {};\n\
-         window.__gwnativeLaunch = {};",
+         window.__gwnativeLaunch = {};\nwindow.__gwnativeE2E = {e2e};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),

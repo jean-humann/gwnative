@@ -140,6 +140,40 @@ node --test web/settings-panel.test.js
 Run `scripts/bundle` after changes to `build.rs`, `packaging/`, the web shell
 copy rules, release profile, or embedded resources.
 
+## Native end-to-end smoke test
+
+`scripts/e2e` exercises the real signed WKWebView app and the installed Guild
+Wars client. The runner:
+
+1. builds and signs gwnative with the normal development identity;
+2. lets the app—not the runner—read the default profile's saved login from
+   Keychain;
+3. exercises Settings, the User Guide, Companion Tools, widgets, layout mode,
+   and the build library by semantic DOM name;
+4. verifies the token boundary and both versioned API descriptions;
+5. waits for launch milestones over a bounded long-poll channel;
+6. sends only the finite **activate** and **move-forward** test actions; and
+7. when the installed client has a certified state layout, confirms movement
+   through a newer game-state revision.
+
+```sh
+scripts/e2e
+scripts/e2e --no-gameplay
+```
+
+The session token is captured and redacted. Credential values never leave the
+application: the event channel reports only whether both fields were offered.
+The control plane exists only under `GWNATIVE_E2E`, has no arbitrary JavaScript,
+coordinates, text-entry or credential action, and sleeps between events. It
+does not use screenshots, OCR, Accessibility scripting, or focus polling.
+
+The page restores the two profile-local `localStorage` values it touches
+byte-for-byte before the runner stops the process. The test intentionally uses
+the installed client root, because a source checkout can hold an older ignored
+client module than the one the packaged app last downloaded. A newly patched,
+uncertified ArenaNet build can prove the host and input path but cannot honestly
+prove character position until its companion layout has been certified.
+
 ## Environment variables
 
 All runtime overrides are optional.
@@ -151,6 +185,7 @@ All runtime overrides are optional.
 | `GWNATIVE_WEB_ROOT` | Override the web shell and client-artifact directory |
 | `GWNATIVE_PORT` | Override loopback port `38112` |
 | `GWNATIVE_PRINT_TOKEN` | Print the injected host-route token to stderr |
+| `GWNATIVE_E2E` | Enable the tokened, finite native test control plane used by `scripts/e2e` |
 | `GWNATIVE_TRACE_HTTP` | Log each loopback HTTP request |
 | `GWNATIVE_TRACE_SOCKETS` | Log socket frame sizes; value `hex` also logs at most the first 16 bytes |
 | `GWNATIVE_FRAME_AUDIT` | Value `1` enables animation-callback, draw, suspension and logical-swap correlation |

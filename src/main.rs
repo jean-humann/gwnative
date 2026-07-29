@@ -21,6 +21,7 @@ mod commands;
 mod diagnostics;
 mod disk;
 mod dock;
+mod e2e_api;
 mod error;
 mod game_api;
 mod generation;
@@ -327,6 +328,7 @@ fn main() {
     module.logs();
 
     let token = session_token();
+    let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
     let loopback = match server::spawn(server::Config {
         root: root.clone(),
         snapshot,
@@ -338,6 +340,7 @@ fn main() {
         port: paths.port(),
         credential_account: profile.keychain_account(),
         mods,
+        e2e,
     }) {
         Ok(loopback) => loopback,
         // Nothing downstream has an answer to this: the client is a page, and

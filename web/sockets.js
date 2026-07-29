@@ -76,6 +76,7 @@ export function createSockets({ log, audit }) {
         // reuses the moment this returns — and growing the heap would detach it
         // outright. Compact it before it can be queued or sent.
         const bytes = data.slice();
+        window.gwE2E?.traffic('send', id, bytes.byteLength);
         if (open) ws.send(bytes);
         else queued.push(bytes);
       },
@@ -102,6 +103,7 @@ export function createSockets({ log, audit }) {
         if (message.type === 'open') {
           open = true;
           trace('open');
+          void window.gwE2E?.report('socket-open', { socketId: id }).catch(() => {});
           for (const bytes of queued.splice(0)) ws.send(bytes);
           deliver('socket-open', socket, socket.onopen);
         } else {
@@ -110,6 +112,7 @@ export function createSockets({ log, audit }) {
         }
         return;
       }
+      window.gwE2E?.traffic('receive', id, event.data.byteLength);
       deliver('socket-message', socket, socket.onmessage, new Uint8Array(event.data));
     };
 

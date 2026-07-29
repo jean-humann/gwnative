@@ -409,6 +409,9 @@ Module = {
         // this, but a frame on screen is the stronger evidence of the two.
         releaseStage();
         log('first frame presented');
+        window.__gwnativeFirstFrame = true;
+        window.dispatchEvent(new Event('gwnative:first-frame'));
+        void window.gwE2E?.report('first-frame').catch(() => {});
         // The heap the client settled on to get here, which is the number a
         // later reading has to be compared against to mean anything.
         readHeap?.();
@@ -546,6 +549,10 @@ Module = {
         `password ${stored.password ? 'set' : 'empty'}) after`,
         `${Math.round(performance.now() - asked)} ms`,
       );
+      void window.gwE2E?.report('credentials-offered', {
+        accountSet: Boolean(stored.username),
+        passwordSet: Boolean(stored.password),
+      }).catch(() => {});
       return stored;
     },
     async storeCredentials(username, password) {
@@ -579,6 +586,7 @@ Module = {
     const s = String(stage || '').toLowerCase();
     if (s === 'complete') {
       releaseStage();
+      void window.gwE2E?.report('startup-complete').catch(() => {});
       return status(null);
     }
     // The client's four arguments for `downloading` are not what their shape
@@ -610,6 +618,10 @@ Module = {
       buildId: Number(info.buildId),
     });
     log(`build info: program=${info.programId} build=${info.buildId}`);
+    void window.gwE2E?.report('client-build', {
+      programId: Number(info.programId),
+      buildId: Number(info.buildId),
+    }).catch(() => {});
   },
 
   isMobile: launchOptions.mockSteamDeck === true,
@@ -742,7 +754,8 @@ function reportTransformFailure() {
   try {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
-      start, panel, data, compat, guide, gameApi, overlay, tools, hotkeys, metrics, runtime, audit,
+      start, panel, data, compat, guide, gameApi, overlay, tools, hotkeys, e2e, metrics, runtime,
+      audit,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -763,6 +776,7 @@ function reportTransformFailure() {
       import('./overlay.js'),
       import('./tools-panel.js'),
       import('./hotkeys.js'),
+      import('./e2e.js'),
       import('./diagnostics.js'),
       import('./client-runtime.js'),
       import('./frame-audit.js'),
@@ -787,6 +801,7 @@ function reportTransformFailure() {
       ...overlay,
       ...tools,
       ...hotkeys,
+      ...e2e,
       ...runtime,
       ...audit,
     };
@@ -914,6 +929,35 @@ function reportTransformFailure() {
   // player whose game did not start.
   window.gwOpenGuide = host.installGuide({ log });
 
+  if (window.__gwnativeE2E === true) {
+    window.gwE2E = host.installE2EBridge({
+      window,
+      canvas: Module.canvas,
+      log,
+    });
+    void window.gwE2E?.report('client-capabilities', {
+      enhancements: String(window.__gwnativeEnhancements ?? 'off'),
+      templateSave: String(window.__gwnativeTemplateSave ?? 'off'),
+    }).catch(() => {});
+    void host.runAppE2E({
+      window,
+      document,
+      storage: window.localStorage,
+      overlays: window.gwOverlays,
+      openTools: window.gwOpenTools,
+      openSettings: window.gwOpenSettings,
+      openGuide: window.gwOpenGuide,
+      log,
+    }).then(() => {
+      void window.gwE2E?.report('app-pass').catch(() => {});
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`[e2e] app FAIL: ${message}`);
+      void window.gwE2E?.report('app-fail', {
+        message: String(message).replace(/[\p{Cc}\p{Cf}]+/gu, ' ').trim().slice(0, 160),
+      }).catch(() => {});
+    });
+  }
   // ArenaNet's glue never dials its own API hosts. Outside Capacitor it folds
   // every request onto this origin, under a path equal to the first label of the
   // host it meant to reach — `https://webgate.ncplatform.net/x` becomes
@@ -1025,11 +1069,15 @@ function reportTransformFailure() {
   // Compatibility is status, not a launch decision. The settings panel keeps
   // the player-facing explanation beside the affected controls; logging and
   // remembering this artifact must never delay ArenaNet's unmodified client.
-  void host.announceCompatibility({
-    log,
-    save: host.saveSettings,
-    seenFor: host.currentSettings().compatibilityNoticeSeenFor,
-  }).catch((error) => log(`[warn] compatibility: ${error}`));
+  if (window.__gwnativeE2E === true) {
+    log('[e2e] compatibility acknowledgement is covered by module tests');
+  } else {
+    void host.announceCompatibility({
+      log,
+      save: host.saveSettings,
+      seenFor: host.currentSettings().compatibilityNoticeSeenFor,
+    }).catch((error) => log(`[warn] compatibility: ${error}`));
+  }
 
   // The canvas is sized by the client, not here. It owns the drawing buffer —
   // it asks for the pixel ratio through emscripten_get_device_pixel_ratio and

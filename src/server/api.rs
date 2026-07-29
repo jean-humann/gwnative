@@ -79,6 +79,9 @@ pub(super) fn serve(
         }
         "__mods" => mod_manifest(request, stream, context)?,
         path if path.starts_with("__mods/") => mod_module(request, stream, context, path)?,
+        path if path == "__e2e/v1" || path.starts_with("__e2e/v1/") => {
+            e2e(request, stream, context)?
+        }
         "__game/v1" => game_description(request, stream, context)?,
         "__game/v1/state" => game_state(request, stream, context)?,
         "__game/v1/actions" => text(
@@ -174,6 +177,56 @@ pub(super) fn serve(
     Ok(Some(flow))
 }
 
+fn e2e(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
+    let Some(hub) = &context.e2e else {
+        return text(stream, 404, "native E2E API is disabled");
+    };
+    let after = || {
+        request
+            .param("after")
+            .unwrap_or_else(|| "0".into())
+            .parse::<u64>()
+            .map_err(|_| "after must be an unsigned integer")
+    };
+    let wait_ms = || {
+        request
+            .param("waitMs")
+            .unwrap_or_else(|| "0".into())
+            .parse::<u64>()
+            .map(|value| value.min(crate::e2e_api::MAX_WAIT_MS))
+            .map_err(|_| "waitMs must be an unsigned integer")
+    };
+
+    match (request.path.as_str(), request.method.as_str()) {
+        ("__e2e/v1", "GET") => json(stream, 200, &hub.description_json()),
+        ("__e2e/v1/actions", "POST") => match hub.submit_action(&request.body) {
+            Ok(action) => json(stream, 200, &action),
+            Err(reason) => text(stream, 400, &reason),
+        },
+        ("__e2e/v1/actions", "GET") => match (after(), wait_ms()) {
+            (Ok(after), Ok(wait_ms)) => json(stream, 200, &hub.actions_json_after(after, wait_ms)),
+            (Err(reason), _) | (_, Err(reason)) => text(stream, 400, reason),
+        },
+        ("__e2e/v1/events", "POST") => match hub.publish_event(&request.body) {
+            Ok(sequence) => json(
+                stream,
+                200,
+                &serde_json::json!({"sequence": sequence})
+                    .to_string()
+                    .into_bytes(),
+            ),
+            Err(reason) => text(stream, 400, &reason),
+        },
+        ("__e2e/v1/events", "GET") => match (after(), wait_ms()) {
+            (Ok(after), Ok(wait_ms)) => json(stream, 200, &hub.events_json_after(after, wait_ms)),
+            (Err(reason), _) | (_, Err(reason)) => text(stream, 400, reason),
+        },
+        ("__e2e/v1", _) => not_allowed(stream, "GET"),
+        ("__e2e/v1/actions" | "__e2e/v1/events", _) => not_allowed(stream, "GET, POST"),
+        _ => text(stream, 404, "no such E2E route"),
+    }
+}
+
 fn game_description(
     request: &Request,
     stream: &mut TcpStream,
@@ -187,10 +240,32 @@ fn game_description(
 
 fn game_state(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
     match request.method.as_str() {
-        "GET" => match context.game_api.state_json() {
-            Some(state) => json(stream, 200, &state),
-            None => text(stream, 404, "no certified game state has been published"),
-        },
+        "GET" => {
+            let after = match request
+                .param("after")
+                .unwrap_or_else(|| "0".into())
+                .parse::<u64>()
+            {
+                Ok(value) => value,
+                Err(_) => return text(stream, 400, "after must be an unsigned integer"),
+            };
+            let wait_ms = match request
+                .param("waitMs")
+                .unwrap_or_else(|| "0".into())
+                .parse::<u64>()
+            {
+                Ok(value) => value.min(crate::game_api::MAX_WAIT_MS),
+                Err(_) => return text(stream, 400, "waitMs must be an unsigned integer"),
+            };
+            match context.game_api.state_json_after(after, wait_ms) {
+                Some(state) => json(stream, 200, &state),
+                None => text(
+                    stream,
+                    404,
+                    "no newer certified game state has been published",
+                ),
+            }
+        }
         "PUT" => match context.game_api.publish(&request.body) {
             Ok(revision) => json(
                 stream,

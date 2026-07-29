@@ -1,0 +1,477 @@
+#!/usr/bin/env python3
+"""Run the signed native app through its event-driven test control plane.
+
+The application—not this runner—reads the selected profile's Keychain item.
+The runner receives only presence milestones and the short-lived loopback
+capability. It performs no screen capture, OCR, focus polling, coordinate
+clicking, arbitrary JavaScript evaluation or credential read.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+from pathlib import Path
+import queue
+import re
+import signal
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+ROOT = Path(__file__).resolve().parent.parent
+TOKEN = re.compile(r"session token ([A-Za-z0-9_-]+)")
+ORIGIN = re.compile(r" at (http://127\.0\.0\.1:\d+)/index\.html")
+EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+LONG_POLL_MS = 15_000
+
+
+class Failure(RuntimeError):
+    pass
+
+
+def run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=ROOT, check=True, text=True, **kwargs)
+
+
+def request_json(
+    origin: str,
+    path: str,
+    token: str | None,
+    *,
+    method: str = "GET",
+    body: dict[str, object] | None = None,
+    expected: int = 200,
+    timeout: float = 20,
+) -> dict[str, object]:
+    payload = json.dumps(body).encode() if body is not None else None
+    headers = {"X-Gwnative-Token": token} if token else {}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        f"{origin}{path}",
+        headers=headers,
+        method=method,
+        data=payload,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            response_body = response.read()
+    except urllib.error.HTTPError as error:
+        status = error.code
+        response_body = error.read()
+    if status != expected:
+        raise Failure(f"{method} {path} answered {status}, expected {expected}")
+    if not response_body:
+        return {}
+    try:
+        return json.loads(response_body)
+    except json.JSONDecodeError:
+        # Refusal routes deliberately answer with plain text. The status is the
+        # contract under test; carrying the body further adds no evidence.
+        return {}
+
+
+def output_reader(
+    process: subprocess.Popen[str],
+    events: queue.Queue[tuple[str, str]],
+) -> None:
+    assert process.stdout is not None
+    for raw in process.stdout:
+        line = raw.rstrip()
+        token = TOKEN.search(line)
+        origin = ORIGIN.search(line)
+        if token:
+            events.put(("token", token.group(1)))
+            print("[gwnative] session token captured (redacted)")
+        else:
+            print(EMAIL.sub("<redacted-account>", line))
+        if origin:
+            events.put(("origin", origin.group(1)))
+
+
+def wait_for_origin(
+    events: queue.Queue[tuple[str, str]],
+    timeout: float,
+) -> tuple[str, str]:
+    deadline = time.monotonic() + timeout
+    token = None
+    origin = None
+    while time.monotonic() < deadline:
+        try:
+            kind, value = events.get(timeout=min(1, deadline - time.monotonic()))
+        except queue.Empty:
+            continue
+        if kind == "token":
+            token = value
+        elif kind == "origin":
+            origin = value
+        if token and origin:
+            return origin, token
+    raise Failure("the signed app did not publish its loopback origin before timeout")
+
+
+class EventStream:
+    """A cursor over the server's bounded long-poll event log."""
+
+    def __init__(self, origin: str, token: str) -> None:
+        self.origin = origin
+        self.token = token
+        self.after = 0
+        self.pending: list[dict[str, object]] = []
+
+    def next_batch(self, deadline: float) -> list[dict[str, object]]:
+        if self.pending:
+            result, self.pending = self.pending, []
+            return result
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return []
+        wait_ms = min(LONG_POLL_MS, max(1, int(remaining * 1000)))
+        query = urllib.parse.urlencode({"after": self.after, "waitMs": wait_ms})
+        envelope = request_json(
+            self.origin,
+            f"/__e2e/v1/events?{query}",
+            self.token,
+            timeout=(wait_ms / 1000) + 3,
+        )
+        result = list(envelope.get("events", []))
+        for event in result:
+            self.after = max(self.after, int(event.get("sequence", 0)))
+        return result
+
+    def wait_for(
+        self,
+        kinds: set[str],
+        timeout: float,
+    ) -> dict[str, dict[str, object]]:
+        deadline = time.monotonic() + timeout
+        found: dict[str, dict[str, object]] = {}
+        while time.monotonic() < deadline and not kinds.issubset(found):
+            batch = self.next_batch(deadline)
+            for event in batch:
+                kind = str(event.get("kind", ""))
+                if kind in {"app-fail", "action-fail"}:
+                    detail = event.get("detail", {})
+                    raise Failure(f"{kind}: {detail.get('message', 'unknown failure')}")
+                if kind in kinds:
+                    found[kind] = event
+                else:
+                    self.pending.append(event)
+            # Events that were not wanted must not make the next read spin on
+            # the same local list forever.
+            if self.pending and not any(
+                str(event.get("kind", "")) in kinds for event in self.pending
+            ):
+                self.pending.clear()
+        missing = kinds.difference(found)
+        if missing:
+            raise Failure(
+                f"no {', '.join(sorted(missing))} event arrived within {timeout:.0f}s"
+            )
+        return found
+
+    def wait_for_action(self, sequence: int, timeout: float) -> dict[str, object]:
+        deadline = time.monotonic() + timeout
+        deferred: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            batch = self.next_batch(deadline)
+            for index, event in enumerate(batch):
+                kind = str(event.get("kind", ""))
+                detail = event.get("detail", {})
+                if kind == "app-fail":
+                    raise Failure(f"app-fail: {detail.get('message', 'unknown failure')}")
+                if kind == "action-fail" and detail.get("actionSequence") == sequence:
+                    raise Failure(f"action failed: {detail.get('message', 'unknown failure')}")
+                if kind == "action-complete" and detail.get("actionSequence") == sequence:
+                    # A state milestone can share this response with the action
+                    # acknowledgement. Keep everything else for the next wait
+                    # instead of silently consuming it.
+                    self.pending.extend(deferred)
+                    self.pending.extend(batch[index + 1 :])
+                    return event
+                deferred.append(event)
+        self.pending.extend(deferred)
+        raise Failure(f"E2E action {sequence} was not acknowledged")
+
+    def wait_optional(self, kind: str, timeout: float) -> dict[str, object] | None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for event in self.next_batch(deadline):
+                event_kind = str(event.get("kind", ""))
+                if event_kind in {"app-fail", "action-fail"}:
+                    detail = event.get("detail", {})
+                    raise Failure(f"{event_kind}: {detail.get('message', 'unknown failure')}")
+                if event_kind == kind:
+                    return event
+        return None
+
+    def wait_for_action_traffic(
+        self,
+        sequence: int,
+        timeout: float,
+    ) -> dict[str, object] | None:
+        deadline = time.monotonic() + timeout
+        deferred: list[dict[str, object]] = []
+        while time.monotonic() < deadline:
+            batch = self.next_batch(deadline)
+            for index, event in enumerate(batch):
+                kind = str(event.get("kind", ""))
+                detail = event.get("detail", {})
+                if kind in {"app-fail", "action-fail"}:
+                    raise Failure(f"{kind}: {detail.get('message', 'unknown failure')}")
+                if (
+                    kind == "client-traffic"
+                    and detail.get("actionSequence") == sequence
+                ):
+                    self.pending.extend(deferred)
+                    self.pending.extend(batch[index + 1 :])
+                    return event
+                deferred.append(event)
+        self.pending.extend(deferred)
+        return None
+
+
+def submit_action(
+    origin: str,
+    token: str,
+    action: str,
+    duration_ms: int | None = None,
+) -> int:
+    body: dict[str, object] = {"action": action}
+    if duration_ms is not None:
+        body["durationMs"] = duration_ms
+    result = request_json(
+        origin,
+        "/__e2e/v1/actions",
+        token,
+        method="POST",
+        body=body,
+    )
+    return int(result["sequence"])
+
+
+def game_state_after(
+    origin: str,
+    token: str,
+    after: int,
+    wait_ms: int,
+) -> dict[str, object] | None:
+    query = urllib.parse.urlencode({"after": after, "waitMs": wait_ms})
+    try:
+        return request_json(
+            origin,
+            f"/__game/v1/state?{query}",
+            token,
+            timeout=(wait_ms / 1000) + 3,
+        )
+    except Failure as error:
+        if "answered 404" in str(error):
+            return None
+        raise
+
+
+def position(envelope: dict[str, object]) -> tuple[float, float]:
+    state = envelope["state"]
+    return float(state["playerX"]), float(state["playerY"])
+
+
+def wait_for_position_change(
+    origin: str,
+    token: str,
+    before: tuple[float, float],
+    revision: int,
+    timeout: float,
+) -> tuple[float, float]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        wait_ms = min(LONG_POLL_MS, max(1, int(remaining * 1000)))
+        envelope = game_state_after(origin, token, revision, wait_ms)
+        if envelope is None:
+            continue
+        revision = int(envelope["revision"])
+        if envelope.get("state", {}).get("status") != "ready":
+            continue
+        after = position(envelope)
+        if math.dist(before, after) >= 1:
+            return after
+    raise Failure("movement input did not change the certified player position")
+
+
+def terminate(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.send_signal(signal.SIGINT)
+    try:
+        process.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=4)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument(
+        "--no-gameplay",
+        action="store_true",
+        help="stop after Keychain, first-frame, page UI, and API-contract checks",
+    )
+    args = parser.parse_args()
+
+    if sys.platform != "darwin":
+        raise Failure("the native E2E runner requires macOS")
+
+    run(["cargo", "build"])
+    support_web = Path.home() / "Library/Application Support/gwnative/web"
+    if not (support_web / "Gw.jspi.wasm").is_file():
+        raise Failure(f"the installed client is missing from {support_web}")
+
+    with tempfile.TemporaryDirectory(prefix="gwnative-e2e-") as temporary:
+        scratch = Path(temporary)
+        web_root = scratch / "web"
+        web_root.mkdir()
+        for source in (ROOT / "web").iterdir():
+            if source.is_file():
+                shutil.copy2(source, web_root / source.name)
+        # The source tree intentionally does not version ArenaNet's artifacts
+        # and can retain an older ignored copy. Overlay the installed client
+        # onto the current page shell in a disposable root.
+        for name in ("Gw.jspi.js", "Gw.jspi.wasm", "version.json"):
+            source = support_web / name
+            if not source.is_file():
+                raise Failure(f"the installed client is missing {source}")
+            shutil.copy2(source, web_root / name)
+
+        environment = os.environ.copy()
+        environment["GWNATIVE_E2E"] = "1"
+        environment["GWNATIVE_PRINT_TOKEN"] = "1"
+        environment["GWNATIVE_WEB_ROOT"] = str(web_root)
+        process = subprocess.Popen(
+            [
+                str(ROOT / "scripts/signed-run"),
+                str(ROOT / "target/debug/gwnative"),
+                "-autologin",
+                "-windowed",
+                "-fps",
+                "60",
+            ],
+            cwd=ROOT,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        launch_events: queue.Queue[tuple[str, str]] = queue.Queue()
+        reader = threading.Thread(
+            target=output_reader,
+            args=(process, launch_events),
+            daemon=True,
+        )
+        reader.start()
+
+        try:
+            origin, token = wait_for_origin(launch_events, args.timeout)
+            request_json(origin, "/__e2e/v1", None, expected=403)
+            description = request_json(origin, "/__e2e/v1", token)
+            action_names = {
+                action.get("name") for action in description.get("actions", [])
+            }
+            if action_names != {"activate", "move-forward"}:
+                raise Failure(f"unexpected E2E action vocabulary: {sorted(action_names)}")
+            if description.get("transport", {}).get("longPoll") is not True:
+                raise Failure("the E2E API does not advertise long polling")
+
+            game_description = request_json(origin, "/__game/v1", token)
+            if game_description.get("actions", {}).get("available") is not False:
+                raise Failure("the public game API unexpectedly advertises a write action")
+            if game_description.get("transport", {}).get("longPoll") is not True:
+                raise Failure("the game-state API does not advertise long polling")
+            request_json(origin, "/__game/v1/actions", token, expected=409)
+
+            stream = EventStream(origin, token)
+            milestones = stream.wait_for(
+                {
+                    "bridge-ready",
+                    "client-capabilities",
+                    "credentials-offered",
+                    "first-frame",
+                    "app-pass",
+                },
+                args.timeout,
+            )
+            credentials = milestones["credentials-offered"].get("detail", {})
+            if credentials != {"accountSet": True, "passwordSet": True}:
+                raise Failure("the app did not offer a complete Keychain login to the client")
+            print("[e2e] signed launch, Keychain, first frame, and semantic app UI PASS")
+            print("[e2e] token gates and event-driven API contracts PASS")
+
+            if args.no_gameplay:
+                print("[e2e] PASS (gameplay skipped)")
+                return 0
+
+            # Enter activates the focused game control. A second activation is
+            # enough for the stock login -> selected-character flow without
+            # scanning or clicking the canvas. Each is acknowledged from inside
+            # the WKWebView before the runner advances.
+            first = submit_action(origin, token, "activate")
+            stream.wait_for_action(first, 5)
+            traffic = stream.wait_for_action_traffic(first, 8)
+
+            ready = game_state_after(origin, token, 0, 0)
+            if ready is None or ready.get("state", {}).get("status") != "ready":
+                second = submit_action(origin, token, "activate")
+                stream.wait_for_action(second, 5)
+                traffic = traffic or stream.wait_for_action_traffic(second, 8)
+                capabilities = milestones["client-capabilities"].get("detail", {})
+                if capabilities.get("enhancements") == "ready":
+                    stream.wait_optional("game-ready", 60)
+                ready = game_state_after(origin, token, 0, 0)
+
+            if ready is None or ready.get("state", {}).get("status") != "ready":
+                if traffic:
+                    direction = traffic.get("detail", {}).get("direction", "unknown")
+                    print(f"[e2e] activation produced client socket {direction} traffic")
+                else:
+                    print("[e2e] activation reached the canvas; no post-action socket traffic observed")
+                print(
+                    "[e2e] authenticated gameplay remains unverifiable because this "
+                    "ArenaNet build has no certified state layout"
+                )
+                print("[e2e] INCONCLUSIVE (gameplay telemetry unavailable)")
+                return 2
+
+            before = position(ready)
+            revision = int(ready["revision"])
+            movement = submit_action(origin, token, "move-forward", 800)
+            stream.wait_for_action(movement, 5)
+            wait_for_position_change(origin, token, before, revision, 15)
+            print("[e2e] authenticated character and movement PASS")
+            print("[e2e] PASS")
+            return 0
+        finally:
+            terminate(process)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (Failure, subprocess.CalledProcessError) as error:
+        print(f"[e2e] FAIL: {error}", file=sys.stderr)
+        raise SystemExit(1)

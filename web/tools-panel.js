@@ -138,6 +138,7 @@ export function installToolsPanel({
   const widgets = installWidgets(overlays);
   const builds = createBuildLibrary(storage);
   const overlay = document.createElement('div');
+  overlay.dataset.surface = 'companion-tools';
   overlay.hidden = true;
   overlay.style.cssText = [
     'position:fixed',
@@ -167,8 +168,10 @@ export function installToolsPanel({
     'font:13px/1.5 -apple-system,BlinkMacSystemFont,sans-serif',
   ].join(';');
   const title = document.createElement('h1');
+  title.id = 'companion-tools-title';
   title.textContent = 'Companion tools';
   title.style.cssText = 'margin:0 0 14px;font-size:20px;color:#f3dd9d';
+  dialog.setAttribute('aria-labelledby', title.id);
   dialog.append(title);
 
   const widgetTitle = document.createElement('h2');

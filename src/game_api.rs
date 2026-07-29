@@ -5,14 +5,16 @@
 //! token-authenticated tools can then read the same state without touching the
 //! game memory or depending on build-specific offsets.
 
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 pub const VERSION: u32 = 1;
 pub const MAX_PUBLISH_BYTES: usize = 16 * 1024;
+pub const MAX_WAIT_MS: u64 = 15_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,10 +61,20 @@ struct Envelope {
     state: State,
 }
 
-#[derive(Default)]
 pub struct Hub {
     revision: AtomicU64,
-    state: RwLock<Option<Envelope>>,
+    state: Mutex<Option<Envelope>>,
+    changed: Condvar,
+}
+
+impl Default for Hub {
+    fn default() -> Self {
+        Self {
+            revision: AtomicU64::new(0),
+            state: Mutex::new(None),
+            changed: Condvar::new(),
+        }
+    }
 }
 
 impl Hub {
@@ -90,17 +102,46 @@ impl Hub {
         };
         *self
             .state
-            .write()
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(envelope);
+        self.changed.notify_all();
         Ok(revision)
     }
 
     pub fn state_json(&self) -> Option<Vec<u8>> {
         self.state
-            .read()
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_ref()
             .and_then(|state| serde_json::to_vec(state).ok())
+    }
+
+    /// Wait for a revision newer than `after`, then return it.
+    ///
+    /// A caller with no state yet gets `None` after the bounded wait. Existing
+    /// callers pass zero milliseconds and retain the immediate GET contract.
+    pub fn state_json_after(&self, after: u64, wait_ms: u64) -> Option<Vec<u8>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let is_newer =
+            |state: &Option<Envelope>| state.as_ref().is_some_and(|value| value.revision > after);
+        if !is_newer(&state) && wait_ms > 0 {
+            state = self
+                .changed
+                .wait_timeout_while(
+                    state,
+                    Duration::from_millis(wait_ms.min(MAX_WAIT_MS)),
+                    |value| !is_newer(value),
+                )
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+        state
+            .as_ref()
+            .filter(|value| value.revision > after)
+            .and_then(|value| serde_json::to_vec(value).ok())
     }
 
     pub fn description_json(&self) -> Vec<u8> {
@@ -109,6 +150,8 @@ impl Hub {
             "transport": {
                 "rest": true,
                 "webSocket": false,
+                "longPoll": true,
+                "maximumWaitMs": MAX_WAIT_MS,
                 "loopbackOnly": true,
                 "tokenRequired": true,
             },
@@ -178,6 +221,8 @@ fn validate(state: &State) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
     fn a_ready_state_is_versioned_and_revisioned() {
@@ -214,5 +259,21 @@ mod tests {
         hub.publish(br#"{"status":"waiting","reason":"loading","tickCount":8}"#)
             .unwrap();
         assert!(hub.state_json().is_some());
+    }
+
+    #[test]
+    fn long_poll_wakes_only_for_a_newer_revision() {
+        let hub = Arc::new(Hub::default());
+        hub.publish(br#"{"status":"waiting","reason":"loading"}"#)
+            .unwrap();
+        let reader = Arc::clone(&hub);
+        let waiting = thread::spawn(move || reader.state_json_after(1, 1_000));
+        thread::sleep(Duration::from_millis(30));
+        hub.publish(br#"{"status":"waiting","reason":"login"}"#)
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&waiting.join().unwrap().unwrap()).unwrap();
+        assert_eq!(value["revision"], 2);
+        assert_eq!(value["state"]["reason"], "login");
     }
 }
