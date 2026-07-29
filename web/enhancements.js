@@ -33,6 +33,7 @@ import {
   COMPANION_SNAPSHOT_ABI,
   COMPANION_SNAPSHOT_BYTES,
 } from './companion-snapshot.js';
+import { probeLayout } from './layout-probe.js';
 import * as diagnostics from './diagnostics.js';
 
 /** Must match `FEATURE_*` in `src/companion-kernel/lib.rs`. */
@@ -291,6 +292,12 @@ export async function installEnhancements(instance, module, selection) {
       renderSamples: [],
       snapshotReads: 0,
       rejectedSnapshots: 0,
+      probeLayout() {
+        if (window.__gwnativeE2E !== true) {
+          throw new Error('layout probing is available only during E2E certification');
+        }
+        return probeLayout(exports.memory.buffer, manifest.layoutWords);
+      },
       // Presentation state only: no pixels and no pointer leave this module.
       get cursor() {
         return cursor?.state ?? null;

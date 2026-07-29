@@ -7,9 +7,10 @@
 //! sleeps on condition variables until either side has something to say.
 //!
 //! The surface exists only when `GWNATIVE_E2E` was present at launch. Its
-//! command vocabulary is deliberately finite: activate the focused game
-//! control, or hold forward for a bounded interval. There is no JavaScript
-//! evaluator, coordinate click, text entry or credential operation.
+//! command vocabulary is deliberately finite: named navigation, targeting,
+//! interaction, cancellation, and one skill key with bounded holds where
+//! applicable. There is no JavaScript evaluator, coordinate click, text entry
+//! or credential operation.
 
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
@@ -100,8 +101,46 @@ impl Hub {
                     "maximumDurationMs": 1000,
                 },
                 {
+                    "name": "move-backward",
+                    "description": "hold Arrow Down on the game canvas",
+                    "minimumDurationMs": 50,
+                    "maximumDurationMs": 1000,
+                },
+                {
+                    "name": "turn-left",
+                    "description": "hold Arrow Left on the game canvas",
+                    "minimumDurationMs": 50,
+                    "maximumDurationMs": 1000,
+                },
+                {
+                    "name": "turn-right",
+                    "description": "hold Arrow Right on the game canvas",
+                    "minimumDurationMs": 50,
+                    "maximumDurationMs": 1000,
+                },
+                {
+                    "name": "target-next",
+                    "description": "press and release Tab on the game canvas",
+                },
+                {
+                    "name": "interact",
+                    "description": "press and release Space on the game canvas",
+                },
+                {
+                    "name": "cancel",
+                    "description": "press and release Escape on the game canvas",
+                },
+                {
+                    "name": "skill-1",
+                    "description": "press and release the first skill key",
+                },
+                {
                     "name": "test-ui",
                     "description": "exercise the app-owned panels and widgets",
+                },
+                {
+                    "name": "probe-layout",
+                    "description": "scan only the bounded certified layout window and return matching deltas",
                 },
             ],
             "prohibited": ["javascript", "coordinates", "text", "credentials"],
@@ -122,16 +161,24 @@ impl Hub {
                 }
                 40
             }
-            "move-forward" => {
+            "move-forward" | "move-backward" | "turn-left" | "turn-right" => {
                 let duration = request.duration_ms.unwrap_or(500);
                 if !(50..=1_000).contains(&duration) {
-                    return Err("move-forward duration must be between 50 and 1000 ms".into());
+                    return Err(
+                        "held gameplay action duration must be between 50 and 1000 ms".into(),
+                    );
                 }
                 duration
             }
-            "test-ui" => {
+            "target-next" | "interact" | "cancel" | "skill-1" => {
                 if request.duration_ms.is_some() {
-                    return Err("test-ui does not accept a duration".into());
+                    return Err("tapped gameplay actions do not accept a duration".into());
+                }
+                40
+            }
+            "test-ui" | "probe-layout" => {
+                if request.duration_ms.is_some() {
+                    return Err("page-owned E2E actions do not accept a duration".into());
                 }
                 0
             }
@@ -149,10 +196,10 @@ impl Hub {
             duration_ms,
         };
         // The page observes every action so socket traffic can be associated
-        // with the command that caused it. It executes only `test-ui`; native
-        // gameplay actions have a second, host-owned delivery queue.
+        // with the command that caused it. It executes only bounded page-owned
+        // checks; native gameplay actions have a second, host-owned queue.
         inner.page_actions.push_back(action.clone());
-        if action.action != "test-ui" {
+        if !matches!(action.action.as_str(), "test-ui" | "probe-layout") {
             inner.native_actions.push_back(action.clone());
         }
         self.actions_changed.notify_all();
@@ -306,9 +353,8 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
         .as_object()
         .ok_or_else(|| "E2E event detail must be an object".to_owned())?;
     match kind {
-        "bridge-ready" | "first-frame" | "app-pass" | "startup-complete" | "game-ready" => {
-            exact_keys(object, &[])
-        }
+        "bridge-ready" | "first-frame" | "app-pass" | "startup-complete" | "login-ready"
+        | "login-committed" | "game-ready" => exact_keys(object, &[]),
         "credentials-offered" => {
             exact_keys(object, &["accountSet", "passwordSet"])?;
             bool_field(object, "accountSet")?;
@@ -356,11 +402,33 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             exact_keys(object, &["message"])?;
             safe_text_field(object, "message")
         }
+        "layout-probe" => {
+            exact_keys(
+                object,
+                &[
+                    "radiusBytes",
+                    "contextDeltas",
+                    "agentDeltas",
+                    "commonDeltas",
+                ],
+            )?;
+            match object.get("radiusBytes").and_then(Value::as_u64) {
+                Some(value) if value <= 4096 && value % 4 == 0 => {}
+                _ => return Err("layout probe radius is outside its bound".into()),
+            }
+            for name in ["contextDeltas", "agentDeltas", "commonDeltas"] {
+                signed_delta_array_field(object, name)?;
+            }
+            Ok(())
+        }
         "action-prepared" => {
             exact_keys(object, &["actionSequence", "action", "target"])?;
             positive_u64_field(object, "actionSequence")?;
             match object.get("action").and_then(Value::as_str) {
-                Some("activate" | "move-forward") => {}
+                Some(
+                    "activate" | "move-forward" | "move-backward" | "turn-left" | "turn-right"
+                    | "target-next" | "interact" | "cancel" | "skill-1",
+                ) => {}
                 _ => return Err("prepared E2E action names an unknown action".into()),
             }
             target_field(object, "target")
@@ -368,7 +436,22 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
         "native-key-observed" | "native-key-released" => {
             exact_keys(object, &["actionSequence", "code", "keyCode"])?;
             positive_u64_field(object, "actionSequence")?;
-            enum_text_field(object, "code", &["enter", "arrow-up", "other"])?;
+            enum_text_field(
+                object,
+                "code",
+                &[
+                    "enter",
+                    "arrow-up",
+                    "arrow-down",
+                    "arrow-left",
+                    "arrow-right",
+                    "tab",
+                    "space",
+                    "escape",
+                    "digit-1",
+                    "other",
+                ],
+            )?;
             u32_field(object, "keyCode")
         }
         "action-complete" => {
@@ -399,13 +482,33 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
 fn action_result(object: &Map<String, Value>) -> Result<(), String> {
     positive_u64_field(object, "actionSequence")?;
     match object.get("action").and_then(Value::as_str) {
-        Some("activate" | "move-forward" | "test-ui") => {}
+        Some(
+            "activate" | "move-forward" | "move-backward" | "turn-left" | "turn-right"
+            | "target-next" | "interact" | "cancel" | "skill-1" | "test-ui" | "probe-layout",
+        ) => {}
         _ => return Err("E2E action result names an unknown action".into()),
     }
     for name in ["target", "activeTarget"] {
         target_field(object, name)?;
     }
     Ok(())
+}
+
+fn signed_delta_array_field(object: &Map<String, Value>, name: &str) -> Result<(), String> {
+    let values = object
+        .get(name)
+        .and_then(Value::as_array)
+        .filter(|values| values.len() <= 16)
+        .ok_or_else(|| format!("layout probe {name} is not a bounded array"))?;
+    if values.iter().all(|value| {
+        value
+            .as_i64()
+            .is_some_and(|value| (-4096..=4096).contains(&value) && value % 4 == 0)
+    }) {
+        Ok(())
+    } else {
+        Err(format!("layout probe {name} contains an invalid delta"))
+    }
 }
 
 fn target_field(object: &Map<String, Value>, name: &str) -> Result<(), String> {
@@ -496,6 +599,11 @@ mod tests {
             hub.submit_action(br#"{"action":"move-forward","durationMs":1001}"#)
                 .is_err()
         );
+        assert!(hub.submit_action(br#"{"action":"target-next"}"#).is_ok());
+        assert!(
+            hub.submit_action(br#"{"action":"skill-1","durationMs":40}"#)
+                .is_err()
+        );
     }
 
     #[test]
@@ -525,23 +633,24 @@ mod tests {
     fn only_gameplay_actions_enter_the_native_queue() {
         let hub = Hub::default();
         hub.submit_action(br#"{"action":"test-ui"}"#).unwrap();
+        hub.submit_action(br#"{"action":"probe-layout"}"#).unwrap();
         hub.submit_action(br#"{"action":"activate"}"#).unwrap();
         hub.submit_action(br#"{"action":"move-forward","durationMs":250}"#)
             .unwrap();
 
         assert!(hub.take_native_action().is_none());
         hub.publish_event(
-            br#"{"kind":"action-prepared","detail":{"actionSequence":2,"action":"activate","target":"password-proxy"}}"#,
+            br#"{"kind":"action-prepared","detail":{"actionSequence":3,"action":"activate","target":"password-proxy"}}"#,
         )
         .unwrap();
         hub.publish_event(
-            br#"{"kind":"action-prepared","detail":{"actionSequence":3,"action":"move-forward","target":"canvas"}}"#,
+            br#"{"kind":"action-prepared","detail":{"actionSequence":4,"action":"move-forward","target":"canvas"}}"#,
         )
         .unwrap();
         let first = hub.take_native_action().unwrap();
         let second = hub.take_native_action().unwrap();
         assert_eq!(first.action, "activate");
-        assert_eq!(first.sequence, 2);
+        assert_eq!(first.sequence, 3);
         assert_eq!(second.action, "move-forward");
         assert_eq!(second.duration_ms, 250);
         assert!(hub.take_native_action().is_none());
@@ -558,6 +667,14 @@ mod tests {
             1,
         );
         assert!(
+            hub.publish_event(br#"{"kind":"login-ready","detail":{}}"#)
+                .is_ok()
+        );
+        assert!(
+            hub.publish_event(br#"{"kind":"login-committed","detail":{}}"#)
+                .is_ok()
+        );
+        assert!(
             hub.publish_event(
                 br#"{"kind":"credentials-offered","detail":{"accountSet":true,"passwordSet":true,"password":"never"}}"#,
             )
@@ -566,6 +683,12 @@ mod tests {
         assert!(
             hub.publish_event(br#"{"kind":"javascript","detail":{}}"#)
                 .is_err()
+        );
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"layout-probe","detail":{"radiusBytes":2048,"contextDeltas":[-48],"agentDeltas":[-48],"commonDeltas":[-48]}}"#,
+            )
+            .is_ok()
         );
         hub.submit_action(br#"{"action":"activate"}"#).unwrap();
         assert!(

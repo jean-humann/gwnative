@@ -83,6 +83,30 @@ const cleanMessage = (value) =>
 const wait = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+const NATIVE_ACTION_CODES = Object.freeze({
+  activate: 'enter',
+  'move-forward': 'arrow-up',
+  'move-backward': 'arrow-down',
+  'turn-left': 'arrow-left',
+  'turn-right': 'arrow-right',
+  'target-next': 'tab',
+  interact: 'space',
+  cancel: 'escape',
+  'skill-1': 'digit-1',
+});
+
+const EVENT_CODES = Object.freeze({
+  Enter: 'enter',
+  ArrowUp: 'arrow-up',
+  ArrowDown: 'arrow-down',
+  ArrowLeft: 'arrow-left',
+  ArrowRight: 'arrow-right',
+  Tab: 'tab',
+  Space: 'space',
+  Escape: 'escape',
+  Digit1: 'digit-1',
+});
+
 const targetName = (window, canvas, candidate) => {
   if (!candidate || candidate === canvas) return 'canvas';
   const kind = Object.entries(window.Module?.oskInput ?? {})
@@ -100,7 +124,7 @@ export function prepareNativeE2EAction(action, { window, canvas }) {
   assert(Number.isSafeInteger(action?.sequence) && action.sequence > 0,
     'E2E action has no valid sequence');
   assert(
-    action.action === 'activate' || action.action === 'move-forward',
+    Object.hasOwn(NATIVE_ACTION_CODES, action.action),
     'E2E native action is not in the allowed vocabulary',
   );
   const activeInput = window.Module?.oskActiveInput;
@@ -133,13 +157,26 @@ export async function executeE2EAction(action, {
 }) {
   assert(Number.isSafeInteger(action?.sequence) && action.sequence > 0,
     'E2E action has no valid sequence');
-  assert(action.action === 'test-ui', 'gameplay actions are native-only');
-  assert(action.durationMs === 0, 'E2E test-ui duration is outside its bound');
-  assert(typeof window.gwRunAppE2E === 'function', 'app UI test is not installed');
-  await window.gwRunAppE2E();
+  assert(
+    action.action === 'test-ui' || action.action === 'probe-layout',
+    'gameplay actions are native-only',
+  );
+  assert(action.durationMs === 0, 'page-owned E2E action duration is outside its bound');
+  let layoutProbe;
+  if (action.action === 'test-ui') {
+    assert(typeof window.gwRunAppE2E === 'function', 'app UI test is not installed');
+    await window.gwRunAppE2E();
+  } else {
+    assert(
+      typeof window.gwCompanionRuntime?.probeLayout === 'function',
+      'companion layout probe is not installed',
+    );
+    layoutProbe = window.gwCompanionRuntime.probeLayout();
+  }
   return {
     target: 'app-ui',
     activeTarget: targetName(window, canvas, window.Module?.oskActiveInput),
+    ...(layoutProbe ? { layoutProbe } : {}),
   };
 }
 
@@ -176,15 +213,12 @@ export function installE2EBridge({
   let lastFailure = '';
   let trafficAction = 0;
   const trafficReported = new Set();
+  const socketActions = new Map();
   const preparedNativeActions = [];
   let activeNativeAction = null;
   const nativeKey = (kind, event) => {
     if (!event.isTrusted) return;
-    const code = event.code === 'Enter'
-      ? 'enter'
-      : event.code === 'ArrowUp'
-        ? 'arrow-up'
-        : 'other';
+    const code = EVENT_CODES[event.code] ?? 'other';
     if (kind === 'native-key-observed') {
       const prepared = preparedNativeActions[0];
       if (!prepared || prepared.code !== code || activeNativeAction) return;
@@ -235,11 +269,11 @@ export function installE2EBridge({
           // Native gameplay delivery has its own copy of this command. The
           // page focuses the client's finite input target and acknowledges it
           // before AppKit is woken, then only observes resulting socket traffic.
-          if (action.action !== 'test-ui') {
+          if (action.action !== 'test-ui' && action.action !== 'probe-layout') {
             const target = prepareNativeE2EAction(action, { window, canvas });
             const prepared = {
               sequence: action.sequence,
-              code: action.action === 'activate' ? 'enter' : 'arrow-up',
+              code: NATIVE_ACTION_CODES[action.action],
             };
             preparedNativeActions.push(prepared);
             try {
@@ -258,8 +292,9 @@ export function installE2EBridge({
           let target = 'canvas';
           let activeTarget = 'canvas';
           try {
-            ({ target, activeTarget } =
-              await executeE2EAction(action, { window, canvas }));
+            const result = await executeE2EAction(action, { window, canvas });
+            ({ target, activeTarget } = result);
+            if (result.layoutProbe) await report('layout-probe', result.layoutProbe);
             await report('action-complete', {
               actionSequence: action.sequence,
               action: action.action,
@@ -323,17 +358,22 @@ export function installE2EBridge({
     }).catch(() => {});
   };
 
+  const socketCreated = (socketId) => {
+    socketActions.set(socketId, trafficAction);
+  };
+
   const connection = (socketId) => {
-    if (trafficAction <= 0) return;
+    const actionSequence = socketActions.get(socketId) ?? 0;
+    if (actionSequence <= 0) return;
     void report('socket-open', {
-      actionSequence: trafficAction,
+      actionSequence,
       socketId,
     }).catch(() => {});
   };
 
   void pump();
 
-  return Object.freeze({ report, traffic, connection, stop });
+  return Object.freeze({ report, traffic, socketCreated, connection, stop });
 }
 
 const setValue = (field, value) => {

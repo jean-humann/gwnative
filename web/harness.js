@@ -519,6 +519,17 @@ Module = {
         accountSet: Boolean(stored.username),
         passwordSet: Boolean(stored.password),
       }).catch(() => {});
+      // Resolving this Promise lets the suspended client build its login
+      // controls. The first submitted frame proves those controls have reached
+      // the compositor; two subsequent client frames let their input state
+      // become current without polling pixels or guessing a wall-clock delay.
+      const afterFirstFrame = () => {
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          void window.gwE2E?.report('login-ready').catch(() => {});
+        }));
+      };
+      if (window.__gwnativeFirstFrame === true) afterFirstFrame();
+      else window.addEventListener('gwnative:first-frame', afterFirstFrame, { once: true });
       return stored;
     },
     async storeCredentials(username, password) {
@@ -528,6 +539,13 @@ Module = {
       // that signs out and back in within one session should not pay for the
       // keychain twice.
       saved = Promise.resolve({ username, password });
+      // The client calls this only after accepting the authenticated account.
+      // Two later client frames let the character-selection controls consume
+      // that transition before the native E2E runner activates the focused
+      // Play control. This reports no credential value.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        void window.gwE2E?.report('login-committed').catch(() => {});
+      }));
     },
     async clearCredentials() {
       const response = await credentials('DELETE');

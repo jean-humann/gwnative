@@ -31,6 +31,7 @@ export function createSockets({ log }) {
 
   function connect(destination) {
     const id = nextId++;
+    window.gwE2E?.socketCreated(id);
     const trace = (...values) => log(`[socket ${id}] ${destination}`, ...values);
     trace('connect');
 
