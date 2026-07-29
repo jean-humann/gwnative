@@ -43,8 +43,6 @@ jobs:
 
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          rust-version: "1.90.0"
 
   check:
     # Apple Silicon, and the newest image GitHub offers. Both halves matter.
@@ -84,6 +82,16 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # Cargo accepts rust-version as a promise without testing it. Exercise
+      # that compiler as well as the newer pinned development toolchain so the
+      # declared floor cannot become aspirational.
+      - name: Minimum supported Rust
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal \
+            --target aarch64-apple-darwin,wasm32-unknown-unknown
+          cargo "+$msrv" check --locked --all-targets
 
       - name: Documentation
         run: python3 scripts/check-docs

@@ -24,6 +24,10 @@ Run the same checks as CI:
 ```sh
 scripts/check-docs
 cargo deny check
+msrv="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)"
+rustup toolchain install "$msrv" --profile minimal \
+    --target aarch64-apple-darwin,wasm32-unknown-unknown
+cargo "+$msrv" check --locked --all-targets
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
