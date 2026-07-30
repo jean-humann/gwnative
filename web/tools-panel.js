@@ -1,8 +1,8 @@
 // Built-in companion tools.
 //
 // These are deliberately useful on the narrow certified state available
-// today. Features requiring inventory, chat or other layouts are named
-// as unavailable instead of reading guessed offsets from a live client.
+// today. Features requiring chat, completion, or other layouts are named as
+// unavailable instead of reading guessed offsets from a live client.
 
 import { createBuildLibrary } from './build-library.js';
 
@@ -18,7 +18,7 @@ export const FEATURES = Object.freeze([
   { id: 'agents', group: 'Game state', name: 'Map agents', status: 'available' },
   { id: 'quests', group: 'Game state', name: 'Quest log and objectives', status: 'available' },
   { id: 'completion', group: 'Game state', name: 'Mission and map completion', status: 'needs-layout' },
-  { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'needs-layout' },
+  { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'available' },
   { id: 'chat', group: 'Game state', name: 'Chat and party search', status: 'needs-layout' },
   { id: 'textures', group: 'Presentation', name: 'Texture and shader packs', status: 'research' },
   { id: 'automation', group: 'Policy', name: 'Unattended gameplay automation', status: 'blocked' },
@@ -157,6 +157,26 @@ function installWidgets(overlays) {
       );
     },
   });
+  const inventory = overlays.register({
+    id: 'inventory',
+    title: 'Inventory',
+    position: { x: 16, y: 520 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      if (!state.inventory) return setText(body, 'Unavailable for this client build');
+      const carried = state.inventory.items.filter((item) => item.isInventoryItem).length;
+      const stored = state.inventory.items.filter((item) => item.isStorageItem).length;
+      const suffix = state.inventory.itemsTruncated ? ' · truncated' : '';
+      setText(
+        body,
+        `${carried} carried · ${stored} stored · `
+          + `${state.inventory.items.length}/${state.inventory.total} loaded items · `
+          + `${state.inventory.goldCharacter}g carried · `
+          + `${state.inventory.goldStorage}g stored${suffix}`,
+      );
+    },
+  });
 
   const updateTime = () => {
     if (clock.isVisible()) clock.update(new Date().toLocaleTimeString());
@@ -186,6 +206,7 @@ function installWidgets(overlays) {
     if (effects.isVisible()) effects.update(event.detail);
     if (agents.isVisible()) agents.update(event.detail);
     if (quests.isVisible()) quests.update(event.detail);
+    if (inventory.isVisible()) inventory.update(event.detail);
   });
 
   return Object.freeze({
@@ -198,6 +219,7 @@ function installWidgets(overlays) {
     effects,
     agents,
     quests,
+    inventory,
     dispose: () => clearInterval(interval),
   });
 }
@@ -288,6 +310,7 @@ export function installToolsPanel({
     ['Player effects', widgets.effects],
     ['Map agents', widgets.agents],
     ['Quest log', widgets.quests],
+    ['Inventory', widgets.inventory],
   ]) {
     widgetButtons.append(
       button(document, label, () => widget.visible(!widget.isVisible())),
