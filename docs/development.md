@@ -41,7 +41,7 @@ Commands:
   (none)         open the window
   sync           download the client and exit
   serve          run the origin without a window
-  certify        print an unsigned build-family certificate candidate
+  certify        print an unsigned artifact-family certificate candidate
 ```
 
 It also supports `-h`/`--help` and `-V`/`--version`. Unknown arguments fail
@@ -52,7 +52,7 @@ cargo run -- sync
 cargo run -- serve
 ```
 
-Use `scripts/client-certify BUILD_ID WEB_ROOT` for the guarded certification
+Use `scripts/client-certify WEB_ROOT` for the guarded certification
 workflow rather than invoking `certify` directly. See
 [Client build certification](certification.md).
 
@@ -144,7 +144,6 @@ All runtime overrides are optional.
 | `GWNATIVE_ACCESS_KEY` | Override the public patch-service client key |
 | `GWNATIVE_PATCH_ROOT` | Override the patch service base URL |
 | `GWNATIVE_WEB_ROOT` | Override the web shell and client-artifact directory |
-| `GWNATIVE_CERTIFICATE_BUILD_ID` | Build ID used by the internal `certify` command |
 | `GWNATIVE_PORT` | Override loopback port `38112` |
 | `GWNATIVE_PRINT_TOKEN` | Print the injected host-route token to stderr |
 | `GWNATIVE_TRACE_HTTP` | Log each loopback HTTP request |

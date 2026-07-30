@@ -80,15 +80,7 @@ fn main() {
         }
     };
     if command == cli::Command::Certify {
-        let build_id = std::env::var("GWNATIVE_CERTIFICATE_BUILD_ID")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or_else(|| {
-                eprintln!("GWNATIVE_CERTIFICATE_BUILD_ID must be a positive integer");
-                std::process::exit(2);
-            });
-        match wasm::certificate_candidate(&paths::web_root(), 1, build_id) {
+        match wasm::certificate_candidate(&paths::web_root()) {
             Ok(candidate) => println!("{candidate}"),
             Err(reason) => {
                 eprintln!("{reason}");

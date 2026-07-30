@@ -162,7 +162,7 @@ not pay for a full reread.
 
 ArenaNet's modules have broken or missing file routines for build templates.
 `src/wasm` prepares the official JSPI and Asyncify modules independently. A
-signed build-family certificate must match both the JavaScript and WebAssembly
+signed artifact-family certificate must match both the JavaScript and WebAssembly
 SHA-256 for the selected runtime before its transform is considered:
 
 1. append small forwarding functions;

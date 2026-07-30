@@ -4,8 +4,7 @@
   "transformAbi": 2,
   "families": [
     {
-      "programId": 1,
-      "buildId": 38797,
+      "familyId": "ed9ca3c2590c43a50f78866ade67038e68944a5dc59aad4ce64f73bb688350bb",
       "layout": {
         "snapshotAbi": 1,
         "snapshotBytes": 64,

@@ -3,10 +3,6 @@ name: Client certificate
 on:
   workflow_dispatch:
     inputs:
-      build_id:
-        description: ArenaNet build ID
-        required: true
-        type: number
       publish:
         description: Sign and open a certificate pull request
         required: true
@@ -19,24 +15,19 @@ on:
         type: boolean
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   candidate:
     runs-on: macos-26
     timeout-minutes: 45
-    # The publishing secret is scoped to this environment. The `publish`
-    # input still gates the only step that receives it.
-    environment: certificate-publishing
+    outputs:
+      family_id: ${{ steps.identity.outputs.family_id }}
     env:
       GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
-      GWNATIVE_CERTIFICATE_BUILD_ID: ${{ inputs.build_id }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
 
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
@@ -44,17 +35,10 @@ jobs:
       - name: Fetch the official runtime pair
         run: cargo run --locked --release -- sync
 
-      - name: Generate the fail-closed candidate
-        run: |
-          if [ "${{ inputs.publish }}" = true ] &&
-             [ "${{ inputs.certify_passive_enhancements }}" = true ]; then
-            scripts/client-certify --certify-passive-enhancements \
-              "${{ inputs.build_id }}" "$GWNATIVE_WEB_ROOT"
-          else
-            scripts/client-certify "${{ inputs.build_id }}" "$GWNATIVE_WEB_ROOT"
-          fi
+      - name: Generate an unsigned fail-closed candidate
+        run: scripts/client-certify "$GWNATIVE_WEB_ROOT"
 
-      - name: Verify both transforms against the official artifacts
+      - name: Verify both transforms against the fetched artifacts
         env:
           GWNATIVE_CERTIFY_JSPI_WASM: ${{ runner.temp }}/gwnative-client/Gw.jspi.wasm
           GWNATIVE_CERTIFY_JSPI_GLUE: ${{ runner.temp }}/gwnative-client/Gw.jspi.js
@@ -63,19 +47,71 @@ jobs:
           GWNATIVE_CERTIFY_FEED: ${{ github.workspace }}/certificates/builds.candidate.json
         run: cargo test wasm::tests::external_official_pairs_produce_valid_candidates -- --nocapture
 
+      - name: Export the derived artifact-family identity
+        id: identity
+        run: |
+          family_id="$(jq -r '.families[-1].familyId' certificates/builds.candidate.json)"
+          case "$family_id" in
+            *[!0-9a-f]*|'') exit 1 ;;
+          esac
+          test "${#family_id}" -eq 64
+          echo "family_id=$family_id" >> "$GITHUB_OUTPUT"
+
       - name: Report the unsigned candidate
-        if: ${{ !inputs.publish }}
         run: |
           echo "### Unsigned certificate candidate" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
-          echo "\`$(shasum -a 256 certificates/builds.candidate.json | cut -d' ' -f1)\`" \
+          echo "Artifact family: \`${{ steps.identity.outputs.family_id }}\`" \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo "Feed SHA-256: \`$(shasum -a 256 certificates/builds.candidate.json | cut -d' ' -f1)\`" \
             >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
-          echo "Passive enhancements remain disabled pending both live runtime fixtures." \
+          echo "Passive enhancements remain disabled in this unprivileged stage." \
             >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Sign the reviewed feed
-        if: ${{ inputs.publish }}
+  publish:
+    if: ${{ inputs.publish }}
+    needs: candidate
+    runs-on: macos-26
+    timeout-minutes: 45
+    environment: certificate-publishing
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
+      EXPECTED_FAMILY_ID: ${{ needs.candidate.outputs.family_id }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Fetch the official runtime pair again
+        run: cargo run --locked --release -- sync
+
+      - name: Reproduce the reviewed candidate
+        run: |
+          if [ "${{ inputs.certify_passive_enhancements }}" = true ]; then
+            scripts/client-certify --certify-passive-enhancements "$GWNATIVE_WEB_ROOT"
+          else
+            scripts/client-certify "$GWNATIVE_WEB_ROOT"
+          fi
+
+      - name: Verify the reproduced transforms and artifact identity
+        env:
+          GWNATIVE_CERTIFY_JSPI_WASM: ${{ runner.temp }}/gwnative-client/Gw.jspi.wasm
+          GWNATIVE_CERTIFY_JSPI_GLUE: ${{ runner.temp }}/gwnative-client/Gw.jspi.js
+          GWNATIVE_CERTIFY_ASYNCIFY_WASM: ${{ runner.temp }}/gwnative-client/Gw.wasm
+          GWNATIVE_CERTIFY_ASYNCIFY_GLUE: ${{ runner.temp }}/gwnative-client/Gw.js
+          GWNATIVE_CERTIFY_FEED: ${{ github.workspace }}/certificates/builds.candidate.json
+        run: |
+          actual_family_id="$(jq -r '.families[-1].familyId' certificates/builds.candidate.json)"
+          test "$actual_family_id" = "$EXPECTED_FAMILY_ID"
+          cargo test wasm::tests::external_official_pairs_produce_valid_candidates -- --nocapture
+
+      - name: Sign the verified feed
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
@@ -83,16 +119,16 @@ jobs:
           scripts/certificate-sign --publish certificates/builds.json
 
       - name: Open a certificate-only pull request
-        if: ${{ inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          branch="certificates/build-${{ inputs.build_id }}-${{ github.run_id }}"
+          short_id="${EXPECTED_FAMILY_ID:0:12}"
+          branch="certificates/family-$short_id-${{ github.run_id }}"
           git switch -c "$branch"
           git config user.name github-actions
           git config user.email github-actions@github.com
           git add certificates/builds.json certificates/builds.json.sig
-          git commit -m "cert(client): add build ${{ inputs.build_id }}"
+          git commit -m "cert(client): add artifact family $short_id"
           git push origin "$branch"
           if [ "${{ inputs.certify_passive_enhancements }}" = true ]; then
             passive="enabled after protected approval of both live runtime fixtures"
@@ -102,5 +138,5 @@ jobs:
           gh pr create \
             --base main \
             --head "$branch" \
-            --title "cert(client): support ArenaNet build ${{ inputs.build_id }}" \
-            --body "Generated from both official runtime artifacts. Static transforms and detached signature verified. Passive enhancements: $passive."
+            --title "cert(client): support artifact family $short_id" \
+            --body "Derived from both official runtime pairs. The unprivileged and protected stages independently fetched the artifacts, reproduced the same family identity, and verified both exact transform outputs. Passive enhancements: $passive."

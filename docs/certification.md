@@ -1,4 +1,4 @@
-# Client build certification
+# Client artifact certification
 
 ArenaNet publishes two official WebAssembly runtimes from one client source:
 JSPI for engines with JavaScript Promise Integration and Asyncify for older
@@ -17,7 +17,7 @@ contains:
 - five fixed bridge kinds implemented in the application;
 - semantic call identities (function, target-call occurrence and total);
 - hashes of stub bodies where the target is a stub; and
-- a build-family proof for the shared data, element and global-prefix bytes.
+- an artifact-family proof for the shared data, element and global-prefix bytes.
 
 It cannot provide WebAssembly instructions, imports, exports, table entries or
 native code. The application appends its five compiled-in forwarders, validates
@@ -39,7 +39,7 @@ The normal ArenaNet patch cycle does not require a gwnative release:
 2. Run:
 
    ```sh
-   scripts/client-certify BUILD_ID WEB_ROOT
+   scripts/client-certify WEB_ROOT
    ```
 
 3. Review `certificates/builds.candidate.json`. If semantic anchors moved, the
@@ -52,6 +52,7 @@ The normal ArenaNet patch cycle does not require a gwnative release:
    feed:
 
    ```sh
+   cp certificates/builds.candidate.json certificates/builds.json
    scripts/certificate-sign --publish certificates/builds.json
    ```
 
@@ -59,10 +60,23 @@ The normal ArenaNet patch cycle does not require a gwnative release:
 
 The manual `Client certificate` workflow automates fetching, candidate
 generation, static validation and creation of that signed review pull request.
-Its `certify_passive_enhancements` checkbox is an explicit attestation, behind
-the protected publishing environment, that both live runtime fixtures passed.
-Without it the signed certificate enables template saving only. The workflow
-never merges its pull request.
+No publisher build number is an input. The generator derives a stable family
+identity from the exact JSPI and Asyncify Wasm/JavaScript hashes.
+
+The workflow has two trust stages:
+
+1. an unprivileged job fetches the official pair, generates an unsigned
+   candidate with enhancements disabled, verifies both transforms, and exports
+   only the derived family identity;
+2. the protected publishing job fetches the files again, reproduces the
+   candidate, requires the same derived identity, repeats both transform tests,
+   and only then receives the signing key.
+
+This catches an artifact change between stages instead of signing whichever
+bytes happened to arrive last. Its `certify_passive_enhancements` checkbox is
+an explicit attestation, behind the protected publishing environment, that
+both live runtime fixtures passed. Without it the signed certificate enables
+template saving only. The workflow never merges its pull request.
 
 ## Trust and rollback
 
@@ -76,6 +90,7 @@ Feed `sequence` is monotonic. A validly signed lower sequence is ignored, a bad
 signature falls back to the bundled feed, and a refresh is written only after
 the JSON/signature pair verifies. Refreshing happens in the background and
 takes effect on the next launch, so network availability is not part of boot.
-The feed retains the newest 32 build families and the derived cache retains only
-the active artifact and transform ABI, so frequent ArenaNet patches do not
-create unbounded signed metadata or local Wasm storage.
+The feed retains the 32 most recently certified artifact families, in
+certification order, and the derived cache retains only the active artifact and
+transform ABI. Frequent ArenaNet patches therefore do not create unbounded
+signed metadata or local Wasm storage.

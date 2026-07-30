@@ -1,4 +1,4 @@
-//! Signed, data-only certification for ArenaNet client build families.
+//! Signed, data-only certification for ArenaNet client artifact families.
 //!
 //! ArenaNet can publish a client more often than gwnative can publish an app.
 //! Keeping build identities in Rust therefore turns every otherwise compatible
@@ -22,6 +22,7 @@ use std::time::Duration;
 use base64::Engine;
 use ed25519_compact::{PublicKey, Signature};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use super::Outcome;
 
@@ -121,8 +122,10 @@ pub struct CertificateFeed {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BuildFamily {
-    pub program_id: u32,
-    pub build_id: u32,
+    /// Derived from both exact official runtime pairs. This is an identity,
+    /// not publisher metadata: candidate generation and feed validation
+    /// independently compute it from the four artifact hashes.
+    pub family_id: String,
     pub layout: LayoutCertificate,
     pub runtimes: Vec<RuntimeCertificate>,
 }
@@ -135,13 +138,12 @@ pub struct LayoutCertificate {
     pub cursor_snapshot_abi: u32,
     pub cursor_snapshot_bytes: u32,
     pub layout_words: Vec<u32>,
-    /// Exact section/prefix identities shared by both official runtime builds.
-    /// Older single-runtime certificates may omit them; a dual-runtime family
-    /// must provide all four and match them independently in each artifact.
-    pub data_sha256: Option<String>,
-    pub element_sha256: Option<String>,
-    pub shared_global_prefix_sha256: Option<String>,
-    pub shared_global_count: Option<u32>,
+    /// Exact section/prefix identities independently checked in both official
+    /// runtime artifacts before these read-only offsets may be used.
+    pub data_sha256: String,
+    pub element_sha256: String,
+    pub shared_global_prefix_sha256: String,
+    pub shared_global_count: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -215,7 +217,7 @@ impl CertificateFeed {
         })
     }
 
-    fn validate(&self) -> Outcome<()> {
+    pub(super) fn validate(&self) -> Outcome<()> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(format!(
                 "certificate: schema {} is not supported",
@@ -229,34 +231,32 @@ impl CertificateFeed {
             ));
         }
         if self.families.is_empty() || self.families.len() > MAX_FAMILIES {
-            return Err("certificate: feed has an invalid build-family count".to_owned());
+            return Err("certificate: feed has an invalid artifact-family count".to_owned());
         }
 
-        let mut builds = HashSet::new();
+        let mut families = HashSet::new();
         let mut artifacts = HashSet::new();
         for family in &self.families {
-            if family.program_id == 0 || family.build_id == 0 {
-                return Err("certificate: program and build IDs must be positive".to_owned());
-            }
-            if !builds.insert((family.program_id, family.build_id)) {
+            hash("family ID", &family.family_id)?;
+            if !families.insert(family.family_id.as_str()) {
                 return Err(format!(
-                    "certificate: duplicate build family {}/{}",
-                    family.program_id, family.build_id
+                    "certificate: duplicate artifact family {}",
+                    family.family_id
                 ));
             }
-            family.layout.validate(family.runtimes.len())?;
-            if family.runtimes.is_empty() || family.runtimes.len() > 2 {
+            family.layout.validate()?;
+            if family.runtimes.len() != 2 {
                 return Err(format!(
-                    "certificate: build {} has an invalid runtime count",
-                    family.build_id
+                    "certificate: family {} must contain both official runtimes",
+                    family.family_id
                 ));
             }
             let mut modes = HashSet::new();
             for runtime in &family.runtimes {
                 if !modes.insert(runtime.runtime.key()) {
                     return Err(format!(
-                        "certificate: build {} repeats runtime {}",
-                        family.build_id,
+                        "certificate: family {} repeats runtime {}",
+                        family.family_id,
                         runtime.runtime.key()
                     ));
                 }
@@ -270,13 +270,19 @@ impl CertificateFeed {
                 }
                 runtime.template.validate()?;
             }
+            if artifact_family_id(&family.runtimes)? != family.family_id {
+                return Err(format!(
+                    "certificate: family {} does not match its artifacts",
+                    family.family_id
+                ));
+            }
         }
         Ok(())
     }
 }
 
 impl LayoutCertificate {
-    fn validate(&self, runtime_count: usize) -> Outcome<()> {
+    fn validate(&self) -> Outcome<()> {
         if self.snapshot_abi != 1
             || self.snapshot_bytes != 64
             || self.cursor_snapshot_abi != 1
@@ -285,28 +291,20 @@ impl LayoutCertificate {
         {
             return Err("certificate: unsupported companion layout ABI".to_owned());
         }
-        let proof = [
-            self.data_sha256.as_deref(),
-            self.element_sha256.as_deref(),
-            self.shared_global_prefix_sha256.as_deref(),
-        ];
-        let complete = proof.iter().all(Option::is_some) && self.shared_global_count.is_some();
-        let absent = proof.iter().all(Option::is_none) && self.shared_global_count.is_none();
-        if (!complete && !absent) || (runtime_count > 1 && !complete) {
-            return Err("certificate: incomplete dual-runtime layout proof".to_owned());
+        for value in [
+            &self.data_sha256,
+            &self.element_sha256,
+            &self.shared_global_prefix_sha256,
+        ] {
+            hash("layout proof", value)?;
         }
-        if complete {
-            for value in proof.into_iter().flatten() {
-                hash("layout proof", value)?;
-            }
-            if self.shared_global_count == Some(0) {
-                return Err("certificate: empty shared-global proof".to_owned());
-            }
+        if self.shared_global_count == 0 {
+            return Err("certificate: empty shared-global proof".to_owned());
         }
         Ok(())
     }
 
-    pub fn page_manifest(&self, program_id: u32, build_id: u32) -> serde_json::Value {
+    pub fn page_manifest(&self, family_id: &str) -> serde_json::Value {
         serde_json::json!({
             "snapshotAbi": self.snapshot_abi,
             "snapshotBytes": self.snapshot_bytes,
@@ -314,10 +312,59 @@ impl LayoutCertificate {
             "cursorSnapshotBytes": self.cursor_snapshot_bytes,
             "configBytes": self.layout_words.len() * std::mem::size_of::<u32>(),
             "layoutWords": self.layout_words,
-            "programId": program_id,
-            "buildId": build_id,
+            "familyId": family_id,
         })
     }
+}
+
+/// Stable identity for a tested JSPI/Asyncify artifact pair.
+///
+/// The domain separator and fixed runtime order make this independent of JSON
+/// field and array ordering. Hash bytes, rather than a human build label, are
+/// the only inputs.
+pub(super) fn artifact_family_id(runtimes: &[RuntimeCertificate]) -> Outcome<String> {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"gwnative-artifact-family-v1\0");
+    for expected in [Runtime::Jspi, Runtime::Asyncify] {
+        let mut matches = runtimes
+            .iter()
+            .filter(|runtime| runtime.runtime == expected);
+        let Some(runtime) = matches.next() else {
+            return Err(format!(
+                "certificate: artifact family must contain one {} runtime",
+                expected.key()
+            ));
+        };
+        if matches.next().is_some() {
+            return Err(format!(
+                "certificate: artifact family repeats the {} runtime",
+                expected.key()
+            ));
+        }
+        hash("wasm", &runtime.wasm_sha256)?;
+        hash("glue", &runtime.glue_sha256)?;
+        digest.update(expected.key().as_bytes());
+        digest.update([0]);
+        digest.update(
+            hex::decode(&runtime.wasm_sha256)
+                .map_err(|_| "certificate: malformed wasm sha256".to_owned())?,
+        );
+        digest.update(
+            hex::decode(&runtime.glue_sha256)
+                .map_err(|_| "certificate: malformed glue sha256".to_owned())?,
+        );
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+pub(super) fn validate_candidate(family: &BuildFamily) -> Outcome<()> {
+    CertificateFeed {
+        schema_version: SCHEMA_VERSION,
+        sequence: 1,
+        transform_abi: TRANSFORM_ABI,
+        families: vec![family.clone()],
+    }
+    .validate()
 }
 
 impl TemplateCertificate {
@@ -537,22 +584,36 @@ mod tests {
         let mut feed = bundled().unwrap();
         let family = feed.families[0].clone();
         feed.families = (1..=MAX_FAMILIES)
-            .map(|build_id| {
-                let mut next = BuildFamily {
-                    build_id: build_id as u32,
-                    ..family.clone()
-                };
+            .map(|generation| {
+                let mut next = family.clone();
                 for (runtime, certificate) in next.runtimes.iter_mut().enumerate() {
-                    certificate.wasm_sha256 = format!("{:064x}", build_id * 2 + runtime);
+                    certificate.wasm_sha256 = format!("{:064x}", generation * 2 + runtime);
                 }
+                next.family_id = artifact_family_id(&next.runtimes).unwrap();
                 next
             })
             .collect();
         feed.validate().unwrap();
-        feed.families.push(BuildFamily {
-            build_id: (MAX_FAMILIES + 1) as u32,
-            ..family
-        });
+        feed.families.push(family);
+        assert!(feed.validate().is_err());
+    }
+
+    #[test]
+    fn artifact_family_identity_is_derived_and_order_independent() {
+        let family = bundled().unwrap().families.remove(0);
+        let expected = artifact_family_id(&family.runtimes).unwrap();
+        assert_eq!(expected, family.family_id);
+
+        let mut reversed = family.runtimes;
+        reversed.reverse();
+        assert_eq!(artifact_family_id(&reversed).unwrap(), expected);
+    }
+
+    #[test]
+    fn artifact_family_identity_cannot_be_supplied_independently() {
+        let mut feed = bundled().unwrap();
+        feed.families[0].family_id =
+            "0000000000000000000000000000000000000000000000000000000000000000".to_owned();
         assert!(feed.validate().is_err());
     }
 }

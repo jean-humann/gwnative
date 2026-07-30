@@ -280,22 +280,14 @@ fn certify_stub(bodies: &[Vec<u8>], bridge: &BridgeCertificate) -> Outcome<()> {
 }
 
 pub(super) fn verify_layout(input: &[u8], layout: &LayoutCertificate) -> Outcome<()> {
-    let Some(data_hash) = layout.data_sha256.as_deref() else {
-        return Ok(());
-    };
-    let proof = layout_proof(input, layout.shared_global_count.unwrap_or_default())?;
-    if proof.data_sha256 != data_hash {
-        return Err("certificate: data section does not match the build family".to_owned());
+    let proof = layout_proof(input, layout.shared_global_count)?;
+    if proof.data_sha256 != layout.data_sha256 {
+        return Err("certificate: data section does not match the artifact family".to_owned());
     }
-    if proof.element_sha256 != layout.element_sha256.as_deref().unwrap_or_default() {
-        return Err("certificate: element section does not match the build family".to_owned());
+    if proof.element_sha256 != layout.element_sha256 {
+        return Err("certificate: element section does not match the artifact family".to_owned());
     }
-    if proof.shared_global_prefix_sha256
-        != layout
-            .shared_global_prefix_sha256
-            .as_deref()
-            .unwrap_or_default()
-    {
+    if proof.shared_global_prefix_sha256 != layout.shared_global_prefix_sha256 {
         return Err("certificate: shared global prefix does not match".to_owned());
     }
     Ok(())

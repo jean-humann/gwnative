@@ -51,10 +51,8 @@ function decodeManifest(candidate) {
       || value?.snapshotBytes !== COMPANION_SNAPSHOT_BYTES
       || value?.cursorSnapshotAbi !== COMPANION_CURSOR_ABI
       || value?.cursorSnapshotBytes !== COMPANION_CURSOR_BYTES
-      || !Number.isSafeInteger(value?.buildId)
-      || value.buildId <= 0
-      || !Number.isSafeInteger(value?.programId)
-      || value.programId <= 0
+      || typeof value?.familyId !== 'string'
+      || !/^[0-9a-f]{64}$/.test(value.familyId)
       || !Array.isArray(value?.layoutWords)
       || value.layoutWords.length === 0
       || value.layoutWords.some(
@@ -299,8 +297,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
 
     const runtime = {
       status: 'installed',
-      buildId: manifest.buildId,
-      programId: manifest.programId,
+      familyId: manifest.familyId,
       memory: exports.memory,
       snapshotPointer,
       configPointer,
@@ -373,7 +370,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
     // `log`, not `info`: the harness forwards log, warn and error to the host
     // and nothing else, so an `info` here is a line that reaches the WebKit
     // inspector and no log file, report or overlay anyone will actually open.
-    console.log(`[enhancement] installed for client build ${manifest.buildId}`);
+    console.log(`[enhancement] installed for artifact family ${manifest.familyId.slice(0, 12)}`);
     return runtime;
   } catch (error) {
     stopObserver();

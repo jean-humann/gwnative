@@ -2,7 +2,7 @@
 //!
 //! ArenaNet publishes a JSPI build and an Asyncify build from the same source.
 //! Their data layout is shared, but Asyncify rewrites the suspendable call graph
-//! and cannot inherit JSPI byte offsets or output hashes. A signed build-family
+//! and cannot inherit JSPI byte offsets or output hashes. A signed artifact-family
 //! certificate therefore binds both exact artifacts to one independently
 //! checked read-only layout while giving each runtime its own semantic
 //! template-save anchors and output hash.
@@ -66,8 +66,6 @@ impl DerivedModules {
 #[serde(rename_all = "camelCase")]
 struct RuntimeModule {
     build: Option<String>,
-    program_id: Option<u32>,
-    build_id: Option<u32>,
     template_save: &'static str,
     enhancements: &'static str,
     enhancement_manifest: Option<serde_json::Value>,
@@ -106,8 +104,6 @@ pub fn failed(enhance: bool) -> Prepared {
             runtime.key(),
             RuntimeModule {
                 build: None,
-                program_id: None,
-                build_id: None,
                 template_save: "failed",
                 enhancements: if enhance {
                     enhancements::FAILED
@@ -158,17 +154,13 @@ pub fn prepare(
 /// read-only layout as review input. Stub body hashes and both transform output
 /// hashes are recomputed. Passive enhancements stay disabled until live layout
 /// probes have independently certified the copied offsets.
-pub fn certificate_candidate(root: &Path, program_id: u32, build_id: u32) -> Outcome<String> {
+pub fn certificate_candidate(root: &Path) -> Outcome<String> {
     let feed = certificate::bundled()?;
     let prototype = feed
         .families
-        .iter()
-        .max_by_key(|family| family.build_id)
+        .last()
         .ok_or("certificate candidate: no prototype family")?;
-    let global_count = prototype
-        .layout
-        .shared_global_count
-        .ok_or("certificate candidate: prototype has no layout proof")?;
+    let global_count = prototype.layout.shared_global_count;
 
     let mut runtimes = Vec::new();
     let mut shared_proof: Option<rewrite::LayoutProof> = None;
@@ -196,7 +188,7 @@ pub fn certificate_candidate(root: &Path, program_id: u32, build_id: u32) -> Out
                 || proof.shared_global_prefix_sha256 != shared.shared_global_prefix_sha256
             {
                 return Err(format!(
-                    "certificate candidate: {} does not share the build-family layout",
+                    "certificate candidate: {} does not share the artifact-family layout",
                     runtime.key()
                 ));
             }
@@ -209,15 +201,16 @@ pub fn certificate_candidate(root: &Path, program_id: u32, build_id: u32) -> Out
 
     let proof = shared_proof.ok_or("certificate candidate: no runtime artifacts")?;
     let mut layout = prototype.layout.clone();
-    layout.data_sha256 = Some(proof.data_sha256);
-    layout.element_sha256 = Some(proof.element_sha256);
-    layout.shared_global_prefix_sha256 = Some(proof.shared_global_prefix_sha256);
+    layout.data_sha256 = proof.data_sha256;
+    layout.element_sha256 = proof.element_sha256;
+    layout.shared_global_prefix_sha256 = proof.shared_global_prefix_sha256;
+    let family_id = certificate::artifact_family_id(&runtimes)?;
     let family = certificate::BuildFamily {
-        program_id,
-        build_id,
+        family_id,
         layout,
         runtimes,
     };
+    certificate::validate_candidate(&family)?;
     serde_json::to_string_pretty(&family)
         .map_err(|e| format!("certificate candidate: cannot encode JSON: {e}"))
 }
@@ -237,8 +230,6 @@ fn prepare_runtime(
                 None,
                 RuntimeModule {
                     build: None,
-                    program_id: None,
-                    build_id: None,
                     template_save: "failed",
                     enhancements: if enhance {
                         enhancements::FAILED
@@ -270,8 +261,6 @@ fn prepare_runtime_inner(
             None,
             RuntimeModule {
                 build: Some(wasm_hash),
-                program_id: None,
-                build_id: None,
                 template_save: "uncertified",
                 enhancements: if enhance {
                     enhancements::UNCERTIFIED
@@ -296,14 +285,12 @@ fn prepare_runtime_inner(
         selected
             .family
             .layout
-            .page_manifest(selected.family.program_id, selected.family.build_id)
+            .page_manifest(&selected.family.family_id)
     });
     Ok((
         Some(derived),
         RuntimeModule {
             build: Some(wasm_hash),
-            program_id: Some(selected.family.program_id),
-            build_id: Some(selected.family.build_id),
             template_save: "ready",
             enhancements: enhancement_state,
             enhancement_manifest: manifest,
@@ -502,12 +489,15 @@ mod tests {
 
     #[test]
     fn external_official_pairs_produce_valid_candidates() {
+        let external = std::env::var("GWNATIVE_CERTIFY_FEED").is_ok();
         let feed = match std::env::var("GWNATIVE_CERTIFY_FEED") {
             Ok(path) => {
                 serde_json::from_slice::<CertificateFeed>(&fs::read(path).unwrap()).unwrap()
             }
             Err(_) => certificate::bundled().unwrap(),
         };
+        feed.validate().unwrap();
+        let mut verified = 0;
         for (runtime, wasm_variable, glue_variable) in [
             (
                 Runtime::Jspi,
@@ -520,10 +510,13 @@ mod tests {
                 "GWNATIVE_CERTIFY_ASYNCIFY_GLUE",
             ),
         ] {
-            let (Ok(wasm_path), Ok(glue_path)) =
-                (std::env::var(wasm_variable), std::env::var(glue_variable))
-            else {
-                continue;
+            let paths = (std::env::var(wasm_variable), std::env::var(glue_variable));
+            let (wasm_path, glue_path) = match paths {
+                (Ok(wasm), Ok(glue)) => (wasm, glue),
+                _ if !external => continue,
+                _ => panic!(
+                    "external certification requires both {wasm_variable} and {glue_variable}"
+                ),
             };
             let wasm = fs::read(wasm_path).unwrap();
             let glue = fs::read(glue_path).unwrap();
@@ -533,11 +526,11 @@ mod tests {
             rewrite::verify_layout(&wasm, &selected.family.layout).unwrap();
             let output = rewrite::candidate(&wasm, selected.runtime).unwrap();
             eprintln!("{} candidate sha256 {}", runtime.key(), digest(&output));
-            if selected.runtime.template.output_sha256
-                != "0000000000000000000000000000000000000000000000000000000000000000"
-            {
-                assert_eq!(digest(&output), selected.runtime.template.output_sha256);
-            }
+            assert_eq!(digest(&output), selected.runtime.template.output_sha256);
+            verified += 1;
+        }
+        if external {
+            assert_eq!(verified, 2, "both official runtime pairs must be verified");
         }
     }
 
@@ -566,7 +559,11 @@ mod tests {
         for runtime in ["jspi", "asyncify"] {
             assert_eq!(modules[runtime]["templateSave"], "ready");
             assert_eq!(modules[runtime]["enhancements"], "ready");
-            assert_eq!(modules[runtime]["enhancementManifest"]["buildId"], 38_797);
+            let family_id = modules[runtime]["enhancementManifest"]["familyId"]
+                .as_str()
+                .unwrap();
+            assert_eq!(family_id.len(), 64);
+            assert!(family_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
         }
     }
 }

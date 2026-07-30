@@ -59,13 +59,13 @@ describe('client runtime selection', () => {
           build: 'certified-jspi-build',
           templateSave: 'ready',
           enhancements: 'ready',
-          enhancementManifest: { buildId: 38797 },
+          enhancementManifest: { familyId: 'jspi-asyncify-pair' },
         },
         asyncify: {
           build: 'certified-asyncify-build',
           templateSave: 'ready',
           enhancements: 'ready',
-          enhancementManifest: { buildId: 38797 },
+          enhancementManifest: { familyId: 'jspi-asyncify-pair' },
         },
       },
     };
@@ -77,7 +77,9 @@ describe('client runtime selection', () => {
     assert.equal(state.__gwnativeTemplateSave, 'ready');
     assert.equal(state.__gwnativeClientBuild, 'certified-jspi-build');
     assert.equal(state.__gwnativeEnhancements, 'ready');
-    assert.deepEqual(state.__gwnativeEnhancementManifest, { buildId: 38797 });
+    assert.deepEqual(state.__gwnativeEnhancementManifest, {
+      familyId: 'jspi-asyncify-pair',
+    });
   });
 
   it('does not inherit JSPI facts when Asyncify is selected', () => {
