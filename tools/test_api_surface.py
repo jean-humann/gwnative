@@ -32,6 +32,7 @@ class ApiSurfaceTests(unittest.TestCase):
                 "    pub effects: Option<PlayerEffects>,\n"
                 "    pub agents: Option<MapAgents>,\n"
                 "    pub quests: Option<Quests>,\n"
+                "    pub inventory: Option<Inventory>,\n"
                 "}\n"
             )
             (wasm / "builds.rs").write_text(
@@ -46,6 +47,7 @@ class ApiSurfaceTests(unittest.TestCase):
             [
                 "agent",
                 "effects",
+                "item",
                 "map",
                 "party",
                 "player",
@@ -157,6 +159,7 @@ class ApiSurfaceTests(unittest.TestCase):
         self.assertEqual(_domain("Py4GW"), "runtime")
         self.assertEqual(_domain("PyDXOverlay"), "dx_overlay")
         self.assertEqual(_domain("PyImGui"), "imgui")
+        self.assertEqual(_domain("PyInventory"), "item")
         self.assertEqual(_domain("UIMgr"), "ui")
         self.assertEqual(_domain("StoCMgr"), "sto_c")
 

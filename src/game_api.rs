@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 pub const VERSION: u32 = 1;
-pub const MAX_PUBLISH_BYTES: usize = 256 * 1024;
+pub const MAX_PUBLISH_BYTES: usize = 1024 * 1024;
 pub const MAX_WAIT_MS: u64 = 15_000;
 const MAX_AGENT_ID: u32 = 4_095;
 
@@ -181,6 +181,75 @@ pub struct Quests {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InventoryBag {
+    pub bag_id: u32,
+    pub bag_type: u32,
+    pub kind: String,
+    pub container_item: u32,
+    pub capacity: u32,
+    pub item_count: u32,
+    pub is_inventory: bool,
+    pub is_equipped: bool,
+    pub is_not_collected: bool,
+    pub is_storage: bool,
+    pub is_material_storage: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InventoryItem {
+    pub item_id: u32,
+    pub agent_id: u32,
+    pub bag_id: u32,
+    pub slot: u32,
+    pub model_file_id: u32,
+    #[serde(rename = "type")]
+    pub item_type: u32,
+    pub type_name: String,
+    pub value: u32,
+    pub interaction: u32,
+    pub model_id: u32,
+    pub item_formula: u32,
+    pub quantity: u32,
+    pub equipped: bool,
+    pub profession: u32,
+    pub customized: bool,
+    pub material_salvageable: bool,
+    pub modifier_count: u32,
+    pub dye_tint: u32,
+    pub dye1: u32,
+    pub dye2: u32,
+    pub dye3: u32,
+    pub dye4: u32,
+    pub is_stackable: bool,
+    pub is_inscribable: bool,
+    pub is_identified: bool,
+    pub is_tradable: bool,
+    pub is_usable: bool,
+    pub is_prefix_upgradable: bool,
+    pub is_suffix_upgradable: bool,
+    pub is_inscription: bool,
+    pub is_purple: bool,
+    pub is_green: bool,
+    pub is_gold: bool,
+    pub is_inventory_item: bool,
+    pub is_storage_item: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Inventory {
+    pub items_truncated: bool,
+    pub total: u32,
+    pub gold_character: u32,
+    pub gold_storage: u32,
+    pub storage_panes_unlocked: u32,
+    pub bags: Vec<InventoryBag>,
+    pub items: Vec<InventoryItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,6 +292,8 @@ pub struct State {
     pub agents: Option<MapAgents>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quests: Option<Quests>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<Inventory>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -331,7 +402,7 @@ impl Hub {
             "state": {
                 "domains": [
                     "player", "map", "target", "party", "skillbar", "effects",
-                    "agents", "quests"
+                    "agents", "quests", "inventory"
                 ],
                 "available": self.state_json().is_some(),
             },
@@ -431,6 +502,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(quests) = &state.quests {
             validate_quests(quests)?;
         }
+        if let Some(inventory) = &state.inventory {
+            validate_inventory(inventory)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -449,6 +523,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.effects.is_some()
         || state.agents.is_some()
         || state.quests.is_some()
+        || state.inventory.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -673,6 +748,176 @@ fn validate_quests(quests: &Quests) -> Result<(), String> {
     Ok(())
 }
 
+fn inventory_bag_type(bag_id: u32) -> Option<(u32, &'static str)> {
+    match bag_id {
+        1..=5 => Some((1, "Inventory")),
+        6 => Some((5, "MaterialStorage")),
+        7 => Some((3, "NotCollected")),
+        8..=21 => Some((4, "Storage")),
+        22 => Some((2, "Equipped")),
+        _ => None,
+    }
+}
+
+fn inventory_item_type(item_type: u32) -> Option<&'static str> {
+    Some(match item_type {
+        0 => "Salvage",
+        2 => "Axe",
+        3 => "Bag",
+        4 => "Boots",
+        5 => "Bow",
+        6 => "Bundle",
+        7 => "Chestpiece",
+        8 => "Rune_Mod",
+        9 => "Usable",
+        10 => "Dye",
+        11 => "Materials_Zcoins",
+        12 => "Offhand",
+        13 => "Gloves",
+        15 => "Hammer",
+        16 => "Headpiece",
+        17 => "CC_Shards",
+        18 => "Key",
+        19 => "Leggings",
+        20 => "Gold_Coin",
+        21 => "Quest_Item",
+        22 => "Wand",
+        24 => "Shield",
+        26 => "Staff",
+        27 => "Sword",
+        29 => "Kit",
+        30 => "Trophy",
+        31 => "Scroll",
+        32 => "Daggers",
+        33 => "Present",
+        34 => "Minipet",
+        35 => "Scythe",
+        36 => "Spear",
+        43 => "Storybook",
+        44 => "Costume",
+        45 => "Costume_Headpiece",
+        0xff => "Unknown",
+        _ => return None,
+    })
+}
+
+fn validate_inventory(inventory: &Inventory) -> Result<(), String> {
+    if inventory.storage_panes_unlocked > 14
+        || inventory.bags.is_empty()
+        || inventory.bags.len() > 22
+        || inventory.items.len() > 512
+        || inventory.total < inventory.items.len() as u32
+        || inventory.total > 1_024
+        || if inventory.items_truncated {
+            inventory.items.len() != 512 || inventory.total <= 512
+        } else {
+            inventory.total != inventory.items.len() as u32
+        }
+    {
+        return Err("inventory page is outside its certified bounds".into());
+    }
+
+    let mut previous_bag_id = 0;
+    let mut total_capacity = 0u32;
+    let mut expected_items = 0u32;
+    let mut bags_by_id = std::collections::HashMap::with_capacity(inventory.bags.len());
+    for bag in &inventory.bags {
+        let Some((bag_type, kind)) = inventory_bag_type(bag.bag_id) else {
+            return Err("inventory bag is outside its certified bounds".into());
+        };
+        if bag.bag_id <= previous_bag_id
+            || bag.bag_type != bag_type
+            || bag.kind != kind
+            || bag.container_item > 1_000_000
+            || bag.capacity > 256
+            || bag.item_count > bag.capacity
+            || bag.is_inventory != (bag_type == 1)
+            || bag.is_equipped != (bag_type == 2)
+            || bag.is_not_collected != (bag_type == 3)
+            || bag.is_storage != (bag_type == 4)
+            || bag.is_material_storage != (bag_type == 5)
+        {
+            return Err("inventory bag is outside its certified bounds".into());
+        }
+        total_capacity = total_capacity
+            .checked_add(bag.capacity)
+            .filter(|value| *value <= 1_024)
+            .ok_or("inventory capacity exceeds its certified bound")?;
+        expected_items = expected_items
+            .checked_add(bag.item_count)
+            .filter(|value| *value <= 1_024)
+            .ok_or("inventory item total exceeds its certified bound")?;
+        previous_bag_id = bag.bag_id;
+        bags_by_id.insert(bag.bag_id, bag);
+    }
+    if !bags_by_id.contains_key(&1) || expected_items != inventory.total {
+        return Err("inventory bag totals are inconsistent".into());
+    }
+
+    let mut item_ids = std::collections::HashSet::with_capacity(inventory.items.len());
+    let mut locations = std::collections::HashSet::with_capacity(inventory.items.len());
+    let mut items_by_bag = std::collections::HashMap::<u32, u32>::new();
+    let mut previous_bag = 0;
+    let mut previous_slot = None;
+    for item in &inventory.items {
+        let Some(bag) = bags_by_id.get(&item.bag_id) else {
+            return Err("inventory item refers to an absent bag".into());
+        };
+        let Some(type_name) = inventory_item_type(item.item_type) else {
+            return Err("inventory item type is outside its certified bounds".into());
+        };
+        let ordered = item.bag_id > previous_bag
+            || (item.bag_id == previous_bag && previous_slot.is_some_and(|slot| item.slot > slot));
+        if item.item_id == 0
+            || item.item_id > 1_000_000
+            || !item_ids.insert(item.item_id)
+            || item.agent_id > MAX_AGENT_ID
+            || item.slot >= bag.capacity
+            || !locations.insert((item.bag_id, item.slot))
+            || !ordered
+            || item.model_file_id == 0
+            || item.type_name != type_name
+            || item.value > u16::MAX as u32
+            || item.model_id == 0
+            || item.item_formula > u16::MAX as u32
+            || item.quantity == 0
+            || item.quantity > u16::MAX as u32
+            || (item.profession > 10 && item.profession != 0xff)
+            || item.modifier_count > 64
+            || [item.dye1, item.dye2, item.dye3, item.dye4]
+                .into_iter()
+                .any(|dye| dye > 0xf)
+            || item.dye_tint > u8::MAX as u32
+            || item.is_stackable != (item.interaction & 0x8_0000 != 0)
+            || item.is_inscribable != (item.interaction & 0x800_0000 != 0)
+            || item.is_identified != (item.interaction & 1 != 0)
+            || item.is_tradable != (item.interaction & 0x100 == 0)
+            || item.is_usable != (item.interaction & 0x100_0000 != 0)
+            || item.is_prefix_upgradable != (item.interaction & 0x4000 == 0)
+            || item.is_suffix_upgradable != (item.interaction & 0x8000 == 0)
+            || item.is_inscription != (item.interaction & 0x2500_0000 == 0x2500_0000)
+            || item.is_purple != (item.interaction & 0x40_0000 != 0)
+            || item.is_green != (item.interaction & 0x10 != 0)
+            || item.is_gold != (item.interaction & 0x2_0000 != 0)
+            || item.is_inventory_item != matches!(bag.bag_type, 1 | 2)
+            || item.is_storage_item != matches!(bag.bag_type, 4 | 5)
+        {
+            return Err("inventory item is outside its certified bounds".into());
+        }
+        *items_by_bag.entry(item.bag_id).or_default() += 1;
+        previous_bag = item.bag_id;
+        previous_slot = Some(item.slot);
+    }
+    for bag in &inventory.bags {
+        let published = items_by_bag.get(&bag.bag_id).copied().unwrap_or_default();
+        if published > bag.item_count || (!inventory.items_truncated && published != bag.item_count)
+        {
+            return Err("inventory item counts are inconsistent".into());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,6 +994,33 @@ mod tests {
                     "primary":true,"areaPrimary":false
                 }],
                 "missionObjectives":[{"objectiveId":7,"type":2}]
+            },
+            "inventory":{
+                "itemsTruncated":false,"total":1,
+                "goldCharacter":1234,"goldStorage":50000,
+                "storagePanesUnlocked":4,
+                "bags":[{
+                    "bagId":1,"bagType":1,"kind":"Inventory",
+                    "containerItem":0,"capacity":20,"itemCount":1,
+                    "isInventory":true,"isEquipped":false,
+                    "isNotCollected":false,"isStorage":false,
+                    "isMaterialStorage":false
+                }],
+                "items":[{
+                    "itemId":500,"agentId":0,"bagId":1,"slot":0,
+                    "modelFileId":123,"type":9,"typeName":"Usable",
+                    "value":100,"interaction":17432577,"modelId":456,
+                    "itemFormula":0,"quantity":5,"equipped":false,
+                    "profession":255,"customized":true,
+                    "materialSalvageable":false,"modifierCount":2,
+                    "dyeTint":7,"dye1":2,"dye2":3,"dye3":4,"dye4":5,
+                    "isStackable":true,"isInscribable":false,
+                    "isIdentified":true,"isTradable":true,"isUsable":true,
+                    "isPrefixUpgradable":true,"isSuffixUpgradable":true,
+                    "isInscription":false,"isPurple":false,"isGreen":false,
+                    "isGold":true,"isInventoryItem":true,
+                    "isStorageItem":false
+                }]
             }
         }"#;
         hub.publish(state).unwrap();
@@ -763,6 +1035,11 @@ mod tests {
         assert_eq!(value["state"]["agents"]["agents"][0]["isCasting"], true);
         assert_eq!(value["state"]["quests"]["activeQuestId"], 44);
         assert_eq!(value["state"]["quests"]["quests"][0]["completed"], true);
+        assert_eq!(
+            value["state"]["inventory"]["items"][0]["typeName"],
+            "Usable"
+        );
+        assert_eq!(value["state"]["inventory"]["items"][0]["isGold"], true);
     }
 
     #[test]
@@ -778,6 +1055,8 @@ mod tests {
             br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","agents":{"truncated":false,"total":1,"agents":[{"agentId":2,"typeBits":219,"kind":"Living","playerNumber":1,"primary":0,"secondary":0,"level":20,"health":1,"rotation":0,"x":0,"y":0,"z":0,"modelState":65,"effects":0,"allegiance":1,"isLiving":true,"isItem":false,"isGadget":false,"isDead":false,"isMoving":false,"isAttacking":false,"isKnockedDown":false,"isCasting":false}]}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","quests":{"activeQuestId":2,"questsTruncated":false,"objectivesTruncated":false,"quests":[{"questId":1,"logState":0,"mapFrom":0,"markerX":0,"markerY":0,"markerPlane":0,"mapTo":0,"completed":false,"currentMission":false,"primary":false,"areaPrimary":false}],"missionObjectives":[]}}"#.as_slice(),
             br#"{"status":"waiting","agents":{"truncated":false,"total":0,"agents":[]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","inventory":{"itemsTruncated":false,"total":1,"goldCharacter":0,"goldStorage":0,"storagePanesUnlocked":0,"bags":[{"bagId":1,"bagType":4,"kind":"Storage","containerItem":0,"capacity":20,"itemCount":1,"isInventory":false,"isEquipped":false,"isNotCollected":false,"isStorage":true,"isMaterialStorage":false}],"items":[]}}"#.as_slice(),
+            br#"{"status":"waiting","inventory":{"itemsTruncated":false,"total":0,"goldCharacter":0,"goldStorage":0,"storagePanesUnlocked":0,"bags":[],"items":[]}}"#.as_slice(),
         ] {
             assert!(hub.publish(state).is_err());
         }

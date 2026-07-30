@@ -36,6 +36,7 @@ VERSION = re.compile(r'#define\s+GWCA_VERSION\s+"([^"]+)"')
 CERTIFIED_DOMAIN_FIELDS = {
     "agent": "agents",
     "effects": "effects",
+    "item": "inventory",
     "map": "map_id",
     "party": "party",
     "player": "player_id",
@@ -359,6 +360,7 @@ def _domain(value: str) -> str:
         "friendlist": "friend_list",
         "im_gui": "imgui",
         "items": "item",
+        "inventory": "item",
         "maps": "map",
         "module": "runtime",
         "players": "player",

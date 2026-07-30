@@ -41,7 +41,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 4;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 5;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -52,6 +52,7 @@ const FLAG_SKILLBAR_VALID: u32 = 1 << 5;
 const FLAG_EFFECTS_VALID: u32 = 1 << 6;
 const FLAG_MAP_AGENTS_VALID: u32 = 1 << 7;
 const FLAG_QUESTS_VALID: u32 = 1 << 8;
+const FLAG_INVENTORY_VALID: u32 = 1 << 9;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -68,6 +69,10 @@ const MAX_RAW_QUESTS: u32 = 256;
 const MAX_QUESTS: usize = 64;
 const MAX_RAW_MISSION_OBJECTIVES: u32 = 128;
 const MAX_MISSION_OBJECTIVES: usize = 32;
+const MAX_INVENTORY_BAGS: usize = 22;
+const MAX_INVENTORY_ITEMS: usize = 512;
+const MAX_BAG_SLOTS: u32 = 256;
+const MAX_TOTAL_BAG_SLOTS: u32 = 1_024;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -179,6 +184,35 @@ struct Layout {
     mission_objective_stride: u32,
     mission_objective_id: u32,
     mission_objective_type: u32,
+    game_item_context: u32,
+    item_context_inventory: u32,
+    inventory_bags: u32,
+    inventory_storage_panes: u32,
+    inventory_gold_character: u32,
+    inventory_gold_storage: u32,
+    bag_type: u32,
+    bag_index: u32,
+    bag_container_item: u32,
+    bag_items_count: u32,
+    bag_items: u32,
+    item_id: u32,
+    item_agent_id: u32,
+    item_bag: u32,
+    item_modifiers: u32,
+    item_modifier_count: u32,
+    item_customized: u32,
+    item_model_file_id: u32,
+    item_type: u32,
+    item_dye: u32,
+    item_value: u32,
+    item_interaction: u32,
+    item_model_id: u32,
+    item_formula: u32,
+    item_material_salvageable: u32,
+    item_quantity: u32,
+    item_equipped: u32,
+    item_profession: u32,
+    item_slot: u32,
     cursor_active_art: u32,
     cursor_software_model: u32,
     cursor_show_count: u32,
@@ -283,6 +317,35 @@ impl Layout {
         mission_objective_stride: 0,
         mission_objective_id: 0,
         mission_objective_type: 0,
+        game_item_context: 0,
+        item_context_inventory: 0,
+        inventory_bags: 0,
+        inventory_storage_panes: 0,
+        inventory_gold_character: 0,
+        inventory_gold_storage: 0,
+        bag_type: 0,
+        bag_index: 0,
+        bag_container_item: 0,
+        bag_items_count: 0,
+        bag_items: 0,
+        item_id: 0,
+        item_agent_id: 0,
+        item_bag: 0,
+        item_modifiers: 0,
+        item_modifier_count: 0,
+        item_customized: 0,
+        item_model_file_id: 0,
+        item_type: 0,
+        item_dye: 0,
+        item_value: 0,
+        item_interaction: 0,
+        item_model_id: 0,
+        item_formula: 0,
+        item_material_salvageable: 0,
+        item_quantity: 0,
+        item_equipped: 0,
+        item_profession: 0,
+        item_slot: 0,
         cursor_active_art: 0,
         cursor_software_model: 0,
         cursor_show_count: 0,
@@ -392,6 +455,37 @@ struct MissionObjective {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct InventoryBag {
+    bag_id: u32,
+    bag_type: u32,
+    container_item: u32,
+    capacity: u32,
+    item_count: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct InventoryItem {
+    item_id: u32,
+    agent_id: u32,
+    bag_id: u32,
+    slot: u32,
+    model_file_id: u32,
+    item_type: u32,
+    value: u32,
+    interaction: u32,
+    model_id: u32,
+    item_formula: u32,
+    quantity: u32,
+    equipped: u32,
+    profession: u32,
+    metadata_flags: u32,
+    modifier_count: u32,
+    dye_info: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -439,6 +533,15 @@ struct Snapshot {
     mission_objective_count: u32,
     quests: [Quest; MAX_QUESTS],
     mission_objectives: [MissionObjective; MAX_MISSION_OBJECTIVES],
+    inventory_flags: u32,
+    gold_character: u32,
+    gold_storage: u32,
+    storage_panes_unlocked: u32,
+    inventory_bag_count: u32,
+    inventory_item_count: u32,
+    inventory_item_total: u32,
+    inventory_bags: [InventoryBag; MAX_INVENTORY_BAGS],
+    inventory_items: [InventoryItem; MAX_INVENTORY_ITEMS],
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -459,8 +562,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 400] = [(); size_of::<Layout>()];
-const _: [(); 12048] = [(); size_of::<Snapshot>()];
+const _: [(); 516] = [(); size_of::<Layout>()];
+const _: [(); 45284] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 static mut SNAPSHOT_PTR: u32 = 0;
@@ -652,6 +755,31 @@ const EMPTY_MISSION_OBJECTIVE: MissionObjective = MissionObjective {
     objective_id: 0,
     objective_type: 0,
 };
+const EMPTY_INVENTORY_BAG: InventoryBag = InventoryBag {
+    bag_id: 0,
+    bag_type: 0,
+    container_item: 0,
+    capacity: 0,
+    item_count: 0,
+};
+const EMPTY_INVENTORY_ITEM: InventoryItem = InventoryItem {
+    item_id: 0,
+    agent_id: 0,
+    bag_id: 0,
+    slot: 0,
+    model_file_id: 0,
+    item_type: 0,
+    value: 0,
+    interaction: 0,
+    model_id: 0,
+    item_formula: 0,
+    quantity: 0,
+    equipped: 0,
+    profession: 0,
+    metadata_flags: 0,
+    modifier_count: 0,
+    dye_info: 0,
+};
 #[derive(Clone, Copy)]
 struct PartyState {
     id: u32,
@@ -763,6 +891,20 @@ impl QuestsSource {
     };
 }
 
+// Inventory is a graph of bags and item pointers. Retain only the owning
+// Inventory pointer across the original tick, then revalidate every bag,
+// slot, back-reference, and item directly while publishing. Materialising
+// 512 records as a local array would overflow the client's imported-memory
+// stack and make the state API interfere with the game it observes.
+#[derive(Clone, Copy)]
+struct InventorySource {
+    inventory: u32,
+}
+
+impl InventorySource {
+    const EMPTY: Self = Self { inventory: 0 };
+}
+
 #[derive(Clone, Copy)]
 struct State {
     flags: u32,
@@ -777,6 +919,7 @@ struct State {
     effects: EffectsSource,
     map_agents: MapAgentsSource,
     quests: QuestsSource,
+    inventory: InventorySource,
 }
 
 impl State {
@@ -800,6 +943,7 @@ impl State {
             effects: EffectsSource::EMPTY,
             map_agents: MapAgentsSource::EMPTY,
             quests: QuestsSource::EMPTY,
+            inventory: InventorySource::EMPTY,
         }
     }
 }
@@ -1002,6 +1146,162 @@ unsafe fn collect_quests(layout: Layout, game: u32) -> Option<QuestsSource> {
         quest_buffer: quests.buffer,
         objective_buffer: objectives.buffer,
     })
+}
+
+fn expected_bag_type(bag_id: u32) -> Option<u32> {
+    match bag_id {
+        1..=5 => Some(1),  // Inventory
+        6 => Some(5),     // Material storage
+        7 => Some(3),     // Not collected
+        8..=21 => Some(4), // Storage
+        22 => Some(2),    // Equipped
+        _ => None,
+    }
+}
+
+fn valid_item_type(item_type: u32) -> bool {
+    matches!(
+        item_type,
+        0 | 2..=13
+            | 15..=22
+            | 24
+            | 26
+            | 27
+            | 29..=36
+            | 43..=45
+            | 0xff
+    )
+}
+
+unsafe fn read_inventory_bag(
+    layout: Layout,
+    address: u32,
+    bag_id: u32,
+) -> Option<(InventoryBag, ArrayView)> {
+    let bag_type = unsafe { read_u32(offset(address, layout.bag_type)?)? };
+    let index = unsafe { read_u32(offset(address, layout.bag_index)?)? };
+    let container_item =
+        unsafe { read_u32(offset(address, layout.bag_container_item)?)? };
+    let item_count = unsafe { read_u32(offset(address, layout.bag_items_count)?)? };
+    let items = unsafe {
+        read_array(
+            offset(address, layout.bag_items)?,
+            4,
+            MAX_BAG_SLOTS,
+            MAX_BAG_SLOTS,
+        )?
+    };
+    if expected_bag_type(bag_id) != Some(bag_type)
+        || index != bag_id - 1
+        || container_item > 1_000_000
+        || item_count > items.size
+    {
+        return None;
+    }
+    Some((
+        InventoryBag {
+            bag_id,
+            bag_type,
+            container_item,
+            capacity: items.size,
+            item_count,
+        },
+        items,
+    ))
+}
+
+unsafe fn read_inventory_item(
+    layout: Layout,
+    address: u32,
+    bag_address: u32,
+    bag_id: u32,
+    slot: u32,
+) -> Option<InventoryItem> {
+    let item_id = unsafe { read_u32(offset(address, layout.item_id)?)? };
+    let agent_id = unsafe { read_u32(offset(address, layout.item_agent_id)?)? };
+    let item_bag = unsafe { read_u32(offset(address, layout.item_bag)?)? };
+    let modifiers = unsafe { read_u32(offset(address, layout.item_modifiers)?)? };
+    let modifier_count =
+        unsafe { read_u32(offset(address, layout.item_modifier_count)?)? };
+    let customized =
+        unsafe { read_u32(offset(address, layout.item_customized)?)? } != 0;
+    let model_file_id =
+        unsafe { read_u32(offset(address, layout.item_model_file_id)?)? };
+    let item_type = unsafe { read_u8(offset(address, layout.item_type)?)? } as u32;
+    let dye_tint = unsafe { read_u8(offset(address, layout.item_dye)?)? } as u32;
+    let dyes = unsafe { read_u16(offset(address, layout.item_dye.checked_add(1)?)?)? }
+        as u32;
+    let value = unsafe { read_u16(offset(address, layout.item_value)?)? } as u32;
+    let interaction =
+        unsafe { read_u32(offset(address, layout.item_interaction)?)? };
+    let model_id = unsafe { read_u32(offset(address, layout.item_model_id)?)? };
+    let item_formula =
+        unsafe { read_u16(offset(address, layout.item_formula)?)? } as u32;
+    let material_salvageable =
+        unsafe { read_u8(offset(address, layout.item_material_salvageable)?)? }
+            as u32;
+    let quantity =
+        unsafe { read_u16(offset(address, layout.item_quantity)?)? } as u32;
+    let equipped =
+        unsafe { read_u8(offset(address, layout.item_equipped)?)? } as u32;
+    let profession =
+        unsafe { read_u8(offset(address, layout.item_profession)?)? } as u32;
+    let item_slot = unsafe { read_u8(offset(address, layout.item_slot)?)? } as u32;
+
+    let modifier_bytes = modifier_count.checked_mul(4)?;
+    if item_id == 0
+        || item_id > 1_000_000
+        || agent_id > 4_095
+        || item_bag != bag_address
+        || item_slot != slot
+        || model_file_id == 0
+        || !valid_item_type(item_type)
+        || model_id == 0
+        || quantity == 0
+        || equipped > 1
+        || (profession > 10 && profession != 0xff)
+        || material_salvageable > 1
+        || modifier_count > 64
+        || (modifier_count > 0
+            && (modifiers & 3 != 0 || !contains(modifiers, modifier_bytes)))
+    {
+        return None;
+    }
+
+    Some(InventoryItem {
+        item_id,
+        agent_id,
+        bag_id,
+        slot,
+        model_file_id,
+        item_type,
+        value,
+        interaction,
+        model_id,
+        item_formula,
+        quantity,
+        equipped,
+        profession,
+        metadata_flags: u32::from(customized) | (material_salvageable << 1),
+        modifier_count,
+        dye_info: dye_tint | (dyes << 8),
+    })
+}
+
+unsafe fn collect_inventory(layout: Layout, game: u32) -> Option<InventorySource> {
+    let item_context = unsafe {
+        pointer(
+            offset(game, layout.game_item_context)?,
+            layout.item_context_inventory.checked_add(4)?,
+        )?
+    };
+    let inventory = unsafe {
+        pointer(
+            offset(item_context, layout.item_context_inventory)?,
+            layout.inventory_gold_storage.checked_add(4)?,
+        )?
+    };
+    Some(InventorySource { inventory })
 }
 
 unsafe fn collect_party(layout: Layout, game: u32, agent_count: u32) -> Option<PartyState> {
@@ -1481,6 +1781,10 @@ unsafe fn collect(layout: Layout) -> State {
         state.flags |= FLAG_QUESTS_VALID;
         state.quests = quests;
     }
+    if let Some(inventory) = unsafe { collect_inventory(layout, game) } {
+        state.flags |= FLAG_INVENTORY_VALID;
+        state.inventory = inventory;
+    }
     state
 }
 
@@ -1547,6 +1851,185 @@ unsafe fn publish_map_agents(
             if valid { count as u32 } else { 0 },
         );
         write_volatile(&mut (*snapshot).map_agent_total, total);
+    }
+    valid
+}
+
+unsafe fn publish_inventory(
+    snapshot: *mut Snapshot,
+    layout: Layout,
+    source: InventorySource,
+) -> bool {
+    let inventory_bytes = layout.inventory_gold_storage.checked_add(4);
+    let mut valid = source.inventory != 0
+        && source.inventory & 3 == 0
+        && inventory_bytes.is_some_and(|bytes| contains(source.inventory, bytes));
+    let mut gold_character = 0;
+    let mut gold_storage = 0;
+    let mut storage_panes_unlocked = 0;
+    let mut bag_count = 0usize;
+    let mut item_count = 0usize;
+    let mut item_total = 0u32;
+    let mut total_slots = 0u32;
+    let mut backpack_found = false;
+
+    if valid {
+        let character = offset(source.inventory, layout.inventory_gold_character)
+            .and_then(|address| unsafe { read_u32(address) });
+        let storage = offset(source.inventory, layout.inventory_gold_storage)
+            .and_then(|address| unsafe { read_u32(address) });
+        let panes = offset(source.inventory, layout.inventory_storage_panes)
+            .and_then(|address| unsafe { read_u32(address) });
+        if let (Some(character), Some(storage), Some(panes)) =
+            (character, storage, panes)
+        {
+            gold_character = character;
+            gold_storage = storage;
+            storage_panes_unlocked = panes;
+            valid &= storage_panes_unlocked <= 14;
+        } else {
+            valid = false;
+        }
+    }
+
+    if valid {
+        for bag_id in 1..=MAX_INVENTORY_BAGS as u32 {
+            let Some(pointer_offset) = bag_id
+                .checked_mul(4)
+                .and_then(|value| layout.inventory_bags.checked_add(value))
+                .and_then(|value| offset(source.inventory, value))
+            else {
+                valid = false;
+                break;
+            };
+            let Some(bag_address) = (unsafe { read_u32(pointer_offset) }) else {
+                valid = false;
+                break;
+            };
+            if bag_address == 0 {
+                continue;
+            }
+            if bag_address & 3 != 0 {
+                valid = false;
+                break;
+            }
+            let Some((bag, items)) =
+                (unsafe { read_inventory_bag(layout, bag_address, bag_id) })
+            else {
+                valid = false;
+                break;
+            };
+            let Some(next_slots) = total_slots.checked_add(bag.capacity) else {
+                valid = false;
+                break;
+            };
+            if next_slots > MAX_TOTAL_BAG_SLOTS {
+                valid = false;
+                break;
+            }
+            total_slots = next_slots;
+            backpack_found |= bag_id == 1;
+            unsafe {
+                write_volatile(&mut (*snapshot).inventory_bags[bag_count], bag);
+            }
+            bag_count += 1;
+
+            let mut actual_count = 0u32;
+            for slot in 0..items.size {
+                let Some(entry) = indexed(items.buffer, slot, 4) else {
+                    valid = false;
+                    break;
+                };
+                let Some(item_address) = (unsafe { read_u32(entry) }) else {
+                    valid = false;
+                    break;
+                };
+                if item_address == 0 {
+                    continue;
+                }
+                if item_address & 3 != 0 {
+                    valid = false;
+                    break;
+                }
+                let Some(item) = (unsafe {
+                    read_inventory_item(
+                        layout,
+                        item_address,
+                        bag_address,
+                        bag_id,
+                        slot,
+                    )
+                }) else {
+                    valid = false;
+                    break;
+                };
+                actual_count += 1;
+                let Some(next_total) = item_total.checked_add(1) else {
+                    valid = false;
+                    break;
+                };
+                item_total = next_total;
+                if item_count < MAX_INVENTORY_ITEMS {
+                    unsafe {
+                        write_volatile(
+                            &mut (*snapshot).inventory_items[item_count],
+                            item,
+                        );
+                    }
+                    item_count += 1;
+                }
+            }
+            if !valid || actual_count != bag.item_count {
+                valid = false;
+                break;
+            }
+        }
+    }
+    valid &= backpack_found && bag_count > 0;
+    if !valid {
+        gold_character = 0;
+        gold_storage = 0;
+        storage_panes_unlocked = 0;
+        bag_count = 0;
+        item_count = 0;
+        item_total = 0;
+    }
+    for index in bag_count..MAX_INVENTORY_BAGS {
+        unsafe {
+            write_volatile(
+                &mut (*snapshot).inventory_bags[index],
+                EMPTY_INVENTORY_BAG,
+            );
+        }
+    }
+    for index in item_count..MAX_INVENTORY_ITEMS {
+        unsafe {
+            write_volatile(
+                &mut (*snapshot).inventory_items[index],
+                EMPTY_INVENTORY_ITEM,
+            );
+        }
+    }
+    unsafe {
+        write_volatile(
+            &mut (*snapshot).inventory_flags,
+            u32::from(valid && item_total > item_count as u32),
+        );
+        write_volatile(&mut (*snapshot).gold_character, gold_character);
+        write_volatile(&mut (*snapshot).gold_storage, gold_storage);
+        write_volatile(
+            &mut (*snapshot).storage_panes_unlocked,
+            storage_panes_unlocked,
+        );
+        write_volatile(
+            &mut (*snapshot).inventory_bag_count,
+            if valid { bag_count as u32 } else { 0 },
+        );
+        write_volatile(
+            &mut (*snapshot).inventory_item_count,
+            if valid { item_count as u32 } else { 0 },
+        );
+        write_volatile(&mut (*snapshot).inventory_item_total, item_total);
     }
     valid
 }
@@ -1683,6 +2166,9 @@ unsafe fn publish(mut state: State, layout: Layout) {
                 EMPTY_MISSION_OBJECTIVE
             };
             write_volatile(&mut (*snapshot).mission_objectives[index], value);
+        }
+        if !publish_inventory(snapshot, layout, state.inventory) {
+            state.flags &= !FLAG_INVENTORY_VALID;
         }
         write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).sequence, next);
