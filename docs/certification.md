@@ -76,3 +76,6 @@ Feed `sequence` is monotonic. A validly signed lower sequence is ignored, a bad
 signature falls back to the bundled feed, and a refresh is written only after
 the JSON/signature pair verifies. Refreshing happens in the background and
 takes effect on the next launch, so network availability is not part of boot.
+The feed retains the newest 32 build families and the derived cache retains only
+the active artifact and transform ABI, so frequent ArenaNet patches do not
+create unbounded signed metadata or local Wasm storage.

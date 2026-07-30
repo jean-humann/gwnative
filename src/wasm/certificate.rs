@@ -27,6 +27,7 @@ use super::Outcome;
 
 const SCHEMA_VERSION: u32 = 1;
 pub(super) const TRANSFORM_ABI: u32 = 2;
+const MAX_FAMILIES: usize = 32;
 const MAX_FEED_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 256;
 const FEED_NAME: &str = "builds.json";
@@ -227,8 +228,8 @@ impl CertificateFeed {
                 self.transform_abi
             ));
         }
-        if self.families.is_empty() {
-            return Err("certificate: feed has no build families".to_owned());
+        if self.families.is_empty() || self.families.len() > MAX_FAMILIES {
+            return Err("certificate: feed has an invalid build-family count".to_owned());
         }
 
         let mut builds = HashSet::new();
@@ -529,5 +530,29 @@ mod tests {
             assert!(seen.insert(kind.marker()));
             assert!(kind.marker() < -1000);
         }
+    }
+
+    #[test]
+    fn the_signed_feed_has_a_bounded_build_history() {
+        let mut feed = bundled().unwrap();
+        let family = feed.families[0].clone();
+        feed.families = (1..=MAX_FAMILIES)
+            .map(|build_id| {
+                let mut next = BuildFamily {
+                    build_id: build_id as u32,
+                    ..family.clone()
+                };
+                for (runtime, certificate) in next.runtimes.iter_mut().enumerate() {
+                    certificate.wasm_sha256 = format!("{:064x}", build_id * 2 + runtime);
+                }
+                next
+            })
+            .collect();
+        feed.validate().unwrap();
+        feed.families.push(BuildFamily {
+            build_id: (MAX_FAMILIES + 1) as u32,
+            ..family
+        });
+        assert!(feed.validate().is_err());
     }
 }

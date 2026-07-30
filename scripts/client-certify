@@ -18,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FEED = ROOT / "certificates" / "builds.json"
+MAX_FAMILIES = 32
 
 
 def arguments() -> argparse.Namespace:
@@ -79,6 +80,10 @@ def main() -> int:
         )
     ]
     feed["families"].append(family)
+    feed["families"] = sorted(
+        feed["families"],
+        key=lambda item: (item["buildId"], item["programId"]),
+    )[-MAX_FAMILIES:]
     feed["families"].sort(key=lambda item: (item["programId"], item["buildId"]))
 
     output = args.output.resolve()
