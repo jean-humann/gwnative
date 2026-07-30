@@ -597,6 +597,7 @@ def main() -> int:
                 "completion",
                 "camera",
                 "trade",
+                "ui",
             }:
                 raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)
@@ -831,6 +832,7 @@ def main() -> int:
             completion = state.get("completion")
             camera = state.get("camera")
             trade = state.get("trade")
+            ui_state = state.get("ui")
             if not isinstance(party, dict) or not party.get("players"):
                 raise Failure("certified party state did not include the player roster")
             skills = skillbar.get("skills") if isinstance(skillbar, dict) else None
@@ -1233,6 +1235,129 @@ def main() -> int:
                 )
             ):
                 raise Failure("certified trade state is incomplete")
+            ui_frames = (
+                ui_state.get("frames") if isinstance(ui_state, dict) else None
+            )
+            ui_total = (
+                ui_state.get("total") if isinstance(ui_state, dict) else None
+            )
+            ui_created = (
+                ui_state.get("createdTotal")
+                if isinstance(ui_state, dict)
+                else None
+            )
+            ui_visible = (
+                ui_state.get("visibleTotal")
+                if isinstance(ui_state, dict)
+                else None
+            )
+            ui_ids = {
+                frame.get("frameId")
+                for frame in ui_frames or []
+                if isinstance(frame, dict)
+            }
+            if (
+                not isinstance(ui_state, dict)
+                or ui_state.get("truncated") not in (True, False)
+                or not isinstance(ui_frames, list)
+                or len(ui_frames) > 128
+                or not isinstance(ui_total, int)
+                or not len(ui_frames) <= ui_total <= 2_048
+                or not isinstance(ui_created, int)
+                or not isinstance(ui_visible, int)
+                or not 0 <= ui_visible <= ui_created <= ui_total
+                or (
+                    ui_state.get("truncated")
+                    and (len(ui_frames) != 128 or ui_total <= 128)
+                )
+                or (
+                    not ui_state.get("truncated")
+                    and (
+                        len(ui_frames) != ui_total
+                        or sum(bool(frame.get("created")) for frame in ui_frames)
+                        != ui_created
+                        or sum(
+                            bool(frame.get("locallyVisible"))
+                            for frame in ui_frames
+                        )
+                        != ui_visible
+                    )
+                )
+                or len(ui_ids) != len(ui_frames)
+                or (
+                    not ui_state.get("truncated")
+                    and any(
+                        frame.get("parentId") is not None
+                        and frame.get("parentId") not in ui_ids
+                        for frame in ui_frames
+                    )
+                )
+                or any(
+                    not isinstance(frame, dict)
+                    or not isinstance(frame.get("frameId"), int)
+                    or not 0 <= frame.get("frameId") < 2_048
+                    or (
+                        frame.get("parentId") is not None
+                        and (
+                            not isinstance(frame.get("parentId"), int)
+                            or not 0 <= frame.get("parentId") < 2_048
+                            or frame.get("parentId") == frame.get("frameId")
+                        )
+                    )
+                    or any(
+                        not isinstance(frame.get(name), int)
+                        for name in (
+                            "childOffsetId",
+                            "frameHash",
+                            "visibilityFlags",
+                            "type",
+                            "templateType",
+                            "state",
+                            "positionFlags",
+                        )
+                    )
+                    or any(
+                        frame.get(name) not in (True, False)
+                        for name in (
+                            "created",
+                            "destroying",
+                            "disabled",
+                            "hidden",
+                            "locallyVisible",
+                            "positionValid",
+                        )
+                    )
+                    or frame.get("created") != bool(frame.get("state", 0) & 0x4)
+                    or frame.get("destroying") != bool(frame.get("state", 0) & 0x8)
+                    or frame.get("disabled") != bool(frame.get("state", 0) & 0x10)
+                    or frame.get("hidden") != bool(frame.get("state", 0) & 0x200)
+                    or frame.get("locallyVisible")
+                    != (
+                        frame.get("created")
+                        and not frame.get("destroying")
+                        and not frame.get("hidden")
+                    )
+                    or not isinstance(frame.get("position"), dict)
+                    or any(
+                        not isinstance(frame.get("position", {}).get(axis), (int, float))
+                        or not math.isfinite(frame.get("position", {}).get(axis))
+                        or abs(frame.get("position", {}).get(axis)) > 1_000_000
+                        for axis in ("left", "bottom", "right", "top")
+                    )
+                    or (
+                        not frame.get("positionValid")
+                        and (
+                            frame.get("positionFlags") != 0
+                            or any(
+                                frame.get("position", {}).get(axis) != 0
+                                for axis in ("left", "bottom", "right", "top")
+                            )
+                        )
+                    )
+                    for frame in ui_frames
+                )
+            ):
+                raise Failure("certified UI frame state is incomplete")
             print(
                 "[e2e] bounded game-state API PASS "
                 f"(players={len(party.get('players', []))}, "
@@ -1248,7 +1373,8 @@ def main() -> int:
                 f"guild={'yes' if guild else 'no'}, "
                 f"unlocked-maps={len(completion_pages[4])}, "
                 f"camera={camera.get('modeName')}, "
-                f"trade={trade.get('statusName')})"
+                f"trade={trade.get('statusName')}, "
+                f"ui-frames={len(ui_frames)}/{ui_total})"
             )
 
             before = position(ready)
