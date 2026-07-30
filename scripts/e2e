@@ -583,7 +583,7 @@ def main() -> int:
             if game_description.get("transport", {}).get("longPoll") is not True:
                 raise Failure("the game-state API does not advertise long polling")
             domains = set(game_description.get("state", {}).get("domains", []))
-            if domains != {"player", "map", "target"}:
+            if domains != {"player", "map", "target", "party", "skillbar", "effects"}:
                 raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)
 
@@ -805,6 +805,61 @@ def main() -> int:
                 )
                 print("[e2e] INCONCLUSIVE (gameplay telemetry unavailable)")
                 return 2
+
+            state = ready["state"]
+            party = state.get("party")
+            skillbar = state.get("skillbar")
+            effects = state.get("effects")
+            if not isinstance(party, dict) or not party.get("players"):
+                raise Failure("certified party state did not include the player roster")
+            skills = skillbar.get("skills") if isinstance(skillbar, dict) else None
+            if (
+                skillbar is None
+                or skillbar.get("agentId") != state.get("playerId")
+                or not isinstance(skills, list)
+                or len(skills) != 8
+                or [skill.get("slot") for skill in skills] != list(range(1, 9))
+                or not isinstance(skillbar.get("disabledMask"), int)
+                or skillbar.get("disabledMask") & ~0xFF
+                or not isinstance(skillbar.get("castCount"), int)
+                or not 0 <= skillbar.get("castCount") <= 64
+                or skillbar.get("casting") != (skillbar.get("castCount") != 0)
+                or any(
+                    skill.get("disabled")
+                    != bool(skillbar.get("disabledMask") & (1 << index))
+                    for index, skill in enumerate(skills)
+                )
+                or not any(skill.get("skillId", 0) > 0 for skill in skills)
+            ):
+                raise Failure("certified player skillbar state is incomplete")
+            buffs = effects.get("buffs") if isinstance(effects, dict) else None
+            active_effects = effects.get("effects") if isinstance(effects, dict) else None
+            if (
+                effects is None
+                or effects.get("agentId") != state.get("playerId")
+                or not isinstance(buffs, list)
+                or len(buffs) > 32
+                or not isinstance(active_effects, list)
+                or len(active_effects) > 64
+                or any(not isinstance(buff, dict) for buff in buffs)
+                or any(not isinstance(effect, dict) for effect in active_effects)
+                or effects.get("buffsTruncated") not in (True, False)
+                or effects.get("effectsTruncated") not in (True, False)
+                or (effects.get("buffsTruncated") and len(buffs) != 32)
+                or (effects.get("effectsTruncated") and len(active_effects) != 64)
+                or len({buff.get("buffId") for buff in buffs}) != len(buffs)
+                or len({effect.get("effectId") for effect in active_effects})
+                != len(active_effects)
+            ):
+                raise Failure("certified player effects state is incomplete")
+            print(
+                "[e2e] party, skillbar, and effects API PASS "
+                f"(players={len(party.get('players', []))}, "
+                f"heroes={len(party.get('heroes', []))}, "
+                f"henchmen={len(party.get('henchmen', []))}, "
+                f"populated-skills={sum(skill.get('skillId', 0) > 0 for skill in skills)}, "
+                f"buffs={len(buffs)}, effects={len(active_effects)})"
+            )
 
             before = position(ready)
             revision = int(ready["revision"])

@@ -72,8 +72,11 @@ window.addEventListener('unhandledrejection', (e) => forward(`[unhandled] ${e.re
 // no quicker, so the pace of the walk under cover is set somewhere below the
 // beat rate, and doubling the wake-ups just doubles their cost. Nothing
 // audible is running before the first frame, so the substitute clock costs
-// nothing here. The rescue ends at first frame, not at first callback: a
-// boot is not survived until there is something on screen to come back to.
+// nothing here. The rescue ends at first frame, not at first callback: a boot
+// is not survived until there is something on screen to come back to. The
+// signed E2E run keeps it for exactly two more callbacks so an occluded test
+// window can prove login readiness before its first native action brings it
+// forward.
 //
 // After that, stock behaviour, deliberately: the timestamp
 // requestAnimationFrame hands its callback is the clock the client drives
@@ -366,9 +369,15 @@ let credentialStatusReported = false;
 
 const reportAfterClientFrames = (kind) => {
   const afterFirstFrame = () => {
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      void window.gwE2E?.report(kind).catch(() => {});
-    }));
+    log(`[e2e] ${kind}: first frame committed; waiting for frame 1`);
+    requestAnimationFrame(() => {
+      log(`[e2e] ${kind}: frame 1 committed; waiting for frame 2`);
+      requestAnimationFrame(() => {
+        log(`[e2e] ${kind}: frame 2 committed; reporting readiness`);
+        if (kind === 'login-ready') bootRescueActive = false;
+        void window.gwE2E?.report(kind).catch(() => {});
+      });
+    });
   };
   if (window.__gwnativeFirstFrame === true) afterFirstFrame();
   else window.addEventListener('gwnative:first-frame', afterFirstFrame, { once: true });
@@ -439,7 +448,7 @@ Module = {
         performance.mark('gw.frame.first-submit');
         // The boot is survived; frame delivery goes back to stock. See the
         // requestAnimationFrame wrapper above.
-        bootRescueActive = false;
+        if (window.__gwnativeE2E !== true) bootRescueActive = false;
         status(null);
         // Nothing is loading any more, and the startup clock has no reason to
         // keep ticking. The client does send `complete`, which already does
