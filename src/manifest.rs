@@ -182,6 +182,22 @@ impl Manifest {
         })
     }
 
+    /// Content-addressed cache filenames this manifest can request.
+    ///
+    /// A hash may occur in several files or at several offsets. The cache
+    /// stores one copy, so callers that decide retention need the same set
+    /// semantics rather than the manifest's ordered references.
+    pub fn chunk_names(&self) -> HashSet<String> {
+        self.files
+            .values()
+            .flat_map(|file| {
+                file.chunk_hashes
+                    .iter()
+                    .map(|hash| hash.hex().as_str().to_owned())
+            })
+            .collect()
+    }
+
     /// Decoded byte length of the `index`-th chunk of `path`.
     pub fn chunk_length(&self, path: &str, index: usize) -> Option<u64> {
         let entry = self.files.get(path)?;

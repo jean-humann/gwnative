@@ -5,6 +5,7 @@
 //! raw depending on the manifest's compression mode, and **the hash covers the
 //! decoded bytes** — decode first, then verify.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -193,6 +194,33 @@ impl Client {
                 "offline mode needs an active manifest from an earlier successful launch".into(),
             )
         })
+    }
+
+    /// Chunks named by every usable manifest cached for this installation.
+    ///
+    /// Profiles isolate their client generation but deliberately share the
+    /// content-addressed chunk directory. Pruning against only the profile
+    /// being launched can therefore strand another installed generation. The
+    /// default profile and each immediate named-profile directory contribute
+    /// only when their cache belongs to this patch root and still parses under
+    /// the manifest bounds.
+    pub fn cached_profile_chunk_names(&self, base: &Path) -> HashSet<String> {
+        let mut directories = vec![base.to_owned()];
+        if let Ok(entries) = fs::read_dir(base.join("profiles")) {
+            directories.extend(entries.flatten().filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(|kind| kind.is_dir())
+                    .map(|_| entry.path())
+            }));
+        }
+        directories
+            .into_iter()
+            .filter_map(|directory| read_cache(&directory, &self.root))
+            .filter_map(|(_, bytes)| Manifest::parse(&bytes).ok())
+            .flat_map(|manifest| manifest.chunk_names())
+            .collect()
     }
 
     /// Refresh the cached manifest if the service has a different one, and say
@@ -883,6 +911,37 @@ mod tests {
                 .unwrap()
                 .files
                 .contains_key("old.bin")
+        );
+    }
+
+    #[test]
+    fn shared_cache_retention_unions_valid_profile_manifests() {
+        fn one_chunk(hash: char) -> Vec<u8> {
+            format!(
+                r#"{{"compressionMode":"none","chunkSize":16,
+                     "files":[{{"name":"Gw.snapshot","size":16,
+                                "chunkHashes":["{}"]}}]}}"#,
+                hash.to_string().repeat(64)
+            )
+            .into_bytes()
+        }
+
+        let base = TempDir::new("manifest-profile-union");
+        let older = base.0.join("profiles/older");
+        let malformed = base.0.join("profiles/malformed");
+        let foreign = base.0.join("profiles/foreign");
+        for directory in [&older, &malformed, &foreign] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        write_cache(&base.0, PATCH_ROOT, None, &one_chunk('a'));
+        write_cache(&older, PATCH_ROOT, None, &one_chunk('b'));
+        write_cache(&malformed, PATCH_ROOT, None, b"not a manifest");
+        write_cache(&foreign, "http://127.0.0.1:8080", None, &one_chunk('c'));
+
+        let client = Client::new(PATCH_ROOT, String::new());
+        assert_eq!(
+            client.cached_profile_chunk_names(&base.0),
+            HashSet::from(["a".repeat(64), "b".repeat(64)])
         );
     }
 

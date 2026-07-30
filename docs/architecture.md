@@ -110,6 +110,22 @@ Every host response carries a content-security policy, COOP/COEP/CORP, and
 changes, forms, and off-origin resource loads. A navigation delegate rejects
 top-level navigation away from the exact loopback origin.
 
+## Profile boundaries
+
+The default profile preserves the original support directory, Keychain account,
+and port. A named profile moves mutable support files below `profiles/<id>`,
+uses `login:<id>` in Keychain, and receives a deterministic loopback port.
+Because WebKit keys IndexedDB and local storage by origin, the stable port also
+isolates page data, overlays, and the build library.
+
+Content-addressed snapshot chunks and the mod discovery directory remain
+shared. Chunk pruning retains the union of valid cached manifests so an older
+installed profile generation is not evicted by a newer one. A second instance
+bypasses only the global primary lock and requires an explicit non-default
+profile. Its profile lock is still mandatory, preventing an accidental pair of
+writers to the same settings, window, and page origin. See
+[Profiles](profiles.md) for the storage map.
+
 ## Client artifacts and generation rollback
 
 The patch manifest describes the official client files and the chunked game

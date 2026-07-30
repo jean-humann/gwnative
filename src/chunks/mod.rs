@@ -119,27 +119,24 @@ struct Stats {
 }
 
 impl ChunkStore {
-    pub fn open(client: Client, manifest: Manifest, cache_dir: PathBuf) -> Result<Self> {
+    pub fn open(
+        client: Client,
+        manifest: Manifest,
+        cache_dir: PathBuf,
+        mut protected_chunks: HashSet<String>,
+    ) -> Result<Self> {
         let snapshot = manifest.require_unique(crate::patch::SNAPSHOT)?.to_owned();
         fs::create_dir_all(&cache_dir)?;
-        // Every hash this manifest can ever ask for, across every file in it —
-        // not just the snapshot's. Collected here, on the manifest that was
-        // just fetched and is about to become the live one, because that is
-        // what makes everything else in the cache provably dead.
+        // Every hash this manifest can ever ask for, across every file in it,
+        // plus the hashes cached profile manifests can ask for. Profiles share
+        // this directory while keeping separate client generations, so only
+        // that union makes everything else in the cache provably dead.
         //
         // Owned strings rather than borrowed `Hex`, which is a stack type with
         // no identity: this crosses onto another thread and has to outlive the
         // manifest reference it came from. A 4.2 GB snapshot is ~16k hashes, so
         // the set is about a megabyte and it is dropped as soon as it is used.
-        let live: HashSet<String> = manifest
-            .files
-            .values()
-            .flat_map(|file| {
-                file.chunk_hashes
-                    .iter()
-                    .map(|hash| hash.hex().as_str().to_owned())
-            })
-            .collect();
+        protected_chunks.extend(manifest.chunk_names());
 
         // Off the launch path: this walks 256 directories and the game has
         // nothing to gain by waiting for it.
@@ -148,7 +145,7 @@ impl ChunkStore {
             move || {
                 crate::qos::set(crate::qos::Class::Utility);
                 sweep_orphans(&cache_dir);
-                prune(&cache_dir, &live);
+                prune(&cache_dir, &protected_chunks);
             }
         });
         Ok(Self {
