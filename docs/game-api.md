@@ -353,6 +353,18 @@ The envelope is revisioned and timestamped:
           "trim": 7
         }
       }
+    },
+    "completion": {
+      "normalMode": {
+        "completedMissions": [55, 56],
+        "completedBonuses": [55]
+      },
+      "hardMode": {
+        "completedMissions": [55],
+        "completedBonuses": []
+      },
+      "unlockedMaps": [55, 248],
+      "vanquishedAreas": [56]
     }
   }
 }
@@ -439,6 +451,23 @@ index before publication. The key itself is used only for validation and is
 never exposed. Friend aliases, character names, UUIDs, guild names/tags,
 member names, announcements, history, chat, and every social write action are
 excluded. This is sensitive account-derived state and remains token-gated.
+
+The completion domain follows the six bounded `WorldContext` bitmaps used by
+GWCA, GWToolbox++, and Py4GW: normal-mode mission completion and bonus,
+hard-mode mission completion and bonus, unlocked maps, and vanquished areas.
+Each source array is independently validated at no more than 32 words. The
+page expands set bit index `n` into numeric map ID `n`, then publishes each
+category as a strictly increasing, duplicate-free array of at most 1,024 IDs.
+The raw bitmap storage, capacity, and client pointers never cross the public
+boundary.
+
+Normal and hard-mode bonuses remain separate because Guild Wars interprets
+mission tiers differently across campaigns; collapsing them would lose the
+GWCA mission-state semantics used by Factions and Nightfall. Empty arrays are
+valid progress, and the domain is omitted when any source descriptor is
+unreadable or outside its certified bounds. Completion is character/account
+progress exposed only through the token-gated read API. There is no operation
+to unlock a map, mark a mission complete, enter an area, or change difficulty.
 
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account

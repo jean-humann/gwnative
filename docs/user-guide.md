@@ -109,7 +109,8 @@ Open **View → Companion Tools…** or press **⌘⇧T** for profile-local comp
 tools:
 
 - movable clock, session timer, target/range, frame-rate, party, skillbar,
-  player-effects, map-agent, quest, inventory, and friend/guild widgets;
+  player-effects, map-agent, quest, inventory, completion, and friend/guild
+  widgets;
 - overlay layout editing, also toggled with **⌘⇧O**;
 - an opaque-code build and team library with validated JSON import/export; and
 - the current compatibility status of researched feature families.
@@ -119,13 +120,13 @@ stored and organised but never applied to the game: the current versioned API
 has no certified write action.
 
 Party, hero, player-skillbar, buff, effect, map-agent, quest-log, mission
-objective, inventory-bag, item, gold, account-storage, friend-presence, and
-numeric guild-summary reads are available on recognised client builds. Encoded
-item, friend, character, guild, and member names; UUIDs; messages; and
-announcements are not exposed. The widgets cannot change inventory or social
-state. Map completion, chat, and texture features remain labelled as requiring
-another certified layout or further research. Unattended gameplay automation
-is blocked. See
+objective, inventory-bag, item, gold, account-storage, friend-presence, numeric
+guild-summary, normal/hard mission, bonus, unlocked-map, and vanquish reads are
+available on recognised client builds. Encoded item, friend, character, guild,
+and member names; UUIDs; messages; and announcements are not exposed. The
+widgets cannot change inventory, social, or completion state. Chat and texture
+features remain labelled as requiring another certified layout or further
+research. Unattended gameplay automation is blocked. See
 [Feature compatibility](feature-compatibility.md) and
 [Game API and overlays](game-api.md).
 
