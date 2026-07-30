@@ -206,7 +206,7 @@ function domainSnapshot() {
   view.setUint32(12072, 1, true);
   view.setUint32(12076, 1, true);
   view.setUint32(12080, 1, true);
-  view.setUint32(12084, 0, true);
+  view.setUint32(12084, 0xffff_ffff, true);
   view.setUint32(12088, 20, true);
   view.setUint32(12092, 1, true);
   view.setUint32(12516, 500, true);
@@ -221,8 +221,8 @@ function domainSnapshot() {
   view.setUint32(12552, 0, true);
   view.setUint32(12556, 5, true);
   view.setUint32(12560, 0, true);
-  view.setUint32(12564, 0xff, true);
-  view.setUint32(12568, 1, true);
+  view.setUint32(12564, 0xfe, true);
+  view.setUint32(12568, 3, true);
   view.setUint32(12572, 2, true);
   view.setUint32(12576, 7 | (2 << 8) | (3 << 12) | (4 << 16) | (5 << 20), true);
   view.setUint32(45284, 1 << 1, true);
@@ -235,7 +235,7 @@ function domainSnapshot() {
   view.setUint32(45324, 1, true);
   view.setUint32(45328, 9, true);
   view.setUint32(45332, 1_200, true);
-  view.setUint32(45336, 0, true);
+  view.setUint32(45336, 0xffff_ffff, true);
   view.setUint32(45340, 1_000, true);
   view.setUint32(45344, 10, true);
   view.setUint32(45348, 50, true);
@@ -245,8 +245,8 @@ function domainSnapshot() {
   view.setUint32(45380, 0, true);
   view.setUint32(45384, 1, true);
   view.setUint32(45388, 1, true);
-  view.setUint32(45392, 77, true);
-  view.setUint32(45396, 248, true);
+  view.setUint32(45392, 0xffff_ffff, true);
+  view.setUint32(45396, 0xffff_ffff, true);
   for (let category = 0; category < 6; category += 1) {
     view.setUint32(47940 + category * 4, 25, true);
     const mapId = 55 + category;
@@ -497,7 +497,7 @@ describe('companion snapshot', () => {
       bagId: 1,
       bagType: 1,
       kind: 'Inventory',
-      containerItem: 0,
+      containerItem: 0xffff_ffff,
       capacity: 20,
       itemCount: 1,
       isInventory: true,
@@ -516,6 +516,8 @@ describe('companion snapshot', () => {
     assert.equal(state.inventory.items[0].isIdentified, true);
     assert.equal(state.inventory.items[0].isStackable, true);
     assert.equal(state.inventory.items[0].isUsable, true);
+    assert.equal(state.inventory.items[0].profession, 0xfe);
+    assert.equal(state.inventory.items[0].materialSalvageable, true);
     assert.equal(state.social.playerStatusName, 'Online');
     assert.equal(state.social.friends.total, 1);
     assert.deepEqual(state.social.friends.entries, [{
@@ -524,12 +526,13 @@ describe('companion snapshot', () => {
       typeName: 'Friend',
       status: 1,
       statusName: 'Online',
-      friendId: 77,
-      zoneId: 248,
+      friendId: 0xffff_ffff,
+      zoneId: 0xffff_ffff,
       isOnline: true,
     }]);
     assert.equal(state.social.guild.index, 2);
-    assert.equal(state.social.guild.factionName, 'Kurzick');
+    assert.equal(state.social.guild.faction, 0xffff_ffff);
+    assert.equal(state.social.guild.factionName, 'Unknown');
     assert.equal(state.social.guild.rosterTotal, 50);
     assert.equal(state.social.guild.cape.trim, 7);
     assert.deepEqual(state.completion.normalMode.completedMissions, [55]);

@@ -1092,7 +1092,6 @@ fn validate_inventory(inventory: &Inventory) -> Result<(), String> {
         if bag.bag_id <= previous_bag_id
             || bag.bag_type != bag_type
             || bag.kind != kind
-            || bag.container_item > 1_000_000
             || bag.capacity > 256
             || bag.item_count > bag.capacity
             || bag.is_inventory != (bag_type == 1)
@@ -1146,7 +1145,7 @@ fn validate_inventory(inventory: &Inventory) -> Result<(), String> {
             || item.item_formula > u16::MAX as u32
             || item.quantity == 0
             || item.quantity > u16::MAX as u32
-            || (item.profession > 10 && item.profession != 0xff)
+            || item.profession > u8::MAX as u32
             || item.modifier_count > 64
             || [item.dye1, item.dye2, item.dye3, item.dye4]
                 .into_iter()
@@ -1194,6 +1193,14 @@ fn friend_status_name(value: u32) -> Option<&'static str> {
         .copied()
 }
 
+fn guild_faction_name(value: u32) -> &'static str {
+    match value {
+        0 => "Kurzick",
+        1 => "Luxon",
+        _ => "Unknown",
+    }
+}
+
 fn validate_social(social: &Social) -> Result<(), String> {
     let Some(player_status_name) = friend_status_name(social.player_status) else {
         return Err("player social status is outside its certified bounds".into());
@@ -1234,8 +1241,6 @@ fn validate_social(social: &Social) -> Result<(), String> {
             || friend.slot >= 256
             || friend.type_name != type_name
             || friend.status_name != status_name
-            || friend.friend_id > 1_000_000
-            || friend.zone_id > 2_000
             || friend.is_online != matches!(friend.status, 1..=3)
         {
             return Err("friend record is outside its certified bounds".into());
@@ -1264,8 +1269,7 @@ fn validate_social(social: &Social) -> Result<(), String> {
 
     if let Some(guild) = &social.guild
         && (!(1..64).contains(&guild.index)
-            || guild.faction > 1
-            || guild.faction_name != ["Kurzick", "Luxon"][guild.faction as usize]
+            || guild.faction_name != guild_faction_name(guild.faction)
             || guild.roster_total > 100)
     {
         return Err("guild summary is outside its certified bounds".into());
@@ -1600,7 +1604,7 @@ mod tests {
                 "storagePanesUnlocked":4,
                 "bags":[{
                     "bagId":1,"bagType":1,"kind":"Inventory",
-                    "containerItem":0,"capacity":20,"itemCount":1,
+                    "containerItem":4294967295,"capacity":20,"itemCount":1,
                     "isInventory":true,"isEquipped":false,
                     "isNotCollected":false,"isStorage":false,
                     "isMaterialStorage":false
@@ -1610,8 +1614,8 @@ mod tests {
                     "modelFileId":123,"type":9,"typeName":"Usable",
                     "value":100,"interaction":17432577,"modelId":456,
                     "itemFormula":0,"quantity":5,"equipped":false,
-                    "profession":255,"customized":true,
-                    "materialSalvageable":false,"modifierCount":2,
+                    "profession":254,"customized":true,
+                    "materialSalvageable":true,"modifierCount":2,
                     "dyeTint":7,"dye1":2,"dye2":3,"dye3":4,"dye4":5,
                     "isStackable":true,"isInscribable":false,
                     "isIdentified":true,"isTradable":true,"isUsable":true,
@@ -1629,12 +1633,12 @@ mod tests {
                     "entries":[{
                         "slot":0,"type":1,"typeName":"Friend",
                         "status":1,"statusName":"Online",
-                        "friendId":77,"zoneId":55,"isOnline":true
+                        "friendId":4294967295,"zoneId":4294967295,"isOnline":true
                     }]
                 },
                 "guild":{
                     "index":2,"playerRank":3,"rank":1,"features":9,
-                    "rating":1200,"faction":0,"factionName":"Kurzick",
+                    "rating":1200,"faction":4294967295,"factionName":"Unknown",
                     "factionPoints":1000,"qualifierPoints":10,
                     "rosterTotal":50,
                     "cape":{
@@ -1692,7 +1696,7 @@ mod tests {
             value["state"]["social"]["friends"]["entries"][0]["typeName"],
             "Friend"
         );
-        assert_eq!(value["state"]["social"]["guild"]["factionName"], "Kurzick");
+        assert_eq!(value["state"]["social"]["guild"]["factionName"], "Unknown");
         assert_eq!(value["state"]["camera"]["modeName"], "Unlocked");
         assert_eq!(
             value["state"]["camera"]["position"]["z"].as_f64(),
