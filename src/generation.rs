@@ -11,22 +11,19 @@
 //! this host says can help. So the size and a digest of each artifact are
 //! recorded when it is written, and checked before the window opens.
 //!
-//! The second is that a *correctly downloaded* generation can still be one this
-//! harness cannot run. ArenaNet ships when they ship; the transform in `wasm`
-//! is certified against a specific module, the JSPI glue changes shape, and the
-//! failure arrives as an app that will not start any more — with the previous,
-//! working client already overwritten. So a freshly synced set is not trusted
-//! until the page reports a first frame. Until then the set it replaced is kept
-//! beside it, and a launch that finds an unproven set restores what came
-//! before and refuses that generation by identity, so the next sync does not walk
-//! straight back into it.
+//! The second is that a *correctly downloaded* generation can still fail before
+//! a first frame. The page records whether it attempted gwnative's optional
+//! transform or ArenaNet's exact module. A transformed failure disables only
+//! that runtime/artifact transform. A freshly synced official set is not trusted
+//! until an unmodified attempt reports a first frame; until then the set and
+//! manifest it replaced are kept beside it. Only a failed unmodified attempt
+//! restores that pair and refuses the offered generation by identity.
 //!
 //! The two identities are deliberately different things. A generation's `id`
 //! says *which patch generation* this is and comes from the manifest's chunk
-//! hashes, so it
-//! is known before a byte is downloaded — that is what makes refusing one
-//! possible. An artifact's `hash` says *what is on this disk* and is taken from
-//! the bytes as written. Neither can stand in for the other.
+//! hashes, so it is known before a byte is downloaded — that is what makes
+//! refusing one possible. An artifact's `hash` says *what is on this disk* and
+//! is taken from the bytes as written. Neither can stand in for the other.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -48,6 +45,7 @@ const FORMAT: u32 = 1;
 /// falls off the end is simply tried again, which is the right outcome once it
 /// is old enough that nobody is being offered it any more.
 const REJECTED_KEPT: usize = 8;
+const DISABLED_TRANSFORMS_KEPT: usize = 256;
 
 /// The id given to a client that was on the disk before the record existed.
 ///
@@ -70,6 +68,33 @@ pub struct Generation {
     /// Manifest-derived patch-generation identity. See the module docs.
     id: String,
     artifacts: BTreeMap<String, Artifact>,
+    /// The active manifest that describes this generation's snapshot.
+    #[serde(default)]
+    manifest: Option<Artifact>,
+}
+
+/// What the page actually tried on the most recent launch.
+///
+/// A transformed failure says nothing about ArenaNet's original client, so it
+/// disables only that transform. An untransformed failure is the evidence that
+/// can justify rolling the official generation back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeAttempt {
+    runtime: String,
+    /// Domain-separated SHA-256 of runtime, artifacts, transform ABI and
+    /// selected transform output.
+    build: Option<String>,
+    transformed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DisabledTransform {
+    runtime: String,
+    /// Domain-separated SHA-256 of runtime, artifacts, transform ABI and
+    /// selected transform output.
+    build: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -82,6 +107,10 @@ struct State {
     /// The set `current` replaced, whose files are stashed in `previous/`.
     previous: Option<Generation>,
     rejected: Vec<String>,
+    #[serde(default)]
+    attempt: Option<RuntimeAttempt>,
+    #[serde(default)]
+    disabled_transforms: Vec<DisabledTransform>,
 }
 
 impl Default for State {
@@ -92,8 +121,17 @@ impl Default for State {
             proven: false,
             previous: None,
             rejected: Vec::new(),
+            attempt: None,
+            disabled_transforms: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    None,
+    TransformDisabled { runtime: String, build: String },
+    GenerationRolledBack(String),
 }
 
 /// The identity of the patch generation this manifest is currently offering.
@@ -132,6 +170,7 @@ fn hash_file(path: &Path) -> Result<Artifact> {
 
 pub struct Store {
     dir: PathBuf,
+    active_manifest: PathBuf,
     state: Mutex<State>,
 }
 
@@ -162,8 +201,13 @@ impl Store {
             },
             Err(_) => State::default(),
         };
+        let active_manifest = dir
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("manifest.cache");
         Self {
             dir,
+            active_manifest,
             state: Mutex::new(state),
         }
     }
@@ -255,18 +299,95 @@ impl Store {
         self.state.lock().unwrap().rejected.iter().any(|r| r == id)
     }
 
-    /// Undo a build that was installed but never reported a first frame.
+    /// Whether this exact runtime/glue/Wasm transform has failed on this Mac.
+    pub fn transform_disabled(&self, runtime: &str, build: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .disabled_transforms
+            .iter()
+            .any(|disabled| disabled.runtime == runtime && disabled.build == build)
+    }
+
+    /// Record the runtime that is about to execute.
     ///
-    /// Returns the id it refused, if it refused one. Does nothing when there is
-    /// no previous set to go back to: on a first install, retrying is the only
-    /// move there is, and refusing the one client on the disk would turn a boot
-    /// that failed for an unrelated reason into an app with no client at all.
-    pub fn roll_back(&self, root: &Path) -> Option<String> {
+    /// Called immediately before the page appends ArenaNet's glue. A launch
+    /// closed before this point attempted no client and must not cause a
+    /// rollback on the next launch.
+    pub fn record_attempt(
+        &self,
+        runtime: &str,
+        build: Option<&str>,
+        transformed: bool,
+    ) -> std::result::Result<(), String> {
+        validate_runtime_attempt(runtime, build, transformed)?;
         let mut state = self.state.lock().unwrap();
-        if state.proven {
-            return None;
+        state.attempt = Some(RuntimeAttempt {
+            runtime: runtime.to_owned(),
+            build: build.map(str::to_owned),
+            transformed,
+        });
+        self.save(&state);
+        Ok(())
+    }
+
+    /// The derived module failed before gameplay, so remember to serve the
+    /// exact official module for this runtime/artifact from now on.
+    pub fn disable_transform(&self, runtime: &str, build: &str) -> std::result::Result<(), String> {
+        validate_runtime_attempt(runtime, Some(build), true)?;
+        let mut state = self.state.lock().unwrap();
+        remember_disabled(&mut state, runtime, build);
+        // The page is about to retry the official module in the same launch.
+        state.attempt = Some(RuntimeAttempt {
+            runtime: runtime.to_owned(),
+            build: Some(build.to_owned()),
+            transformed: false,
+        });
+        self.save(&state);
+        Ok(())
+    }
+
+    /// Recover an unproven launch without blaming an optional transform on the
+    /// official ArenaNet generation.
+    ///
+    /// A transformed attempt disables only that exact transform and retries the
+    /// same generation. A launch that never reached the client is also retried.
+    /// Only an attempted unmodified runtime may restore and reject a generation.
+    pub fn recover(&self, root: &Path) -> Recovery {
+        let mut state = self.state.lock().unwrap();
+        let Some(attempt) = state.attempt.take() else {
+            return Recovery::None;
+        };
+        // A transform can arrive later than the official client generation
+        // through the signed feed. The generation may therefore already be
+        // proven when this exact transform fails. Judge the transform before
+        // consulting the generation proof so it cannot become permanently
+        // crash-looped behind an older successful first frame.
+        if attempt.transformed {
+            let Some(build) = attempt.build else {
+                self.save(&state);
+                return Recovery::None;
+            };
+            remember_disabled(&mut state, &attempt.runtime, &build);
+            self.save(&state);
+            return Recovery::TransformDisabled {
+                runtime: attempt.runtime,
+                build,
+            };
         }
-        let (current, previous) = (state.current.clone()?, state.previous.clone()?);
+        if state.proven {
+            // The exact installed generation has reached a first frame before.
+            // A later unmodified attempt that did not is not evidence that an
+            // ArenaNet patch is bad, and there is no unproven installation to
+            // undo. Clear the completed attempt and keep the known client.
+            self.save(&state);
+            return Recovery::None;
+        }
+        let (Some(current), Some(previous)) = (state.current.clone(), state.previous.clone())
+        else {
+            self.save(&state);
+            return Recovery::None;
+        };
 
         // Verified before it is trusted, for the same reason the current set is:
         // restoring a stash that rotted would replace a build that does not work
@@ -274,14 +395,32 @@ impl Store {
         for (name, expected) in &previous.artifacts {
             if let Err(reason) = check(&self.dir.join("previous").join(name), expected) {
                 note!("[generation] cannot roll back — the stashed {name}: {reason}");
-                return None;
+                self.save(&state);
+                return Recovery::None;
             }
         }
+        let Some(expected_manifest) = &previous.manifest else {
+            note!("[generation] cannot roll back — the previous manifest was not recorded");
+            self.save(&state);
+            return Recovery::None;
+        };
+        let stashed_manifest = self.dir.join("previous").join("manifest.cache");
+        if let Err(reason) = check(&stashed_manifest, expected_manifest) {
+            note!("[generation] cannot roll back — the stashed manifest: {reason}");
+            self.save(&state);
+            return Recovery::None;
+        }
         for name in previous.artifacts.keys() {
-            if let Err(e) = fs::copy(self.dir.join("previous").join(name), root.join(name)) {
+            if let Err(e) = copy_atomic(&self.dir.join("previous").join(name), &root.join(name)) {
                 note!("[generation] cannot roll back — restoring {name}: {e}");
-                return None;
+                self.save(&state);
+                return Recovery::None;
             }
+        }
+        if let Err(e) = copy_atomic(&stashed_manifest, &self.active_manifest) {
+            note!("[generation] cannot roll back — restoring the manifest: {e}");
+            self.save(&state);
+            return Recovery::None;
         }
 
         state.rejected.push(current.id.clone());
@@ -293,9 +432,19 @@ impl Store {
         // to be: the next sync stashes this one before replacing it.
         state.proven = true;
         state.previous = None;
+        state.attempt = None;
         self.save(&state);
         let _ = fs::remove_dir_all(self.dir.join("previous"));
-        Some(current.id)
+        Recovery::GenerationRolledBack(current.id)
+    }
+
+    #[cfg(test)]
+    fn roll_back(&self, root: &Path) -> Option<String> {
+        self.record_attempt("asyncify", None, false).unwrap();
+        match self.recover(root) {
+            Recovery::GenerationRolledBack(id) => Some(id),
+            Recovery::None | Recovery::TransformDisabled { .. } => None,
+        }
     }
 
     /// Copy the current artifacts aside so a sync can be undone.
@@ -304,20 +453,25 @@ impl Store {
     /// copy. A set that has never been proven is not stashed — it is not a
     /// rollback target, and overwriting the stash with it would throw away the
     /// last set that did work.
-    pub fn stash(&self, root: &Path, names: &[&'static str]) {
+    /// Returns false only when a proven generation needed protection and could
+    /// not be copied. A caller replacing a complete client should then keep it.
+    pub fn stash(&self, root: &Path, names: &[&'static str]) -> bool {
         let state = self.state.lock().unwrap();
         if !state.proven {
-            return;
+            return true;
         }
-        let Some(current) = state.current.clone() else {
-            return;
+        let Some(mut current) = state.current.clone() else {
+            return true;
         };
         let stash = self.dir.join("previous");
-        let copy = || -> Result<()> {
+        let mut copy = || -> Result<()> {
             fs::create_dir_all(&stash)?;
             for name in names {
                 fs::copy(root.join(name), stash.join(name))?;
             }
+            let manifest = hash_file(&self.active_manifest)?;
+            fs::copy(&self.active_manifest, stash.join("manifest.cache"))?;
+            current.manifest = Some(manifest);
             Ok(())
         };
         if let Err(e) = copy() {
@@ -325,12 +479,38 @@ impl Store {
                 "[generation] could not stash the current client ({e}); a bad sync will not be undoable"
             );
             let _ = fs::remove_dir_all(&stash);
-            return;
+            return false;
         }
         drop(state);
         let mut state = self.state.lock().unwrap();
         state.previous = Some(current);
         self.save(&state);
+        true
+    }
+
+    /// A sync wrote the client files but could not activate their manifest.
+    ///
+    /// `current` is still the proven generation at this point, so putting its
+    /// stash back restores the entry state rather than performing a rollback.
+    pub fn restore_stash(&self, root: &Path, names: &[&'static str]) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let previous = state
+            .previous
+            .clone()
+            .ok_or_else(|| Error::Decode("no client stash to restore".to_owned()))?;
+        for name in names {
+            copy_atomic(&self.dir.join("previous").join(name), &root.join(name))?;
+        }
+        if previous.manifest.is_some() {
+            copy_atomic(
+                &self.dir.join("previous").join("manifest.cache"),
+                &self.active_manifest,
+            )?;
+        }
+        state.previous = None;
+        self.save(&state);
+        let _ = fs::remove_dir_all(self.dir.join("previous"));
+        Ok(())
     }
 
     /// Drop the stash, after a sync that replaced nothing.
@@ -355,15 +535,14 @@ impl Store {
     /// Record a freshly written set as current, unproven — unless it is the set
     /// that was already here.
     ///
-    /// Writing the same generation again is not a new generation, and two ordinary things
-    /// do it: the `sync` command, and repairing an artifact that rotted. Calling
-    /// either of those unproven arms a rollback whose target is a copy of the
-    /// same set, so an app that then dies before its first frame restores what
-    /// was already on disk and refuses, by name, the build it just restored —
-    /// after which the service goes on offering it and nothing will install it.
-    /// A set that has booted here has not stopped having booted here.
+    /// Writing the same generation again is not a new generation. Both the
+    /// `sync` command and a repair can do it. Calling either of those unproven
+    /// arms a rollback whose target is a copy of the same set, so an app that
+    /// then dies before its first frame restores what was already on disk and
+    /// refuses, by name, the generation it just restored. A set that has booted
+    /// here has not stopped having booted here.
     pub fn record(&self, id: &str, root: &Path, names: &[&'static str]) {
-        let Some(artifacts) = weigh(root, names) else {
+        let Some((artifacts, manifest)) = weigh(root, names, &self.active_manifest) else {
             return;
         };
         let mut state = self.state.lock().unwrap();
@@ -374,8 +553,10 @@ impl Store {
         state.current = Some(Generation {
             id: id.to_owned(),
             artifacts,
+            manifest: Some(manifest),
         });
         state.proven = same && state.proven;
+        state.attempt = None;
         if state.proven {
             // And with nothing to undo, nothing to undo it with. See
             // [`Store::forget_stash`], which this is the other half of.
@@ -409,15 +590,17 @@ impl Store {
         if self.state.lock().unwrap().current.is_some() {
             return;
         }
-        let Some(artifacts) = weigh(root, names) else {
+        let Some((artifacts, manifest)) = weigh(root, names, &self.active_manifest) else {
             return;
         };
         let mut state = self.state.lock().unwrap();
         state.current = Some(Generation {
             id: ADOPTED.to_owned(),
             artifacts,
+            manifest: Some(manifest),
         });
         state.proven = true;
+        state.attempt = None;
         self.save(&state);
         note!("[generation] adopted the client already on disk; it is checked from now on");
     }
@@ -430,10 +613,14 @@ impl Store {
     pub fn prove(&self) {
         let mut state = self.state.lock().unwrap();
         if state.proven {
+            if state.attempt.take().is_some() {
+                self.save(&state);
+            }
             return;
         }
         state.proven = true;
         state.previous = None;
+        state.attempt = None;
         self.save(&state);
         let id = state.current.as_ref().map_or("", |g| g.id.as_str());
         note!("[generation] client generation {id} reached a first frame; keeping it");
@@ -446,7 +633,11 @@ impl Store {
 /// All-or-nothing on purpose: a half-recorded set would make [`Store::unsound`]
 /// report the unrecorded half as fine and the recorded half as checkable, which
 /// is a worse answer than falling back to existence checks until the next sync.
-fn weigh(root: &Path, names: &[&'static str]) -> Option<BTreeMap<String, Artifact>> {
+fn weigh(
+    root: &Path,
+    names: &[&'static str],
+    active_manifest: &Path,
+) -> Option<(BTreeMap<String, Artifact>, Artifact)> {
     let mut artifacts = BTreeMap::new();
     for name in names {
         match hash_file(&root.join(name)) {
@@ -459,7 +650,66 @@ fn weigh(root: &Path, names: &[&'static str]) -> Option<BTreeMap<String, Artifac
             }
         }
     }
-    Some(artifacts)
+    let manifest = match hash_file(active_manifest) {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            note!("[generation] could not record the active manifest ({e})");
+            return None;
+        }
+    };
+    Some((artifacts, manifest))
+}
+
+fn validate_runtime_attempt(
+    runtime: &str,
+    build: Option<&str>,
+    transformed: bool,
+) -> std::result::Result<(), String> {
+    if runtime != "jspi" && runtime != "asyncify" {
+        return Err("runtime must be jspi or asyncify".to_owned());
+    }
+    if transformed && build.is_none() {
+        return Err("a transformed runtime must name its artifact".to_owned());
+    }
+    if let Some(build) = build
+        && (build.len() != 64
+            || !build
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    {
+        return Err("runtime artifact must be a lowercase SHA-256".to_owned());
+    }
+    Ok(())
+}
+
+fn remember_disabled(state: &mut State, runtime: &str, build: &str) {
+    if let Some(position) = state
+        .disabled_transforms
+        .iter()
+        .position(|disabled| disabled.runtime == runtime && disabled.build == build)
+    {
+        let disabled = state.disabled_transforms.remove(position);
+        state.disabled_transforms.push(disabled);
+    } else {
+        state.disabled_transforms.push(DisabledTransform {
+            runtime: runtime.to_owned(),
+            build: build.to_owned(),
+        });
+    }
+    let excess = state
+        .disabled_transforms
+        .len()
+        .saturating_sub(DISABLED_TRANSFORMS_KEPT);
+    state.disabled_transforms.drain(..excess);
+}
+
+fn copy_atomic(source: &Path, destination: &Path) -> Result<()> {
+    let temporary = destination.with_extension(format!("{}.tmp", std::process::id()));
+    fs::copy(source, &temporary)?;
+    fs::rename(&temporary, destination).inspect_err(|_| {
+        let _ = fs::remove_file(&temporary);
+    })?;
+    Ok(())
 }
 
 /// Whether the file at `path` is the artifact that was recorded.
@@ -509,6 +759,11 @@ mod tests {
         for name in NAMES {
             fs::write(root.join(name), format!("{flavour}:{name}")).unwrap();
         }
+        fs::write(
+            root.parent().unwrap().join("manifest.cache"),
+            format!("{flavour}:manifest"),
+        )
+        .unwrap();
     }
 
     /// A manifest offering [`NAMES`], each one chunk long.
@@ -654,6 +909,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_failed_transform_is_disabled_without_rolling_back_official_files() {
+        const BUILD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let temp = TempDir::new("generation-transform-fallback");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "old");
+
+        store.stash(&root, &NAMES);
+        write_client(&root, "new");
+        store.record("new", &root, &NAMES);
+        store.record_attempt("jspi", Some(BUILD), true).unwrap();
+
+        assert_eq!(
+            store.recover(&root),
+            Recovery::TransformDisabled {
+                runtime: "jspi".to_owned(),
+                build: BUILD.to_owned(),
+            }
+        );
+        assert!(store.transform_disabled("jspi", BUILD));
+        assert!(!store.rejected("new"));
+        assert_eq!(
+            fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
+            "new:Gw.jspi.js",
+            "a derived-module failure must keep ArenaNet's exact generation"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.0.join("manifest.cache")).unwrap(),
+            "new:manifest",
+            "the active manifest must stay paired with that generation"
+        );
+
+        // The next launch serves the official module. Only if that attempt also
+        // fails is the official generation itself eligible for rollback.
+        store.record_attempt("jspi", Some(BUILD), false).unwrap();
+        assert_eq!(
+            store.recover(&root),
+            Recovery::GenerationRolledBack("new".to_owned())
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
+            "old:Gw.jspi.js"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.0.join("manifest.cache")).unwrap(),
+            "old:manifest"
+        );
+    }
+
+    #[test]
+    fn a_later_transform_failure_is_not_hidden_by_a_proven_generation() {
+        const BUILD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let temp = TempDir::new("generation-proven-transform");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "shipped");
+
+        // A signed certificate can arrive after these official bytes have
+        // already booted. Its first failed launch must still disable it.
+        store.record_attempt("asyncify", Some(BUILD), true).unwrap();
+        assert!(matches!(
+            store.recover(&root),
+            Recovery::TransformDisabled { .. }
+        ));
+        assert!(store.transform_disabled("asyncify", BUILD));
+
+        // A successful official retry clears the launch attempt even though
+        // the generation proof was already true before this launch.
+        store
+            .record_attempt("asyncify", Some(BUILD), false)
+            .unwrap();
+        store.prove();
+        drop(store);
+        let store = Store::open(state);
+        assert_eq!(store.recover(&root), Recovery::None);
+        assert!(store.state.lock().unwrap().attempt.is_none());
+    }
+
     /// The other half of that sequence: the sync that never gets past the
     /// stash. A download can fail on any of the artifacts, and what it leaves
     /// behind must not look like a build worth going back to.
@@ -682,6 +1016,24 @@ mod tests {
             "there was never anything to undo"
         );
         assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
+    #[test]
+    fn replacing_a_complete_client_requires_a_complete_rollback_stash() {
+        let temp = TempDir::new("generation-stash-precondition");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "working");
+
+        // The files are readable, but their paired manifest cannot be
+        // preserved. The updater must learn that before touching the live set.
+        fs::remove_file(temp.0.join("manifest.cache")).unwrap();
+        assert!(!store.stash(&root, &NAMES));
+        assert!(!state.join("previous").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
+            "working:Gw.jspi.js"
+        );
     }
 
     /// Installing the build that is already here is not a new build. The `sync`

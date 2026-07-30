@@ -156,7 +156,13 @@ fn static_file(
 ) -> std::io::Result<()> {
     // The derived client answers to the base module's own name, so the page
     // asks for one thing and the glue's `locateFile` needs no special case.
-    let derived = context.derived_wasm.get(&request.path).cloned();
+    // A certified module that cannot instantiate is retried against ArenaNet's
+    // exact bytes. The query is issued only by the injected harness and changes
+    // which local file answers, never the path being resolved.
+    let original = request.param("gwnative-original").as_deref() == Some("1");
+    let derived = (!original)
+        .then(|| context.derived_wasm.get(&request.path).cloned())
+        .flatten();
     let Some(file) = derived.or_else(|| resolve(&context.root, &request.path)) else {
         note!("[loopback] 403 /{}", request.path);
         return text(stream, 403, "forbidden");

@@ -50,10 +50,12 @@ launcher, settings UI, and metrics.
 2. Acquire the per-support-directory single-instance lock.
 3. Check whether the current code-signing identity can use the Keychain item.
 4. Select a writable web root.
-5. Load the cached manifest and revalidate it in the background, or fetch a
-   current manifest for an explicit sync.
-6. Roll back an unproven client, verify installed artifacts, and fetch missing
-   or newer artifacts.
+5. Load a pending patch offer when one exists, otherwise load the active
+   manifest. Explicit sync fetches a fresh pending offer.
+6. Recover a failed optional transform or unproven official generation, verify
+   installed artifacts, and promote missing or newer artifacts with their
+   matching manifest. After promotion, revalidate the manifest in the
+   background for the next launch.
 7. Open the game-image chunk store, consume a pending clear request, replay the
    boot prefetch list, and start cursor-based readahead.
 8. Start diagnostics and load settings.
@@ -111,8 +113,10 @@ top-level navigation away from the exact loopback origin.
 ## Client artifacts and generation rollback
 
 The patch manifest describes the official client files and the chunked game
-image. gwnative stores manifest validators and can start from the disk copy,
-moving revalidation off the window's critical path.
+image. gwnative keeps an active manifest paired with the installed client and a
+separate pending offer. Revalidation writes only the pending file, moving the
+network check off the window's critical path without changing the snapshot
+under a running or unsuccessfully updated client.
 
 Artifact presence is not treated as integrity:
 
@@ -121,11 +125,22 @@ Artifact presence is not treated as integrity:
 - the offered generation ID is derived from manifest data before download; and
 - a newly installed generation is unproven until `POST /__booted`.
 
-Before replacing a proven set, gwnative saves it. If the new set fails to report
-a first frame before the next launch, the prior set is restored and the failed
-generation ID is refused. Refusals are bounded, a damaged installed copy may
-retry a refused generation when no alternative exists, and first install never deletes its
-only client merely because an unrelated boot failure occurred.
+Before replacing a proven set, gwnative saves its files and active manifest. A
+new manifest becomes active only after the complete five-file client set has
+been staged, verified and promoted.
+
+The page records which exact runtime it is about to execute. Recovery separates
+two failures:
+
+- a transformed attempt disables only that runtime/artifact transform and
+  retries the same official module; and
+- only a failed unmodified attempt can restore the previous files and manifest
+  and refuse the offered patch-generation ID.
+
+Transform refusals and generation refusals are bounded. A damaged installed
+copy may retry a refused generation when no alternative exists, an explicit
+`sync` can retry one deliberately, and first install never deletes its only
+client merely because an unrelated boot failure occurred.
 
 ## Game-image storage
 

@@ -402,15 +402,38 @@ Module = {
     const url = client.wasm;
     performance.mark('gw.wasm.instantiate.begin');
     (async () => {
+      const instantiate = async (source) => {
+        try {
+          return await WebAssembly.instantiateStreaming(fetch(source), imports);
+        } catch (error) {
+          log('[warn] streaming instantiate failed, falling back:', error);
+          return WebAssembly.instantiate(
+            await (await fetch(source)).arrayBuffer(),
+            imports,
+          );
+        }
+      };
       let result;
       try {
-        result = await WebAssembly.instantiateStreaming(fetch(url), imports);
+        result = await instantiate(url);
       } catch (error) {
-        log('[warn] streaming instantiate failed, falling back:', error);
-        result = await WebAssembly.instantiate(
-          await (await fetch(url)).arrayBuffer(),
-          imports,
+        if (
+          window.__gwnativeTemplateSave !== 'ready'
+          || typeof window.__gwnativeClientBuild !== 'string'
+        ) {
+          throw error;
+        }
+        log(
+          '[warn] certified client could not instantiate; retrying ArenaNet’s exact module:',
+          error,
         );
+        await reportTransformFailure().catch((reportError) => {
+          log('[warn] could not persist the transform fallback:', reportError);
+        });
+        window.__gwnativeTemplateSave = 'failed';
+        window.__gwnativeEnhancements = 'off';
+        window.__gwnativeEnhancementManifest = null;
+        result = await instantiate(`${url}?gwnative-original=1`);
       }
       performance.mark('gw.wasm.instantiate.end');
       // 8.2 MB to fetch and compile, and the largest single item in a launch.
@@ -618,6 +641,35 @@ function appendGlue() {
   document.body.appendChild(script);
 }
 
+async function postRuntimeState(path, body) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Gwnative-Token': window.__gwnativeToken ?? '',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error((await response.text()) || `${path} failed: ${response.status}`);
+  }
+}
+
+function reportRuntimeAttempt() {
+  return postRuntimeState('__runtime', {
+    runtime: client.mode,
+    build: window.__gwnativeClientBuild,
+    transformed: window.__gwnativeTemplateSave === 'ready',
+  });
+}
+
+function reportTransformFailure() {
+  return postRuntimeState('__transform-failed', {
+    runtime: client.mode,
+    build: window.__gwnativeClientBuild,
+  });
+}
+
 (async function boot() {
   status('Loading host…');
 
@@ -821,20 +873,14 @@ function appendGlue() {
     document.getElementById('launcher').hidden = true;
   }
 
-  // After the launcher and before the glue, which is the only gap left: the
-  // launcher owns the overlay until it is done with it, and once the client is
-  // appended there is nowhere to say anything. Awaited because it is a sentence
-  // a player is reading, not a step in the boot — see compatibility.js.
-  try {
-    await host.announceCompatibility({
-      log,
-      save: host.saveSettings,
-      seenFor: host.currentSettings().compatibilityNoticeSeenFor,
-    });
-  } catch (error) {
-    log(`[warn] compatibility: ${error}`);
-    document.getElementById('launcher').hidden = true;
-  }
+  // Compatibility is status, not a launch decision. The settings panel keeps
+  // the player-facing explanation beside the affected controls; logging and
+  // remembering this artifact must never delay ArenaNet's unmodified client.
+  void host.announceCompatibility({
+    log,
+    save: host.saveSettings,
+    seenFor: host.currentSettings().compatibilityNoticeSeenFor,
+  }).catch((error) => log(`[warn] compatibility: ${error}`));
 
   // The canvas is sized by the client, not here. It owns the drawing buffer —
   // it asks for the pixel ratio through emscripten_get_device_pixel_ratio and
@@ -922,6 +968,14 @@ function appendGlue() {
   });
 
   status('Starting the game…');
+  try {
+    // Only now has the launch actually attempted a client. A player who closes
+    // the app before this point must not make the next launch reject or roll
+    // back a generation it never ran.
+    await reportRuntimeAttempt();
+  } catch (error) {
+    log('[warn] could not record the runtime attempt:', error);
+  }
   appendGlue();
 })();
 

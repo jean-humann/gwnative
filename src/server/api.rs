@@ -73,6 +73,10 @@ pub(super) fn serve(
         "__dns" => dns(request, stream)?,
         "__credentials" => credentials(request, stream)?,
         "__settings" => settings(request, stream, context)?,
+        "__runtime" if request.method == "POST" => runtime_attempt(request, stream, context)?,
+        "__transform-failed" if request.method == "POST" => {
+            transform_failed(request, stream, context)?
+        }
         "__socket" => return socket(request, stream, flow).map(Some),
         "__diag" => diag(request, stream, context)?,
         "__resident" => match &context.snapshot {
@@ -281,6 +285,65 @@ fn settings(request: &Request, stream: &mut TcpStream, context: &Context) -> std
             }
         }
         _ => not_allowed(stream, "GET, PUT"),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeAttempt {
+    runtime: String,
+    build: Option<String>,
+    transformed: bool,
+}
+
+fn runtime_attempt(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+) -> std::io::Result<()> {
+    let recorded = serde_json::from_slice::<RuntimeAttempt>(&request.body)
+        .map_err(|error| error.to_string())
+        .and_then(|attempt| {
+            context.generations.record_attempt(
+                &attempt.runtime,
+                attempt.build.as_deref(),
+                attempt.transformed,
+            )
+        });
+    match recorded {
+        Ok(()) => no_content(stream),
+        Err(reason) => {
+            note!("[generation] refused a runtime attempt: {reason}");
+            text(stream, 400, &reason)
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TransformFailure {
+    runtime: String,
+    build: String,
+}
+
+fn transform_failed(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+) -> std::io::Result<()> {
+    let disabled = serde_json::from_slice::<TransformFailure>(&request.body)
+        .map_err(|error| error.to_string())
+        .and_then(|failure| {
+            context
+                .generations
+                .disable_transform(&failure.runtime, &failure.build)
+        });
+    match disabled {
+        Ok(()) => no_content(stream),
+        Err(reason) => {
+            note!("[generation] refused a transform failure: {reason}");
+            text(stream, 400, &reason)
+        }
     }
 }
 

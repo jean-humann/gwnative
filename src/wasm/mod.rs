@@ -24,6 +24,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sha2::Digest;
 
+use crate::generation;
+
 pub use certificate::Runtime;
 use certificate::{CertificateFeed, Selected};
 
@@ -32,6 +34,35 @@ type Outcome<T> = std::result::Result<T, Fault>;
 
 fn digest(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
+}
+
+/// Stable identity for one transform attempt on an exact official runtime pair.
+///
+/// ArenaNet may change generated glue without changing the Wasm, so the Wasm
+/// hash alone is neither a compatibility identity nor a safe transform-refusal
+/// key. The transform ABI is included so an application update that fixes the
+/// transformer gets one clean retry instead of inheriting an older version's
+/// local refusal forever. A selected output hash does the same for a corrected
+/// data-only certificate that keeps the compiled ABI.
+fn runtime_compatibility_id(
+    runtime: Runtime,
+    wasm_sha256: &str,
+    glue_sha256: &str,
+    transform_abi: u32,
+    output_sha256: Option<&str>,
+) -> String {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"gwnative-runtime-compatibility-v1\0");
+    digest.update(runtime.key().as_bytes());
+    digest.update([0]);
+    digest.update(wasm_sha256.as_bytes());
+    digest.update([0]);
+    digest.update(glue_sha256.as_bytes());
+    digest.update([0]);
+    digest.update(transform_abi.to_le_bytes());
+    digest.update([0]);
+    digest.update(output_sha256.unwrap_or("uncertified").as_bytes());
+    hex::encode(digest.finalize())
 }
 
 const STAMP: &str = "derived.json";
@@ -57,7 +88,7 @@ impl DerivedModules {
         self.by_name.get(request_path)
     }
 
-    fn insert(&mut self, runtime: Runtime, path: PathBuf) {
+    pub(crate) fn insert(&mut self, runtime: Runtime, path: PathBuf) {
         self.by_name.insert(runtime.wasm_name(), path);
     }
 }
@@ -129,6 +160,7 @@ pub fn prepare(
     derived_root: &Path,
     certificate_cache: &Path,
     enhance: bool,
+    generations: &generation::Store,
 ) -> Outcome<Prepared> {
     let feed = certificate::load(certificate_cache)?;
     certificate::spawn_refresh(certificate_cache.to_path_buf(), feed.sequence);
@@ -136,7 +168,8 @@ pub fn prepare(
     let mut derived = DerivedModules::default();
     let mut runtimes = BTreeMap::new();
     for runtime in [Runtime::Jspi, Runtime::Asyncify] {
-        let (path, module) = prepare_runtime(root, derived_root, &feed, runtime, enhance);
+        let (path, module) =
+            prepare_runtime(root, derived_root, &feed, runtime, enhance, generations);
         if let Some(path) = path {
             derived.insert(runtime, path);
         }
@@ -230,8 +263,9 @@ fn prepare_runtime(
     feed: &CertificateFeed,
     runtime: Runtime,
     enhance: bool,
+    generations: &generation::Store,
 ) -> (Option<PathBuf>, RuntimeModule) {
-    match prepare_runtime_inner(root, cache_root, feed, runtime, enhance) {
+    match prepare_runtime_inner(root, cache_root, feed, runtime, enhance, generations) {
         Ok(result) => result,
         Err(reason) => {
             note!("[gwnative] {}: {reason}", runtime.key());
@@ -258,6 +292,7 @@ fn prepare_runtime_inner(
     feed: &CertificateFeed,
     runtime: Runtime,
     enhance: bool,
+    generations: &generation::Store,
 ) -> Outcome<(Option<PathBuf>, RuntimeModule)> {
     let wasm_path = root.join(runtime.wasm_name());
     let glue_path = root.join(runtime.glue_name());
@@ -266,10 +301,17 @@ fn prepare_runtime_inner(
     let wasm_hash = digest(&input);
     let glue_hash = digest(&glue);
     let Some(selected) = feed.select(runtime, &wasm_hash, &glue_hash) else {
+        let compatibility_id = runtime_compatibility_id(
+            runtime,
+            &wasm_hash,
+            &glue_hash,
+            certificate::TRANSFORM_ABI,
+            None,
+        );
         return Ok((
             None,
             RuntimeModule {
-                build: Some(wasm_hash),
+                build: Some(compatibility_id),
                 template_save: "uncertified",
                 enhancements: if enhance {
                     enhancements::UNCERTIFIED
@@ -280,6 +322,28 @@ fn prepare_runtime_inner(
             },
         ));
     };
+    let compatibility_id = runtime_compatibility_id(
+        runtime,
+        &wasm_hash,
+        &glue_hash,
+        certificate::TRANSFORM_ABI,
+        Some(&selected.runtime.template.output_sha256),
+    );
+    if generations.transform_disabled(runtime.key(), &compatibility_id) {
+        return Ok((
+            None,
+            RuntimeModule {
+                build: Some(compatibility_id),
+                template_save: "failed",
+                enhancements: if enhance {
+                    enhancements::FAILED
+                } else {
+                    enhancements::OFF
+                },
+                enhancement_manifest: None,
+            },
+        ));
+    }
 
     let derived = derive(cache_root, runtime, &input, &selected)?;
     let (enhancement_state, manifest) = if !enhance {
@@ -303,7 +367,7 @@ fn prepare_runtime_inner(
     Ok((
         Some(derived),
         RuntimeModule {
-            build: Some(wasm_hash),
+            build: Some(compatibility_id),
             template_save: "ready",
             enhancements: enhancement_state,
             enhancement_manifest: manifest,
@@ -422,6 +486,31 @@ mod tests {
     }
 
     #[test]
+    fn runtime_compatibility_identity_covers_pair_runtime_and_transform_abi() {
+        let wasm = "a".repeat(64);
+        let glue = "b".repeat(64);
+        let output = "d".repeat(64);
+        let jspi = runtime_compatibility_id(Runtime::Jspi, &wasm, &glue, 2, Some(&output));
+        assert_eq!(jspi.len(), 64);
+        assert_ne!(
+            jspi,
+            runtime_compatibility_id(Runtime::Jspi, &wasm, &"c".repeat(64), 2, Some(&output))
+        );
+        assert_ne!(
+            jspi,
+            runtime_compatibility_id(Runtime::Asyncify, &wasm, &glue, 2, Some(&output))
+        );
+        assert_ne!(
+            jspi,
+            runtime_compatibility_id(Runtime::Jspi, &wasm, &glue, 3, Some(&output))
+        );
+        assert_ne!(
+            jspi,
+            runtime_compatibility_id(Runtime::Jspi, &wasm, &glue, 2, Some(&"e".repeat(64)))
+        );
+    }
+
+    #[test]
     fn companion_cannot_reenter_the_game() {
         let mut imports = Vec::new();
         let mut exports = Vec::new();
@@ -501,6 +590,89 @@ mod tests {
     }
 
     #[test]
+    fn unknown_official_pairs_run_unmodified_with_optional_features_disabled() {
+        let temporary = crate::scratch::TempDir::new("unknown-runtime-pairs");
+        let root = temporary.0.join("web");
+        fs::create_dir_all(&root).unwrap();
+        let feed = certificate::bundled().unwrap();
+        let generations = generation::Store::open(temporary.0.join("support").join("generations"));
+
+        for runtime in [Runtime::Jspi, Runtime::Asyncify] {
+            fs::write(
+                root.join(runtime.wasm_name()),
+                format!("new {} wasm", runtime.key()),
+            )
+            .unwrap();
+            fs::write(
+                root.join(runtime.glue_name()),
+                format!("new {} glue", runtime.key()),
+            )
+            .unwrap();
+            let (derived, module) = prepare_runtime(
+                &root,
+                &temporary.0.join("derived"),
+                &feed,
+                runtime,
+                true,
+                &generations,
+            );
+            assert!(
+                derived.is_none(),
+                "an unknown pair must serve ArenaNet's exact module"
+            );
+            assert_eq!(module.template_save, "uncertified");
+            assert_eq!(module.enhancements, enhancements::UNCERTIFIED);
+            assert!(module.enhancement_manifest.is_none());
+            assert_eq!(module.build.as_deref().map(str::len), Some(64));
+        }
+    }
+
+    #[test]
+    fn a_locally_failed_exact_transform_serves_the_official_module() {
+        let temporary = crate::scratch::TempDir::new("disabled-runtime-transform");
+        let root = temporary.0.join("web");
+        fs::create_dir_all(&root).unwrap();
+        let runtime = Runtime::Jspi;
+        let wasm = b"official wasm";
+        let glue = b"official glue";
+        fs::write(root.join(runtime.wasm_name()), wasm).unwrap();
+        fs::write(root.join(runtime.glue_name()), glue).unwrap();
+
+        let mut feed = certificate::bundled().unwrap();
+        let certified = feed.families[0]
+            .runtimes
+            .iter_mut()
+            .find(|candidate| candidate.runtime == runtime)
+            .unwrap();
+        certified.wasm_sha256 = digest(wasm);
+        certified.glue_sha256 = digest(glue);
+        let compatibility_id = runtime_compatibility_id(
+            runtime,
+            &certified.wasm_sha256,
+            &certified.glue_sha256,
+            certificate::TRANSFORM_ABI,
+            Some(&certified.template.output_sha256),
+        );
+        let generations = generation::Store::open(temporary.0.join("support").join("generations"));
+        generations
+            .disable_transform(runtime.key(), &compatibility_id)
+            .unwrap();
+
+        let (derived, module) = prepare_runtime(
+            &root,
+            &temporary.0.join("derived"),
+            &feed,
+            runtime,
+            true,
+            &generations,
+        );
+        assert!(derived.is_none());
+        assert_eq!(module.build.as_deref(), Some(compatibility_id.as_str()));
+        assert_eq!(module.template_save, "failed");
+        assert_eq!(module.enhancements, enhancements::FAILED);
+    }
+
+    #[test]
     fn external_official_pairs_produce_valid_candidates() {
         let external = std::env::var("GWNATIVE_CERTIFY_FEED").is_ok();
         let feed = match std::env::var("GWNATIVE_CERTIFY_FEED") {
@@ -555,11 +727,13 @@ mod tests {
             return;
         };
         let temporary = crate::scratch::TempDir::new("dual-runtime-derive");
+        let generations = generation::Store::open(temporary.0.join("support").join("generations"));
         let prepared = prepare(
             Path::new(&root),
             &temporary.0.join("derived"),
             &temporary.0.join("certificates"),
             true,
+            &generations,
         )
         .unwrap();
         assert!(prepared.derived.get(Runtime::Jspi.wasm_name()).is_some());
@@ -573,12 +747,8 @@ mod tests {
             serde_json::from_str(&prepared.module.runtimes_json()).unwrap();
         for runtime in ["jspi", "asyncify"] {
             assert_eq!(modules[runtime]["templateSave"], "ready");
-            assert_eq!(modules[runtime]["enhancements"], "ready");
-            let family_id = modules[runtime]["enhancementManifest"]["familyId"]
-                .as_str()
-                .unwrap();
-            assert_eq!(family_id.len(), 64);
-            assert!(family_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(modules[runtime]["enhancements"], "uncertified");
+            assert!(modules[runtime]["enhancementManifest"].is_null());
         }
     }
 }

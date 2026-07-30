@@ -29,7 +29,7 @@ use super::Outcome;
 const SCHEMA_VERSION: u32 = 1;
 pub(super) const TRANSFORM_ABI: u32 = 2;
 const MAX_FAMILIES: usize = 256;
-const MAX_FEED_BYTES: usize = 2 * 1024 * 1024;
+const MAX_FEED_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 256;
 const FEED_NAME: &str = "builds.json";
 const SIGNATURE_NAME: &str = "builds.json.sig";
@@ -238,7 +238,6 @@ impl CertificateFeed {
         }
 
         let mut families = HashSet::new();
-        let mut artifacts = HashSet::new();
         for family in &self.families {
             hash("family ID", &family.family_id)?;
             if !families.insert(family.family_id.as_str()) {
@@ -267,12 +266,6 @@ impl CertificateFeed {
                 }
                 hash("wasm", &runtime.wasm_sha256)?;
                 hash("glue", &runtime.glue_sha256)?;
-                if !artifacts.insert(runtime.wasm_sha256.as_str()) {
-                    return Err(format!(
-                        "certificate: artifact {} appears twice",
-                        runtime.wasm_sha256
-                    ));
-                }
                 runtime.template.validate()?;
             }
             let passive_count = family
@@ -615,6 +608,10 @@ mod tests {
             })
             .collect();
         feed.validate().unwrap();
+        assert!(
+            serde_json::to_vec_pretty(&feed).unwrap().len() <= MAX_FEED_BYTES,
+            "the publisher's retained history must fit the reader's byte budget"
+        );
         feed.families.push(family);
         assert!(feed.validate().is_err());
     }
@@ -636,6 +633,21 @@ mod tests {
         feed.families[0].family_id =
             "0000000000000000000000000000000000000000000000000000000000000000".to_owned();
         assert!(feed.validate().is_err());
+    }
+
+    #[test]
+    fn a_family_may_reuse_an_unchanged_runtime_artifact() {
+        let mut feed = bundled().unwrap();
+        let mut next = feed.families[0].clone();
+        // ArenaNet can republish one runtime unchanged while changing the
+        // other, or change generated glue without changing its Wasm. The exact
+        // four-artifact family identity handles both; globally unique Wasm
+        // hashes would make either release impossible to certify.
+        next.runtimes[1].glue_sha256 =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
+        next.family_id = artifact_family_id(&next.runtimes).unwrap();
+        feed.families.push(next);
+        feed.validate().unwrap();
     }
 
     #[test]

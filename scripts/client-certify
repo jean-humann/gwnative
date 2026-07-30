@@ -19,6 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 FEED = ROOT / "certificates" / "builds.json"
 MAX_FAMILIES = 256
+MAX_FEED_BYTES = 4 * 1024 * 1024
 
 
 def arguments() -> argparse.Namespace:
@@ -85,7 +86,13 @@ def main() -> int:
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
-    temporary.write_text(json.dumps(feed, indent=2) + "\n")
+    encoded = (json.dumps(feed, indent=2) + "\n").encode()
+    if len(encoded) > MAX_FEED_BYTES:
+        raise SystemExit(
+            f"candidate feed is {len(encoded)} bytes; "
+            f"reader limit is {MAX_FEED_BYTES}"
+        )
+    temporary.write_bytes(encoded)
     temporary.replace(output)
     print(
         f"candidate sequence {feed['sequence']} family {family['familyId']}: {output}",

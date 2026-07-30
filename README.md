@@ -66,6 +66,8 @@ gwnative is playable. It:
   double-click translation, pointer lock, and native window state;
 - repairs build-template operations on client builds that have been explicitly
   certified;
+- keeps unknown or failed compatibility transforms out of the gameplay path by
+  running ArenaNet's original JSPI or Asyncify module;
 - offers an optional native game cursor and target-distance readout;
 - records structured diagnostics and can produce a redacted problem report;
 - rolls back a newly downloaded client that never reaches a first frame; and

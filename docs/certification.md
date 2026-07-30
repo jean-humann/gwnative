@@ -22,7 +22,7 @@ files plus `version.json` in staging, and promotes that five-file set
 failure-atomically. The snapshot remains content-addressed chunk storage rather
 than a fifth assembled runtime file.
 
-Three identifiers serve different purposes and must not be substituted:
+Three internal identities serve different purposes and must not be substituted:
 
 - the **patch generation ID** is derived from manifest sizes and chunk hashes
   for all four runtime files plus `version.json`; it is known before download
@@ -30,8 +30,14 @@ Three identifiers serve different purposes and must not be substituted:
 - the **artifact-family ID** is derived from the assembled SHA-256 of exactly
   the four JavaScript/WebAssembly files; it selects certification and does not
   change for a metadata-only `version.json` update;
-- the client's reported program/build values are runtime diagnostics only.
-  They are neither complete file identities nor certification inputs.
+- the **runtime-compatibility ID** is a domain-separated SHA-256 of one runtime
+  name, Wasm hash, generated-JavaScript hash, transform ABI and selected output
+  hash; it keys local fallback and player notices without confusing a glue-only
+  change for the same transform or carrying a refusal into a fixed transformer
+  or corrected certificate.
+
+The client's reported program/build values are runtime diagnostics only. They
+are neither complete file identities nor certification inputs.
 
 Because every manifest chunk is addressed by its digest, a manifest update
 during a download cannot silently mix bytes. The later publishing stage fetches
@@ -172,3 +178,11 @@ The feed retains the 256 most recently certified artifact families, in
 certification order, and the derived cache retains only the active artifact and
 transform ABI. Frequent ArenaNet patches therefore do not create unbounded
 signed metadata or local Wasm storage.
+
+Certification is never a playability gate. An unknown pair is served directly
+from ArenaNet with template saving and passive tools disabled. If an exact
+certified transform cannot instantiate or fails before first frame, gwnative
+remembers only that runtime-compatibility ID and retries the same official module.
+Only a subsequent failed attempt of the unmodified client can reject and roll
+back the ArenaNet patch generation. The client files and their active manifest
+are stashed and restored together.

@@ -108,17 +108,31 @@ fn main() {
     // One client and one manifest, for everything below that needs either.
     let client = patch::Client::from_env();
     let manifest = load_manifest(&client, force_sync);
+    let revalidate = manifest
+        .as_ref()
+        .is_ok_and(|(_, source)| !matches!(source, patch::Source::Service));
 
-    let generations = install_client(&root, &client, manifest.as_ref(), force_sync, windowed);
+    let generations = install_client(
+        &root,
+        &client,
+        manifest.as_ref().map(|(manifest, _)| manifest),
+        force_sync,
+        windowed,
+    );
     if force_sync {
         return;
     }
-    // Nothing was downloaded, so nothing was recorded — and a client with no
-    // record is only ever checked for existence. Hash it once here and every
-    // later launch gets a real check. No-op after the first time.
-    generations.adopt(&root, &patch::artifacts());
-
-    let snapshot = match manifest {
+    // Do this only after installation. A pending offer may be the manifest
+    // being installed above; refreshing that file concurrently could otherwise
+    // promote a newer manifest over the artifacts fetched from the older one.
+    if revalidate {
+        revalidate_manifest();
+    }
+    // Snapshot chunks must come from the manifest promoted with the client that
+    // is actually on disk. `manifest` may be a newer pending offer whose client
+    // download failed, or one that rollback just refused.
+    let active_manifest = client.active_manifest(&paths::support_dir());
+    let snapshot = match active_manifest {
         Ok(manifest) => open_and_warm_snapshot(client, manifest),
         // Without a manifest there is no chunk list, so there is no snapshot —
         // the same outcome as failing to open one, reported the same way.
@@ -173,6 +187,7 @@ fn main() {
         &paths::derived_dir(),
         &paths::certificate_dir(),
         enhance,
+        &generations,
     ) {
         Ok(prepared) => prepared,
         Err(reason) => {
@@ -269,25 +284,26 @@ fn hold_the_only_instance(windowed: bool) -> instance::Instance {
 /// off the path to the window; see [`patch::Client::manifest`]. The `sync`
 /// command does not, because it is an explicit request for whatever is on offer
 /// now.
-fn load_manifest(client: &patch::Client, force_sync: bool) -> error::Result<manifest::Manifest> {
+fn load_manifest(
+    client: &patch::Client,
+    force_sync: bool,
+) -> error::Result<(manifest::Manifest, patch::Source)> {
     let dir = paths::support_dir();
     if force_sync {
-        return client.fetch_manifest(&dir);
+        return client
+            .fetch_manifest(&dir)
+            .map(|manifest| (manifest, patch::Source::Service));
     }
-    let (manifest, source) = client.manifest(&dir)?;
-    if source == patch::Source::Disk {
-        revalidate_manifest();
-    }
-    Ok(manifest)
+    client.manifest(&dir)
 }
 
 /// Make the web root hold a client this build can run, and return the record
 /// that says so.
 ///
-/// The rollback comes before anything reads the root: a client installed last
-/// launch that never reported a first frame is one this build cannot run, and
-/// the set it replaced is still stashed. See `generation` for why presence was
-/// never enough on its own.
+/// Recovery comes before anything reads the root. A failed optional transform
+/// is disabled while ArenaNet's exact generation stays installed; only a failed
+/// unmodified attempt can restore its stashed predecessor. See `generation` for
+/// why presence was never enough on its own.
 ///
 /// Three things ask for a sync, and until the manifest was in hand here only two
 /// could: the `sync` command, an artifact that is missing or has rotted, and the
@@ -304,11 +320,17 @@ fn install_client(
     let generations = Arc::new(generation::Store::open(
         paths::support_dir().join("generations"),
     ));
-    if let Some(refused) = generations.roll_back(root) {
-        note!(
-            "[gwnative] client generation {refused} never reached a first frame; \
-             restored the one before it"
-        );
+    match generations.recover(root) {
+        generation::Recovery::None => {}
+        generation::Recovery::TransformDisabled { runtime, build } => note!(
+            "[gwnative] {runtime} transform {}… did not reach a first frame; \
+             retrying the same official client unmodified",
+            &build[..12]
+        ),
+        generation::Recovery::GenerationRolledBack(refused) => note!(
+            "[gwnative] official client generation {refused} never reached a first frame; \
+             restored the client and manifest from before it"
+        ),
     }
 
     // The build on offer, named before a byte of it is downloaded: `identify`
@@ -320,13 +342,22 @@ fn install_client(
     // ever displayed: either there is no manifest, or there is one that does not
     // describe this client, and either way what this launch has is the client on
     // disk.
+    let names = patch::artifacts();
+    let missing = generations.unsound(root, &names);
+    // A complete installation that predates the generation record is a valid
+    // rollback target. Adopt it before deciding whether the service offers
+    // something newer, so migration cannot replace the only playable copy
+    // without preserving it first.
+    if missing.is_empty() {
+        generations.adopt(root, &names);
+    }
+
     let plan = manifest.map_err(|e| e.to_string()).and_then(|manifest| {
-        generation::identify(manifest, &patch::artifacts())
+        generation::identify(manifest, &names)
             .map(|offered| (manifest, offered))
             .map_err(|e| e.to_string())
     });
 
-    let missing = generations.unsound(root, &patch::artifacts());
     let outdated = plan
         .as_ref()
         .is_ok_and(|(_, offered)| generations.stale(offered));
@@ -335,9 +366,17 @@ fn install_client(
     }
 
     let failure = match &plan {
-        Ok((manifest, offered)) => sync(root, &missing, &generations, client, manifest, offered)
-            .err()
-            .map(|e| e.to_string()),
+        Ok((manifest, offered)) => sync(
+            root,
+            &missing,
+            &generations,
+            client,
+            manifest,
+            offered,
+            force_sync,
+        )
+        .err()
+        .map(|e| e.to_string()),
         Err(e) => Some(e.clone()),
     };
     if let Some(detail) = failure {
@@ -493,9 +532,9 @@ fn revalidate_manifest() {
         qos::set(qos::Class::Utility);
         let client = patch::Client::from_env();
         match client.revalidate(&paths::support_dir()) {
-            // Storing it is what installs it: the next launch opens on this
-            // manifest, sees it offers a build that is not the one on disk, and
-            // fetches it. See [`patch::Client::revalidate`].
+            // The next launch opens on this pending offer, sees it names a build
+            // that is not the one on disk, and installs the matching artifact
+            // set before promoting the manifest. See [`patch::Client::revalidate`].
             Ok(true) => note!(
                 "[gwnative] the service has published a new client generation; \
                  it will be installed at the next launch"
@@ -523,6 +562,7 @@ fn sync(
     client: &patch::Client,
     manifest: &manifest::Manifest,
     offered: &str,
+    force: bool,
 ) -> error::Result<()> {
     if unsound.is_empty() {
         note!("[gwnative] installing client generation {offered}");
@@ -534,7 +574,7 @@ fn sync(
     }
     let names = patch::artifacts();
 
-    if generations.rejected(offered) {
+    if generations.rejected(offered) && !force {
         if unsound.is_empty() {
             note!(
                 "[gwnative] the service still offers client generation {offered}, which never reached \
@@ -551,9 +591,23 @@ fn sync(
         );
     }
 
-    generations.stash(root, &names);
+    if !generations.stash(root, &names) && unsound.is_empty() {
+        return Err(std::io::Error::other(
+            "the working client could not be preserved before replacement",
+        )
+        .into());
+    }
     let fetched =
         patch::sync_with(client, manifest, root).inspect_err(|_| generations.forget_stash())?;
+    if let Err(error) = client.activate_manifest(&paths::support_dir()) {
+        if let Err(restore) = generations.restore_stash(root, &names) {
+            note!(
+                "[gwnative] could not restore the previous client after manifest activation \
+                 failed: {restore}"
+            );
+        }
+        return Err(error);
+    }
     for (name, bytes) in fetched {
         note!("[gwnative]   {name} ({bytes} bytes)");
     }
