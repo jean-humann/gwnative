@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 pub const VERSION: u32 = 1;
-pub const MAX_PUBLISH_BYTES: usize = 16 * 1024;
+pub const MAX_PUBLISH_BYTES: usize = 32 * 1024;
 pub const MAX_WAIT_MS: u64 = 15_000;
 const MAX_AGENT_ID: u32 = 4_095;
 
@@ -82,6 +82,35 @@ pub struct Skillbar {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Buff {
+    pub skill_id: u32,
+    pub buff_id: u32,
+    pub target_agent_id: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Effect {
+    pub skill_id: u32,
+    pub attribute_level: u32,
+    pub effect_id: u32,
+    pub agent_id: u32,
+    pub duration: f32,
+    pub timestamp: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlayerEffects {
+    pub agent_id: u32,
+    pub buffs_truncated: bool,
+    pub effects_truncated: bool,
+    pub buffs: Vec<Buff>,
+    pub effects: Vec<Effect>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,6 +147,8 @@ pub struct State {
     pub party: Option<Party>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skillbar: Option<Skillbar>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<PlayerEffects>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -224,7 +255,7 @@ impl Hub {
                 "tokenRequired": true,
             },
             "state": {
-                "domains": ["player", "map", "target", "party", "skillbar"],
+                "domains": ["player", "map", "target", "party", "skillbar", "effects"],
                 "available": self.state_json().is_some(),
             },
             "actions": {
@@ -314,6 +345,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(skillbar) = &state.skillbar {
             validate_skillbar(skillbar, state.player_id.unwrap_or_default())?;
         }
+        if let Some(effects) = &state.effects {
+            validate_effects(effects, state.player_id.unwrap_or_default())?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -329,6 +363,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.range_name.is_some()
         || state.party.is_some()
         || state.skillbar.is_some()
+        || state.effects.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -404,6 +439,41 @@ fn validate_skillbar(skillbar: &Skillbar, player_id: u32) -> Result<(), String> 
     Ok(())
 }
 
+fn validate_effects(effects: &PlayerEffects, player_id: u32) -> Result<(), String> {
+    if effects.agent_id != player_id
+        || effects.buffs.len() > 32
+        || effects.effects.len() > 64
+        || (effects.buffs_truncated && effects.buffs.len() != 32)
+        || (effects.effects_truncated && effects.effects.len() != 64)
+    {
+        return Err("effects do not belong to the certified player".into());
+    }
+    let mut buff_ids = std::collections::HashSet::with_capacity(effects.buffs.len());
+    if effects.buffs.iter().any(|buff| {
+        buff.skill_id == 0
+            || buff.skill_id > 100_000
+            || buff.buff_id == 0
+            || !buff_ids.insert(buff.buff_id)
+            || buff.target_agent_id > MAX_AGENT_ID
+    }) {
+        return Err("buffs are outside their certified bounds".into());
+    }
+    let mut effect_ids = std::collections::HashSet::with_capacity(effects.effects.len());
+    if effects.effects.iter().any(|effect| {
+        effect.skill_id == 0
+            || effect.skill_id > 100_000
+            || effect.attribute_level > 100
+            || effect.effect_id == 0
+            || !effect_ids.insert(effect.effect_id)
+            || effect.agent_id > MAX_AGENT_ID
+            || !effect.duration.is_finite()
+            || !(0.0..=1_000_000.0).contains(&effect.duration)
+    }) {
+        return Err("effects are outside their certified bounds".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn party_and_skillbar_are_typed_and_bounded() {
+    fn party_skillbar_and_effects_are_typed_and_bounded() {
         let hub = Hub::default();
         let state = br#"{
             "status":"ready","tickCount":7,"mapId":55,"instanceType":1,
@@ -452,6 +522,11 @@ mod tests {
                     {"slot":7,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":106,"event":0,"disabled":false},
                     {"slot":8,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":107,"event":0,"disabled":false}
                 ]
+            },
+            "effects":{
+                "agentId":4,"buffsTruncated":false,"effectsTruncated":false,
+                "buffs":[{"skillId":200,"buffId":300,"targetAgentId":4}],
+                "effects":[{"skillId":201,"attributeLevel":12,"effectId":301,"agentId":8,"duration":12.5,"timestamp":400}]
             }
         }"#;
         hub.publish(state).unwrap();
@@ -460,16 +535,20 @@ mod tests {
         assert_eq!(value["state"]["skillbar"]["skills"][7]["slot"], 8);
         assert_eq!(value["state"]["skillbar"]["disabledMask"], 0);
         assert_eq!(value["state"]["skillbar"]["castCount"], 0);
+        assert_eq!(value["state"]["effects"]["buffs"][0]["buffId"], 300);
+        assert_eq!(value["state"]["effects"]["effects"][0]["duration"], 12.5);
     }
 
     #[test]
-    fn malformed_party_and_skillbar_state_is_refused() {
+    fn malformed_party_skillbar_and_effects_state_is_refused() {
         let hub = Hub::default();
         for state in [
             br#"{"status":"ready","mapId":1,"playerId":2,"playerX":0,"playerY":0,"targetValid":false,"party":{"id":1,"hardMode":false,"defeated":false,"leader":false,"alliesTruncated":false,"players":[],"heroes":[],"henchmen":[],"allies":[]}}"#.as_slice(),
             br#"{"status":"ready","mapId":1,"playerId":2,"playerX":0,"playerY":0,"targetValid":false,"skillbar":{"agentId":3,"disabledMask":0,"castCount":0,"casting":false,"skills":[]}}"#.as_slice(),
             br#"{"status":"waiting","party":{"id":1,"hardMode":false,"defeated":false,"leader":false,"alliesTruncated":false,"players":[],"heroes":[],"henchmen":[],"allies":[]}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","skillbar":{"agentId":2,"disabledMask":1,"castCount":0,"casting":false,"skills":[{"slot":1,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":1,"event":0,"disabled":false},{"slot":2,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":2,"event":0,"disabled":false},{"slot":3,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":3,"event":0,"disabled":false},{"slot":4,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":4,"event":0,"disabled":false},{"slot":5,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":5,"event":0,"disabled":false},{"slot":6,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":6,"event":0,"disabled":false},{"slot":7,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":7,"event":0,"disabled":false},{"slot":8,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":8,"event":0,"disabled":false}]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","effects":{"agentId":2,"buffsTruncated":false,"effectsTruncated":false,"buffs":[],"effects":[{"skillId":1,"attributeLevel":0,"effectId":7,"agentId":0,"duration":1,"timestamp":1},{"skillId":2,"attributeLevel":0,"effectId":7,"agentId":0,"duration":1,"timestamp":2}]}}"#.as_slice(),
+            br#"{"status":"waiting","effects":{"agentId":2,"buffsTruncated":false,"effectsTruncated":false,"buffs":[],"effects":[]}}"#.as_slice(),
         ] {
             assert!(hub.publish(state).is_err());
         }

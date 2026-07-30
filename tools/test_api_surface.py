@@ -29,6 +29,7 @@ class ApiSurfaceTests(unittest.TestCase):
                 "    pub target_valid: Option<bool>,\n"
                 "    pub party: Option<Party>,\n"
                 "    pub skillbar: Option<Skillbar>,\n"
+                "    pub effects: Option<PlayerEffects>,\n"
                 "}\n"
             )
             (wasm / "builds.rs").write_text(
@@ -40,7 +41,7 @@ class ApiSurfaceTests(unittest.TestCase):
 
         self.assertEqual(
             report["certifiedDomains"],
-            ["map", "party", "player", "skillbar", "target"],
+            ["effects", "map", "party", "player", "skillbar", "target"],
         )
 
     def test_gwca_inventory_keeps_names_but_not_declarations(self) -> None:

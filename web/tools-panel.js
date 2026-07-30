@@ -1,7 +1,7 @@
 // Built-in companion tools.
 //
 // These are deliberately useful on the narrow certified state available
-// today. Features requiring effects, inventory, chat or other layouts are named
+// today. Features requiring inventory, chat or other layouts are named
 // as unavailable instead of reading guessed offsets from a live client.
 
 import { createBuildLibrary } from './build-library.js';
@@ -14,7 +14,7 @@ export const FEATURES = Object.freeze([
   { id: 'builds', group: 'Builds', name: 'Build and team library', status: 'available' },
   { id: 'party', group: 'Game state', name: 'Party and hero roster', status: 'available' },
   { id: 'skillbar', group: 'Game state', name: 'Player skillbar', status: 'available' },
-  { id: 'effects', group: 'Game state', name: 'Effects and buffs', status: 'needs-layout' },
+  { id: 'effects', group: 'Game state', name: 'Effects and buffs', status: 'available' },
   { id: 'maps', group: 'Game state', name: 'Map agents, quests and completion', status: 'needs-layout' },
   { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'needs-layout' },
   { id: 'chat', group: 'Game state', name: 'Chat and party search', status: 'needs-layout' },
@@ -101,6 +101,22 @@ function installWidgets(overlays) {
       );
     },
   });
+  const effects = overlays.register({
+    id: 'player-effects',
+    title: 'Effects',
+    position: { x: 16, y: 352 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      if (!state.effects) return setText(body, 'Unavailable for this client build');
+      const suffix =
+        state.effects.buffsTruncated || state.effects.effectsTruncated ? ' · truncated' : '';
+      setText(
+        body,
+        `${state.effects.buffs.length} buffs · ${state.effects.effects.length} effects${suffix}`,
+      );
+    },
+  });
 
   const updateTime = () => {
     if (clock.isVisible()) clock.update(new Date().toLocaleTimeString());
@@ -127,6 +143,7 @@ function installWidgets(overlays) {
     if (target.isVisible()) target.update(event.detail);
     if (party.isVisible()) party.update(event.detail);
     if (skillbar.isVisible()) skillbar.update(event.detail);
+    if (effects.isVisible()) effects.update(event.detail);
   });
 
   return Object.freeze({
@@ -136,6 +153,7 @@ function installWidgets(overlays) {
     performance: performanceWidget,
     party,
     skillbar,
+    effects,
     dispose: () => clearInterval(interval),
   });
 }
@@ -223,6 +241,7 @@ export function installToolsPanel({
     ['Performance', widgets.performance],
     ['Party roster', widgets.party],
     ['Player skillbar', widgets.skillbar],
+    ['Player effects', widgets.effects],
   ]) {
     widgetButtons.append(
       button(document, label, () => widget.visible(!widget.isVisible())),

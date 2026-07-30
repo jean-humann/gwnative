@@ -18,7 +18,7 @@ describe('companion tools', () => {
     assert.equal(FEATURES.find((feature) => feature.id === 'builds').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'party').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'skillbar').status, 'available');
-    assert.equal(FEATURES.find((feature) => feature.id === 'effects').status, 'needs-layout');
+    assert.equal(FEATURES.find((feature) => feature.id === 'effects').status, 'available');
   });
 
   it('makes inline flex panels genuinely hide and reopen', () => {

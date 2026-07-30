@@ -34,7 +34,7 @@ describe('public game state', () => {
     );
   });
 
-  it('keeps the typed party and skillbar domains', () => {
+  it('keeps the typed party, skillbar, and effects domains', () => {
     const party = Object.freeze({
       id: 1,
       players: Object.freeze([{ loginNumber: 42 }]),
@@ -43,9 +43,18 @@ describe('public game state', () => {
       agentId: 2,
       skills: Object.freeze([{ slot: 1, skillId: 100 }]),
     });
+    const effects = Object.freeze({
+      agentId: 2,
+      buffs: Object.freeze([{ skillId: 100, buffId: 7, targetAgentId: 2 }]),
+      effects: Object.freeze([]),
+    });
     assert.deepEqual(
-      publicState({ status: 'ready', party, skillbar }),
-      { status: 'ready', party, skillbar },
+      publicState({
+        status: 'ready', party, skillbar, effects,
+      }),
+      {
+        status: 'ready', party, skillbar, effects,
+      },
     );
   });
 

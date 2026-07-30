@@ -34,6 +34,7 @@ BINDING_NAME = re.compile(
 RUST_FIELD = re.compile(r"^\s*pub\s+([a-zA-Z_]\w*)\s*:", re.MULTILINE)
 VERSION = re.compile(r'#define\s+GWCA_VERSION\s+"([^"]+)"')
 CERTIFIED_DOMAIN_FIELDS = {
+    "effects": "effects",
     "map": "map_id",
     "party": "party",
     "player": "player_id",
