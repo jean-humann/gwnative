@@ -141,27 +141,37 @@ copy rules, release profile, or embedded resources.
 Wars client. The runner:
 
 1. builds and signs gwnative with the normal development identity;
-2. lets the app—not the runner—read the default profile's saved login from
+2. lets the app—not the runner—inspect the default profile's saved-login
+   availability and, when Guild Wars requests it, read that login from
    Keychain;
 3. exercises Settings, the User Guide, Companion Tools, widgets, layout mode,
    and the build library by semantic DOM name;
 4. verifies the token boundary and both versioned API descriptions;
 5. waits for launch milestones over a bounded long-poll channel;
-6. waits for the client’s own credential-commit callback before activating the
-   selected character;
+6. waits for a successful account-token response, then for authenticated
+   socket receive traffic to settle across a bounded run of client frames,
+   before activating the selected character;
 7. sends only a finite set of named AppKit actions: activate, forward/backward,
    left/right, next target, interact, cancel, and skill 1; and
 8. when the installed client has a certified state layout, requires two stable
-   state revisions and confirms bidirectional movement through newer revisions.
+   revisions, validates bounded party and eight-slot skillbar state, and
+   confirms bidirectional movement through newer revisions.
 
 ```sh
 scripts/e2e
+scripts/e2e --character "Character Name"
 scripts/e2e --no-gameplay
 scripts/e2e --auth-timeout 240
 ```
 
 The session token is captured and redacted. Credential values never leave the
-application: the event channel reports only whether both fields were offered.
+application: the event channel reports only profile availability and whether
+both fields were offered. Guild Wars does not call its secure-storage bridge
+when **Remember Password** is disabled. In that state the runner waits for
+manual sign-in instead of injecting text or clicking coordinates; enable
+**Remember Password** during that sign-in to restore the profile Keychain item.
+`--character` passes only the official selection hint and never hardcodes a
+player name into the test.
 The control plane exists only under `GWNATIVE_E2E`, has no arbitrary JavaScript,
 coordinates, text-entry or credential action, and sleeps between events. It
 does not use screenshots, OCR, Accessibility scripting, or focus polling.
@@ -170,7 +180,8 @@ through its normal responder chain. Page JavaScript observes the action only to
 associate resulting socket traffic; it cannot synthesize the gameplay event.
 The disposable client copy is pinned with `--no-update` for the whole run so a
 background artifact refresh cannot change the build between certification and
-input.
+input. A process-scoped `caffeinate` assertion prevents macOS idle sleep from
+suspending WKWebView’s animation-frame-driven client during the run.
 
 The page restores the two profile-local `localStorage` values it touches
 byte-for-byte before the runner stops the process. The test intentionally uses

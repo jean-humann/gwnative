@@ -68,8 +68,9 @@ over its environment equivalent.
 
 | Guild Wars switch | gwnative behaviour |
 | --- | --- |
-| `-autologin` | Offers invocation credentials or the selected profile's Keychain login to the current client |
-| `-email VALUE` and `-password VALUE` | Together supply invocation-only credentials; they are not written to disk |
+| `-autologin` | Requests the official saved-login path; Guild Wars asks Keychain only when its **Remember Password** preference is enabled |
+| `-email VALUE` and `-password VALUE` | Together supply invocation-only credentials; they are not written to disk and cannot overwrite or delete a different profile Keychain login |
+| `-character VALUE` | Passes the official character-selection hint to the current client |
 | `-fps VALUE` | Caps delivered animation frames from 1 through 1000 |
 | `-image` | Syncs the current client, downloads and verifies the entire 4.2 GB game image, then exits |
 | `-repair` | Alias for `repair` |
@@ -91,13 +92,14 @@ from Rust debug output and its owned buffer is overwritten before release, but
 those measures cannot hide the original process argument.
 
 Supplying only one of `-email` or `-password` produces a compatibility notice
-and injects no partial credential object.
+and injects no partial credential object. A complete pair takes precedence over
+`-autologin`: starting both official portal operations concurrently violates
+the current client's single-operation invariant.
 
 ### Recognised but unavailable
 
 | Switches | Reason |
 | --- | --- |
-| `-character` | The current WebAssembly client has no supported character-selection launch hook |
 | `-bmp` | The client has no screenshot-format launch hook |
 | `-lodfull` | The client has no supported model-detail launch hook |
 | `-fqdn` | Authentication routing belongs to the current client and restricted native network bridge |
