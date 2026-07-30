@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 3;
-export const COMPANION_SNAPSHOT_BYTES = 2804;
+export const COMPANION_SNAPSHOT_ABI = 4;
+export const COMPANION_SNAPSHOT_BYTES = 12_048;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -43,6 +43,8 @@ const FLAGS = Object.freeze({
   party: 1 << 4,
   skillbar: 1 << 5,
   effects: 1 << 6,
+  agents: 1 << 7,
+  quests: 1 << 8,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -51,7 +53,9 @@ const KNOWN_FLAGS =
   | FLAGS.loading
   | FLAGS.party
   | FLAGS.skillbar
-  | FLAGS.effects;
+  | FLAGS.effects
+  | FLAGS.agents
+  | FLAGS.quests;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -68,12 +72,24 @@ const MAX_AGENT_ID = 4_095;
 const SKILL_SLOTS = 8;
 const MAX_PLAYER_BUFFS = 32;
 const MAX_PLAYER_EFFECTS = 64;
+const MAX_MAP_AGENTS = 128;
+const MAX_QUESTS = 64;
+const MAX_MISSION_OBJECTIVES = 32;
 const EFFECT_FLAGS = Object.freeze({
   buffsTruncated: 1 << 0,
   effectsTruncated: 1 << 1,
 });
 const KNOWN_EFFECT_FLAGS =
   EFFECT_FLAGS.buffsTruncated | EFFECT_FLAGS.effectsTruncated;
+const MAP_AGENT_FLAGS = Object.freeze({
+  truncated: 1 << 0,
+});
+const QUEST_FLAGS = Object.freeze({
+  questsTruncated: 1 << 0,
+  objectivesTruncated: 1 << 1,
+});
+const KNOWN_QUEST_FLAGS =
+  QUEST_FLAGS.questsTruncated | QUEST_FLAGS.objectivesTruncated;
 
 /** @param {number} value */
 function validCoordinate(value) {
@@ -326,6 +342,207 @@ function readEffects(view, playerId) {
   });
 }
 
+function mapAgentKind(typeBits) {
+  if ((typeBits & 0xdb) !== 0) return 'Living';
+  if ((typeBits & 0x400) !== 0) return 'Item';
+  if ((typeBits & 0x200) !== 0) return 'Gadget';
+  return 'Unknown';
+}
+
+function readMapAgents(view) {
+  const flags = view.getUint32(2804, true);
+  const count = view.getUint32(2808, true);
+  const total = view.getUint32(2812, true);
+  const truncated = (flags & MAP_AGENT_FLAGS.truncated) !== 0;
+  if (
+    (flags & ~MAP_AGENT_FLAGS.truncated) !== 0
+    || count < 1
+    || count > MAX_MAP_AGENTS
+    || total < count
+    || total > MAX_AGENT_ID
+    || (truncated ? count !== MAX_MAP_AGENTS || total <= count : total !== count)
+  ) {
+    return null;
+  }
+
+  const agents = [];
+  let previousId = 0;
+  for (let index = 0; index < MAX_MAP_AGENTS; index += 1) {
+    const offset = 2816 + index * 56;
+    if (index >= count) {
+      if (!wordsAreZero(view, offset, 56)) return null;
+      continue;
+    }
+    const agentId = view.getUint32(offset, true);
+    const typeBits = view.getUint32(offset + 4, true);
+    const playerNumber = view.getUint32(offset + 8, true);
+    const primary = view.getUint32(offset + 12, true);
+    const secondary = view.getUint32(offset + 16, true);
+    const level = view.getUint32(offset + 20, true);
+    const health = view.getFloat32(offset + 24, true);
+    const rotation = view.getFloat32(offset + 28, true);
+    const x = view.getFloat32(offset + 32, true);
+    const y = view.getFloat32(offset + 36, true);
+    const z = view.getFloat32(offset + 40, true);
+    const modelState = view.getUint32(offset + 44, true);
+    const effects = view.getUint32(offset + 48, true);
+    const allegiance = view.getUint32(offset + 52, true);
+    const living = (typeBits & 0xdb) !== 0;
+    if (
+      agentId <= previousId
+      || agentId > MAX_AGENT_ID
+      || (typeBits & AGENT_TYPE_BITS) === 0
+      || playerNumber > 0xffff
+      || primary > 10
+      || secondary > 10
+      || level > 0xff
+      || !Number.isFinite(health)
+      || health < -10
+      || health > 10
+      || !Number.isFinite(rotation)
+      || Math.abs(rotation) > 4
+      || !validCoordinate(x)
+      || !validCoordinate(y)
+      || !validCoordinate(z)
+      || allegiance > 6
+      || (!living && (
+        playerNumber !== 0
+        || primary !== 0
+        || secondary !== 0
+        || level !== 0
+        || health !== 0
+        || modelState !== 0
+        || effects !== 0
+        || allegiance !== 0
+      ))
+    ) {
+      return null;
+    }
+    previousId = agentId;
+    agents.push(Object.freeze({
+      agentId,
+      typeBits,
+      kind: mapAgentKind(typeBits),
+      playerNumber,
+      primary,
+      secondary,
+      level,
+      health,
+      rotation,
+      x,
+      y,
+      z,
+      modelState,
+      effects,
+      allegiance,
+      isLiving: living,
+      isItem: (typeBits & 0x400) !== 0,
+      isGadget: (typeBits & 0x200) !== 0,
+      isDead: living && (effects & 0x10) !== 0,
+      isMoving: living && [12, 76, 204].includes(modelState),
+      isAttacking: living && [96, 1088, 1120].includes(modelState),
+      isKnockedDown: living && modelState === 1104,
+      isCasting: living && [65, 581].includes(modelState),
+    }));
+  }
+  return Object.freeze({
+    truncated,
+    total,
+    agents: Object.freeze(agents),
+  });
+}
+
+function readQuests(view) {
+  const activeQuestId = view.getUint32(9984, true);
+  const flags = view.getUint32(9988, true);
+  const questCount = view.getUint32(9992, true);
+  const objectiveCount = view.getUint32(9996, true);
+  const questsTruncated = (flags & QUEST_FLAGS.questsTruncated) !== 0;
+  const objectivesTruncated = (flags & QUEST_FLAGS.objectivesTruncated) !== 0;
+  if (
+    activeQuestId > 100_000
+    || (flags & ~KNOWN_QUEST_FLAGS) !== 0
+    || questCount > MAX_QUESTS
+    || objectiveCount > MAX_MISSION_OBJECTIVES
+    || (questsTruncated && questCount !== MAX_QUESTS)
+    || (objectivesTruncated && objectiveCount !== MAX_MISSION_OBJECTIVES)
+  ) {
+    return null;
+  }
+
+  const quests = [];
+  const questIds = new Set();
+  for (let index = 0; index < MAX_QUESTS; index += 1) {
+    const offset = 10000 + index * 28;
+    if (index >= questCount) {
+      if (!wordsAreZero(view, offset, 28)) return null;
+      continue;
+    }
+    const quest = Object.freeze({
+      questId: view.getUint32(offset, true),
+      logState: view.getUint32(offset + 4, true),
+      mapFrom: view.getUint32(offset + 8, true),
+      markerX: view.getFloat32(offset + 12, true),
+      markerY: view.getFloat32(offset + 16, true),
+      markerPlane: view.getUint32(offset + 20, true),
+      mapTo: view.getUint32(offset + 24, true),
+    });
+    if (
+      quest.questId === 0
+      || quest.questId > 100_000
+      || questIds.has(quest.questId)
+      || quest.mapFrom > 2_000
+      || quest.mapTo > 2_000
+      || !validCoordinate(quest.markerX)
+      || !validCoordinate(quest.markerY)
+      || quest.markerPlane > 100_000
+    ) {
+      return null;
+    }
+    questIds.add(quest.questId);
+    quests.push(Object.freeze({
+      ...quest,
+      completed: (quest.logState & 0x2) !== 0,
+      currentMission: (quest.logState & 0x10) !== 0,
+      primary: (quest.logState & 0x20) !== 0,
+      areaPrimary: (quest.logState & 0x40) !== 0,
+    }));
+  }
+  if (activeQuestId !== 0 && !questsTruncated && !questIds.has(activeQuestId)) {
+    return null;
+  }
+
+  const missionObjectives = [];
+  const objectiveIds = new Set();
+  for (let index = 0; index < MAX_MISSION_OBJECTIVES; index += 1) {
+    const offset = 11792 + index * 8;
+    if (index >= objectiveCount) {
+      if (!wordsAreZero(view, offset, 8)) return null;
+      continue;
+    }
+    const objective = Object.freeze({
+      objectiveId: view.getUint32(offset, true),
+      type: view.getUint32(offset + 4, true),
+    });
+    if (
+      objective.objectiveId === 0
+      || objectiveIds.has(objective.objectiveId)
+      || objective.type > 100_000
+    ) {
+      return null;
+    }
+    objectiveIds.add(objective.objectiveId);
+    missionObjectives.push(objective);
+  }
+  return Object.freeze({
+    activeQuestId,
+    questsTruncated,
+    objectivesTruncated,
+    quests: Object.freeze(quests),
+    missionObjectives: Object.freeze(missionObjectives),
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -466,6 +683,22 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const agentsValid = (flags & FLAGS.agents) !== 0;
+  const agents = agentsValid ? readMapAgents(view) : null;
+  if (
+    (agentsValid && agents === null)
+    || (!agentsValid && !wordsAreZero(view, 2804, 7180))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
+  const questsValid = (flags & FLAGS.quests) !== 0;
+  const quests = questsValid ? readQuests(view) : null;
+  if (
+    (questsValid && quests === null)
+    || (!questsValid && !wordsAreZero(view, 9984, 2064))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -482,6 +715,8 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(party ? { party } : {}),
     ...(skillbar ? { skillbar } : {}),
     ...(effects ? { effects } : {}),
+    ...(agents ? { agents } : {}),
+    ...(quests ? { quests } : {}),
   });
 }
 

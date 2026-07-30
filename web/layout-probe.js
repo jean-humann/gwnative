@@ -87,12 +87,12 @@ function agentArrayAt(read, layout, delta, playerNumber) {
     if (agent === null) continue;
     if (
       read.u32(agent + layout[11]) !== id
-      || read.u16(agent + layout[15]) !== playerNumber
-      || ((read.u16(agent + layout[16]) ?? 0) & 0xf000) !== 0x3000
+      || read.u16(agent + layout[17]) !== playerNumber
+      || ((read.u16(agent + layout[18]) ?? 0) & 0xf000) !== 0x3000
     ) {
       continue;
     }
-    const type = read.u32(agent + layout[14]);
+    const type = read.u32(agent + layout[16]);
     const x = read.f32(agent + layout[12]);
     const y = read.f32(agent + layout[13]);
     return (
@@ -116,7 +116,7 @@ export function probeLayout(buffer, layoutWords, radiusBytes = 2048) {
   if (
     !(buffer instanceof ArrayBuffer)
     || !Array.isArray(layoutWords)
-    || layoutWords.length !== 79
+    || layoutWords.length !== 100
     || layoutWords.some((word) => !Number.isInteger(word) || word < 0)
     || !Number.isInteger(radiusBytes)
     || radiusBytes < 0

@@ -34,7 +34,7 @@ describe('public game state', () => {
     );
   });
 
-  it('keeps the typed party, skillbar, and effects domains', () => {
+  it('keeps every typed nested game-state domain', () => {
     const party = Object.freeze({
       id: 1,
       players: Object.freeze([{ loginNumber: 42 }]),
@@ -48,12 +48,20 @@ describe('public game state', () => {
       buffs: Object.freeze([{ skillId: 100, buffId: 7, targetAgentId: 2 }]),
       effects: Object.freeze([]),
     });
+    const agents = Object.freeze({
+      total: 1,
+      agents: Object.freeze([{ agentId: 2, kind: 'Living' }]),
+    });
+    const quests = Object.freeze({
+      activeQuestId: 44,
+      quests: Object.freeze([{ questId: 44 }]),
+    });
     assert.deepEqual(
       publicState({
-        status: 'ready', party, skillbar, effects,
+        status: 'ready', party, skillbar, effects, agents, quests,
       }),
       {
-        status: 'ready', party, skillbar, effects,
+        status: 'ready', party, skillbar, effects, agents, quests,
       },
     );
   });

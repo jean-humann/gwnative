@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 pub const VERSION: u32 = 1;
-pub const MAX_PUBLISH_BYTES: usize = 32 * 1024;
+pub const MAX_PUBLISH_BYTES: usize = 256 * 1024;
 pub const MAX_WAIT_MS: u64 = 15_000;
 const MAX_AGENT_ID: u32 = 4_095;
 
@@ -111,6 +111,76 @@ pub struct PlayerEffects {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MapAgent {
+    pub agent_id: u32,
+    pub type_bits: u32,
+    pub kind: String,
+    pub player_number: u32,
+    pub primary: u32,
+    pub secondary: u32,
+    pub level: u32,
+    pub health: f32,
+    pub rotation: f32,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub model_state: u32,
+    pub effects: u32,
+    pub allegiance: u32,
+    pub is_living: bool,
+    pub is_item: bool,
+    pub is_gadget: bool,
+    pub is_dead: bool,
+    pub is_moving: bool,
+    pub is_attacking: bool,
+    pub is_knocked_down: bool,
+    pub is_casting: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MapAgents {
+    pub truncated: bool,
+    pub total: u32,
+    pub agents: Vec<MapAgent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Quest {
+    pub quest_id: u32,
+    pub log_state: u32,
+    pub map_from: u32,
+    pub marker_x: f32,
+    pub marker_y: f32,
+    pub marker_plane: u32,
+    pub map_to: u32,
+    pub completed: bool,
+    pub current_mission: bool,
+    pub primary: bool,
+    pub area_primary: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MissionObjective {
+    pub objective_id: u32,
+    #[serde(rename = "type")]
+    pub objective_type: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Quests {
+    pub active_quest_id: u32,
+    pub quests_truncated: bool,
+    pub objectives_truncated: bool,
+    pub quests: Vec<Quest>,
+    pub mission_objectives: Vec<MissionObjective>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +219,10 @@ pub struct State {
     pub skillbar: Option<Skillbar>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effects: Option<PlayerEffects>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<MapAgents>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quests: Option<Quests>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -255,7 +329,10 @@ impl Hub {
                 "tokenRequired": true,
             },
             "state": {
-                "domains": ["player", "map", "target", "party", "skillbar", "effects"],
+                "domains": [
+                    "player", "map", "target", "party", "skillbar", "effects",
+                    "agents", "quests"
+                ],
                 "available": self.state_json().is_some(),
             },
             "actions": {
@@ -348,6 +425,12 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(effects) = &state.effects {
             validate_effects(effects, state.player_id.unwrap_or_default())?;
         }
+        if let Some(agents) = &state.agents {
+            validate_agents(agents)?;
+        }
+        if let Some(quests) = &state.quests {
+            validate_quests(quests)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -364,6 +447,8 @@ fn validate(state: &State) -> Result<(), String> {
         || state.party.is_some()
         || state.skillbar.is_some()
         || state.effects.is_some()
+        || state.agents.is_some()
+        || state.quests.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -474,6 +559,120 @@ fn validate_effects(effects: &PlayerEffects, player_id: u32) -> Result<(), Strin
     Ok(())
 }
 
+fn validate_agents(agents: &MapAgents) -> Result<(), String> {
+    if agents.agents.is_empty()
+        || agents.agents.len() > 128
+        || agents.total < agents.agents.len() as u32
+        || agents.total > MAX_AGENT_ID
+        || if agents.truncated {
+            agents.agents.len() != 128 || agents.total <= 128
+        } else {
+            agents.total != agents.agents.len() as u32
+        }
+    {
+        return Err("map-agent page is outside its certified bounds".into());
+    }
+    let mut previous_id = 0;
+    for agent in &agents.agents {
+        let living = agent.type_bits & 0xdb != 0;
+        let item = agent.type_bits & 0x400 != 0;
+        let gadget = agent.type_bits & 0x200 != 0;
+        let kind = if living {
+            "Living"
+        } else if item {
+            "Item"
+        } else if gadget {
+            "Gadget"
+        } else {
+            "Unknown"
+        };
+        if agent.agent_id <= previous_id
+            || agent.agent_id > MAX_AGENT_ID
+            || agent.type_bits & (0xdb | 0x200 | 0x400) == 0
+            || agent.kind != kind
+            || agent.player_number > u16::MAX as u32
+            || agent.primary > 10
+            || agent.secondary > 10
+            || agent.level > u8::MAX as u32
+            || !agent.health.is_finite()
+            || !(-10.0..=10.0).contains(&agent.health)
+            || !agent.rotation.is_finite()
+            || agent.rotation.abs() > 4.0
+            || [agent.x, agent.y, agent.z]
+                .into_iter()
+                .any(|value| !value.is_finite() || value.abs() > 1_000_000.0)
+            || agent.allegiance > 6
+            || agent.is_living != living
+            || agent.is_item != item
+            || agent.is_gadget != gadget
+            || agent.is_dead != (living && agent.effects & 0x10 != 0)
+            || agent.is_moving != (living && matches!(agent.model_state, 12 | 76 | 204))
+            || agent.is_attacking != (living && matches!(agent.model_state, 96 | 1088 | 1120))
+            || agent.is_knocked_down != (living && agent.model_state == 1104)
+            || agent.is_casting != (living && matches!(agent.model_state, 65 | 581))
+            || (!living
+                && (agent.player_number != 0
+                    || agent.primary != 0
+                    || agent.secondary != 0
+                    || agent.level != 0
+                    || agent.health != 0.0
+                    || agent.model_state != 0
+                    || agent.effects != 0
+                    || agent.allegiance != 0))
+        {
+            return Err("map-agent record is outside its certified bounds".into());
+        }
+        previous_id = agent.agent_id;
+    }
+    Ok(())
+}
+
+fn validate_quests(quests: &Quests) -> Result<(), String> {
+    if quests.active_quest_id > 100_000
+        || quests.quests.len() > 64
+        || quests.mission_objectives.len() > 32
+        || (quests.quests_truncated && quests.quests.len() != 64)
+        || (quests.objectives_truncated && quests.mission_objectives.len() != 32)
+    {
+        return Err("quest page is outside its certified bounds".into());
+    }
+    let mut quest_ids = std::collections::HashSet::with_capacity(quests.quests.len());
+    if quests.quests.iter().any(|quest| {
+        quest.quest_id == 0
+            || quest.quest_id > 100_000
+            || !quest_ids.insert(quest.quest_id)
+            || quest.map_from > 2_000
+            || quest.map_to > 2_000
+            || !quest.marker_x.is_finite()
+            || quest.marker_x.abs() > 1_000_000.0
+            || !quest.marker_y.is_finite()
+            || quest.marker_y.abs() > 1_000_000.0
+            || quest.marker_plane > 100_000
+            || quest.completed != (quest.log_state & 0x2 != 0)
+            || quest.current_mission != (quest.log_state & 0x10 != 0)
+            || quest.primary != (quest.log_state & 0x20 != 0)
+            || quest.area_primary != (quest.log_state & 0x40 != 0)
+    }) {
+        return Err("quest record is outside its certified bounds".into());
+    }
+    if quests.active_quest_id != 0
+        && !quests.quests_truncated
+        && !quest_ids.contains(&quests.active_quest_id)
+    {
+        return Err("active quest is absent from the complete quest page".into());
+    }
+    let mut objective_ids =
+        std::collections::HashSet::with_capacity(quests.mission_objectives.len());
+    if quests.mission_objectives.iter().any(|objective| {
+        objective.objective_id == 0
+            || !objective_ids.insert(objective.objective_id)
+            || objective.objective_type > 100_000
+    }) {
+        return Err("mission objective is outside its certified bounds".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn party_skillbar_and_effects_are_typed_and_bounded() {
+    fn certified_nested_domains_are_typed_and_bounded() {
         let hub = Hub::default();
         let state = br#"{
             "status":"ready","tickCount":7,"mapId":55,"instanceType":1,
@@ -527,6 +726,29 @@ mod tests {
                 "agentId":4,"buffsTruncated":false,"effectsTruncated":false,
                 "buffs":[{"skillId":200,"buffId":300,"targetAgentId":4}],
                 "effects":[{"skillId":201,"attributeLevel":12,"effectId":301,"agentId":8,"duration":12.5,"timestamp":400}]
+            },
+            "agents":{
+                "truncated":false,"total":1,
+                "agents":[{
+                    "agentId":4,"typeBits":219,"kind":"Living","playerNumber":42,
+                    "primary":7,"secondary":0,"level":20,"health":0.75,
+                    "rotation":1.25,"x":1.5,"y":2.5,"z":3,
+                    "modelState":65,"effects":0,"allegiance":1,
+                    "isLiving":true,"isItem":false,"isGadget":false,
+                    "isDead":false,"isMoving":false,"isAttacking":false,
+                    "isKnockedDown":false,"isCasting":true
+                }]
+            },
+            "quests":{
+                "activeQuestId":44,"questsTruncated":false,
+                "objectivesTruncated":false,
+                "quests":[{
+                    "questId":44,"logState":34,"mapFrom":55,
+                    "markerX":10,"markerY":20,"markerPlane":3,"mapTo":56,
+                    "completed":true,"currentMission":false,
+                    "primary":true,"areaPrimary":false
+                }],
+                "missionObjectives":[{"objectiveId":7,"type":2}]
             }
         }"#;
         hub.publish(state).unwrap();
@@ -537,10 +759,14 @@ mod tests {
         assert_eq!(value["state"]["skillbar"]["castCount"], 0);
         assert_eq!(value["state"]["effects"]["buffs"][0]["buffId"], 300);
         assert_eq!(value["state"]["effects"]["effects"][0]["duration"], 12.5);
+        assert_eq!(value["state"]["agents"]["agents"][0]["kind"], "Living");
+        assert_eq!(value["state"]["agents"]["agents"][0]["isCasting"], true);
+        assert_eq!(value["state"]["quests"]["activeQuestId"], 44);
+        assert_eq!(value["state"]["quests"]["quests"][0]["completed"], true);
     }
 
     #[test]
-    fn malformed_party_skillbar_and_effects_state_is_refused() {
+    fn malformed_nested_domain_state_is_refused() {
         let hub = Hub::default();
         for state in [
             br#"{"status":"ready","mapId":1,"playerId":2,"playerX":0,"playerY":0,"targetValid":false,"party":{"id":1,"hardMode":false,"defeated":false,"leader":false,"alliesTruncated":false,"players":[],"heroes":[],"henchmen":[],"allies":[]}}"#.as_slice(),
@@ -549,6 +775,9 @@ mod tests {
             br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","skillbar":{"agentId":2,"disabledMask":1,"castCount":0,"casting":false,"skills":[{"slot":1,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":1,"event":0,"disabled":false},{"slot":2,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":2,"event":0,"disabled":false},{"slot":3,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":3,"event":0,"disabled":false},{"slot":4,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":4,"event":0,"disabled":false},{"slot":5,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":5,"event":0,"disabled":false},{"slot":6,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":6,"event":0,"disabled":false},{"slot":7,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":7,"event":0,"disabled":false},{"slot":8,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":8,"event":0,"disabled":false}]}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","effects":{"agentId":2,"buffsTruncated":false,"effectsTruncated":false,"buffs":[],"effects":[{"skillId":1,"attributeLevel":0,"effectId":7,"agentId":0,"duration":1,"timestamp":1},{"skillId":2,"attributeLevel":0,"effectId":7,"agentId":0,"duration":1,"timestamp":2}]}}"#.as_slice(),
             br#"{"status":"waiting","effects":{"agentId":2,"buffsTruncated":false,"effectsTruncated":false,"buffs":[],"effects":[]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","agents":{"truncated":false,"total":1,"agents":[{"agentId":2,"typeBits":219,"kind":"Living","playerNumber":1,"primary":0,"secondary":0,"level":20,"health":1,"rotation":0,"x":0,"y":0,"z":0,"modelState":65,"effects":0,"allegiance":1,"isLiving":true,"isItem":false,"isGadget":false,"isDead":false,"isMoving":false,"isAttacking":false,"isKnockedDown":false,"isCasting":false}]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","quests":{"activeQuestId":2,"questsTruncated":false,"objectivesTruncated":false,"quests":[{"questId":1,"logState":0,"mapFrom":0,"markerX":0,"markerY":0,"markerPlane":0,"mapTo":0,"completed":false,"currentMission":false,"primary":false,"areaPrimary":false}],"missionObjectives":[]}}"#.as_slice(),
+            br#"{"status":"waiting","agents":{"truncated":false,"total":0,"agents":[]}}"#.as_slice(),
         ] {
             assert!(hub.publish(state).is_err());
         }
