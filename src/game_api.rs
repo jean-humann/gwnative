@@ -329,6 +329,32 @@ pub struct Completion {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Point3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Camera {
+    pub look_at_agent_id: u32,
+    pub mode: u32,
+    pub mode_name: String,
+    pub unlocked: bool,
+    pub yaw: f32,
+    pub current_yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
+    pub max_distance: f32,
+    pub position: Point3,
+    pub look_at: Point3,
+    pub field_of_view: f32,
+    pub render_field_of_view: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -377,6 +403,8 @@ pub struct State {
     pub social: Option<Social>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<Completion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<Camera>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -485,7 +513,7 @@ impl Hub {
             "state": {
                 "domains": [
                     "player", "map", "target", "party", "skillbar", "effects",
-                    "agents", "quests", "inventory", "social", "completion"
+                    "agents", "quests", "inventory", "social", "completion", "camera"
                 ],
                 "available": self.state_json().is_some(),
             },
@@ -594,6 +622,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(completion) = &state.completion {
             validate_completion(completion)?;
         }
+        if let Some(camera) = &state.camera {
+            validate_camera(camera)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -615,6 +646,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.inventory.is_some()
         || state.social.is_some()
         || state.completion.is_some()
+        || state.camera.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -1124,6 +1156,61 @@ fn validate_completion(completion: &Completion) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_camera(camera: &Camera) -> Result<(), String> {
+    let mode_name = match camera.mode {
+        0 => "Default",
+        2 => "Follow",
+        3 => "Unlocked",
+        1 | 4..=9 => "Unknown",
+        _ => return Err("camera mode is outside its certified bounds".into()),
+    };
+    let coordinates = [
+        camera.position.x,
+        camera.position.y,
+        camera.position.z,
+        camera.look_at.x,
+        camera.look_at.y,
+        camera.look_at.z,
+    ];
+    let tangent =
+        (camera.position.y - camera.look_at.y).atan2(camera.position.x - camera.look_at.x);
+    let current_yaw = if tangent >= 0.0 {
+        tangent - std::f32::consts::PI
+    } else {
+        tangent + std::f32::consts::PI
+    };
+    let render_field_of_view =
+        1.0_f32.atan2((5.0 / 3.0) / (camera.field_of_view * 0.5).tan()) * 2.0;
+    let approximately = |left: f32, right: f32| {
+        left.is_finite() && right.is_finite() && (left - right).abs() <= 0.0001
+    };
+    if camera.look_at_agent_id > MAX_AGENT_ID
+        || camera.mode_name != mode_name
+        || camera.unlocked != (camera.mode == 3)
+        || !camera.yaw.is_finite()
+        || camera.yaw.abs() > 10.0
+        || !camera.current_yaw.is_finite()
+        || camera.current_yaw.abs() > std::f32::consts::PI
+        || !approximately(camera.current_yaw, current_yaw)
+        || !camera.pitch.is_finite()
+        || !(-1.01..=1.01).contains(&camera.pitch)
+        || !camera.distance.is_finite()
+        || !(0.0..=100_000.0).contains(&camera.distance)
+        || !camera.max_distance.is_finite()
+        || !(0.0..=100_000.0).contains(&camera.max_distance)
+        || coordinates
+            .iter()
+            .any(|value| !value.is_finite() || value.abs() > 1_000_000.0)
+        || !camera.field_of_view.is_finite()
+        || !(0.0..=std::f32::consts::PI).contains(&camera.field_of_view)
+        || camera.field_of_view == 0.0
+        || !approximately(camera.render_field_of_view, render_field_of_view)
+    {
+        return Err("camera state is outside its certified bounds".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1250,6 +1337,14 @@ mod tests {
                         "emblem":6,"trim":7
                     }
                 }
+            },
+            "camera":{
+                "lookAtAgentId":4,"mode":3,"modeName":"Unlocked",
+                "unlocked":true,"yaw":1.25,"currentYaw":2.3561945,
+                "pitch":0.25,"distance":1000,"maxDistance":5000,
+                "position":{"x":110,"y":-260,"z":-50},
+                "lookAt":{"x":100,"y":-250,"z":3},
+                "fieldOfView":1.2,"renderFieldOfView":0.77901974
             }
         }"#;
         hub.publish(state).unwrap();
@@ -1274,6 +1369,11 @@ mod tests {
             "Friend"
         );
         assert_eq!(value["state"]["social"]["guild"]["factionName"], "Kurzick");
+        assert_eq!(value["state"]["camera"]["modeName"], "Unlocked");
+        assert_eq!(
+            value["state"]["camera"]["position"]["z"].as_f64(),
+            Some(-50.0),
+        );
     }
 
     #[test]
@@ -1295,6 +1395,33 @@ mod tests {
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","completion":{"normalMode":{"completedMissions":[56,55],"completedBonuses":[]},"hardMode":{"completedMissions":[],"completedBonuses":[]},"unlockedMaps":[],"vanquishedAreas":[]}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","completion":{"normalMode":{"completedMissions":[],"completedBonuses":[]},"hardMode":{"completedMissions":[],"completedBonuses":[]},"unlockedMaps":[1024],"vanquishedAreas":[]}}"#.as_slice(),
             br#"{"status":"waiting","completion":{"normalMode":{"completedMissions":[],"completedBonuses":[]},"hardMode":{"completedMissions":[],"completedBonuses":[]},"unlockedMaps":[],"vanquishedAreas":[]}}"#.as_slice(),
+        ] {
+            assert!(hub.publish(state).is_err());
+        }
+    }
+
+    #[test]
+    fn camera_state_is_derived_and_bounded() {
+        let hub = Hub::default();
+        let valid = br#"{
+            "status":"ready","tickCount":1,"mapId":55,"instanceType":0,
+            "instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "camera":{
+                "lookAtAgentId":2,"mode":2,"modeName":"Follow",
+                "unlocked":false,"yaw":1.25,"currentYaw":2.3561945,
+                "pitch":0.25,"distance":1000,"maxDistance":5000,
+                "position":{"x":110,"y":-260,"z":-50},
+                "lookAt":{"x":100,"y":-250,"z":3},
+                "fieldOfView":1.2,"renderFieldOfView":0.77901974
+            }
+        }"#;
+        hub.publish(valid).unwrap();
+
+        for state in [
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","camera":{"lookAtAgentId":2,"mode":10,"modeName":"Unknown","unlocked":false,"yaw":1.25,"currentYaw":2.3561945,"pitch":0.25,"distance":1000,"maxDistance":5000,"position":{"x":110,"y":-260,"z":-50},"lookAt":{"x":100,"y":-250,"z":3},"fieldOfView":1.2,"renderFieldOfView":0.77901974}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","camera":{"lookAtAgentId":2,"mode":2,"modeName":"Follow","unlocked":false,"yaw":1.25,"currentYaw":0,"pitch":0.25,"distance":1000,"maxDistance":5000,"position":{"x":110,"y":-260,"z":-50},"lookAt":{"x":100,"y":-250,"z":3},"fieldOfView":1.2,"renderFieldOfView":0.77901974}}"#.as_slice(),
+            br#"{"status":"waiting","camera":{"lookAtAgentId":0,"mode":0,"modeName":"Default","unlocked":false,"yaw":0,"currentYaw":0,"pitch":0,"distance":0,"maxDistance":0,"position":{"x":0,"y":0,"z":0},"lookAt":{"x":0,"y":0,"z":0},"fieldOfView":1,"renderFieldOfView":1}}"#.as_slice(),
         ] {
             assert!(hub.publish(state).is_err());
         }

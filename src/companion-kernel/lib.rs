@@ -38,7 +38,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 7;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 8;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -52,6 +52,7 @@ const FLAG_QUESTS_VALID: u32 = 1 << 8;
 const FLAG_INVENTORY_VALID: u32 = 1 << 9;
 const FLAG_SOCIAL_VALID: u32 = 1 << 10;
 const FLAG_COMPLETION_VALID: u32 = 1 << 11;
+const FLAG_CAMERA_VALID: u32 = 1 << 12;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -263,6 +264,16 @@ struct Layout {
     cursor_texture_type: u32,
     cursor_texture_width: u32,
     cursor_texture_height: u32,
+    camera_address: u32,
+    camera_look_at_agent_id: u32,
+    camera_max_distance: u32,
+    camera_yaw: u32,
+    camera_pitch: u32,
+    camera_distance: u32,
+    camera_position: u32,
+    camera_look_at_target: u32,
+    camera_field_of_view: u32,
+    camera_mode: u32,
 }
 
 impl Layout {
@@ -430,6 +441,16 @@ impl Layout {
         cursor_texture_type: 0,
         cursor_texture_width: 0,
         cursor_texture_height: 0,
+        camera_address: 0,
+        camera_look_at_agent_id: 0,
+        camera_max_distance: 0,
+        camera_yaw: 0,
+        camera_pitch: 0,
+        camera_distance: 0,
+        camera_position: 0,
+        camera_look_at_target: 0,
+        camera_field_of_view: 0,
+        camera_mode: 0,
     };
 }
 
@@ -568,6 +589,34 @@ struct Friend {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct CameraState {
+    look_at_agent_id: u32,
+    mode: u32,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    max_distance: f32,
+    position: [f32; 3],
+    look_at: [f32; 3],
+    field_of_view: f32,
+}
+
+impl CameraState {
+    const EMPTY: Self = Self {
+        look_at_agent_id: 0,
+        mode: 0,
+        yaw: 0.0,
+        pitch: 0.0,
+        distance: 0.0,
+        max_distance: 0.0,
+        position: [0.0; 3],
+        look_at: [0.0; 3],
+        field_of_view: 0.0,
+    };
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -645,6 +694,7 @@ struct Snapshot {
     friends: [Friend; MAX_FRIENDS],
     completion_counts: [u32; 6],
     completion_words: [[u32; MAX_COMPLETION_WORDS as usize]; 6],
+    camera: CameraState,
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -665,8 +715,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 652] = [(); size_of::<Layout>()];
-const _: [(); 48732] = [(); size_of::<Snapshot>()];
+const _: [(); 692] = [(); size_of::<Layout>()];
+const _: [(); 48784] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 #[panic_handler]
@@ -737,6 +787,10 @@ unsafe fn pointer(address: u32, required_bytes: u32) -> Option<u32> {
 
 fn finite_position(value: f32) -> bool {
     value.is_finite() && value.abs() <= 1_000_000.0
+}
+
+fn finite_camera_angle(value: f32) -> bool {
+    value.is_finite() && value.abs() <= 10.0
 }
 
 fn valid_agent_type(value: u32) -> bool {
@@ -1055,6 +1109,7 @@ struct State {
     inventory: InventorySource,
     social: SocialSource,
     completion: CompletionSource,
+    camera: CameraState,
 }
 
 impl State {
@@ -1081,6 +1136,7 @@ impl State {
             inventory: InventorySource::EMPTY,
             social: SocialSource::EMPTY,
             completion: CompletionSource::EMPTY,
+            camera: CameraState::EMPTY,
         }
     }
 }
@@ -1316,6 +1372,66 @@ unsafe fn collect_completion(layout: Layout, game: u32) -> Option<CompletionSour
         };
     }
     Some(CompletionSource { arrays })
+}
+
+unsafe fn collect_camera(layout: Layout) -> Option<CameraState> {
+    let camera = layout.camera_address;
+    if camera == 0
+        || camera & 3 != 0
+        || !contains(camera, layout.camera_mode.checked_add(4)?)
+    {
+        return None;
+    }
+    let look_at_agent_id =
+        unsafe { read_u32(offset(camera, layout.camera_look_at_agent_id)?)? };
+    let mode = unsafe { read_u32(offset(camera, layout.camera_mode)?)? };
+    let yaw = unsafe { read_f32(offset(camera, layout.camera_yaw)?)? };
+    let pitch = unsafe { read_f32(offset(camera, layout.camera_pitch)?)? };
+    let distance = unsafe { read_f32(offset(camera, layout.camera_distance)?)? };
+    let max_distance =
+        unsafe { read_f32(offset(camera, layout.camera_max_distance)?)? };
+    let field_of_view =
+        unsafe { read_f32(offset(camera, layout.camera_field_of_view)?)? };
+    let position_address = offset(camera, layout.camera_position)?;
+    let look_at_address = offset(camera, layout.camera_look_at_target)?;
+    let position = [
+        unsafe { read_f32(position_address)? },
+        unsafe { read_f32(offset(position_address, 4)?)? },
+        unsafe { read_f32(offset(position_address, 8)?)? },
+    ];
+    let look_at = [
+        unsafe { read_f32(look_at_address)? },
+        unsafe { read_f32(offset(look_at_address, 4)?)? },
+        unsafe { read_f32(offset(look_at_address, 8)?)? },
+    ];
+    if look_at_agent_id > 4_095
+        || mode > 9
+        || !finite_camera_angle(yaw)
+        || !pitch.is_finite()
+        || !(-1.01..=1.01).contains(&pitch)
+        || !distance.is_finite()
+        || !(0.0..=100_000.0).contains(&distance)
+        || !max_distance.is_finite()
+        || !(0.0..=100_000.0).contains(&max_distance)
+        || !field_of_view.is_finite()
+        || !(0.0..=core::f32::consts::PI).contains(&field_of_view)
+        || field_of_view == 0.0
+        || position.into_iter().any(|value| !finite_position(value))
+        || look_at.into_iter().any(|value| !finite_position(value))
+    {
+        return None;
+    }
+    Some(CameraState {
+        look_at_agent_id,
+        mode,
+        yaw,
+        pitch,
+        distance,
+        max_distance,
+        position,
+        look_at,
+        field_of_view,
+    })
 }
 
 fn expected_bag_type(bag_id: u32) -> Option<u32> {
@@ -1982,6 +2098,10 @@ unsafe fn collect(layout: Layout) -> State {
     if let Some(completion) = unsafe { collect_completion(layout, game) } {
         state.flags |= FLAG_COMPLETION_VALID;
         state.completion = completion;
+    }
+    if let Some(camera) = unsafe { collect_camera(layout) } {
+        state.flags |= FLAG_CAMERA_VALID;
+        state.camera = camera;
     }
     state
 }
@@ -2745,6 +2865,7 @@ unsafe fn publish(runtime: &mut RuntimeState, mut state: State, layout: Layout) 
         if !publish_completion(snapshot, state.completion) {
             state.flags &= !FLAG_COMPLETION_VALID;
         }
+        write_volatile(&mut (*snapshot).camera, state.camera);
         write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).sequence, next);
     }

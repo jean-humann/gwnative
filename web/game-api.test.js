@@ -72,12 +72,35 @@ describe('public game state', () => {
       unlockedMaps: Object.freeze([55]),
       vanquishedAreas: Object.freeze([]),
     });
+    const camera = Object.freeze({
+      mode: 3,
+      modeName: 'Unlocked',
+      position: Object.freeze({ x: 1, y: 2, z: 3 }),
+    });
     assert.deepEqual(
       publicState({
-        status: 'ready', party, skillbar, effects, agents, quests, inventory, social, completion,
+        status: 'ready',
+        party,
+        skillbar,
+        effects,
+        agents,
+        quests,
+        inventory,
+        social,
+        completion,
+        camera,
       }),
       {
-        status: 'ready', party, skillbar, effects, agents, quests, inventory, social, completion,
+        status: 'ready',
+        party,
+        skillbar,
+        effects,
+        agents,
+        quests,
+        inventory,
+        social,
+        completion,
+        camera,
       },
     );
   });

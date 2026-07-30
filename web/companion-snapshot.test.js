@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 7;
+const SNAPSHOT_ABI = 8;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -43,6 +43,7 @@ const FLAG_QUESTS = 1 << 8;
 const FLAG_INVENTORY = 1 << 9;
 const FLAG_SOCIAL = 1 << 10;
 const FLAG_COMPLETION = 1 << 11;
+const FLAG_CAMERA = 1 << 12;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -117,7 +118,8 @@ function domainSnapshot() {
       | FLAG_QUESTS
       | FLAG_INVENTORY
       | FLAG_SOCIAL
-      | FLAG_COMPLETION,
+      | FLAG_COMPLETION
+      | FLAG_CAMERA,
   });
   const view = new DataView(buffer);
   view.setUint32(64, 3, true);
@@ -244,6 +246,19 @@ function domainSnapshot() {
     const bit = mapId % 32;
     view.setUint32(47964 + category * 128 + word * 4, 2 ** bit, true);
   }
+  view.setUint32(48732, 1, true);
+  view.setUint32(48736, 3, true);
+  view.setFloat32(48740, 1.25, true);
+  view.setFloat32(48744, 0.25, true);
+  view.setFloat32(48748, 1_000, true);
+  view.setFloat32(48752, 5_000, true);
+  view.setFloat32(48756, 110, true);
+  view.setFloat32(48760, -260, true);
+  view.setFloat32(48764, -50, true);
+  view.setFloat32(48768, 100, true);
+  view.setFloat32(48772, -250, true);
+  view.setFloat32(48776, 3, true);
+  view.setFloat32(48780, 1.2, true);
   return buffer;
 }
 
@@ -455,6 +470,16 @@ describe('companion snapshot', () => {
     assert.deepEqual(state.completion.hardMode.completedBonuses, [58]);
     assert.deepEqual(state.completion.unlockedMaps, [59]);
     assert.deepEqual(state.completion.vanquishedAreas, [60]);
+    assert.equal(state.camera.lookAtAgentId, 1);
+    assert.equal(state.camera.modeName, 'Unlocked');
+    assert.equal(state.camera.unlocked, true);
+    assert.equal(state.camera.yaw, 1.25);
+    assert.equal(state.camera.pitch, 0.25);
+    assert.deepEqual(state.camera.position, { x: 110, y: -260, z: -50 });
+    assert.deepEqual(state.camera.lookAt, { x: 100, y: -250, z: 3 });
+    assert.ok(Math.abs(state.camera.fieldOfView - 1.2) < 0.000001);
+    assert.ok(Number.isFinite(state.camera.currentYaw));
+    assert.ok(Number.isFinite(state.camera.renderFieldOfView));
     assert.ok(Object.isFrozen(state.party.players));
     assert.ok(Object.isFrozen(state.skillbar.skills));
     assert.ok(Object.isFrozen(state.effects.effects));
@@ -465,6 +490,8 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state.social.guild.cape));
     assert.ok(Object.isFrozen(state.completion.normalMode.completedMissions));
     assert.ok(Object.isFrozen(state.completion));
+    assert.ok(Object.isFrozen(state.camera.position));
+    assert.ok(Object.isFrozen(state.camera));
   });
 
   it('accepts a complete bounded inventory page with an explicit remainder', () => {
@@ -614,6 +641,23 @@ describe('companion snapshot', () => {
       true,
     );
     assert.equal(readCompanionSnapshot(absentCompletion, 0).reason, 'corrupt');
+
+    const badCameraMode = domainSnapshot();
+    new DataView(badCameraMode).setUint32(48736, 10, true);
+    assert.equal(readCompanionSnapshot(badCameraMode, 0).reason, 'corrupt');
+
+    const badCameraFov = domainSnapshot();
+    new DataView(badCameraFov).setFloat32(48780, Number.NaN, true);
+    assert.equal(readCompanionSnapshot(badCameraFov, 0).reason, 'corrupt');
+
+    const absentCamera = domainSnapshot();
+    const absentCameraView = new DataView(absentCamera);
+    absentCameraView.setUint32(
+      12,
+      absentCameraView.getUint32(12, true) & ~FLAG_CAMERA,
+      true,
+    );
+    assert.equal(readCompanionSnapshot(absentCamera, 0).reason, 'corrupt');
   });
 
   // The seqlock, which is the whole reason this can be read on the animation
@@ -633,7 +677,7 @@ describe('companion snapshot', () => {
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
       // A flag this build has no name for. The companion sets only four, so a
       // fifth is either a newer companion or not a companion at all.
-      { flags: FLAG_READY | FLAG_PLAYER | (1 << 12) },
+      { flags: FLAG_READY | FLAG_PLAYER | (1 << 13) },
     ]) {
       assert.equal(read(overrides).reason, 'snapshot', JSON.stringify(overrides));
     }
