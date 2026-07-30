@@ -15,9 +15,73 @@ use serde::{Deserialize, Serialize};
 pub const VERSION: u32 = 1;
 pub const MAX_PUBLISH_BYTES: usize = 16 * 1024;
 pub const MAX_WAIT_MS: u64 = 15_000;
+const MAX_AGENT_ID: u32 = 4_095;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PartyPlayer {
+    pub login_number: u32,
+    pub called_target_id: u32,
+    pub state: u32,
+    pub connected: bool,
+    pub ticked: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PartyHero {
+    pub agent_id: u32,
+    pub owner_player_id: u32,
+    pub hero_id: u32,
+    pub level: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PartyHenchman {
+    pub agent_id: u32,
+    pub profession: u32,
+    pub level: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Party {
+    pub id: u32,
+    pub hard_mode: bool,
+    pub defeated: bool,
+    pub leader: bool,
+    pub allies_truncated: bool,
+    pub players: Vec<PartyPlayer>,
+    pub heroes: Vec<PartyHero>,
+    pub henchmen: Vec<PartyHenchman>,
+    pub allies: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Skill {
+    pub slot: u32,
+    pub adrenaline_a: u32,
+    pub adrenaline_b: u32,
+    pub recharge: u32,
+    pub skill_id: u32,
+    pub event: u32,
+    pub disabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Skillbar {
+    pub agent_id: u32,
+    pub disabled_mask: u32,
+    pub cast_count: u32,
+    pub casting: bool,
+    pub skills: Vec<Skill>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,6 +114,10 @@ pub struct State {
     pub distance: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub party: Option<Party>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skillbar: Option<Skillbar>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -156,7 +224,7 @@ impl Hub {
                 "tokenRequired": true,
             },
             "state": {
-                "domains": ["player", "map", "target"],
+                "domains": ["player", "map", "target", "party", "skillbar"],
                 "available": self.state_json().is_some(),
             },
             "actions": {
@@ -194,8 +262,16 @@ fn validate(state: &State) -> Result<(), String> {
         return Err("distance cannot be negative".into());
     }
     if state.status == "ready" {
-        if state.map_id.is_none()
-            || state.player_id.is_none()
+        if state.reason.is_some()
+            || state.tick_count.is_none()
+            || !state.map_id.is_some_and(|id| (1..=2_000).contains(&id))
+            || !matches!(
+                (state.instance_type, state.instance_name.as_deref()),
+                (Some(0), Some("Outpost")) | (Some(1), Some("Explorable"))
+            )
+            || !state
+                .player_id
+                .is_some_and(|id| (1..=MAX_AGENT_ID).contains(&id))
             || state.player_x.is_none()
             || state.player_y.is_none()
         {
@@ -203,17 +279,127 @@ fn validate(state: &State) -> Result<(), String> {
         }
         match state.target_valid {
             Some(true)
-                if state.target_id.is_some()
+                if state
+                    .target_id
+                    .is_some_and(|id| (1..=MAX_AGENT_ID).contains(&id))
+                    && matches!(state.target_kind.as_deref(), Some("Living" | "Unknown"))
                     && state.target_x.is_some()
                     && state.target_y.is_some()
-                    && state.distance.is_some() => {}
+                    && state.distance.is_some()
+                    && state.range_name.as_deref().is_some_and(|name| {
+                        matches!(
+                            name,
+                            "Adjacent"
+                                | "Nearby"
+                                | "Area"
+                                | "Earshot"
+                                | "Spellcast"
+                                | "Spirit"
+                                | "Compass"
+                                | "Beyond compass"
+                        )
+                    }) => {}
             Some(false)
                 if state.target_id.is_none()
+                    && state.target_kind.as_deref() == Some("None")
                     && state.target_x.is_none()
                     && state.target_y.is_none()
-                    && state.distance.is_none() => {}
+                    && state.distance.is_none()
+                    && state.range_name.as_deref() == Some("None") => {}
             _ => return Err("ready game state has an inconsistent target".into()),
         }
+        if let Some(party) = &state.party {
+            validate_party(party)?;
+        }
+        if let Some(skillbar) = &state.skillbar {
+            validate_skillbar(skillbar, state.player_id.unwrap_or_default())?;
+        }
+    } else if state.map_id.is_some()
+        || state.instance_type.is_some()
+        || state.instance_name.is_some()
+        || state.player_id.is_some()
+        || state.player_x.is_some()
+        || state.player_y.is_some()
+        || state.target_valid.is_some()
+        || state.target_id.is_some()
+        || state.target_kind.is_some()
+        || state.target_x.is_some()
+        || state.target_y.is_some()
+        || state.distance.is_some()
+        || state.range_name.is_some()
+        || state.party.is_some()
+        || state.skillbar.is_some()
+    {
+        return Err("non-ready game state carries live game data".into());
+    }
+    Ok(())
+}
+
+fn validate_party(party: &Party) -> Result<(), String> {
+    if party.players.is_empty()
+        || party.players.len() > 12
+        || party.heroes.len() > 12
+        || party.henchmen.len() > 12
+        || party.players.len() + party.heroes.len() + party.henchmen.len() > 12
+        || party.allies.len() > 32
+    {
+        return Err("party roster is outside its certified bounds".into());
+    }
+    if party.players.iter().any(|player| {
+        player.login_number == 0
+            || player.called_target_id > MAX_AGENT_ID
+            || player.connected != (player.state & 1 != 0)
+            || player.ticked != (player.state & 2 != 0)
+    }) {
+        return Err("party player state is inconsistent".into());
+    }
+    if party.heroes.iter().any(|hero| {
+        hero.agent_id == 0
+            || hero.agent_id > MAX_AGENT_ID
+            || hero.owner_player_id == 0
+            || !party
+                .players
+                .iter()
+                .any(|player| player.login_number == hero.owner_player_id)
+            || hero.hero_id == 0
+            || hero.hero_id > 1_000
+            || !(1..=20).contains(&hero.level)
+    }) {
+        return Err("party hero state is outside its certified bounds".into());
+    }
+    if party.henchmen.iter().any(|henchman| {
+        henchman.agent_id == 0
+            || henchman.agent_id > MAX_AGENT_ID
+            || henchman.profession > 10
+            || !(1..=20).contains(&henchman.level)
+    }) {
+        return Err("party henchman state is outside its certified bounds".into());
+    }
+    if party
+        .allies
+        .iter()
+        .any(|agent_id| !(1..=MAX_AGENT_ID).contains(agent_id))
+    {
+        return Err("party ally state is outside its certified agent bounds".into());
+    }
+    Ok(())
+}
+
+fn validate_skillbar(skillbar: &Skillbar, player_id: u32) -> Result<(), String> {
+    if skillbar.agent_id != player_id
+        || skillbar.disabled_mask & !0xff != 0
+        || skillbar.cast_count > 64
+        || skillbar.casting != (skillbar.cast_count != 0)
+        || skillbar.skills.len() != 8
+    {
+        return Err("skillbar does not belong to the certified player".into());
+    }
+    if skillbar.skills.iter().enumerate().any(|(index, skill)| {
+        skill.slot != index as u32 + 1
+            || skill.skill_id > 100_000
+            || skill.disabled != (skillbar.disabled_mask & (1 << index) != 0)
+    }) {
+        return Err("skillbar slots are outside their certified bounds".into());
     }
     Ok(())
 }
@@ -230,7 +416,7 @@ mod tests {
         let state = br#"{
             "status":"ready","tickCount":7,"mapId":55,"instanceType":1,
             "instanceName":"Explorable","playerId":4,"playerX":1.5,"playerY":2.5,
-            "targetValid":false
+            "targetValid":false,"targetKind":"None","rangeName":"None"
         }"#;
         assert_eq!(hub.publish(state).unwrap(), 1);
         assert_eq!(hub.publish(state).unwrap(), 2);
@@ -238,6 +424,67 @@ mod tests {
         assert_eq!(value["apiVersion"], 1);
         assert_eq!(value["revision"], 2);
         assert_eq!(value["state"]["mapId"], 55);
+    }
+
+    #[test]
+    fn party_and_skillbar_are_typed_and_bounded() {
+        let hub = Hub::default();
+        let state = br#"{
+            "status":"ready","tickCount":7,"mapId":55,"instanceType":1,
+            "instanceName":"Explorable","playerId":4,"playerX":1.5,"playerY":2.5,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "party":{
+                "id":3,"hardMode":false,"defeated":false,"leader":true,
+                "alliesTruncated":false,
+                "players":[{"loginNumber":42,"calledTargetId":0,"state":3,"connected":true,"ticked":true}],
+                "heroes":[{"agentId":8,"ownerPlayerId":42,"heroId":5,"level":20}],
+                "henchmen":[],"allies":[9]
+            },
+            "skillbar":{
+                "agentId":4,"disabledMask":0,"castCount":0,"casting":false,
+                "skills":[
+                    {"slot":1,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":100,"event":0,"disabled":false},
+                    {"slot":2,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":101,"event":0,"disabled":false},
+                    {"slot":3,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":102,"event":0,"disabled":false},
+                    {"slot":4,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":103,"event":0,"disabled":false},
+                    {"slot":5,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":104,"event":0,"disabled":false},
+                    {"slot":6,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":105,"event":0,"disabled":false},
+                    {"slot":7,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":106,"event":0,"disabled":false},
+                    {"slot":8,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":107,"event":0,"disabled":false}
+                ]
+            }
+        }"#;
+        hub.publish(state).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&hub.state_json().unwrap()).unwrap();
+        assert_eq!(value["state"]["party"]["players"][0]["loginNumber"], 42);
+        assert_eq!(value["state"]["skillbar"]["skills"][7]["slot"], 8);
+        assert_eq!(value["state"]["skillbar"]["disabledMask"], 0);
+        assert_eq!(value["state"]["skillbar"]["castCount"], 0);
+    }
+
+    #[test]
+    fn malformed_party_and_skillbar_state_is_refused() {
+        let hub = Hub::default();
+        for state in [
+            br#"{"status":"ready","mapId":1,"playerId":2,"playerX":0,"playerY":0,"targetValid":false,"party":{"id":1,"hardMode":false,"defeated":false,"leader":false,"alliesTruncated":false,"players":[],"heroes":[],"henchmen":[],"allies":[]}}"#.as_slice(),
+            br#"{"status":"ready","mapId":1,"playerId":2,"playerX":0,"playerY":0,"targetValid":false,"skillbar":{"agentId":3,"disabledMask":0,"castCount":0,"casting":false,"skills":[]}}"#.as_slice(),
+            br#"{"status":"waiting","party":{"id":1,"hardMode":false,"defeated":false,"leader":false,"alliesTruncated":false,"players":[],"heroes":[],"henchmen":[],"allies":[]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","skillbar":{"agentId":2,"disabledMask":1,"castCount":0,"casting":false,"skills":[{"slot":1,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":1,"event":0,"disabled":false},{"slot":2,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":2,"event":0,"disabled":false},{"slot":3,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":3,"event":0,"disabled":false},{"slot":4,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":4,"event":0,"disabled":false},{"slot":5,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":5,"event":0,"disabled":false},{"slot":6,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":6,"event":0,"disabled":false},{"slot":7,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":7,"event":0,"disabled":false},{"slot":8,"adrenalineA":0,"adrenalineB":0,"recharge":0,"skillId":8,"event":0,"disabled":false}]}}"#.as_slice(),
+        ] {
+            assert!(hub.publish(state).is_err());
+        }
+    }
+
+    #[test]
+    fn unknown_and_inconsistent_live_fields_are_refused() {
+        let hub = Hub::default();
+        for state in [
+            br#"{"status":"waiting","reason":"loading","mapId":1}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Explorable","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None"}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","unexpected":true}"#.as_slice(),
+        ] {
+            assert!(hub.publish(state).is_err());
+        }
     }
 
     #[test]

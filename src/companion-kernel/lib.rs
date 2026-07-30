@@ -38,12 +38,20 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 1;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 2;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
 const FLAG_TARGET_VALID: u32 = 1 << 2;
 const FLAG_LOADING: u32 = 1 << 3;
+const FLAG_PARTY_VALID: u32 = 1 << 4;
+const FLAG_SKILLBAR_VALID: u32 = 1 << 5;
+
+const MAX_PARTY_PLAYERS: usize = 12;
+const MAX_PARTY_HEROES: usize = 12;
+const MAX_PARTY_HENCHMEN: usize = 12;
+const MAX_PARTY_ALLIES: usize = 32;
+const SKILL_SLOTS: usize = 8;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -84,6 +92,40 @@ struct Layout {
     agent_type: u32,
     agent_player_number: u32,
     agent_model_type: u32,
+    game_world_context: u32,
+    game_party_context: u32,
+    party_flag: u32,
+    party_player_party: u32,
+    party_id: u32,
+    party_players: u32,
+    party_henchmen: u32,
+    party_heroes: u32,
+    party_others: u32,
+    party_player_stride: u32,
+    party_player_login_number: u32,
+    party_player_called_target_id: u32,
+    party_player_state: u32,
+    party_hero_stride: u32,
+    party_hero_agent_id: u32,
+    party_hero_owner_player_id: u32,
+    party_hero_id: u32,
+    party_hero_level: u32,
+    party_henchman_stride: u32,
+    party_henchman_agent_id: u32,
+    party_henchman_profession: u32,
+    party_henchman_level: u32,
+    world_skillbar: u32,
+    skillbar_stride: u32,
+    skillbar_agent_id: u32,
+    skillbar_skills: u32,
+    skillbar_disabled: u32,
+    skillbar_cast_count: u32,
+    skill_stride: u32,
+    skill_adrenaline_a: u32,
+    skill_adrenaline_b: u32,
+    skill_recharge: u32,
+    skill_id: u32,
+    skill_event: u32,
     cursor_active_art: u32,
     cursor_software_model: u32,
     cursor_show_count: u32,
@@ -96,6 +138,41 @@ struct Layout {
     cursor_texture_type: u32,
     cursor_texture_width: u32,
     cursor_texture_height: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PartyPlayer {
+    login_number: u32,
+    called_target_id: u32,
+    state: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PartyHero {
+    agent_id: u32,
+    owner_player_id: u32,
+    hero_id: u32,
+    level: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PartyHenchman {
+    agent_id: u32,
+    profession: u32,
+    level: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SkillSlot {
+    adrenaline_a: u32,
+    adrenaline_b: u32,
+    recharge: u32,
+    skill_id: u32,
+    event: u32,
 }
 
 #[repr(C)]
@@ -117,10 +194,24 @@ struct Snapshot {
     target_y: f32,
     distance: f32,
     range_band: u32,
+    party_id: u32,
+    party_flags: u32,
+    party_player_count: u32,
+    party_hero_count: u32,
+    party_henchman_count: u32,
+    party_ally_count: u32,
+    party_players: [PartyPlayer; MAX_PARTY_PLAYERS],
+    party_heroes: [PartyHero; MAX_PARTY_HEROES],
+    party_henchmen: [PartyHenchman; MAX_PARTY_HENCHMEN],
+    party_allies: [u32; MAX_PARTY_ALLIES],
+    skillbar_agent_id: u32,
+    skillbar_disabled_mask: u32,
+    skillbar_cast_count: u32,
+    skills: [SkillSlot; SKILL_SLOTS],
 }
 
-// Separate bounded region: the 64-byte core snapshot is full, and the cursor
-// bitmap is far too large to live in it.
+// Separate bounded region: the cursor bitmap is far too large to live in the
+// typed state snapshot.
 #[repr(C)]
 struct CursorSnapshot {
     magic: u32,
@@ -137,8 +228,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 116] = [(); size_of::<Layout>()];
-const _: [(); 64] = [(); size_of::<Snapshot>()];
+const _: [(); 252] = [(); size_of::<Layout>()];
+const _: [(); 868] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 #[panic_handler]
@@ -254,6 +345,76 @@ struct AgentState {
     y: f32,
 }
 
+const EMPTY_PARTY_PLAYER: PartyPlayer = PartyPlayer {
+    login_number: 0,
+    called_target_id: 0,
+    state: 0,
+};
+const EMPTY_PARTY_HERO: PartyHero = PartyHero {
+    agent_id: 0,
+    owner_player_id: 0,
+    hero_id: 0,
+    level: 0,
+};
+const EMPTY_PARTY_HENCHMAN: PartyHenchman = PartyHenchman {
+    agent_id: 0,
+    profession: 0,
+    level: 0,
+};
+const EMPTY_SKILL_SLOT: SkillSlot = SkillSlot {
+    adrenaline_a: 0,
+    adrenaline_b: 0,
+    recharge: 0,
+    skill_id: 0,
+    event: 0,
+};
+
+#[derive(Clone, Copy)]
+struct PartyState {
+    id: u32,
+    flags: u32,
+    player_count: u32,
+    hero_count: u32,
+    henchman_count: u32,
+    ally_count: u32,
+    players: [PartyPlayer; MAX_PARTY_PLAYERS],
+    heroes: [PartyHero; MAX_PARTY_HEROES],
+    henchmen: [PartyHenchman; MAX_PARTY_HENCHMEN],
+    allies: [u32; MAX_PARTY_ALLIES],
+}
+
+impl PartyState {
+    const EMPTY: Self = Self {
+        id: 0,
+        flags: 0,
+        player_count: 0,
+        hero_count: 0,
+        henchman_count: 0,
+        ally_count: 0,
+        players: [EMPTY_PARTY_PLAYER; MAX_PARTY_PLAYERS],
+        heroes: [EMPTY_PARTY_HERO; MAX_PARTY_HEROES],
+        henchmen: [EMPTY_PARTY_HENCHMAN; MAX_PARTY_HENCHMEN],
+        allies: [0; MAX_PARTY_ALLIES],
+    };
+}
+
+#[derive(Clone, Copy)]
+struct SkillbarState {
+    agent_id: u32,
+    disabled_mask: u32,
+    cast_count: u32,
+    skills: [SkillSlot; SKILL_SLOTS],
+}
+
+impl SkillbarState {
+    const EMPTY: Self = Self {
+        agent_id: 0,
+        disabled_mask: 0,
+        cast_count: 0,
+        skills: [EMPTY_SKILL_SLOT; SKILL_SLOTS],
+    };
+}
+
 #[derive(Clone, Copy)]
 struct State {
     flags: u32,
@@ -263,6 +424,8 @@ struct State {
     target: AgentState,
     distance: f32,
     band: u32,
+    party: PartyState,
+    skillbar: SkillbarState,
 }
 
 impl State {
@@ -281,6 +444,8 @@ impl State {
             target: EMPTY_AGENT,
             distance: 0.0,
             band: 0,
+            party: PartyState::EMPTY,
+            skillbar: SkillbarState::EMPTY,
         }
     }
 }
@@ -306,6 +471,225 @@ unsafe fn read_agent(
         return None;
     }
     Some(AgentState { id, kind, x, y })
+}
+
+#[derive(Clone, Copy)]
+struct ArrayView {
+    buffer: u32,
+    size: u32,
+}
+
+unsafe fn read_array(
+    address: u32,
+    stride: u32,
+    maximum_size: u32,
+    maximum_capacity: u32,
+) -> Option<ArrayView> {
+    if stride == 0 || !contains(address, 16) {
+        return None;
+    }
+    let buffer = unsafe { read_u32(address)? };
+    let capacity = unsafe { read_u32(offset(address, 4)?)? };
+    let size = unsafe { read_u32(offset(address, 8)?)? };
+    if size > capacity || size > maximum_size || capacity > maximum_capacity {
+        return None;
+    }
+    if size == 0 {
+        return Some(ArrayView { buffer: 0, size: 0 });
+    }
+    let bytes = checked_mul(size, stride)?;
+    (buffer & 3 == 0 && contains(buffer, bytes)).then_some(ArrayView { buffer, size })
+}
+
+unsafe fn collect_party(layout: Layout, game: u32, agent_count: u32) -> Option<PartyState> {
+    let party = unsafe {
+        pointer(
+            offset(game, layout.game_party_context)?,
+            layout.party_player_party.checked_add(4)?,
+        )?
+    };
+    let info = unsafe {
+        pointer(
+            offset(party, layout.party_player_party)?,
+            layout.party_others.checked_add(16)?,
+        )?
+    };
+    let players = unsafe {
+        read_array(
+            offset(info, layout.party_players)?,
+            layout.party_player_stride,
+            MAX_PARTY_PLAYERS as u32,
+            64,
+        )?
+    };
+    let heroes = unsafe {
+        read_array(
+            offset(info, layout.party_heroes)?,
+            layout.party_hero_stride,
+            MAX_PARTY_HEROES as u32,
+            64,
+        )?
+    };
+    let henchmen = unsafe {
+        read_array(
+            offset(info, layout.party_henchmen)?,
+            layout.party_henchman_stride,
+            MAX_PARTY_HENCHMEN as u32,
+            64,
+        )?
+    };
+    let others = unsafe {
+        read_array(offset(info, layout.party_others)?, 4, 256, 1_024)?
+    };
+    if players.size == 0
+        || players
+            .size
+            .checked_add(heroes.size)?
+            .checked_add(henchmen.size)?
+            > MAX_PARTY_PLAYERS as u32
+    {
+        return None;
+    }
+
+    let raw_flags = unsafe { read_u32(offset(party, layout.party_flag)?)? };
+    let mut state = PartyState {
+        id: unsafe { read_u32(offset(info, layout.party_id)?)? },
+        flags: ((raw_flags & 0x10 != 0) as u32)
+            | (((raw_flags & 0x20 != 0) as u32) << 1)
+            | (((raw_flags & 0x80 != 0) as u32) << 2)
+            | ((others.size > MAX_PARTY_ALLIES as u32) as u32) << 3,
+        player_count: players.size,
+        hero_count: heroes.size,
+        henchman_count: henchmen.size,
+        ally_count: others.size.min(MAX_PARTY_ALLIES as u32),
+        ..PartyState::EMPTY
+    };
+
+    for index in 0..players.size {
+        let entry = indexed(players.buffer, index, layout.party_player_stride)?;
+        let login_number =
+            unsafe { read_u32(offset(entry, layout.party_player_login_number)?)? };
+        let called_target_id =
+            unsafe { read_u32(offset(entry, layout.party_player_called_target_id)?)? };
+        let member_state = unsafe { read_u32(offset(entry, layout.party_player_state)?)? };
+        if login_number == 0 || called_target_id >= agent_count {
+            return None;
+        }
+        state.players[index as usize] = PartyPlayer {
+            login_number,
+            called_target_id,
+            state: member_state,
+        };
+    }
+
+    for index in 0..heroes.size {
+        let entry = indexed(heroes.buffer, index, layout.party_hero_stride)?;
+        let hero = PartyHero {
+            agent_id: unsafe { read_u32(offset(entry, layout.party_hero_agent_id)?)? },
+            owner_player_id: unsafe {
+                read_u32(offset(entry, layout.party_hero_owner_player_id)?)?
+            },
+            hero_id: unsafe { read_u32(offset(entry, layout.party_hero_id)?)? },
+            level: unsafe { read_u32(offset(entry, layout.party_hero_level)?)? },
+        };
+        if hero.agent_id == 0
+            || hero.agent_id >= agent_count
+            || hero.owner_player_id == 0
+            || !(0..players.size).any(|player_index| {
+                state.players[player_index as usize].login_number == hero.owner_player_id
+            })
+            || hero.hero_id == 0
+            || hero.hero_id > 1_000
+            || !(1..=20).contains(&hero.level)
+        {
+            return None;
+        }
+        state.heroes[index as usize] = hero;
+    }
+
+    for index in 0..henchmen.size {
+        let entry = indexed(henchmen.buffer, index, layout.party_henchman_stride)?;
+        let henchman = PartyHenchman {
+            agent_id: unsafe { read_u32(offset(entry, layout.party_henchman_agent_id)?)? },
+            profession: unsafe {
+                read_u32(offset(entry, layout.party_henchman_profession)?)?
+            },
+            level: unsafe { read_u32(offset(entry, layout.party_henchman_level)?)? },
+        };
+        if henchman.agent_id == 0
+            || henchman.agent_id >= agent_count
+            || henchman.profession > 10
+            || !(1..=20).contains(&henchman.level)
+        {
+            return None;
+        }
+        state.henchmen[index as usize] = henchman;
+    }
+
+    for index in 0..state.ally_count {
+        let agent_id = unsafe { read_u32(indexed(others.buffer, index, 4)?)? };
+        if agent_id == 0 || agent_id >= agent_count {
+            return None;
+        }
+        state.allies[index as usize] = agent_id;
+    }
+    Some(state)
+}
+
+unsafe fn collect_skillbar(layout: Layout, game: u32, player_id: u32) -> Option<SkillbarState> {
+    let world = unsafe {
+        pointer(
+            offset(game, layout.game_world_context)?,
+            layout.world_skillbar.checked_add(16)?,
+        )?
+    };
+    let skillbars = unsafe {
+        read_array(
+            offset(world, layout.world_skillbar)?,
+            layout.skillbar_stride,
+            16,
+            64,
+        )?
+    };
+    for index in 0..skillbars.size {
+        let bar = indexed(skillbars.buffer, index, layout.skillbar_stride)?;
+        let agent_id = unsafe { read_u32(offset(bar, layout.skillbar_agent_id)?)? };
+        if agent_id != player_id {
+            continue;
+        }
+        let disabled_mask = unsafe { read_u32(offset(bar, layout.skillbar_disabled)?)? };
+        let cast_count = unsafe { read_u32(offset(bar, layout.skillbar_cast_count)?)? };
+        if disabled_mask & !0xff != 0 || cast_count > 64 {
+            return None;
+        }
+        let mut state = SkillbarState {
+            agent_id,
+            disabled_mask,
+            cast_count,
+            ..SkillbarState::EMPTY
+        };
+        let skills = offset(bar, layout.skillbar_skills)?;
+        for slot in 0..SKILL_SLOTS as u32 {
+            let skill = indexed(skills, slot, layout.skill_stride)?;
+            let value = SkillSlot {
+                adrenaline_a: unsafe {
+                    read_u32(offset(skill, layout.skill_adrenaline_a)?)?
+                },
+                adrenaline_b: unsafe {
+                    read_u32(offset(skill, layout.skill_adrenaline_b)?)?
+                },
+                recharge: unsafe { read_u32(offset(skill, layout.skill_recharge)?)? },
+                skill_id: unsafe { read_u32(offset(skill, layout.skill_id)?)? },
+                event: unsafe { read_u32(offset(skill, layout.skill_event)?)? },
+            };
+            if value.skill_id > 100_000 {
+                return None;
+            }
+            state.skills[slot as usize] = value;
+        }
+        return Some(state);
+    }
+    None
 }
 
 unsafe fn collect(layout: Layout) -> State {
@@ -453,6 +837,14 @@ unsafe fn collect(layout: Layout) -> State {
             }
         }
     }
+    if let Some(party) = unsafe { collect_party(layout, game, size) } {
+        state.flags |= FLAG_PARTY_VALID;
+        state.party = party;
+    }
+    if let Some(skillbar) = unsafe { collect_skillbar(layout, game, state.player.id) } {
+        state.flags |= FLAG_SKILLBAR_VALID;
+        state.skillbar = skillbar;
+    }
     state
 }
 
@@ -476,6 +868,57 @@ unsafe fn publish(runtime: &mut RuntimeState, state: State) {
         write_volatile(&mut (*snapshot).target_y, state.target.y);
         write_volatile(&mut (*snapshot).distance, state.distance);
         write_volatile(&mut (*snapshot).range_band, state.band);
+        write_volatile(&mut (*snapshot).party_id, state.party.id);
+        write_volatile(&mut (*snapshot).party_flags, state.party.flags);
+        write_volatile(
+            &mut (*snapshot).party_player_count,
+            state.party.player_count,
+        );
+        write_volatile(&mut (*snapshot).party_hero_count, state.party.hero_count);
+        write_volatile(
+            &mut (*snapshot).party_henchman_count,
+            state.party.henchman_count,
+        );
+        write_volatile(&mut (*snapshot).party_ally_count, state.party.ally_count);
+        for index in 0..MAX_PARTY_PLAYERS {
+            write_volatile(
+                &mut (*snapshot).party_players[index],
+                state.party.players[index],
+            );
+        }
+        for index in 0..MAX_PARTY_HEROES {
+            write_volatile(
+                &mut (*snapshot).party_heroes[index],
+                state.party.heroes[index],
+            );
+        }
+        for index in 0..MAX_PARTY_HENCHMEN {
+            write_volatile(
+                &mut (*snapshot).party_henchmen[index],
+                state.party.henchmen[index],
+            );
+        }
+        for index in 0..MAX_PARTY_ALLIES {
+            write_volatile(
+                &mut (*snapshot).party_allies[index],
+                state.party.allies[index],
+            );
+        }
+        write_volatile(
+            &mut (*snapshot).skillbar_agent_id,
+            state.skillbar.agent_id,
+        );
+        write_volatile(
+            &mut (*snapshot).skillbar_disabled_mask,
+            state.skillbar.disabled_mask,
+        );
+        write_volatile(
+            &mut (*snapshot).skillbar_cast_count,
+            state.skillbar.cast_count,
+        );
+        for index in 0..SKILL_SLOTS {
+            write_volatile(&mut (*snapshot).skills[index], state.skillbar.skills[index]);
+        }
         write_volatile(&mut (*snapshot).sequence, next);
     }
     runtime.sequence = next;

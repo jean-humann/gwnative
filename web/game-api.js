@@ -21,6 +21,8 @@ const PUBLIC_FIELDS = Object.freeze([
   'targetY',
   'distance',
   'rangeName',
+  'party',
+  'skillbar',
 ]);
 
 export function publicState(state) {

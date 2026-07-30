@@ -506,7 +506,7 @@ mod tests {
                 "PUT",
                 "/__game/v1/state",
                 Some(token),
-                r#"{"status":"ready","mapId":1,"playerId":2,"playerX":0,"playerY":0,"targetValid":false}"#,
+                r#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None"}"#,
             )
             .0,
             200,

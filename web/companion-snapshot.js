@@ -1,7 +1,7 @@
 // Reading what the companion published, without trusting it.
 //
 // The companion (`src/companion-kernel/lib.rs`) runs inside the client's own
-// memory and writes two fixed-size blocks: a 64-byte state snapshot and a
+// memory and writes two fixed-size blocks: a bounded state snapshot and a
 // 4160-byte cursor block. This file turns those bytes back into values, and it
 // is the only place in the page that knows their layout.
 //
@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 1;
-export const COMPANION_SNAPSHOT_BYTES = 64;
+export const COMPANION_SNAPSHOT_ABI = 2;
+export const COMPANION_SNAPSHOT_BYTES = 868;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -40,8 +40,25 @@ const FLAGS = Object.freeze({
   player: 1 << 1,
   target: 1 << 2,
   loading: 1 << 3,
+  party: 1 << 4,
+  skillbar: 1 << 5,
 });
-const KNOWN_FLAGS = FLAGS.ready | FLAGS.player | FLAGS.target | FLAGS.loading;
+const KNOWN_FLAGS =
+  FLAGS.ready | FLAGS.player | FLAGS.target | FLAGS.loading | FLAGS.party | FLAGS.skillbar;
+const PARTY_FLAGS = Object.freeze({
+  hardMode: 1 << 0,
+  defeated: 1 << 1,
+  leader: 1 << 2,
+  alliesTruncated: 1 << 3,
+});
+const KNOWN_PARTY_FLAGS =
+  PARTY_FLAGS.hardMode | PARTY_FLAGS.defeated | PARTY_FLAGS.leader | PARTY_FLAGS.alliesTruncated;
+const MAX_PARTY_PLAYERS = 12;
+const MAX_PARTY_HEROES = 12;
+const MAX_PARTY_HENCHMEN = 12;
+const MAX_PARTY_ALLIES = 32;
+const MAX_AGENT_ID = 4_095;
+const SKILL_SLOTS = 8;
 
 /** @param {number} value */
 function validCoordinate(value) {
@@ -63,6 +80,151 @@ const AGENT_TYPE_BITS = 0x400 | 0x200 | 0xdb;
  */
 function agentKind(bits) {
   return (bits & 0xdb) !== 0 ? 'Living' : 'Unknown';
+}
+
+const wordsAreZero = (view, offset, bytes) => {
+  for (let cursor = offset; cursor < offset + bytes; cursor += 4) {
+    if (view.getUint32(cursor, true) !== 0) return false;
+  }
+  return true;
+};
+
+function readParty(view) {
+  const id = view.getUint32(64, true);
+  const flags = view.getUint32(68, true);
+  const playerCount = view.getUint32(72, true);
+  const heroCount = view.getUint32(76, true);
+  const henchmanCount = view.getUint32(80, true);
+  const allyCount = view.getUint32(84, true);
+  if (
+    (flags & ~KNOWN_PARTY_FLAGS) !== 0
+    || playerCount < 1
+    || playerCount > MAX_PARTY_PLAYERS
+    || heroCount > MAX_PARTY_HEROES
+    || henchmanCount > MAX_PARTY_HENCHMEN
+    || playerCount + heroCount + henchmanCount > MAX_PARTY_PLAYERS
+    || allyCount > MAX_PARTY_ALLIES
+  ) {
+    return null;
+  }
+
+  const players = [];
+  for (let index = 0; index < MAX_PARTY_PLAYERS; index += 1) {
+    const offset = 88 + index * 12;
+    const loginNumber = view.getUint32(offset, true);
+    const calledTargetId = view.getUint32(offset + 4, true);
+    const state = view.getUint32(offset + 8, true);
+    if (index >= playerCount) {
+      if (loginNumber !== 0 || calledTargetId !== 0 || state !== 0) return null;
+      continue;
+    }
+    if (loginNumber === 0 || calledTargetId > MAX_AGENT_ID) return null;
+    players.push(Object.freeze({
+      loginNumber,
+      calledTargetId,
+      state,
+      connected: (state & 1) !== 0,
+      ticked: (state & 2) !== 0,
+    }));
+  }
+
+  const heroes = [];
+  for (let index = 0; index < MAX_PARTY_HEROES; index += 1) {
+    const offset = 232 + index * 16;
+    const agentId = view.getUint32(offset, true);
+    const ownerPlayerId = view.getUint32(offset + 4, true);
+    const heroId = view.getUint32(offset + 8, true);
+    const level = view.getUint32(offset + 12, true);
+    if (index >= heroCount) {
+      if (agentId !== 0 || ownerPlayerId !== 0 || heroId !== 0 || level !== 0) return null;
+      continue;
+    }
+    if (
+      agentId === 0
+      || agentId > MAX_AGENT_ID
+      || ownerPlayerId === 0
+      || !players.some((player) => player.loginNumber === ownerPlayerId)
+      || heroId === 0
+      || heroId > 1_000
+      || level < 1
+      || level > 20
+    ) {
+      return null;
+    }
+    heroes.push(Object.freeze({ agentId, ownerPlayerId, heroId, level }));
+  }
+
+  const henchmen = [];
+  for (let index = 0; index < MAX_PARTY_HENCHMEN; index += 1) {
+    const offset = 424 + index * 12;
+    const agentId = view.getUint32(offset, true);
+    const profession = view.getUint32(offset + 4, true);
+    const level = view.getUint32(offset + 8, true);
+    if (index >= henchmanCount) {
+      if (agentId !== 0 || profession !== 0 || level !== 0) return null;
+      continue;
+    }
+    if (
+      agentId === 0
+      || agentId > MAX_AGENT_ID
+      || profession > 10
+      || level < 1
+      || level > 20
+    ) return null;
+    henchmen.push(Object.freeze({ agentId, profession, level }));
+  }
+
+  const allies = [];
+  for (let index = 0; index < MAX_PARTY_ALLIES; index += 1) {
+    const agentId = view.getUint32(568 + index * 4, true);
+    if (index >= allyCount) {
+      if (agentId !== 0) return null;
+      continue;
+    }
+    if (agentId === 0 || agentId > MAX_AGENT_ID) return null;
+    allies.push(agentId);
+  }
+
+  return Object.freeze({
+    id,
+    hardMode: (flags & PARTY_FLAGS.hardMode) !== 0,
+    defeated: (flags & PARTY_FLAGS.defeated) !== 0,
+    leader: (flags & PARTY_FLAGS.leader) !== 0,
+    alliesTruncated: (flags & PARTY_FLAGS.alliesTruncated) !== 0,
+    players: Object.freeze(players),
+    heroes: Object.freeze(heroes),
+    henchmen: Object.freeze(henchmen),
+    allies: Object.freeze(allies),
+  });
+}
+
+function readSkillbar(view, playerId) {
+  const agentId = view.getUint32(696, true);
+  const disabledMask = view.getUint32(700, true);
+  const castCount = view.getUint32(704, true);
+  if (agentId !== playerId || (disabledMask & ~0xff) !== 0 || castCount > 64) return null;
+  const skills = [];
+  for (let index = 0; index < SKILL_SLOTS; index += 1) {
+    const offset = 708 + index * 20;
+    const skill = Object.freeze({
+      slot: index + 1,
+      adrenalineA: view.getUint32(offset, true),
+      adrenalineB: view.getUint32(offset + 4, true),
+      recharge: view.getUint32(offset + 8, true),
+      skillId: view.getUint32(offset + 12, true),
+      event: view.getUint32(offset + 16, true),
+      disabled: (disabledMask & (1 << index)) !== 0,
+    });
+    if (skill.skillId > 100_000) return null;
+    skills.push(skill);
+  }
+  return Object.freeze({
+    agentId,
+    disabledMask,
+    castCount,
+    casting: castCount !== 0,
+    skills: Object.freeze(skills),
+  });
 }
 
 /**
@@ -151,6 +313,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     || state.mapId > 2_000
     || state.instanceType > 1
     || state.playerId === 0
+    || state.playerId > MAX_AGENT_ID
     || !validCoordinate(state.playerX)
     || !validCoordinate(state.playerY)
   ) {
@@ -163,6 +326,7 @@ export function readCompanionSnapshot(buffer, pointer) {
   if (
     targetValid
       ? state.targetId === 0
+        || state.targetId > MAX_AGENT_ID
         || (state.agentTypeBits & AGENT_TYPE_BITS) === 0
         || !validCoordinate(state.targetX)
         || !validCoordinate(state.targetY)
@@ -179,6 +343,28 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const partyValid = (flags & FLAGS.party) !== 0;
+  const party = partyValid ? readParty(view) : null;
+  if (
+    (partyValid && party === null)
+    || (!partyValid && !wordsAreZero(view, 64, 632))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
+  const skillbarValid = (flags & FLAGS.skillbar) !== 0;
+  const skillbar = skillbarValid ? readSkillbar(view, state.playerId) : null;
+  if (
+    (skillbarValid && skillbar === null)
+    || (!skillbarValid && !wordsAreZero(view, 696, 172))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
+  // The nested records are read after the inexpensive header check above.
+  // Close the seqlock around them as well: the writer may have started a new
+  // frame while those arrays were being copied.
+  if (view.getUint32(8, true) !== firstSequence) {
+    return Object.freeze({ status: 'waiting', reason: 'writing' });
+  }
   return Object.freeze({
     status: 'ready',
     ...state,
@@ -186,11 +372,13 @@ export function readCompanionSnapshot(buffer, pointer) {
     targetValid,
     targetKind: targetValid ? agentKind(state.agentTypeBits) : 'None',
     rangeName: RANGE_NAMES[state.rangeBand] ?? 'None',
+    ...(party ? { party } : {}),
+    ...(skillbar ? { skillbar } : {}),
   });
 }
 
-// The cursor bitmap has its own region: the 64-byte snapshot is full, and four
-// kilobytes of pixels do not belong in a read that happens every frame.
+// The cursor bitmap has its own region: four kilobytes of pixels do not belong
+// in the typed state read that happens every frame.
 
 export const COMPANION_CURSOR_ABI = 1;
 export const COMPANION_CURSOR_BYTES = 4160;

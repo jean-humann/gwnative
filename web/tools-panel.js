@@ -1,7 +1,7 @@
 // Built-in companion tools.
 //
 // These are deliberately useful on the narrow certified state available
-// today. Features requiring party, inventory, chat or skill layouts are named
+// today. Features requiring effects, inventory, chat or other layouts are named
 // as unavailable instead of reading guessed offsets from a live client.
 
 import { createBuildLibrary } from './build-library.js';
@@ -12,7 +12,9 @@ export const FEATURES = Object.freeze([
   { id: 'target', group: 'Telemetry', name: 'Target and range', status: 'available' },
   { id: 'performance', group: 'Telemetry', name: 'Frame rate', status: 'available' },
   { id: 'builds', group: 'Builds', name: 'Build and team library', status: 'available' },
-  { id: 'party', group: 'Game state', name: 'Party, heroes and effects', status: 'needs-layout' },
+  { id: 'party', group: 'Game state', name: 'Party and hero roster', status: 'available' },
+  { id: 'skillbar', group: 'Game state', name: 'Player skillbar', status: 'available' },
+  { id: 'effects', group: 'Game state', name: 'Effects and buffs', status: 'needs-layout' },
   { id: 'maps', group: 'Game state', name: 'Map agents, quests and completion', status: 'needs-layout' },
   { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'needs-layout' },
   { id: 'chat', group: 'Game state', name: 'Chat and party search', status: 'needs-layout' },
@@ -68,6 +70,37 @@ function installWidgets(overlays) {
     visible: false,
     render: (body, value) => setText(body, value ?? 'Measuring…'),
   });
+  const party = overlays.register({
+    id: 'party-roster',
+    title: 'Party',
+    position: { x: 16, y: 240 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      if (!state.party) return setText(body, 'Unavailable for this client build');
+      setText(
+        body,
+        `${state.party.players.length} players · ${state.party.heroes.length} heroes · `
+          + `${state.party.henchmen.length} henchmen`,
+      );
+    },
+  });
+  const skillbar = overlays.register({
+    id: 'player-skillbar',
+    title: 'Skillbar',
+    position: { x: 16, y: 296 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      if (!state.skillbar) return setText(body, 'Unavailable for this client build');
+      setText(
+        body,
+        state.skillbar.skills
+          .map((skill) => `${skill.slot}:${skill.skillId || '—'}`)
+          .join(' · '),
+      );
+    },
+  });
 
   const updateTime = () => {
     if (clock.isVisible()) clock.update(new Date().toLocaleTimeString());
@@ -92,6 +125,8 @@ function installWidgets(overlays) {
 
   window.addEventListener('gwnative:state', (event) => {
     if (target.isVisible()) target.update(event.detail);
+    if (party.isVisible()) party.update(event.detail);
+    if (skillbar.isVisible()) skillbar.update(event.detail);
   });
 
   return Object.freeze({
@@ -99,6 +134,8 @@ function installWidgets(overlays) {
     timer,
     target,
     performance: performanceWidget,
+    party,
+    skillbar,
     dispose: () => clearInterval(interval),
   });
 }
@@ -184,6 +221,8 @@ export function installToolsPanel({
     ['Session timer', widgets.timer],
     ['Target details', widgets.target],
     ['Performance', widgets.performance],
+    ['Party roster', widgets.party],
+    ['Player skillbar', widgets.skillbar],
   ]) {
     widgetButtons.append(
       button(document, label, () => widget.visible(!widget.isVisible())),
