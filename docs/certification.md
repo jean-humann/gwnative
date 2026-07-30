@@ -63,6 +63,18 @@ generation, static validation and creation of that signed review pull request.
 No publisher build number is an input. The generator derives a stable family
 identity from the exact JSPI and Asyncify Wasm/JavaScript hashes.
 
+The same workflow scans the official files every six hours, because ArenaNet
+does not provide a release event this project can subscribe to:
+
+- a known family passes silently;
+- a new family whose two template transforms pass opens one tracking issue;
+- moved semantic anchors open one transformer-review issue and fail the scan;
+- transient download failures fail the Actions run but never alter or sign the
+  feed.
+
+The issue, rather than an ArenaNet build-number feed, starts the human part of
+certification. There is no need to know when ArenaNet plans a release.
+
 The workflow has two trust stages:
 
 1. an unprivileged job fetches the official pair, generates an unsigned
@@ -77,6 +89,31 @@ bytes happened to arrive last. Its `certify_passive_enhancements` checkbox is
 an explicit attestation, behind the protected publishing environment, that
 both live runtime fixtures passed. Without it the signed certificate enables
 template saving only. The workflow never merges its pull request.
+
+## Operator runbook for a detected family
+
+When the automatic issue appears:
+
+1. The scheduled scan has already proved both exact template outputs. Generate
+   the same candidate in a temporary test checkout and confirm its family ID
+   matches the issue.
+2. Run the local, unshipped enhancement candidate through JSPI on macOS 27 and
+   Asyncify on macOS 26. Cover sign-in, a map transition, socket suspension,
+   cursor and target readout. Watch for traps, rewinds and duplicate resumes.
+3. If both live fixtures pass, dispatch `Client certificate` with `publish`
+   and `certify_passive_enhancements` enabled. If only template saving passes,
+   publish with passive enhancements disabled instead.
+4. Approve the protected publishing environment. It refetches everything,
+   requires the same family identity, repeats both transforms, signs the feed,
+   and opens a certificate-only pull request.
+5. Review and merge that pull request. Existing applications download the
+   signed feed in the background and use it on their next launch; no gwnative
+   application release is required.
+
+If candidate generation cannot locate the old semantic anchors, review the
+new modules and update the certification data. An application release is
+needed only if the compiled transform or its ABI must change, not merely
+because function indices moved.
 
 ## Trust and rollback
 

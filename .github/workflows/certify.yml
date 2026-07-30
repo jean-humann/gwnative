@@ -1,6 +1,10 @@
 name: Client certificate
 
 on:
+  schedule:
+    # ArenaNet has no release signal this project can subscribe to. Deriving
+    # the identity from the official files makes polling authoritative.
+    - cron: "17 */6 * * *"
   workflow_dispatch:
     inputs:
       publish:
@@ -16,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   candidate:
@@ -23,8 +28,6 @@ jobs:
     timeout-minutes: 45
     outputs:
       family_id: ${{ steps.identity.outputs.family_id }}
-    env:
-      GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,12 +36,19 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
 
       - name: Fetch the official runtime pair
+        env:
+          GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
         run: cargo run --locked --release -- sync
 
       - name: Generate an unsigned fail-closed candidate
+        id: generate
+        continue-on-error: ${{ github.event_name == 'schedule' }}
+        env:
+          GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
         run: scripts/client-certify "$GWNATIVE_WEB_ROOT"
 
       - name: Verify both transforms against the fetched artifacts
+        if: steps.generate.outcome == 'success'
         env:
           GWNATIVE_CERTIFY_JSPI_WASM: ${{ runner.temp }}/gwnative-client/Gw.jspi.wasm
           GWNATIVE_CERTIFY_JSPI_GLUE: ${{ runner.temp }}/gwnative-client/Gw.jspi.js
@@ -48,6 +58,7 @@ jobs:
         run: cargo test wasm::tests::external_official_pairs_produce_valid_candidates -- --nocapture
 
       - name: Export the derived artifact-family identity
+        if: steps.generate.outcome == 'success'
         id: identity
         run: |
           family_id="$(jq -r '.families[-1].familyId' certificates/builds.candidate.json)"
@@ -56,18 +67,80 @@ jobs:
           esac
           test "${#family_id}" -eq 64
           echo "family_id=$family_id" >> "$GITHUB_OUTPUT"
+          if jq -e --arg family_id "$family_id" \
+            'any(.families[]; .familyId == $family_id)' \
+            certificates/builds.json >/dev/null; then
+            echo "known=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "known=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Report the unsigned candidate
+        if: steps.generate.outcome == 'success'
         run: |
-          echo "### Unsigned certificate candidate" >> "$GITHUB_STEP_SUMMARY"
-          echo >> "$GITHUB_STEP_SUMMARY"
-          echo "Artifact family: \`${{ steps.identity.outputs.family_id }}\`" \
-            >> "$GITHUB_STEP_SUMMARY"
-          echo "Feed SHA-256: \`$(shasum -a 256 certificates/builds.candidate.json | cut -d' ' -f1)\`" \
-            >> "$GITHUB_STEP_SUMMARY"
-          echo >> "$GITHUB_STEP_SUMMARY"
-          echo "Passive enhancements remain disabled in this unprivileged stage." \
-            >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Unsigned certificate candidate"
+            echo
+            echo "Artifact family: \`${{ steps.identity.outputs.family_id }}\`"
+            echo "Feed SHA-256: \`$(shasum -a 256 certificates/builds.candidate.json | cut -d' ' -f1)\`"
+            echo
+            echo "Passive enhancements remain disabled in this unprivileged stage."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open a tracking issue for a new artifact family
+        if: github.event_name == 'schedule' && steps.identity.outputs.known == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAMILY_ID: ${{ steps.identity.outputs.family_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          short_id="${FAMILY_ID:0:12}"
+          existing="$(gh issue list --state open \
+            --search "$FAMILY_ID in:body" --json number --jq '.[0].number // empty')"
+          if [ -z "$existing" ]; then
+            body="$(printf '%s\n\n%s\n\n%s\n\n%s\n' \
+              "The automatic client scan found a new official JSPI/Asyncify artifact family:" \
+              "\`$FAMILY_ID\`" \
+              "Both exact template transforms passed. Passive enhancements remain disabled until the JSPI and Asyncify live fixtures pass." \
+              "Scan: $RUN_URL")"
+            gh issue create \
+              --title "cert(client): review artifact family $short_id" \
+              --body "$body"
+          fi
+
+      - name: Close a tracking issue once its family is certified
+        if: github.event_name == 'schedule' && steps.identity.outputs.known == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAMILY_ID: ${{ steps.identity.outputs.family_id }}
+        run: |
+          existing="$(gh issue list --state open \
+            --search "$FAMILY_ID in:body" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" \
+              --comment "The signed certificate feed now contains this artifact family."
+          fi
+
+      - name: Report a candidate that needs transformer review
+        if: github.event_name == 'schedule' && steps.generate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="cert(client): automatic candidate needs transformer review"
+          existing="$(gh issue list --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -z "$existing" ]; then
+            body="$(printf '%s\n\n%s\n\n%s\n' \
+              "The official client artifacts no longer match the semantic anchors in the newest certificate." \
+              "Nothing was signed or published. The installed client remains playable with uncertified compatibility features disabled." \
+              "Failed scan: $RUN_URL")"
+            gh issue create --title "$title" --body "$body"
+          fi
+
+      - name: Fail a scheduled scan whose candidate could not be generated
+        if: github.event_name == 'schedule' && steps.generate.outcome == 'failure'
+        run: exit 1
 
   publish:
     if: ${{ inputs.publish }}
@@ -79,7 +152,6 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
       EXPECTED_FAMILY_ID: ${{ needs.candidate.outputs.family_id }}
 
     steps:
@@ -89,9 +161,13 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
 
       - name: Fetch the official runtime pair again
+        env:
+          GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
         run: cargo run --locked --release -- sync
 
       - name: Reproduce the reviewed candidate
+        env:
+          GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
         run: |
           if [ "${{ inputs.certify_passive_enhancements }}" = true ]; then
             scripts/client-certify --certify-passive-enhancements "$GWNATIVE_WEB_ROOT"
