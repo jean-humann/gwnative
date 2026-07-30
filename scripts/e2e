@@ -598,6 +598,7 @@ def main() -> int:
                 "camera",
                 "trade",
                 "ui",
+                "merchant",
             }:
                 raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)
@@ -833,6 +834,7 @@ def main() -> int:
             camera = state.get("camera")
             trade = state.get("trade")
             ui_state = state.get("ui")
+            merchant = state.get("merchant")
             if not isinstance(party, dict) or not party.get("players"):
                 raise Failure("certified party state did not include the player roster")
             skills = skillbar.get("skills") if isinstance(skillbar, dict) else None
@@ -1358,6 +1360,34 @@ def main() -> int:
                 )
             ):
                 raise Failure("certified UI frame state is incomplete")
+            merchant_items = (
+                merchant.get("itemIds") if isinstance(merchant, dict) else None
+            )
+            merchant_total = (
+                merchant.get("total") if isinstance(merchant, dict) else None
+            )
+            if (
+                not isinstance(merchant, dict)
+                or merchant.get("truncated") not in (True, False)
+                or not isinstance(merchant_items, list)
+                or len(merchant_items) > 128
+                or not isinstance(merchant_total, int)
+                or not len(merchant_items) <= merchant_total <= 512
+                or any(
+                    not isinstance(item_id, int)
+                    or not 1 <= item_id <= 1_000_000
+                    for item_id in merchant_items
+                )
+                or (
+                    merchant.get("truncated")
+                    and (len(merchant_items) != 128 or merchant_total <= 128)
+                )
+                or (
+                    not merchant.get("truncated")
+                    and merchant_total != len(merchant_items)
+                )
+            ):
+                raise Failure("certified merchant item state is incomplete")
             print(
                 "[e2e] bounded game-state API PASS "
                 f"(players={len(party.get('players', []))}, "
@@ -1374,7 +1404,8 @@ def main() -> int:
                 f"unlocked-maps={len(completion_pages[4])}, "
                 f"camera={camera.get('modeName')}, "
                 f"trade={trade.get('statusName')}, "
-                f"ui-frames={len(ui_frames)}/{ui_total})"
+                f"ui-frames={len(ui_frames)}/{ui_total}, "
+                f"merchant-items={len(merchant_items)}/{merchant_total})"
             )
 
             before = position(ready)
