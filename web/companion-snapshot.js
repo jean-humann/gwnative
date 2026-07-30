@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 2;
-export const COMPANION_SNAPSHOT_BYTES = 868;
+export const COMPANION_SNAPSHOT_ABI = 3;
+export const COMPANION_SNAPSHOT_BYTES = 2804;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -42,9 +42,16 @@ const FLAGS = Object.freeze({
   loading: 1 << 3,
   party: 1 << 4,
   skillbar: 1 << 5,
+  effects: 1 << 6,
 });
 const KNOWN_FLAGS =
-  FLAGS.ready | FLAGS.player | FLAGS.target | FLAGS.loading | FLAGS.party | FLAGS.skillbar;
+  FLAGS.ready
+  | FLAGS.player
+  | FLAGS.target
+  | FLAGS.loading
+  | FLAGS.party
+  | FLAGS.skillbar
+  | FLAGS.effects;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -59,6 +66,14 @@ const MAX_PARTY_HENCHMEN = 12;
 const MAX_PARTY_ALLIES = 32;
 const MAX_AGENT_ID = 4_095;
 const SKILL_SLOTS = 8;
+const MAX_PLAYER_BUFFS = 32;
+const MAX_PLAYER_EFFECTS = 64;
+const EFFECT_FLAGS = Object.freeze({
+  buffsTruncated: 1 << 0,
+  effectsTruncated: 1 << 1,
+});
+const KNOWN_EFFECT_FLAGS =
+  EFFECT_FLAGS.buffsTruncated | EFFECT_FLAGS.effectsTruncated;
 
 /** @param {number} value */
 function validCoordinate(value) {
@@ -227,6 +242,90 @@ function readSkillbar(view, playerId) {
   });
 }
 
+function readEffects(view, playerId) {
+  const agentId = view.getUint32(868, true);
+  const flags = view.getUint32(872, true);
+  const buffCount = view.getUint32(876, true);
+  const effectCount = view.getUint32(880, true);
+  if (
+    agentId !== playerId
+    || (flags & ~KNOWN_EFFECT_FLAGS) !== 0
+    || buffCount > MAX_PLAYER_BUFFS
+    || effectCount > MAX_PLAYER_EFFECTS
+    || ((flags & EFFECT_FLAGS.buffsTruncated) !== 0 && buffCount !== MAX_PLAYER_BUFFS)
+    || ((flags & EFFECT_FLAGS.effectsTruncated) !== 0 && effectCount !== MAX_PLAYER_EFFECTS)
+  ) {
+    return null;
+  }
+
+  const buffs = [];
+  const buffIds = new Set();
+  for (let index = 0; index < MAX_PLAYER_BUFFS; index += 1) {
+    const offset = 884 + index * 12;
+    if (index >= buffCount) {
+      if (!wordsAreZero(view, offset, 12)) return null;
+      continue;
+    }
+    const buff = Object.freeze({
+      skillId: view.getUint32(offset, true),
+      buffId: view.getUint32(offset + 4, true),
+      targetAgentId: view.getUint32(offset + 8, true),
+    });
+    if (
+      buff.skillId === 0
+      || buff.skillId > 100_000
+      || buff.buffId === 0
+      || buffIds.has(buff.buffId)
+      || buff.targetAgentId > MAX_AGENT_ID
+    ) {
+      return null;
+    }
+    buffIds.add(buff.buffId);
+    buffs.push(buff);
+  }
+
+  const effects = [];
+  const effectIds = new Set();
+  for (let index = 0; index < MAX_PLAYER_EFFECTS; index += 1) {
+    const offset = 1268 + index * 24;
+    if (index >= effectCount) {
+      if (!wordsAreZero(view, offset, 24)) return null;
+      continue;
+    }
+    const effect = Object.freeze({
+      skillId: view.getUint32(offset, true),
+      attributeLevel: view.getUint32(offset + 4, true),
+      effectId: view.getUint32(offset + 8, true),
+      agentId: view.getUint32(offset + 12, true),
+      duration: view.getFloat32(offset + 16, true),
+      timestamp: view.getUint32(offset + 20, true),
+    });
+    if (
+      effect.skillId === 0
+      || effect.skillId > 100_000
+      || effect.attributeLevel > 100
+      || effect.effectId === 0
+      || effectIds.has(effect.effectId)
+      || effect.agentId > MAX_AGENT_ID
+      || !Number.isFinite(effect.duration)
+      || effect.duration < 0
+      || effect.duration > 1_000_000
+    ) {
+      return null;
+    }
+    effectIds.add(effect.effectId);
+    effects.push(effect);
+  }
+
+  return Object.freeze({
+    agentId,
+    buffsTruncated: (flags & EFFECT_FLAGS.buffsTruncated) !== 0,
+    effectsTruncated: (flags & EFFECT_FLAGS.effectsTruncated) !== 0,
+    buffs: Object.freeze(buffs),
+    effects: Object.freeze(effects),
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -359,6 +458,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const effectsValid = (flags & FLAGS.effects) !== 0;
+  const effects = effectsValid ? readEffects(view, state.playerId) : null;
+  if (
+    (effectsValid && effects === null)
+    || (!effectsValid && !wordsAreZero(view, 868, 1936))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -374,6 +481,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     rangeName: RANGE_NAMES[state.rangeBand] ?? 'None',
     ...(party ? { party } : {}),
     ...(skillbar ? { skillbar } : {}),
+    ...(effects ? { effects } : {}),
   });
 }
 

@@ -23,6 +23,7 @@ const PUBLIC_FIELDS = Object.freeze([
   'rangeName',
   'party',
   'skillbar',
+  'effects',
 ]);
 
 export function publicState(state) {

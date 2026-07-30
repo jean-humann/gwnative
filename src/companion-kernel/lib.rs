@@ -38,7 +38,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 2;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 3;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -46,12 +46,18 @@ const FLAG_TARGET_VALID: u32 = 1 << 2;
 const FLAG_LOADING: u32 = 1 << 3;
 const FLAG_PARTY_VALID: u32 = 1 << 4;
 const FLAG_SKILLBAR_VALID: u32 = 1 << 5;
+const FLAG_EFFECTS_VALID: u32 = 1 << 6;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
 const MAX_PARTY_HENCHMEN: usize = 12;
 const MAX_PARTY_ALLIES: usize = 32;
 const SKILL_SLOTS: usize = 8;
+const MAX_EFFECT_AGENTS: u32 = 64;
+const MAX_RAW_BUFFS: u32 = 240;
+const MAX_RAW_EFFECTS: u32 = 240;
+const MAX_PLAYER_BUFFS: usize = 32;
+const MAX_PLAYER_EFFECTS: usize = 64;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -126,6 +132,22 @@ struct Layout {
     skill_recharge: u32,
     skill_id: u32,
     skill_event: u32,
+    world_party_effects: u32,
+    agent_effects_stride: u32,
+    agent_effects_agent_id: u32,
+    agent_effects_buffs: u32,
+    agent_effects_effects: u32,
+    buff_stride: u32,
+    buff_skill_id: u32,
+    buff_id: u32,
+    buff_target_agent_id: u32,
+    effect_stride: u32,
+    effect_skill_id: u32,
+    effect_attribute_level: u32,
+    effect_id: u32,
+    effect_agent_id: u32,
+    effect_duration: u32,
+    effect_timestamp: u32,
     cursor_active_art: u32,
     cursor_software_model: u32,
     cursor_show_count: u32,
@@ -177,6 +199,25 @@ struct SkillSlot {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct PlayerBuff {
+    skill_id: u32,
+    buff_id: u32,
+    target_agent_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PlayerEffect {
+    skill_id: u32,
+    attribute_level: u32,
+    effect_id: u32,
+    agent_id: u32,
+    duration: f32,
+    timestamp: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -208,6 +249,12 @@ struct Snapshot {
     skillbar_disabled_mask: u32,
     skillbar_cast_count: u32,
     skills: [SkillSlot; SKILL_SLOTS],
+    effects_agent_id: u32,
+    effects_flags: u32,
+    buff_count: u32,
+    effect_count: u32,
+    buffs: [PlayerBuff; MAX_PLAYER_BUFFS],
+    effects: [PlayerEffect; MAX_PLAYER_EFFECTS],
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -228,8 +275,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 252] = [(); size_of::<Layout>()];
-const _: [(); 868] = [(); size_of::<Snapshot>()];
+const _: [(); 316] = [(); size_of::<Layout>()];
+const _: [(); 2804] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 #[panic_handler]
@@ -368,7 +415,19 @@ const EMPTY_SKILL_SLOT: SkillSlot = SkillSlot {
     skill_id: 0,
     event: 0,
 };
-
+const EMPTY_PLAYER_BUFF: PlayerBuff = PlayerBuff {
+    skill_id: 0,
+    buff_id: 0,
+    target_agent_id: 0,
+};
+const EMPTY_PLAYER_EFFECT: PlayerEffect = PlayerEffect {
+    skill_id: 0,
+    attribute_level: 0,
+    effect_id: 0,
+    agent_id: 0,
+    duration: 0.0,
+    timestamp: 0,
+};
 #[derive(Clone, Copy)]
 struct PartyState {
     id: u32,
@@ -415,6 +474,32 @@ impl SkillbarState {
     };
 }
 
+// Keep only validated source spans here, never the full published page. This
+// module imports the client's memory, including its fixed linker stack; putting
+// 64 effects in `State` would widen the tick frame into more client-owned
+// bytes. The game cannot mutate these arrays between the completed original
+// tick and `publish`, so the bounded second read below stays coherent.
+#[derive(Clone, Copy)]
+struct EffectsSource {
+    agent_id: u32,
+    flags: u32,
+    buff_count: u32,
+    effect_count: u32,
+    buff_buffer: u32,
+    effect_buffer: u32,
+}
+
+impl EffectsSource {
+    const EMPTY: Self = Self {
+        agent_id: 0,
+        flags: 0,
+        buff_count: 0,
+        effect_count: 0,
+        buff_buffer: 0,
+        effect_buffer: 0,
+    };
+}
+
 #[derive(Clone, Copy)]
 struct State {
     flags: u32,
@@ -426,6 +511,7 @@ struct State {
     band: u32,
     party: PartyState,
     skillbar: SkillbarState,
+    effects: EffectsSource,
 }
 
 impl State {
@@ -446,6 +532,7 @@ impl State {
             band: 0,
             party: PartyState::EMPTY,
             skillbar: SkillbarState::EMPTY,
+            effects: EffectsSource::EMPTY,
         }
     }
 }
@@ -692,6 +779,124 @@ unsafe fn collect_skillbar(layout: Layout, game: u32, player_id: u32) -> Option<
     None
 }
 
+unsafe fn read_player_buff(layout: Layout, buffer: u32, index: u32) -> Option<PlayerBuff> {
+    let entry = indexed(buffer, index, layout.buff_stride)?;
+    Some(PlayerBuff {
+        skill_id: unsafe { read_u32(offset(entry, layout.buff_skill_id)?)? },
+        buff_id: unsafe { read_u32(offset(entry, layout.buff_id)?)? },
+        target_agent_id: unsafe { read_u32(offset(entry, layout.buff_target_agent_id)?)? },
+    })
+}
+
+unsafe fn read_player_effect(
+    layout: Layout,
+    buffer: u32,
+    index: u32,
+) -> Option<PlayerEffect> {
+    let entry = indexed(buffer, index, layout.effect_stride)?;
+    Some(PlayerEffect {
+        skill_id: unsafe { read_u32(offset(entry, layout.effect_skill_id)?)? },
+        attribute_level: unsafe {
+            read_u32(offset(entry, layout.effect_attribute_level)?)?
+        },
+        effect_id: unsafe { read_u32(offset(entry, layout.effect_id)?)? },
+        agent_id: unsafe { read_u32(offset(entry, layout.effect_agent_id)?)? },
+        duration: unsafe { read_f32(offset(entry, layout.effect_duration)?)? },
+        timestamp: unsafe { read_u32(offset(entry, layout.effect_timestamp)?)? },
+    })
+}
+
+unsafe fn collect_effects(
+    layout: Layout,
+    game: u32,
+    player_id: u32,
+    agent_count: u32,
+) -> Option<EffectsSource> {
+    let world = unsafe {
+        pointer(
+            offset(game, layout.game_world_context)?,
+            layout.world_party_effects.checked_add(16)?,
+        )?
+    };
+    let agent_effects = unsafe {
+        read_array(
+            offset(world, layout.world_party_effects)?,
+            layout.agent_effects_stride,
+            MAX_EFFECT_AGENTS,
+            256,
+        )?
+    };
+    let mut player_entry = None;
+    for index in 0..agent_effects.size {
+        let entry = indexed(agent_effects.buffer, index, layout.agent_effects_stride)?;
+        let agent_id = unsafe { read_u32(offset(entry, layout.agent_effects_agent_id)?)? };
+        if agent_id == 0 || agent_id >= agent_count {
+            return None;
+        }
+        if agent_id == player_id {
+            if player_entry.is_some() {
+                return None;
+            }
+            player_entry = Some(entry);
+        }
+    }
+
+    let mut state = EffectsSource::EMPTY;
+    state.agent_id = player_id;
+    let Some(entry) = player_entry else {
+        return Some(state);
+    };
+    let buffs = unsafe {
+        read_array(
+            offset(entry, layout.agent_effects_buffs)?,
+            layout.buff_stride,
+            MAX_RAW_BUFFS,
+            1_024,
+        )?
+    };
+    let effects = unsafe {
+        read_array(
+            offset(entry, layout.agent_effects_effects)?,
+            layout.effect_stride,
+            MAX_RAW_EFFECTS,
+            1_024,
+        )?
+    };
+    state.flags = u32::from(buffs.size > MAX_PLAYER_BUFFS as u32)
+        | (u32::from(effects.size > MAX_PLAYER_EFFECTS as u32) << 1);
+    state.buff_count = buffs.size.min(MAX_PLAYER_BUFFS as u32);
+    state.effect_count = effects.size.min(MAX_PLAYER_EFFECTS as u32);
+    state.buff_buffer = buffs.buffer;
+    state.effect_buffer = effects.buffer;
+
+    for index in 0..state.buff_count {
+        let buff = unsafe { read_player_buff(layout, buffs.buffer, index)? };
+        if buff.skill_id == 0
+            || buff.skill_id > 100_000
+            || buff.buff_id == 0
+            || (buff.target_agent_id != 0 && buff.target_agent_id >= agent_count)
+        {
+            return None;
+        }
+    }
+
+    for index in 0..state.effect_count {
+        let effect = unsafe { read_player_effect(layout, effects.buffer, index)? };
+        if effect.skill_id == 0
+            || effect.skill_id > 100_000
+            || effect.attribute_level > 100
+            || effect.effect_id == 0
+            || (effect.agent_id != 0 && effect.agent_id >= agent_count)
+            || !effect.duration.is_finite()
+            || effect.duration < 0.0
+            || effect.duration > 1_000_000.0
+        {
+            return None;
+        }
+    }
+    Some(state)
+}
+
 unsafe fn collect(layout: Layout) -> State {
     let mut state = State::empty();
     let contexts = match unsafe { pointer(layout.context_root, 28) } {
@@ -845,10 +1050,16 @@ unsafe fn collect(layout: Layout) -> State {
         state.flags |= FLAG_SKILLBAR_VALID;
         state.skillbar = skillbar;
     }
+    if let Some(effects) =
+        unsafe { collect_effects(layout, game, state.player.id, size) }
+    {
+        state.flags |= FLAG_EFFECTS_VALID;
+        state.effects = effects;
+    }
     state
 }
 
-unsafe fn publish(runtime: &mut RuntimeState, state: State) {
+unsafe fn publish(runtime: &mut RuntimeState, state: State, layout: Layout) {
     let next = runtime.sequence.wrapping_add(2) & !1;
     let snapshot = runtime.snapshot_ptr as *mut Snapshot;
     unsafe {
@@ -918,6 +1129,34 @@ unsafe fn publish(runtime: &mut RuntimeState, state: State) {
         );
         for index in 0..SKILL_SLOTS {
             write_volatile(&mut (*snapshot).skills[index], state.skillbar.skills[index]);
+        }
+        write_volatile(
+            &mut (*snapshot).effects_agent_id,
+            state.effects.agent_id,
+        );
+        write_volatile(&mut (*snapshot).effects_flags, state.effects.flags);
+        write_volatile(&mut (*snapshot).buff_count, state.effects.buff_count);
+        write_volatile(
+            &mut (*snapshot).effect_count,
+            state.effects.effect_count,
+        );
+        for index in 0..MAX_PLAYER_BUFFS {
+            let value = if index < state.effects.buff_count as usize {
+                read_player_buff(layout, state.effects.buff_buffer, index as u32)
+                    .unwrap_or(EMPTY_PLAYER_BUFF)
+            } else {
+                EMPTY_PLAYER_BUFF
+            };
+            write_volatile(&mut (*snapshot).buffs[index], value);
+        }
+        for index in 0..MAX_PLAYER_EFFECTS {
+            let value = if index < state.effects.effect_count as usize {
+                read_player_effect(layout, state.effects.effect_buffer, index as u32)
+                    .unwrap_or(EMPTY_PLAYER_EFFECT)
+            } else {
+                EMPTY_PLAYER_EFFECT
+            };
+            write_volatile(&mut (*snapshot).effects[index], value);
         }
         write_volatile(&mut (*snapshot).sequence, next);
     }
@@ -1196,7 +1435,7 @@ pub unsafe extern "C" fn companion_init(
         write_volatile(&mut runtime.cursor_published.hotspot_x, 0);
         write_volatile(&mut runtime.cursor_published.hotspot_y, 0);
         if features & FEATURE_TARGET_READOUT != 0 {
-            publish(runtime, State::empty());
+            publish(runtime, State::empty(), runtime.layout);
         }
         if features & FEATURE_NATIVE_CURSOR != 0 {
             clear_cursor(runtime);
@@ -1232,7 +1471,8 @@ pub unsafe extern "C" fn companion_observe(runtime_ptr: u32) {
         && valid_region(true, runtime.snapshot_ptr, SNAPSHOT_BYTES, SNAPSHOT_BYTES)
     {
         runtime.tick_count = runtime.tick_count.wrapping_add(1);
-        unsafe { publish(runtime, collect(runtime.layout)) };
+        let layout = runtime.layout;
+        unsafe { publish(runtime, collect(layout), layout) };
     }
     if runtime.features & FEATURE_NATIVE_CURSOR != 0
         && valid_region(true, runtime.cursor_ptr, CURSOR_BYTES, CURSOR_BYTES)
