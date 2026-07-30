@@ -20,6 +20,7 @@ export const FEATURES = Object.freeze([
   { id: 'completion', group: 'Game state', name: 'Mission and map completion', status: 'available' },
   { id: 'camera', group: 'Game state', name: 'Camera and render state', status: 'available' },
   { id: 'trade', group: 'Game state', name: 'Trade offer', status: 'available' },
+  { id: 'ui', group: 'Game state', name: 'UI frame inventory', status: 'available' },
   { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'available' },
   { id: 'social', group: 'Game state', name: 'Friends and guild summary', status: 'available' },
   { id: 'chat', group: 'Game state', name: 'Chat and party search', status: 'needs-layout' },
@@ -48,6 +49,13 @@ export function formatTradeSummary(trade) {
   return `${trade.statusName} · you ${itemCount(trade.player.items)} + `
     + `${trade.player.gold}g · partner ${itemCount(trade.partner.items)} + `
     + `${trade.partner.gold}g${truncated}`;
+}
+
+export function formatUiSummary(ui) {
+  if (!ui) return 'Unavailable for this client build';
+  const truncated = ui.truncated ? ' · first 128' : '';
+  return `${ui.visibleTotal}/${ui.createdTotal} locally visible · `
+    + `${ui.total} frames${truncated}`;
 }
 
 const setText = (element, value) => {
@@ -257,6 +265,16 @@ function installWidgets(overlays) {
       setText(body, formatTradeSummary(state.trade));
     },
   });
+  const ui = overlays.register({
+    id: 'ui-frames',
+    title: 'UI frames',
+    position: { x: 16, y: 800 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      setText(body, formatUiSummary(state.ui));
+    },
+  });
 
   const updateTime = () => {
     if (clock.isVisible()) clock.update(new Date().toLocaleTimeString());
@@ -291,6 +309,7 @@ function installWidgets(overlays) {
     if (social.isVisible()) social.update(event.detail);
     if (camera.isVisible()) camera.update(event.detail);
     if (trade.isVisible()) trade.update(event.detail);
+    if (ui.isVisible()) ui.update(event.detail);
   });
 
   return Object.freeze({
@@ -308,6 +327,7 @@ function installWidgets(overlays) {
     social,
     camera,
     trade,
+    ui,
     dispose: () => clearInterval(interval),
   });
 }
@@ -403,6 +423,7 @@ export function installToolsPanel({
     ['Friends and guild', widgets.social],
     ['Camera and render state', widgets.camera],
     ['Trade offer', widgets.trade],
+    ['UI frame inventory', widgets.ui],
   ]) {
     widgetButtons.append(
       button(document, label, () => widget.visible(!widget.isVisible())),
