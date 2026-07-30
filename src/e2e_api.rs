@@ -429,6 +429,9 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
                     "agentDeltas",
                     "commonDeltas",
                     "quest",
+                    "inventory",
+                    "social",
+                    "completion",
                 ],
             )?;
             match object.get("radiusBytes").and_then(Value::as_u64) {
@@ -476,6 +479,131 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
                 "objectiveCount",
             ] {
                 u32_field(quest, name)?;
+            }
+            let inventory = object
+                .get("inventory")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "layout probe inventory detail must be an object".to_owned())?;
+            exact_keys(
+                inventory,
+                &[
+                    "itemContextAvailable",
+                    "inventoryAvailable",
+                    "scalarFieldsValid",
+                    "storagePanesUnlocked",
+                    "bagPointerCount",
+                    "backpackPresent",
+                    "bagInvalidId",
+                    "bagInvalidMask",
+                    "itemCount",
+                    "itemInvalidBagId",
+                    "itemInvalidSlot",
+                    "itemInvalidMask",
+                    "inventoryRecordsValid",
+                ],
+            )?;
+            for name in [
+                "itemContextAvailable",
+                "inventoryAvailable",
+                "scalarFieldsValid",
+                "backpackPresent",
+                "inventoryRecordsValid",
+            ] {
+                bool_field(inventory, name)?;
+            }
+            for name in [
+                "storagePanesUnlocked",
+                "bagPointerCount",
+                "bagInvalidId",
+                "bagInvalidMask",
+                "itemCount",
+                "itemInvalidBagId",
+                "itemInvalidSlot",
+                "itemInvalidMask",
+            ] {
+                u32_field(inventory, name)?;
+            }
+            let social = object
+                .get("social")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "layout probe social detail must be an object".to_owned())?;
+            exact_keys(
+                social,
+                &[
+                    "friendListAvailable",
+                    "friendHeaderValid",
+                    "playerStatus",
+                    "friendCapacity",
+                    "friendSlotCount",
+                    "friendEntryCount",
+                    "friendInvalidSlot",
+                    "friendInvalidMask",
+                    "friendCountMismatchMask",
+                    "friendRecordsValid",
+                    "guildContextAvailable",
+                    "guildIndex",
+                    "guildRecordPresent",
+                    "guildRosterCapacity",
+                    "guildRosterCount",
+                    "guildInvalidMask",
+                    "guildRecordsValid",
+                    "socialRecordsValid",
+                ],
+            )?;
+            for name in [
+                "friendListAvailable",
+                "friendHeaderValid",
+                "friendRecordsValid",
+                "guildContextAvailable",
+                "guildRecordPresent",
+                "guildRecordsValid",
+                "socialRecordsValid",
+            ] {
+                bool_field(social, name)?;
+            }
+            for name in [
+                "playerStatus",
+                "friendCapacity",
+                "friendSlotCount",
+                "friendEntryCount",
+                "friendInvalidSlot",
+                "friendInvalidMask",
+                "friendCountMismatchMask",
+                "guildIndex",
+                "guildRosterCapacity",
+                "guildRosterCount",
+                "guildInvalidMask",
+            ] {
+                u32_field(social, name)?;
+            }
+            let completion = object
+                .get("completion")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "layout probe completion detail must be an object".to_owned())?;
+            exact_keys(
+                completion,
+                &[
+                    "worldAvailable",
+                    "capacities",
+                    "sizes",
+                    "invalidMasks",
+                    "completionRecordsValid",
+                ],
+            )?;
+            bool_field(completion, "worldAvailable")?;
+            bool_field(completion, "completionRecordsValid")?;
+            for name in ["capacities", "sizes", "invalidMasks"] {
+                let values = completion
+                    .get(name)
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| format!("layout probe {name} must be an array"))?;
+                if values.len() != 6
+                    || values
+                        .iter()
+                        .any(|value| value.as_u64().is_none_or(|n| n > u32::MAX as u64))
+                {
+                    return Err(format!("layout probe {name} is outside its bound"));
+                }
             }
             Ok(())
         }
@@ -785,7 +913,7 @@ mod tests {
         );
         assert!(
             hub.publish_event(
-                br#"{"kind":"layout-probe","detail":{"radiusBytes":2048,"contextDeltas":[-48],"agentDeltas":[-48],"commonDeltas":[-48],"quest":{"worldAvailable":true,"activeQuestId":0,"questCapacity":0,"questCount":0,"questInvalidIndex":4294967295,"questInvalidMask":0,"objectiveCapacity":0,"objectiveCount":0,"questRecordsValid":true,"activeQuestPresent":true,"objectiveRecordsValid":true}}}"#,
+                br#"{"kind":"layout-probe","detail":{"radiusBytes":2048,"contextDeltas":[-48],"agentDeltas":[-48],"commonDeltas":[-48],"quest":{"worldAvailable":true,"activeQuestId":0,"questCapacity":0,"questCount":0,"questInvalidIndex":4294967295,"questInvalidMask":0,"objectiveCapacity":0,"objectiveCount":0,"questRecordsValid":true,"activeQuestPresent":true,"objectiveRecordsValid":true},"inventory":{"itemContextAvailable":true,"inventoryAvailable":true,"scalarFieldsValid":true,"storagePanesUnlocked":4,"bagPointerCount":1,"backpackPresent":true,"bagInvalidId":0,"bagInvalidMask":0,"itemCount":0,"itemInvalidBagId":0,"itemInvalidSlot":4294967295,"itemInvalidMask":0,"inventoryRecordsValid":true},"social":{"friendListAvailable":true,"friendHeaderValid":true,"playerStatus":1,"friendCapacity":0,"friendSlotCount":0,"friendEntryCount":0,"friendInvalidSlot":4294967295,"friendInvalidMask":0,"friendCountMismatchMask":0,"friendRecordsValid":true,"guildContextAvailable":true,"guildIndex":0,"guildRecordPresent":false,"guildRosterCapacity":0,"guildRosterCount":0,"guildInvalidMask":0,"guildRecordsValid":true,"socialRecordsValid":true},"completion":{"worldAvailable":true,"capacities":[1,1,1,1,1,1],"sizes":[1,1,1,1,1,1],"invalidMasks":[0,0,0,0,0,0],"completionRecordsValid":true}}}"#,
             )
             .is_ok()
         );

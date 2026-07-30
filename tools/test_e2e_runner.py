@@ -127,6 +127,43 @@ class GameStateTests(unittest.TestCase):
             RUNNER.game_state_after = original
         self.assertEqual(ready["revision"], 3)
 
+    def test_gameplay_state_waits_for_two_complete_revisions(self) -> None:
+        complete = {
+            "status": "ready",
+            "mapId": 55,
+            "playerId": 4,
+            **{name: {} for name in RUNNER.GAMEPLAY_DOMAINS},
+            "party": {"players": [{"loginNumber": 1}]},
+        }
+        states = iter(
+            [
+                {
+                    "revision": 2,
+                    "state": {
+                        "status": "ready",
+                        "mapId": 55,
+                        "playerId": 4,
+                        "party": {"players": []},
+                    },
+                },
+                {"revision": 3, "state": complete},
+                {"revision": 4, "state": complete},
+            ]
+        )
+        initial = next(states)
+        original = RUNNER.game_state_after
+        RUNNER.game_state_after = lambda *args, **kwargs: next(states)
+        try:
+            ready = RUNNER.wait_for_complete_gameplay_state(
+                "",
+                "",
+                initial,
+                1,
+            )
+        finally:
+            RUNNER.game_state_after = original
+        self.assertEqual(ready["revision"], 4)
+
 
 class ProfileTests(unittest.TestCase):
     def test_default_profile_uses_the_legacy_web_root(self) -> None:

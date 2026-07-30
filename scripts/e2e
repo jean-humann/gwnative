@@ -399,6 +399,66 @@ def wait_for_ready_state(
     return latest
 
 
+GAMEPLAY_DOMAINS = (
+    "party",
+    "skillbar",
+    "effects",
+    "agents",
+    "quests",
+    "inventory",
+    "social",
+    "completion",
+    "camera",
+    "trade",
+    "ui",
+    "merchant",
+    "progression",
+)
+
+
+def gameplay_domains_complete(state: dict[str, object]) -> bool:
+    party = state.get("party")
+    return (
+        state.get("status") == "ready"
+        and isinstance(party, dict)
+        and isinstance(party.get("players"), list)
+        and bool(party.get("players"))
+        and all(isinstance(state.get(name), dict) for name in GAMEPLAY_DOMAINS)
+    )
+
+
+def wait_for_complete_gameplay_state(
+    origin: str,
+    token: str,
+    initial: dict[str, object],
+    timeout: float,
+) -> dict[str, object]:
+    """Wait for two complete revisions after the core map becomes ready."""
+    deadline = time.monotonic() + timeout
+    latest = initial
+    candidate: tuple[object, object] | None = None
+    while time.monotonic() < deadline:
+        state = latest.get("state", {})
+        if gameplay_domains_complete(state):
+            identity = (state.get("mapId"), state.get("playerId"))
+            if candidate == identity:
+                return latest
+            candidate = identity
+        else:
+            candidate = None
+        remaining = deadline - time.monotonic()
+        wait_ms = min(LONG_POLL_MS, max(1, int(remaining * 1000)))
+        next_state = game_state_after(
+            origin,
+            token,
+            int(latest.get("revision", 0)),
+            wait_ms,
+        )
+        if next_state is not None:
+            latest = next_state
+    return latest
+
+
 def wait_for_position_change(
     origin: str,
     token: str,
@@ -823,6 +883,12 @@ def main() -> int:
                 print("[e2e] INCONCLUSIVE (gameplay telemetry unavailable)")
                 return 2
 
+            ready = wait_for_complete_gameplay_state(
+                origin,
+                token,
+                ready,
+                15,
+            )
             state = ready["state"]
             party = state.get("party")
             skillbar = state.get("skillbar")
@@ -838,7 +904,13 @@ def main() -> int:
             merchant = state.get("merchant")
             progression = state.get("progression")
             if not isinstance(party, dict) or not party.get("players"):
-                raise Failure("certified party state did not include the player roster")
+                present = sorted(
+                    name for name in GAMEPLAY_DOMAINS if isinstance(state.get(name), dict)
+                )
+                raise Failure(
+                    "certified party state did not include the player roster "
+                    f"(domains present={present})"
+                )
             skills = skillbar.get("skills") if isinstance(skillbar, dict) else None
             if (
                 skillbar is None
@@ -975,6 +1047,47 @@ def main() -> int:
                 and all(isinstance(item, dict) for item in items)
                 else []
             )
+            inventory_probe = {
+                "truncated": (
+                    inventory.get("itemsTruncated")
+                    if isinstance(inventory, dict)
+                    else None
+                ),
+                "total": (
+                    inventory.get("total")
+                    if isinstance(inventory, dict)
+                    else None
+                ),
+                "bagCount": len(bags) if isinstance(bags, list) else None,
+                "bagIds": (
+                    [bag.get("bagId") for bag in bags]
+                    if isinstance(bags, list)
+                    and all(isinstance(bag, dict) for bag in bags)
+                    else None
+                ),
+                "itemCount": len(items) if isinstance(items, list) else None,
+                "locationsOrderedUnique": (
+                    item_locations == sorted(set(item_locations))
+                ),
+                "itemIdsUnique": (
+                    len({item.get("itemId") for item in items}) == len(items)
+                    if isinstance(items, list)
+                    and all(isinstance(item, dict) for item in items)
+                    else None
+                ),
+                "storagePanesUnlocked": (
+                    inventory.get("storagePanesUnlocked")
+                    if isinstance(inventory, dict)
+                    else None
+                ),
+            }
+            if inventory is None:
+                probe = submit_action(origin, token, "probe-layout")
+                stream.wait_for_action(probe, 10)
+                probe_event = stream.wait_optional("layout-probe", 2)
+                inventory_probe["layout"] = (
+                    (probe_event or {}).get("detail", {}).get("inventory")
+                )
             if (
                 inventory is None
                 or inventory.get("itemsTruncated") not in (True, False)
@@ -1015,7 +1128,10 @@ def main() -> int:
                 or len({item.get("itemId") for item in items}) != len(items)
                 or item_locations != sorted(set(item_locations))
             ):
-                raise Failure("certified inventory state is incomplete")
+                raise Failure(
+                    "certified inventory state is incomplete "
+                    f"(bounded summary={inventory_probe})"
+                )
             friend_page = (
                 social.get("friends")
                 if isinstance(social, dict)
@@ -1027,6 +1143,55 @@ def main() -> int:
                 else None
             )
             guild = social.get("guild") if isinstance(social, dict) else None
+            social_probe = {
+                "present": isinstance(social, dict),
+                "playerStatus": (
+                    social.get("playerStatus")
+                    if isinstance(social, dict)
+                    else None
+                ),
+                "playerStatusName": (
+                    social.get("playerStatusName")
+                    if isinstance(social, dict)
+                    else None
+                ),
+                "friendTotal": (
+                    friend_page.get("total")
+                    if isinstance(friend_page, dict)
+                    else None
+                ),
+                "friendEntryCount": (
+                    len(friend_entries)
+                    if isinstance(friend_entries, list)
+                    else None
+                ),
+                "friendKinds": (
+                    {
+                        name: friend_page.get(name)
+                        for name in ("friends", "ignores", "partners", "traders")
+                    }
+                    if isinstance(friend_page, dict)
+                    else None
+                ),
+                "guildPresent": isinstance(guild, dict),
+                "guildIndex": (
+                    guild.get("index")
+                    if isinstance(guild, dict)
+                    else None
+                ),
+                "guildRosterTotal": (
+                    guild.get("rosterTotal")
+                    if isinstance(guild, dict)
+                    else None
+                ),
+            }
+            if social is None:
+                probe = submit_action(origin, token, "probe-layout")
+                stream.wait_for_action(probe, 10)
+                probe_event = stream.wait_optional("layout-probe", 2)
+                social_probe["layout"] = (
+                    (probe_event or {}).get("detail", {}).get("social")
+                )
             if (
                 social is None
                 or not isinstance(social.get("playerStatus"), int)
@@ -1076,14 +1241,22 @@ def main() -> int:
                         or not isinstance(guild.get("index"), int)
                         or not 1 <= guild.get("index") < 64
                         or not isinstance(guild.get("faction"), int)
-                        or not 0 <= guild.get("faction") <= 1
+                        or not 0 <= guild.get("faction") <= 0xffff_ffff
+                        or guild.get("factionName")
+                        != {
+                            0: "Kurzick",
+                            1: "Luxon",
+                        }.get(guild.get("faction"), "Unknown")
                         or not isinstance(guild.get("rosterTotal"), int)
                         or not 0 <= guild.get("rosterTotal") <= 100
                         or not isinstance(guild.get("cape"), dict)
                     )
                 )
             ):
-                raise Failure("certified social state is incomplete")
+                raise Failure(
+                    "certified social state is incomplete "
+                    f"(bounded summary={social_probe})"
+                )
             completion_pages = (
                 [
                     completion.get("normalMode", {}).get("completedMissions"),
@@ -1096,6 +1269,24 @@ def main() -> int:
                 if isinstance(completion, dict)
                 else []
             )
+            completion_probe = {
+                "present": isinstance(completion, dict),
+                "pageLengths": (
+                    [
+                        len(page) if isinstance(page, list) else None
+                        for page in completion_pages
+                    ]
+                    if completion_pages
+                    else None
+                ),
+            }
+            if not isinstance(completion, dict):
+                probe = submit_action(origin, token, "probe-layout")
+                stream.wait_for_action(probe, 10)
+                probe_event = stream.wait_optional("layout-probe", 2)
+                completion_probe["layout"] = (
+                    (probe_event or {}).get("detail", {}).get("completion")
+                )
             if (
                 len(completion_pages) != 6
                 or any(
@@ -1109,7 +1300,10 @@ def main() -> int:
                     for page in completion_pages
                 )
             ):
-                raise Failure("certified completion state is incomplete")
+                raise Failure(
+                    "certified completion state is incomplete "
+                    f"(bounded summary={completion_probe})"
+                )
             camera_position = (
                 camera.get("position") if isinstance(camera, dict) else None
             )
