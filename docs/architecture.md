@@ -209,8 +209,8 @@ hook.
 
 The validated companion state is narrowed into the versioned v1 map, player,
 target, party, skillbar, effects, agent, quest, inventory, social, and
-completion, camera, and trade schema. Large agent, quest, effect, bag, item, and
-friend pages
+completion, camera, trade, and UI-frame schema. Large agent, quest, effect,
+bag, item, friend, and UI-frame pages
 remain fixed and bounded in the seqlock block rather than being copied onto the
 companion’s imported-memory stack. Inventory traversal retains only the owning
 pointer across the original tick, then rechecks bag arrays and every item
@@ -227,6 +227,11 @@ Trade collection follows the certified `GameContext + 0x58` pointer, validates
 the fixed context flags plus two bounded item arrays, and drops stale offer
 contents whenever the window is closed. Neither the companion nor the public
 API exposes a trade write.
+UI collection reads the exact-build global frame-array descriptor used by the
+compiled frame lookup routine. Publication rechecks each slot's embedded ID,
+parent back-reference, scalar state, and finite local rectangle while excluding
+labels, callbacks, tooltips, relation lists, dialog payloads, and every UI
+write. The 128-record page retains full-array totals and explicit truncation.
 The page publishes no faster than four times per second and Rust validates it
 again before making it available on token-gated loopback routes. There is no
 certified action endpoint. The overlay registry and Companion Tools consume the
