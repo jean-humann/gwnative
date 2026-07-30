@@ -39,6 +39,18 @@ const el = (id) => document.getElementById(id);
 const gb = (bytes) => (bytes / 1e9).toFixed(1);
 
 /**
+ * Resolve the one first-run prompt an unattended E2E launch cannot answer.
+ *
+ * The override is deliberately session-only: persisting it would make a test
+ * choose how the player's profile behaves later. Configured profiles keep
+ * their exact choice, and ordinary launches still receive `null` and display
+ * the launcher.
+ */
+export function launchStrategy(strategy, unattended) {
+  return unattended && strategy === null ? 'quick' : strategy;
+}
+
+/**
  * Wait for the next progress poll, or resolve false as soon as the watcher is
  * cancelled. Clearing the timer is what prevents a hidden launcher from
  * leaving one last scheduled wake-up behind.

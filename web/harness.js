@@ -1047,8 +1047,14 @@ function appendGlue() {
     host.resolveDataStrategy(bytes, {
       log,
       save: host.saveSettings,
-      strategy: host.currentSettings().dataStrategy,
+      strategy: host.launchStrategy(
+        host.currentSettings().dataStrategy,
+        window.__gwnativeE2E === true,
+      ),
     });
+  if (window.__gwnativeE2E === true && settings.dataStrategy === null) {
+    log('[e2e] using non-persistent Quick Start for an unconfigured profile');
+  }
   try {
     await window.gwResolveDataStrategy(snapshotBytes);
   } catch (error) {
