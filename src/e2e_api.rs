@@ -353,8 +353,18 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
         .as_object()
         .ok_or_else(|| "E2E event detail must be an object".to_owned())?;
     match kind {
-        "bridge-ready" | "first-frame" | "app-pass" | "startup-complete" | "login-ready"
-        | "login-committed" | "game-ready" => exact_keys(object, &[]),
+        "bridge-ready"
+        | "first-frame"
+        | "app-pass"
+        | "startup-complete"
+        | "login-ready"
+        | "login-committed"
+        | "character-selection-ready"
+        | "game-ready" => exact_keys(object, &[]),
+        "credential-status" => {
+            exact_keys(object, &["status"])?;
+            enum_text_field(object, "status", &["available", "unavailable", "error"])
+        }
         "credentials-offered" => {
             exact_keys(object, &["accountSet", "passwordSet"])?;
             bool_field(object, "accountSet")?;
@@ -671,7 +681,17 @@ mod tests {
                 .is_ok()
         );
         assert!(
+            hub.publish_event(
+                br#"{"kind":"credential-status","detail":{"status":"unavailable"}}"#,
+            )
+            .is_ok()
+        );
+        assert!(
             hub.publish_event(br#"{"kind":"login-committed","detail":{}}"#)
+                .is_ok()
+        );
+        assert!(
+            hub.publish_event(br#"{"kind":"character-selection-ready","detail":{}}"#)
                 .is_ok()
         );
         assert!(

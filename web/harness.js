@@ -338,9 +338,8 @@ const credentials = (method, body) => {
 /// 150 ms — long enough to lose that race — and the symptom is a login screen
 /// with "Remember Account Name" ticked and nothing in the field. Started at load
 /// it is minutes early instead.
-let saved = launchOptions.credentials
-  ? Promise.resolve({ ...launchOptions.credentials })
-  : null;
+let saved = null;
+const invocationCredentialsActive = Boolean(launchOptions.credentials);
 
 const readSaved = () => {
   saved ??= credentials('GET').then((response) => {
@@ -360,6 +359,39 @@ const readSaved = () => {
 readSaved().catch(() => {
   saved = null;
 });
+
+let loginReadyReported = false;
+let loginCommittedReported = false;
+let credentialStatusReported = false;
+
+const reportAfterClientFrames = (kind) => {
+  const afterFirstFrame = () => {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      void window.gwE2E?.report(kind).catch(() => {});
+    }));
+  };
+  if (window.__gwnativeFirstFrame === true) afterFirstFrame();
+  else window.addEventListener('gwnative:first-frame', afterFirstFrame, { once: true });
+};
+
+const reportLoginReady = () => {
+  if (loginReadyReported) return;
+  loginReadyReported = true;
+  reportAfterClientFrames('login-ready');
+};
+
+const reportLoginCommitted = () => {
+  if (loginCommittedReported) return;
+  loginCommittedReported = true;
+  window.gwE2E?.authenticationCommitted();
+  reportAfterClientFrames('login-committed');
+};
+
+const reportCredentialStatus = (status) => {
+  if (credentialStatusReported) return;
+  credentialStatusReported = true;
+  void window.gwE2E?.report('credential-status', { status }).catch(() => {});
+};
 
 const STARTUP_LABELS = {
   connecting: 'Starting Guild Wars',
@@ -531,6 +563,14 @@ Module = {
   secureStorage: {
     async getCredentials() {
       const asked = performance.now();
+      // Explicit argv credentials already own the login operation. Do not
+      // offer either that pair or a different profile login through a second
+      // secure-storage operation at the same time.
+      if (invocationCredentialsActive) {
+        log('secureStorage: explicit invocation credentials own this login');
+        reportLoginReady();
+        throw new Error('explicit invocation credentials are active');
+      }
       let stored;
       try {
         stored = await readSaved();
@@ -542,6 +582,8 @@ Module = {
       // launch legitimately has nothing.
       if (!stored) {
         log('secureStorage: nothing saved — the client should ask');
+        reportCredentialStatus('unavailable');
+        reportLoginReady();
         throw new Error('no stored credentials');
       }
       // Said on this side as well as the host's, because "the keychain
@@ -554,6 +596,7 @@ Module = {
         `password ${stored.password ? 'set' : 'empty'}) after`,
         `${Math.round(performance.now() - asked)} ms`,
       );
+      reportCredentialStatus('available');
       void window.gwE2E?.report('credentials-offered', {
         accountSet: Boolean(stored.username),
         passwordSet: Boolean(stored.password),
@@ -562,31 +605,31 @@ Module = {
       // controls. The first submitted frame proves those controls have reached
       // the compositor; two subsequent client frames let their input state
       // become current without polling pixels or guessing a wall-clock delay.
-      const afterFirstFrame = () => {
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          void window.gwE2E?.report('login-ready').catch(() => {});
-        }));
-      };
-      if (window.__gwnativeFirstFrame === true) afterFirstFrame();
-      else window.addEventListener('gwnative:first-frame', afterFirstFrame, { once: true });
+      reportLoginReady();
       return stored;
     },
     async storeCredentials(username, password) {
+      // -email/-password is invocation-only even when Guild Wars already had
+      // Remember Password enabled. Preserve any different profile item.
+      if (invocationCredentialsActive) {
+        log('secureStorage: kept the profile login; invocation credentials are not persisted');
+        return;
+      }
       const response = await credentials('PUT', { username, password });
       if (!response.ok) throw new Error(await response.text());
       // Held rather than re-read: the host now has exactly this, and a client
       // that signs out and back in within one session should not pay for the
       // keychain twice.
       saved = Promise.resolve({ username, password });
-      // The client calls this only after accepting the authenticated account.
-      // Two later client frames let the character-selection controls consume
-      // that transition before the native E2E runner activates the focused
-      // Play control. This reports no credential value.
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        void window.gwE2E?.report('login-committed').catch(() => {});
-      }));
     },
     async clearCredentials() {
+      // Explicit invocation credentials are independent of the selected
+      // profile. When the client declines to remember that invocation, it must
+      // not delete a different login that was already stored in Keychain.
+      if (invocationCredentialsActive) {
+        log('secureStorage: kept the profile login; invocation credentials were not remembered');
+        return;
+      }
       const response = await credentials('DELETE');
       if (!response.ok) {
         throw new Error((await response.text()) || `credential deletion failed: ${response.status}`);
@@ -655,6 +698,9 @@ Module = {
     performance.mark('gw.runtime.initialized');
     log('runtime initialised');
     status('Starting Guild Wars');
+    // Emscripten has synchronously copied argv into the client before the next
+    // task runs. Drop the JavaScript copy, especially any -password value.
+    setTimeout(() => host.scrubGuildWarsClientArguments(Module.arguments), 0);
     installTools();
     installMods();
   },
@@ -777,8 +823,8 @@ function reportTransformFailure() {
   try {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
-      frameRate, start, panel, data, compat, guide, gameApi, overlay, tools, hotkeys, e2e, metrics,
-      runtime, audit,
+      frameRate, start, panel, data, compat, guide, gameApi, overlay, tools, hotkeys, e2e,
+      clientArguments, metrics, runtime, audit,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -801,6 +847,7 @@ function reportTransformFailure() {
       import('./tools-panel.js'),
       import('./hotkeys.js'),
       import('./e2e.js'),
+      import('./client-arguments.js'),
       import('./diagnostics.js'),
       import('./client-runtime.js'),
       import('./frame-audit.js'),
@@ -827,6 +874,7 @@ function reportTransformFailure() {
       ...tools,
       ...hotkeys,
       ...e2e,
+      ...clientArguments,
       ...runtime,
       ...audit,
     };
@@ -1010,6 +1058,12 @@ function reportTransformFailure() {
               status: this.status,
               bytes: this.response.byteLength,
             }).catch(() => {});
+            if (
+              this.status >= 200
+              && this.status < 300
+              && tags.includes('Reply')
+              && tags.includes('Token')
+            ) reportLoginCommitted();
           }
         }
       }, { once: true });
@@ -1035,9 +1089,11 @@ function reportTransformFailure() {
     return open.call(this, method, url, ...rest);
   };
 
-  Module.dns = host.createDns({ log });
+  const networkRegistry = host.createNetworkRegistry();
+  Module.dns = host.createDns({ log, registry: networkRegistry });
   Module.socket = host.createSockets({
     log,
+    registry: networkRegistry,
     audit: frameAudit.enabled ? frameAudit : undefined,
   });
 
@@ -1207,18 +1263,40 @@ function reportTransformFailure() {
   window.addEventListener('focus', () => {
     host.setGameAudioMuted(false);
     host.resumeGameAudio();
-  });
+    });
 
-  status('Starting the game…');
-  try {
-    // Only now has the launch actually attempted a client. A player who closes
-    // the app before this point must not make the next launch reject or roll
-    // back a generation it never ran.
-    await reportRuntimeAttempt();
-  } catch (error) {
-    log('[warn] could not record the runtime attempt:', error);
+    status('Starting the game…');
+    if (window.__gwnativeE2E === true) {
+      try {
+      reportCredentialStatus((await readSaved()) ? 'available' : 'unavailable');
+    } catch (error) {
+      saved = null;
+      reportCredentialStatus('error');
+      log(`[warn] E2E credential status could not be read: ${error}`);
+    }
+    // The login screen can be ready without ever asking secureStorage: the
+    // client's Remember Password preference decides whether that method runs.
+    reportLoginReady();
   }
-  appendGlue();
+  Module.arguments = host.guildWarsClientArguments(launchOptions);
+  host.scrubGuildWarsLaunchCredentials(launchOptions);
+  if (Module.arguments.length > 0) {
+    const credentialsSet = Module.arguments.includes('-password');
+    log(
+      `client arguments: autologin=${Module.arguments.includes('-autologin')},`,
+      `credentials=${credentialsSet ? 'set' : 'keychain'},`,
+        `character=${Module.arguments.includes('-character') ? 'set' : 'default'}`,
+      );
+    }
+    try {
+      // Only now has the launch actually attempted a client. A player who closes
+      // the app before this point must not make the next launch reject or roll
+      // back a generation it never ran.
+      await reportRuntimeAttempt();
+    } catch (error) {
+      log('[warn] could not record the runtime attempt:', error);
+    }
+    appendGlue();
 })();
 
 })();

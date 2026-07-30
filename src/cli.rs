@@ -171,6 +171,7 @@ impl Invocation {
             "profile": self.profile.as_deref().unwrap_or("default"),
             "autologin": self.legacy.autologin,
             "credentials": credentials,
+            "character": self.legacy.character,
             "fps": self.legacy.fps,
             "mute": self.legacy.mute,
             "diagnostics": self.legacy.diagnostics,
@@ -350,7 +351,7 @@ where
                 translated(
                     &mut invocation,
                     option,
-                    "offers the invocation or profile Keychain credentials to the current client",
+                    "requests the client's saved-login path; Guild Wars asks Keychain when Remember Password is enabled",
                 );
             }
             "-email" => {
@@ -373,10 +374,10 @@ where
             "-character" => {
                 let value = nonempty(take_value(&args, &mut index, option, inline)?, option)?;
                 set_once(&mut invocation.legacy.character, value.to_owned(), option)?;
-                unsupported(
+                translated(
                     &mut invocation,
                     option,
-                    "the current WebAssembly client exposes no supported character-selection launch hook",
+                    "passes the selection hint to the current client at startup",
                 );
             }
             "-fps" => {
@@ -833,6 +834,7 @@ mod tests {
             Some("hunter2")
         );
         assert_eq!(parsed.legacy.character.as_deref(), Some("Devona"));
+        assert_eq!(parsed.client_json()["character"], "Devona");
         let debug = format!("{parsed:?}");
         assert!(!debug.contains("hunter2"));
         assert!(debug.contains("<redacted>"));

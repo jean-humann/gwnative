@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { createSockets } from './sockets.js';
+import { createNetworkRegistry, createSockets } from './sockets.js';
 
 describe('socket callback audit', () => {
   it('bounds every game callback with its external source', () => {
@@ -63,5 +63,17 @@ describe('socket callback audit', () => {
       globalThis.WebSocket = previousWebSocket;
       globalThis.window = previousWindow;
     }
+  });
+});
+
+describe('client socket roles', () => {
+  it('identifies only resolved Auth service destinations as authentication', () => {
+    const registry = createNetworkRegistry();
+    registry.resolved('File1.ArenaNetworks.com', '192.0.2.10');
+    registry.resolved('Auth1.ArenaNetworks.com.', '192.0.2.20');
+
+    assert.equal(registry.role('192.0.2.10:6112'), 'other');
+    assert.equal(registry.role('192.0.2.20:6112'), 'authentication');
+    assert.equal(registry.role('192.0.2.30:6112'), 'other');
   });
 });
