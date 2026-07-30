@@ -116,7 +116,8 @@ the check instead of leaving a second version constant behind. The Rust suite
 contains unit and socket-level integration tests. `tests/companion.rs`
 instantiates the exact freestanding kernel over a deterministic client-memory
 fixture, executes one tick, and sends the resulting agent, quest, inventory,
-friend, and guild seqlock page through the production JavaScript decoder. One ignored test
+friend, guild, camera, and trade seqlock page through the production JavaScript
+decoder. One ignored test
 reaches the GitHub
 API and is excluded from the default run. The `tests/web.rs` integration test
 invokes:
@@ -160,7 +161,7 @@ Wars client. The runner:
 8. when the installed client has a certified state layout, requires two stable
    revisions, validates bounded party, eight-slot skillbar, player effects,
    map agents, quests, mission objectives, inventory bags/items, gold, friends,
-   and the numeric guild summary, and
+   the numeric guild summary, camera geometry, and trade offer state, and
    confirms bidirectional movement through newer revisions.
 
 ```sh

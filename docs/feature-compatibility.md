@@ -26,7 +26,7 @@ The names-only, reproducible comparison is in the
 | Guild Wars CLI recognition | Available | Every documented switch parsed; native translations or explicit notices |
 | Isolated launch profiles | Available | Per-profile mutable state, Keychain identity, origin, overlays, and build library |
 | Explicit `.gwmod` sessions | Available | Compatible format, host-side ZIP/graph validation, double hash validation, ordered runtime |
-| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory/social/completion/camera state |
+| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory/social/completion/camera/trade state |
 | Overlay framework | Available | Profile-local movable widgets and exact-context hotkeys |
 | Clock, session timer, FPS | Available | Built-in Companion Tools widgets |
 | Target distance/range | Available on certified builds | Bounds-checked companion snapshot |
@@ -42,7 +42,8 @@ The names-only, reproducible comparison is in the
 | Friends and guild | Available on certified builds | 128-entry bounded presence page, exact category totals, numeric status/zone/ID, and privacy-minimised guild/rank/faction/roster/cape summary |
 | Mission and map completion | Available on certified builds | Six bounded WorldContext bitmaps expanded into sorted normal/HM mission, bonus, unlocked-map, and vanquish IDs |
 | Camera and render state | Available on certified builds | Bounded camera mode, agent target, position/look-at vectors, distance, yaw/pitch, raw FOV, and derived render FOV |
-| Chat, party search, trade | Needs certified layout and policy | No chat write or packet injection surface |
+| Trade offer | Available on certified builds | Bounded local status flags, both gold offers, and two 16-item read-only pages with explicit truncation and stale-close normalisation |
+| Chat and party search | Needs certified layout and policy | No chat write or packet injection surface |
 | Skill activation or build application | Read-only only | Codes can be stored; no game action is exposed |
 | Texture/shader packs | Research | WebGL/WASM pipeline differs from native DirectX replacement |
 | Unattended gameplay automation | Blocked | Not exposed through API, hotkeys, overlays, or mods by default |

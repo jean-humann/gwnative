@@ -24,7 +24,8 @@ identity, current target position/range, bounded party roster, the player’s
 eight-slot skillbar and effects, a bounded map-agent page, and the quest log
 with mission objectives, plus bounded inventory and account-storage summaries.
 It also includes a privacy-minimised friend-presence page and numeric guild
-summary, six completion bitmaps, and the current camera/render geometry.
+summary, six completion bitmaps, the current camera/render geometry, and a
+bounded read-only trade-offer summary.
 Client-owned names, UUIDs, messages, and announcements are not read.
 
 ## Loopback endpoints
@@ -389,6 +390,29 @@ The envelope is revisioned and timestamped:
       },
       "fieldOfView": 1.2,
       "renderFieldOfView": 0.7790197
+    },
+    "trade": {
+      "flags": 3,
+      "statusName": "OfferSent",
+      "open": true,
+      "initiated": true,
+      "offerSent": true,
+      "accepted": false,
+      "player": {
+        "gold": 2222,
+        "itemsTruncated": false,
+        "items": [
+          { "slot": 1, "itemId": 700, "quantity": 5 },
+          { "slot": 2, "itemId": 701, "quantity": 1 }
+        ]
+      },
+      "partner": {
+        "gold": 3333,
+        "itemsTruncated": false,
+        "items": [
+          { "slot": 1, "itemId": 800, "quantity": 2 }
+        ]
+      }
     }
   }
 }
@@ -456,7 +480,7 @@ modifier-count fields. The boolean stackable, inscribable, identified,
 tradable, usable, upgrade, inscription, rarity, inventory, and storage fields
 are exact derivatives of the same interaction and bag words and are checked
 again by Rust. Encoded item names, customization text, modifier words, and
-merchant/trade state are not read in this ABI. Inventory is sensitive account
+merchant state are not read in this ABI. Inventory is sensitive account
 state: the loopback token is mandatory, the page publishes no faster than four
 times per second, and the domain has no move/use/equip/salvage/gold action.
 
@@ -507,6 +531,26 @@ finite and within its certified bounds. Camera controller pointers,
 transition destinations, and render-device ownership remain private. There is
 no API operation to rotate, move, zoom, unlock, or otherwise mutate the camera.
 
+The trade domain follows the fixed GWCA and Py4GW Native `TradeContext` reached
+through `GameContext + 0x58`. That accessor is also byte-identical in all three
+certified browser clients. `flags` retains only the documented initiated,
+offer-sent, and accepted bits; the booleans and `statusName` are exact
+derivatives, with `Accepted` taking precedence over `OfferSent`, then
+`Initiated`. A zero word is `Closed`.
+
+Each side carries at most 100,000 gold and 16 ordered `{slot, itemId,
+quantity}` records. `itemsTruncated` distinguishes that public cap from a
+complete offer. Item IDs are non-zero and unique per side, and quantities are
+bounded to 1–250. The companion validates up to 32 source entries before
+publishing the capped page. When the client closes a trade, stale gold and item
+buffers are discarded and the API publishes two empty offers. The domain
+describes local client state only: it does not claim that the partner accepted
+or sent an offer, and it never follows item-name pointers.
+
+Trade state is read-only. The actions endpoint exposes no operation to open,
+cancel, accept, change, submit, add, or remove an offer, and no packet or UI
+event is injected.
+
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account
 identity, chat, encoded game text, or action surface.
@@ -541,7 +585,8 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - inventory, storage, and gold totals;
 - mission and map completion totals;
 - friend presence and numeric guild summary;
-- camera mode, distance, pitch, and render FOV; and
+- camera mode, distance, pitch, and render FOV;
+- trade status, item counts, and gold for both sides; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact
