@@ -15,7 +15,9 @@ export const FEATURES = Object.freeze([
   { id: 'party', group: 'Game state', name: 'Party and hero roster', status: 'available' },
   { id: 'skillbar', group: 'Game state', name: 'Player skillbar', status: 'available' },
   { id: 'effects', group: 'Game state', name: 'Effects and buffs', status: 'available' },
-  { id: 'maps', group: 'Game state', name: 'Map agents, quests and completion', status: 'needs-layout' },
+  { id: 'agents', group: 'Game state', name: 'Map agents', status: 'available' },
+  { id: 'quests', group: 'Game state', name: 'Quest log and objectives', status: 'available' },
+  { id: 'completion', group: 'Game state', name: 'Mission and map completion', status: 'needs-layout' },
   { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'needs-layout' },
   { id: 'chat', group: 'Game state', name: 'Chat and party search', status: 'needs-layout' },
   { id: 'textures', group: 'Presentation', name: 'Texture and shader packs', status: 'research' },
@@ -117,6 +119,44 @@ function installWidgets(overlays) {
       );
     },
   });
+  const agents = overlays.register({
+    id: 'map-agents',
+    title: 'Map agents',
+    position: { x: 16, y: 408 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      if (!state.agents) return setText(body, 'Unavailable for this client build');
+      const living = state.agents.agents.filter((agent) => agent.isLiving).length;
+      const suffix = state.agents.truncated ? ' · truncated' : '';
+      setText(
+        body,
+        `${state.agents.agents.length}/${state.agents.total} agents · ${living} living${suffix}`,
+      );
+    },
+  });
+  const quests = overlays.register({
+    id: 'quest-log',
+    title: 'Quests',
+    position: { x: 16, y: 464 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      if (!state.quests) return setText(body, 'Unavailable for this client build');
+      const active = state.quests.activeQuestId === 0
+        ? 'no active quest'
+        : `active #${state.quests.activeQuestId}`;
+      const suffix =
+        state.quests.questsTruncated || state.quests.objectivesTruncated
+          ? ' · truncated'
+          : '';
+      setText(
+        body,
+        `${state.quests.quests.length} quests · ${active} · `
+          + `${state.quests.missionObjectives.length} objectives${suffix}`,
+      );
+    },
+  });
 
   const updateTime = () => {
     if (clock.isVisible()) clock.update(new Date().toLocaleTimeString());
@@ -144,6 +184,8 @@ function installWidgets(overlays) {
     if (party.isVisible()) party.update(event.detail);
     if (skillbar.isVisible()) skillbar.update(event.detail);
     if (effects.isVisible()) effects.update(event.detail);
+    if (agents.isVisible()) agents.update(event.detail);
+    if (quests.isVisible()) quests.update(event.detail);
   });
 
   return Object.freeze({
@@ -154,6 +196,8 @@ function installWidgets(overlays) {
     party,
     skillbar,
     effects,
+    agents,
+    quests,
     dispose: () => clearInterval(interval),
   });
 }
@@ -242,6 +286,8 @@ export function installToolsPanel({
     ['Party roster', widgets.party],
     ['Player skillbar', widgets.skillbar],
     ['Player effects', widgets.effects],
+    ['Map agents', widgets.agents],
+    ['Quest log', widgets.quests],
   ]) {
     widgetButtons.append(
       button(document, label, () => widget.visible(!widget.isVisible())),

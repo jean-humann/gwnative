@@ -24,6 +24,8 @@ const PUBLIC_FIELDS = Object.freeze([
   'party',
   'skillbar',
   'effects',
+  'agents',
+  'quests',
 ]);
 
 export function publicState(state) {

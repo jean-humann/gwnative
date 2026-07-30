@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 3;
+const SNAPSHOT_ABI = 4;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -38,6 +38,8 @@ const FLAG_LOADING = 1 << 3;
 const FLAG_PARTY = 1 << 4;
 const FLAG_SKILLBAR = 1 << 5;
 const FLAG_EFFECTS = 1 << 6;
+const FLAG_AGENTS = 1 << 7;
+const FLAG_QUESTS = 1 << 8;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -107,7 +109,9 @@ function domainSnapshot() {
       | FLAG_TARGET
       | FLAG_PARTY
       | FLAG_SKILLBAR
-      | FLAG_EFFECTS,
+      | FLAG_EFFECTS
+      | FLAG_AGENTS
+      | FLAG_QUESTS,
   });
   const view = new DataView(buffer);
   view.setUint32(64, 3, true);
@@ -150,6 +154,34 @@ function domainSnapshot() {
   view.setUint32(1280, 7, true);
   view.setFloat32(1284, 12.5, true);
   view.setUint32(1288, 400, true);
+  view.setUint32(2808, 1, true);
+  view.setUint32(2812, 1, true);
+  view.setUint32(2816, 1, true);
+  view.setUint32(2820, 0xdb, true);
+  view.setUint32(2824, 42, true);
+  view.setUint32(2828, 7, true);
+  view.setUint32(2832, 0, true);
+  view.setUint32(2836, 20, true);
+  view.setFloat32(2840, 0.75, true);
+  view.setFloat32(2844, 1.25, true);
+  view.setFloat32(2848, 100, true);
+  view.setFloat32(2852, -250.5, true);
+  view.setFloat32(2856, 3, true);
+  view.setUint32(2860, 65, true);
+  view.setUint32(2864, 0, true);
+  view.setUint32(2868, 1, true);
+  view.setUint32(9984, 44, true);
+  view.setUint32(9992, 1, true);
+  view.setUint32(9996, 1, true);
+  view.setUint32(10000, 44, true);
+  view.setUint32(10004, 0x22, true);
+  view.setUint32(10008, 55, true);
+  view.setFloat32(10012, 10, true);
+  view.setFloat32(10016, 20, true);
+  view.setUint32(10020, 3, true);
+  view.setUint32(10024, 56, true);
+  view.setUint32(11792, 7, true);
+  view.setUint32(11796, 2, true);
   return buffer;
 }
 
@@ -219,7 +251,7 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state));
   });
 
-  it('decodes bounded party, skillbar, and player effect state', () => {
+  it('decodes bounded party, skillbar, effects, agents, and quests', () => {
     const state = readCompanionSnapshot(domainSnapshot(), 0);
     assert.equal(state.status, 'ready');
     assert.equal(state.party.id, 3);
@@ -267,9 +299,56 @@ describe('companion snapshot', () => {
     }]);
     assert.equal(state.effects.buffsTruncated, false);
     assert.equal(state.effects.effectsTruncated, false);
+    assert.equal(state.agents.total, 1);
+    assert.equal(state.agents.truncated, false);
+    assert.deepEqual(state.agents.agents, [{
+      agentId: 1,
+      typeBits: 0xdb,
+      kind: 'Living',
+      playerNumber: 42,
+      primary: 7,
+      secondary: 0,
+      level: 20,
+      health: 0.75,
+      rotation: 1.25,
+      x: 100,
+      y: -250.5,
+      z: 3,
+      modelState: 65,
+      effects: 0,
+      allegiance: 1,
+      isLiving: true,
+      isItem: false,
+      isGadget: false,
+      isDead: false,
+      isMoving: false,
+      isAttacking: false,
+      isKnockedDown: false,
+      isCasting: true,
+    }]);
+    assert.equal(state.quests.activeQuestId, 44);
+    assert.deepEqual(state.quests.quests, [{
+      questId: 44,
+      logState: 0x22,
+      mapFrom: 55,
+      markerX: 10,
+      markerY: 20,
+      markerPlane: 3,
+      mapTo: 56,
+      completed: true,
+      currentMission: false,
+      primary: true,
+      areaPrimary: false,
+    }]);
+    assert.deepEqual(state.quests.missionObjectives, [{
+      objectiveId: 7,
+      type: 2,
+    }]);
     assert.ok(Object.isFrozen(state.party.players));
     assert.ok(Object.isFrozen(state.skillbar.skills));
     assert.ok(Object.isFrozen(state.effects.effects));
+    assert.ok(Object.isFrozen(state.agents.agents));
+    assert.ok(Object.isFrozen(state.quests.quests));
   });
 
   it('refuses partial party, skillbar, and effect records', () => {
@@ -308,6 +387,22 @@ describe('companion snapshot', () => {
     const badTruncation = domainSnapshot();
     new DataView(badTruncation).setUint32(872, 1, true);
     assert.equal(readCompanionSnapshot(badTruncation, 0).reason, 'corrupt');
+
+    const invalidAgent = domainSnapshot();
+    new DataView(invalidAgent).setUint32(2836, 256, true);
+    assert.equal(readCompanionSnapshot(invalidAgent, 0).reason, 'corrupt');
+
+    const absentActiveQuest = domainSnapshot();
+    new DataView(absentActiveQuest).setUint32(9984, 45, true);
+    assert.equal(readCompanionSnapshot(absentActiveQuest, 0).reason, 'corrupt');
+
+    const unusedQuest = domainSnapshot();
+    new DataView(unusedQuest).setUint32(10028, 1, true);
+    assert.equal(readCompanionSnapshot(unusedQuest, 0).reason, 'corrupt');
+
+    const badQuestTruncation = domainSnapshot();
+    new DataView(badQuestTruncation).setUint32(9988, 1, true);
+    assert.equal(readCompanionSnapshot(badQuestTruncation, 0).reason, 'corrupt');
   });
 
   // The seqlock, which is the whole reason this can be read on the animation
@@ -327,7 +422,7 @@ describe('companion snapshot', () => {
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
       // A flag this build has no name for. The companion sets only four, so a
       // fifth is either a newer companion or not a companion at all.
-      { flags: FLAG_READY | FLAG_PLAYER | (1 << 8) },
+      { flags: FLAG_READY | FLAG_PLAYER | (1 << 9) },
     ]) {
       assert.equal(read(overrides).reason, 'snapshot', JSON.stringify(overrides));
     }

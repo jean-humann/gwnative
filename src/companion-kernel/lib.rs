@@ -38,7 +38,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 3;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 4;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -47,6 +47,8 @@ const FLAG_LOADING: u32 = 1 << 3;
 const FLAG_PARTY_VALID: u32 = 1 << 4;
 const FLAG_SKILLBAR_VALID: u32 = 1 << 5;
 const FLAG_EFFECTS_VALID: u32 = 1 << 6;
+const FLAG_MAP_AGENTS_VALID: u32 = 1 << 7;
+const FLAG_QUESTS_VALID: u32 = 1 << 8;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -58,6 +60,11 @@ const MAX_RAW_BUFFS: u32 = 240;
 const MAX_RAW_EFFECTS: u32 = 240;
 const MAX_PLAYER_BUFFS: usize = 32;
 const MAX_PLAYER_EFFECTS: usize = 64;
+const MAX_MAP_AGENTS: usize = 128;
+const MAX_RAW_QUESTS: u32 = 256;
+const MAX_QUESTS: usize = 64;
+const MAX_RAW_MISSION_OBJECTIVES: u32 = 128;
+const MAX_MISSION_OBJECTIVES: usize = 32;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -95,9 +102,18 @@ struct Layout {
     agent_id: u32,
     agent_x: u32,
     agent_y: u32,
+    agent_z: u32,
+    agent_rotation: u32,
     agent_type: u32,
     agent_player_number: u32,
     agent_model_type: u32,
+    agent_primary: u32,
+    agent_secondary: u32,
+    agent_level: u32,
+    agent_hp: u32,
+    agent_model_state: u32,
+    agent_effects: u32,
+    agent_allegiance: u32,
     game_world_context: u32,
     game_party_context: u32,
     party_flag: u32,
@@ -148,6 +164,18 @@ struct Layout {
     effect_agent_id: u32,
     effect_duration: u32,
     effect_timestamp: u32,
+    world_active_quest: u32,
+    world_quest_log: u32,
+    quest_stride: u32,
+    quest_id: u32,
+    quest_log_state: u32,
+    quest_map_from: u32,
+    quest_marker: u32,
+    quest_map_to: u32,
+    world_mission_objectives: u32,
+    mission_objective_stride: u32,
+    mission_objective_id: u32,
+    mission_objective_type: u32,
     cursor_active_art: u32,
     cursor_software_model: u32,
     cursor_show_count: u32,
@@ -218,6 +246,44 @@ struct PlayerEffect {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct MapAgent {
+    agent_id: u32,
+    type_bits: u32,
+    player_number: u32,
+    primary: u32,
+    secondary: u32,
+    level: u32,
+    health: f32,
+    rotation: f32,
+    x: f32,
+    y: f32,
+    z: f32,
+    model_state: u32,
+    effects: u32,
+    allegiance: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Quest {
+    quest_id: u32,
+    log_state: u32,
+    map_from: u32,
+    marker_x: f32,
+    marker_y: f32,
+    marker_plane: u32,
+    map_to: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MissionObjective {
+    objective_id: u32,
+    objective_type: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -255,6 +321,16 @@ struct Snapshot {
     effect_count: u32,
     buffs: [PlayerBuff; MAX_PLAYER_BUFFS],
     effects: [PlayerEffect; MAX_PLAYER_EFFECTS],
+    map_agent_flags: u32,
+    map_agent_count: u32,
+    map_agent_total: u32,
+    map_agents: [MapAgent; MAX_MAP_AGENTS],
+    active_quest_id: u32,
+    quest_flags: u32,
+    quest_count: u32,
+    mission_objective_count: u32,
+    quests: [Quest; MAX_QUESTS],
+    mission_objectives: [MissionObjective; MAX_MISSION_OBJECTIVES],
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -275,8 +351,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 316] = [(); size_of::<Layout>()];
-const _: [(); 2804] = [(); size_of::<Snapshot>()];
+const _: [(); 400] = [(); size_of::<Layout>()];
+const _: [(); 12048] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 #[panic_handler]
@@ -330,6 +406,10 @@ unsafe fn read_i32(address: u32) -> Option<i32> {
 
 unsafe fn read_u16(address: u32) -> Option<u16> {
     contains(address, 2).then(|| unsafe { read_volatile(address as *const u16) })
+}
+
+unsafe fn read_u8(address: u32) -> Option<u8> {
+    contains(address, 1).then(|| unsafe { read_volatile(address as *const u8) })
 }
 
 unsafe fn read_f32(address: u32) -> Option<f32> {
@@ -428,6 +508,35 @@ const EMPTY_PLAYER_EFFECT: PlayerEffect = PlayerEffect {
     duration: 0.0,
     timestamp: 0,
 };
+const EMPTY_MAP_AGENT: MapAgent = MapAgent {
+    agent_id: 0,
+    type_bits: 0,
+    player_number: 0,
+    primary: 0,
+    secondary: 0,
+    level: 0,
+    health: 0.0,
+    rotation: 0.0,
+    x: 0.0,
+    y: 0.0,
+    z: 0.0,
+    model_state: 0,
+    effects: 0,
+    allegiance: 0,
+};
+const EMPTY_QUEST: Quest = Quest {
+    quest_id: 0,
+    log_state: 0,
+    map_from: 0,
+    marker_x: 0.0,
+    marker_y: 0.0,
+    marker_plane: 0,
+    map_to: 0,
+};
+const EMPTY_MISSION_OBJECTIVE: MissionObjective = MissionObjective {
+    objective_id: 0,
+    objective_type: 0,
+};
 #[derive(Clone, Copy)]
 struct PartyState {
     id: u32,
@@ -500,6 +609,45 @@ impl EffectsSource {
     };
 }
 
+// The map-agent page follows the same stack rule as effects: retain only the
+// source descriptor, then validate and write each record directly during the
+// seqlock publish after the original game tick has completed. A 128-record
+// page must never become a local array on the client's fixed imported-memory
+// stack.
+#[derive(Clone, Copy)]
+struct MapAgentsSource {
+    buffer: u32,
+    size: u32,
+}
+
+impl MapAgentsSource {
+    const EMPTY: Self = Self {
+        buffer: 0,
+        size: 0,
+    };
+}
+
+#[derive(Clone, Copy)]
+struct QuestsSource {
+    active_quest_id: u32,
+    flags: u32,
+    quest_count: u32,
+    objective_count: u32,
+    quest_buffer: u32,
+    objective_buffer: u32,
+}
+
+impl QuestsSource {
+    const EMPTY: Self = Self {
+        active_quest_id: 0,
+        flags: 0,
+        quest_count: 0,
+        objective_count: 0,
+        quest_buffer: 0,
+        objective_buffer: 0,
+    };
+}
+
 #[derive(Clone, Copy)]
 struct State {
     flags: u32,
@@ -512,6 +660,8 @@ struct State {
     party: PartyState,
     skillbar: SkillbarState,
     effects: EffectsSource,
+    map_agents: MapAgentsSource,
+    quests: QuestsSource,
 }
 
 impl State {
@@ -533,6 +683,8 @@ impl State {
             party: PartyState::EMPTY,
             skillbar: SkillbarState::EMPTY,
             effects: EffectsSource::EMPTY,
+            map_agents: MapAgentsSource::EMPTY,
+            quests: QuestsSource::EMPTY,
         }
     }
 }
@@ -558,6 +710,60 @@ unsafe fn read_agent(
         return None;
     }
     Some(AgentState { id, kind, x, y })
+}
+
+unsafe fn read_map_agent(layout: Layout, address: u32, id: u32) -> Option<MapAgent> {
+    if unsafe { read_u32(offset(address, layout.agent_id)?)? } != id {
+        return None;
+    }
+    let type_bits = unsafe { read_u32(offset(address, layout.agent_type)?)? };
+    let x = unsafe { read_f32(offset(address, layout.agent_x)?)? };
+    let y = unsafe { read_f32(offset(address, layout.agent_y)?)? };
+    let z = unsafe { read_f32(offset(address, layout.agent_z)?)? };
+    let rotation = unsafe { read_f32(offset(address, layout.agent_rotation)?)? };
+    if !valid_agent_type(type_bits)
+        || !finite_position(x)
+        || !finite_position(y)
+        || !finite_position(z)
+        || !rotation.is_finite()
+        || rotation.abs() > 4.0
+    {
+        return None;
+    }
+
+    let mut agent = MapAgent {
+        agent_id: id,
+        type_bits,
+        rotation,
+        x,
+        y,
+        z,
+        ..EMPTY_MAP_AGENT
+    };
+    if type_bits & 0xdb == 0 {
+        return Some(agent);
+    }
+
+    agent.player_number =
+        unsafe { read_u16(offset(address, layout.agent_player_number)?)? } as u32;
+    agent.primary = unsafe { read_u8(offset(address, layout.agent_primary)?)? } as u32;
+    agent.secondary =
+        unsafe { read_u8(offset(address, layout.agent_secondary)?)? } as u32;
+    agent.level = unsafe { read_u8(offset(address, layout.agent_level)?)? } as u32;
+    agent.health = unsafe { read_f32(offset(address, layout.agent_hp)?)? };
+    agent.model_state = unsafe { read_u32(offset(address, layout.agent_model_state)?)? };
+    agent.effects = unsafe { read_u32(offset(address, layout.agent_effects)?)? };
+    agent.allegiance =
+        unsafe { read_u8(offset(address, layout.agent_allegiance)?)? } as u32;
+    if agent.primary > 10
+        || agent.secondary > 10
+        || !agent.health.is_finite()
+        || !(-10.0..=10.0).contains(&agent.health)
+        || agent.allegiance > 6
+    {
+        return None;
+    }
+    Some(agent)
 }
 
 #[derive(Clone, Copy)]
@@ -586,6 +792,101 @@ unsafe fn read_array(
     }
     let bytes = checked_mul(size, stride)?;
     (buffer & 3 == 0 && contains(buffer, bytes)).then_some(ArrayView { buffer, size })
+}
+
+unsafe fn read_quest(layout: Layout, buffer: u32, index: u32) -> Option<Quest> {
+    let entry = indexed(buffer, index, layout.quest_stride)?;
+    let marker = offset(entry, layout.quest_marker)?;
+    let quest = Quest {
+        quest_id: unsafe { read_u32(offset(entry, layout.quest_id)?)? },
+        log_state: unsafe { read_u32(offset(entry, layout.quest_log_state)?)? },
+        map_from: unsafe { read_u32(offset(entry, layout.quest_map_from)?)? },
+        marker_x: unsafe { read_f32(marker)? },
+        marker_y: unsafe { read_f32(offset(marker, 4)?)? },
+        marker_plane: unsafe { read_u32(offset(marker, 8)?)? },
+        map_to: unsafe { read_u32(offset(entry, layout.quest_map_to)?)? },
+    };
+    if quest.quest_id == 0
+        || quest.quest_id > 100_000
+        || quest.map_from > 2_000
+        || quest.map_to > 2_000
+        || !finite_position(quest.marker_x)
+        || !finite_position(quest.marker_y)
+        || quest.marker_plane > 100_000
+    {
+        return None;
+    }
+    Some(quest)
+}
+
+unsafe fn read_mission_objective(
+    layout: Layout,
+    buffer: u32,
+    index: u32,
+) -> Option<MissionObjective> {
+    let entry = indexed(buffer, index, layout.mission_objective_stride)?;
+    let objective = MissionObjective {
+        objective_id: unsafe { read_u32(offset(entry, layout.mission_objective_id)?)? },
+        objective_type: unsafe {
+            read_u32(offset(entry, layout.mission_objective_type)?)?
+        },
+    };
+    if objective.objective_id == 0 || objective.objective_type > 100_000 {
+        return None;
+    }
+    Some(objective)
+}
+
+unsafe fn collect_quests(layout: Layout, game: u32) -> Option<QuestsSource> {
+    let world = unsafe {
+        pointer(
+            offset(game, layout.game_world_context)?,
+            layout.world_mission_objectives.checked_add(16)?,
+        )?
+    };
+    let active_quest_id =
+        unsafe { read_u32(offset(world, layout.world_active_quest)?)? };
+    if active_quest_id > 100_000 {
+        return None;
+    }
+    let quests = unsafe {
+        read_array(
+            offset(world, layout.world_quest_log)?,
+            layout.quest_stride,
+            MAX_RAW_QUESTS,
+            1_024,
+        )?
+    };
+    let objectives = unsafe {
+        read_array(
+            offset(world, layout.world_mission_objectives)?,
+            layout.mission_objective_stride,
+            MAX_RAW_MISSION_OBJECTIVES,
+            512,
+        )?
+    };
+
+    let mut active_found = active_quest_id == 0;
+    for index in 0..quests.size {
+        let quest = unsafe { read_quest(layout, quests.buffer, index)? };
+        active_found |= quest.quest_id == active_quest_id;
+    }
+    if !active_found {
+        return None;
+    }
+    let objective_count = objectives.size.min(MAX_MISSION_OBJECTIVES as u32);
+    for index in 0..objective_count {
+        unsafe { read_mission_objective(layout, objectives.buffer, index)? };
+    }
+    Some(QuestsSource {
+        active_quest_id,
+        flags: u32::from(quests.size > MAX_QUESTS as u32)
+            | (u32::from(objectives.size > MAX_MISSION_OBJECTIVES as u32) << 1),
+        quest_count: quests.size.min(MAX_QUESTS as u32),
+        objective_count,
+        quest_buffer: quests.buffer,
+        objective_buffer: objectives.buffer,
+    })
 }
 
 unsafe fn collect_party(layout: Layout, game: u32, agent_count: u32) -> Option<PartyState> {
@@ -1056,17 +1357,92 @@ unsafe fn collect(layout: Layout) -> State {
         state.flags |= FLAG_EFFECTS_VALID;
         state.effects = effects;
     }
+    state.flags |= FLAG_MAP_AGENTS_VALID;
+    state.map_agents = MapAgentsSource {
+        buffer: agent_buffer,
+        size,
+    };
+    if let Some(quests) = unsafe { collect_quests(layout, game) } {
+        state.flags |= FLAG_QUESTS_VALID;
+        state.quests = quests;
+    }
     state
 }
 
-unsafe fn publish(runtime: &mut RuntimeState, state: State, layout: Layout) {
+unsafe fn publish_map_agents(
+    snapshot: *mut Snapshot,
+    layout: Layout,
+    source: MapAgentsSource,
+) -> bool {
+    let mut count = 0usize;
+    let mut total = 0u32;
+    let mut valid = source.buffer != 0 && source.size > 1 && source.size <= 4_096;
+    if valid {
+        for id in 1..source.size {
+            let value = indexed(source.buffer, id, 4)
+                .and_then(|entry| unsafe { read_u32(entry) });
+            let Some(address) = value else {
+                valid = false;
+                break;
+            };
+            if address == 0 {
+                continue;
+            }
+            let record = if address & 3 == 0 && contains(address, 0xa0) {
+                unsafe { read_map_agent(layout, address, id) }
+            } else {
+                None
+            };
+            let Some(record) = record else {
+                valid = false;
+                break;
+            };
+            total = match total.checked_add(1) {
+                Some(value) => value,
+                None => {
+                    valid = false;
+                    break;
+                }
+            };
+            if count < MAX_MAP_AGENTS {
+                unsafe {
+                    write_volatile(&mut (*snapshot).map_agents[count], record);
+                }
+                count += 1;
+            }
+        }
+    }
+    valid &= total > 0;
+    if !valid {
+        count = 0;
+        total = 0;
+    }
+    for index in count..MAX_MAP_AGENTS {
+        unsafe {
+            write_volatile(&mut (*snapshot).map_agents[index], EMPTY_MAP_AGENT);
+        }
+    }
+    unsafe {
+        write_volatile(
+            &mut (*snapshot).map_agent_flags,
+            u32::from(valid && total > count as u32),
+        );
+        write_volatile(
+            &mut (*snapshot).map_agent_count,
+            if valid { count as u32 } else { 0 },
+        );
+        write_volatile(&mut (*snapshot).map_agent_total, total);
+    }
+    valid
+}
+
+unsafe fn publish(runtime: &mut RuntimeState, mut state: State, layout: Layout) {
     let next = runtime.sequence.wrapping_add(2) & !1;
     let snapshot = runtime.snapshot_ptr as *mut Snapshot;
     unsafe {
         write_volatile(&mut (*snapshot).sequence, next.wrapping_sub(1));
         write_volatile(&mut (*snapshot).magic, MAGIC);
         write_volatile(&mut (*snapshot).abi_and_size, ABI_AND_SIZE);
-        write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).tick_count, runtime.tick_count);
         write_volatile(&mut (*snapshot).map_id, state.map_id);
         write_volatile(&mut (*snapshot).instance_type, state.instance_type);
@@ -1158,6 +1534,42 @@ unsafe fn publish(runtime: &mut RuntimeState, state: State, layout: Layout) {
             };
             write_volatile(&mut (*snapshot).effects[index], value);
         }
+        if !publish_map_agents(snapshot, layout, state.map_agents) {
+            state.flags &= !FLAG_MAP_AGENTS_VALID;
+        }
+        write_volatile(
+            &mut (*snapshot).active_quest_id,
+            state.quests.active_quest_id,
+        );
+        write_volatile(&mut (*snapshot).quest_flags, state.quests.flags);
+        write_volatile(&mut (*snapshot).quest_count, state.quests.quest_count);
+        write_volatile(
+            &mut (*snapshot).mission_objective_count,
+            state.quests.objective_count,
+        );
+        for index in 0..MAX_QUESTS {
+            let value = if index < state.quests.quest_count as usize {
+                read_quest(layout, state.quests.quest_buffer, index as u32)
+                    .unwrap_or(EMPTY_QUEST)
+            } else {
+                EMPTY_QUEST
+            };
+            write_volatile(&mut (*snapshot).quests[index], value);
+        }
+        for index in 0..MAX_MISSION_OBJECTIVES {
+            let value = if index < state.quests.objective_count as usize {
+                read_mission_objective(
+                    layout,
+                    state.quests.objective_buffer,
+                    index as u32,
+                )
+                .unwrap_or(EMPTY_MISSION_OBJECTIVE)
+            } else {
+                EMPTY_MISSION_OBJECTIVE
+            };
+            write_volatile(&mut (*snapshot).mission_objectives[index], value);
+        }
+        write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).sequence, next);
     }
     runtime.sequence = next;
