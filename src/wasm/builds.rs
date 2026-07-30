@@ -616,6 +616,8 @@ pub(super) struct EnhancementLayout {
     pub ui_frame_parent_relation: u32,
     pub ui_frame_hash: u32,
     pub ui_frame_state: u32,
+    // Append-only ABI: keep every previously certified layout word stable.
+    pub world_merchant_items: u32,
 }
 
 impl EnhancementLayout {
@@ -821,13 +823,14 @@ impl EnhancementLayout {
             self.ui_frame_parent_relation,
             self.ui_frame_hash,
             self.ui_frame_state,
+            self.world_merchant_items,
         ]
     }
 }
 
 /// Fields in [`EnhancementLayout`]. Named because the companion's own `Layout`
 /// is this many words long and the two have to agree.
-pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 198;
+pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 199;
 
 pub(super) struct EnhancementBuild {
     /// The *template-save* output, not ArenaNet's own module. That transform is
@@ -860,7 +863,7 @@ pub(super) struct EnhancementBuild {
 pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     EnhancementBuild {
         sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-        output_sha256: "6a86b6397860880f92bd5f54e2b22593cf4ce3d20978caeab4db1f36922d9201",
+        output_sha256: "23f40d5b71cdb79d26ae71369199f1df5717e1795146d074a9b2a56b68cabc18",
         import_count: 219,
         program_id: 1,
         build_id: 38771,
@@ -1067,11 +1070,12 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             ui_frame_parent_relation: 0x128,
             ui_frame_hash: 0x134,
             ui_frame_state: 0x18c,
+            world_merchant_items: 0x24,
         },
     },
     EnhancementBuild {
         sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
-        output_sha256: "3ded6e2aee14af8523168961406d511173ee857d97e0ca318bfacbac2bbe381a",
+        output_sha256: "8e869a571a328bffada7e26259830d3fc49cad9c92aa1b0ea682f4804d718d4d",
         import_count: 219,
         program_id: 1,
         build_id: 38790,
@@ -1278,11 +1282,12 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             ui_frame_parent_relation: 0x128,
             ui_frame_hash: 0x134,
             ui_frame_state: 0x18c,
+            world_merchant_items: 0x24,
         },
     },
     EnhancementBuild {
         sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
-        output_sha256: "cfc1d0c27d5a17b03b63eac385351acecea07e1bf70c5d9ca0d4bcf912e15db0",
+        output_sha256: "4deae31f215e579fa7e2c86ec3565854330a3a2b95b36f14ce0bb5bf4986dfe2",
         import_count: 219,
         program_id: 1,
         build_id: 38795,
@@ -1489,6 +1494,7 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             ui_frame_parent_relation: 0x128,
             ui_frame_hash: 0x134,
             ui_frame_state: 0x18c,
+            world_merchant_items: 0x24,
         },
     },
 ];
@@ -1632,6 +1638,14 @@ mod tests {
             assert_eq!(build.layout.ui_frame_parent_relation, 0x128);
             assert_eq!(build.layout.ui_frame_hash, 0x134);
             assert_eq!(build.layout.ui_frame_state, 0x18c);
+        }
+    }
+
+    #[test]
+    fn every_certified_build_uses_the_verified_merchant_layout() {
+        for build in ENHANCEMENT_BUILDS {
+            assert_eq!(build.layout.game_world_context, 0x2c);
+            assert_eq!(build.layout.world_merchant_items, 0x24);
         }
     }
 }

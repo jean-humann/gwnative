@@ -57,6 +57,7 @@ const frameArray = 0x167000;
 const framePointers = 0x168000;
 const rootFrame = 0x169000;
 const childFrame = 0x16a000;
+const merchantItems = 0x16b000;
 const snapshot = 0x180000;
 const config = 0x1a0000;
 
@@ -108,6 +109,14 @@ u32(world + 0x6f8, 0);
 u32(world + 0x508, 0);
 u32(world + 0x50c, 0);
 u32(world + 0x510, 0);
+
+// WorldContext's merchant-facing item-ID array. It does not imply that a
+// merchant window is open and deliberately carries no price or quote data.
+u32(world + 0x24, merchantItems);
+u32(world + 0x28, 2);
+u32(world + 0x2c, 2);
+u32(merchantItems, 900);
+u32(merchantItems + 4, 901);
 
 // One active quest and one mission objective.
 u32(world + 0x528, 44);
@@ -277,7 +286,7 @@ u32(childFrame + 0x20, 7);
 u32(childFrame + 0x24, 8);
 u32(childFrame + 0x18c, 0x204);
 
-const layout = Array(198).fill(0);
+const layout = Array(199).fill(0);
 Object.assign(layout, {
   0: contextRoot,
   1: agentArray,
@@ -443,6 +452,7 @@ Object.assign(layout, {
   195: 0x128,
   196: 0x134,
   197: 0x18c,
+  198: 0x24,
 });
 new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
@@ -452,7 +462,7 @@ const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
 });
 const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 792, 0, 0, 1 << 1),
+  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 796, 0, 0, 1 << 1),
   1,
 );
 tick(0);
@@ -469,6 +479,11 @@ assert.deepEqual(
     { agentId: 2, kind: 'Item' },
   ],
 );
+assert.deepEqual(state.merchant, {
+  truncated: false,
+  total: 2,
+  itemIds: [900, 901],
+});
 assert.equal(state.agents.agents[0].isCasting, true);
 assert.equal(state.quests.activeQuestId, 44);
 assert.equal(state.quests.quests[0].completed, true);
