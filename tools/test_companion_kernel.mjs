@@ -118,6 +118,38 @@ u32(world + 0x2c, 2);
 u32(merchantItems, 900);
 u32(merchantItems + 4, 901);
 
+// Duplicated progression counters intentionally differ by one so the
+// companion exercises the same highest-valid-copy rule as GWCA/Py4GW.
+u32(world + 0x684, 1);
+u32(world + 0x740, 1_337_499);
+u32(world + 0x744, 1_337_500);
+u32(world + 0x748, 999);
+u32(world + 0x74c, 1_000);
+u32(world + 0x750, 4_999);
+u32(world + 0x754, 5_000);
+u32(world + 0x758, 1_999);
+u32(world + 0x75c, 2_000);
+u32(world + 0x760, 5_999);
+u32(world + 0x764, 6_000);
+u32(world + 0x768, 99);
+u32(world + 0x76c, 100);
+u32(world + 0x770, 999);
+u32(world + 0x774, 1_000);
+u32(world + 0x788, 19);
+u32(world + 0x78c, 20);
+u32(world + 0x798, 499);
+u32(world + 0x79c, 500);
+u32(world + 0x7a0, 2_499);
+u32(world + 0x7a4, 2_500);
+u32(world + 0x7a8, 4);
+u32(world + 0x7ac, 5);
+u32(world + 0x7b0, 124);
+u32(world + 0x7b4, 125);
+u32(world + 0x7b8, 10_000);
+u32(world + 0x7bc, 10_000);
+u32(world + 0x7c0, 10_000);
+u32(world + 0x7c4, 15_000);
+
 // One active quest and one mission objective.
 u32(world + 0x528, 44);
 u32(world + 0x52c, questLog);
@@ -286,7 +318,7 @@ u32(childFrame + 0x20, 7);
 u32(childFrame + 0x24, 8);
 u32(childFrame + 0x18c, 0x204);
 
-const layout = Array(199).fill(0);
+const layout = Array(228).fill(0);
 Object.assign(layout, {
   0: contextRoot,
   1: agentArray,
@@ -453,6 +485,35 @@ Object.assign(layout, {
   196: 0x134,
   197: 0x18c,
   198: 0x24,
+  199: 0x684,
+  200: 0x740,
+  201: 0x744,
+  202: 0x748,
+  203: 0x74c,
+  204: 0x750,
+  205: 0x754,
+  206: 0x7b8,
+  207: 0x758,
+  208: 0x75c,
+  209: 0x760,
+  210: 0x764,
+  211: 0x7bc,
+  212: 0x768,
+  213: 0x76c,
+  214: 0x770,
+  215: 0x774,
+  216: 0x7c4,
+  217: 0x788,
+  218: 0x78c,
+  219: 0x798,
+  220: 0x79c,
+  221: 0x7a0,
+  222: 0x7a4,
+  223: 0x7c0,
+  224: 0x7a8,
+  225: 0x7ac,
+  226: 0x7b0,
+  227: 0x7b4,
 });
 new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
@@ -462,7 +523,7 @@ const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
 });
 const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 796, 0, 0, 1 << 1),
+  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 912, 0, 0, 1 << 1),
   1,
 );
 tick(0);
@@ -483,6 +544,18 @@ assert.deepEqual(state.merchant, {
   truncated: false,
   total: 2,
   itemIds: [900, 901],
+});
+assert.deepEqual(state.progression, {
+  hardModeUnlocked: true,
+  level: 20,
+  experience: 1_337_500,
+  factions: {
+    kurzick: { current: 1_000, totalEarned: 5_000, maximum: 10_000 },
+    luxon: { current: 2_000, totalEarned: 6_000, maximum: 10_000 },
+    imperial: { current: 100, totalEarned: 1_000, maximum: 15_000 },
+    balthazar: { current: 500, totalEarned: 2_500, maximum: 10_000 },
+  },
+  skillPoints: { current: 5, totalEarned: 125 },
 });
 assert.equal(state.agents.agents[0].isCasting, true);
 assert.equal(state.quests.activeQuestId, 44);

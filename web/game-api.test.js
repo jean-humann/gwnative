@@ -93,6 +93,18 @@ describe('public game state', () => {
       total: 2,
       itemIds: Object.freeze([900, 901]),
     });
+    const progression = Object.freeze({
+      hardModeUnlocked: true,
+      level: 20,
+      experience: 1_337_500,
+      factions: Object.freeze({
+        kurzick: Object.freeze({ current: 1_000, totalEarned: 5_000, maximum: 10_000 }),
+        luxon: Object.freeze({ current: 2_000, totalEarned: 6_000, maximum: 10_000 }),
+        imperial: Object.freeze({ current: 100, totalEarned: 1_000, maximum: 15_000 }),
+        balthazar: Object.freeze({ current: 500, totalEarned: 2_500, maximum: 10_000 }),
+      }),
+      skillPoints: Object.freeze({ current: 5, totalEarned: 125 }),
+    });
     assert.deepEqual(
       publicState({
         status: 'ready',
@@ -108,6 +120,7 @@ describe('public game state', () => {
         trade,
         ui,
         merchant,
+        progression,
       }),
       {
         status: 'ready',
@@ -123,6 +136,7 @@ describe('public game state', () => {
         trade,
         ui,
         merchant,
+        progression,
       },
     );
   });
