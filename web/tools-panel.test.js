@@ -23,7 +23,7 @@ describe('companion tools', () => {
     assert.equal(FEATURES.find((feature) => feature.id === 'quests').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'inventory').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'social').status, 'available');
-    assert.equal(FEATURES.find((feature) => feature.id === 'completion').status, 'needs-layout');
+    assert.equal(FEATURES.find((feature) => feature.id === 'completion').status, 'available');
   });
 
   it('makes inline flex panels genuinely hide and reopen', () => {

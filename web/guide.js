@@ -117,8 +117,8 @@ export const GUIDE = [
         'Use Edit layout or ⌘⇧O to move them.',
       'The library names, groups, imports and exports template codes in this profile. ' +
         'It does not apply them to the game. Certified builds also offer read-only party, ' +
-        'skillbar, effects, map-agent, quest and inventory summaries. Chat, completion ' +
-        'and other unmapped tools remain listed as unavailable rather than guessed.',
+        'skillbar, effects, map-agent, quest, inventory, completion, friend and guild ' +
+        'summaries. Chat and other unmapped tools remain unavailable rather than guessed.',
       'These hotkeys open local interface only. They never synthesize game input, and ' +
         'unattended gameplay automation is not part of the companion tools.',
     ],
