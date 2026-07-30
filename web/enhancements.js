@@ -25,8 +25,8 @@ import {
 /** Must match `FEATURE_*` in `src/companion-kernel/lib.rs`. */
 const FEATURE_NATIVE_CURSOR = 1 << 0;
 const FEATURE_TARGET_READOUT = 1 << 1;
-const ENHANCEMENT_TRANSFORM_ABI = 7;
-const ENHANCEMENT_LAYOUT_WORDS = 100;
+const ENHANCEMENT_TRANSFORM_ABI = 8;
+const ENHANCEMENT_LAYOUT_WORDS = 129;
 
 /** How many render-cost samples to keep for `window.gwCompanionRuntime`. */
 const SAMPLE_WINDOW = 240;

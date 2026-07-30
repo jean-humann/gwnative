@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 4;
-export const COMPANION_SNAPSHOT_BYTES = 12_048;
+export const COMPANION_SNAPSHOT_ABI = 5;
+export const COMPANION_SNAPSHOT_BYTES = 45_284;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -45,6 +45,7 @@ const FLAGS = Object.freeze({
   effects: 1 << 6,
   agents: 1 << 7,
   quests: 1 << 8,
+  inventory: 1 << 9,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -55,7 +56,8 @@ const KNOWN_FLAGS =
   | FLAGS.skillbar
   | FLAGS.effects
   | FLAGS.agents
-  | FLAGS.quests;
+  | FLAGS.quests
+  | FLAGS.inventory;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -75,6 +77,10 @@ const MAX_PLAYER_EFFECTS = 64;
 const MAX_MAP_AGENTS = 128;
 const MAX_QUESTS = 64;
 const MAX_MISSION_OBJECTIVES = 32;
+const MAX_INVENTORY_BAGS = 22;
+const MAX_INVENTORY_ITEMS = 512;
+const MAX_INVENTORY_ITEM_ID = 1_000_000;
+const MAX_TOTAL_BAG_SLOTS = 1_024;
 const EFFECT_FLAGS = Object.freeze({
   buffsTruncated: 1 << 0,
   effectsTruncated: 1 << 1,
@@ -90,6 +96,9 @@ const QUEST_FLAGS = Object.freeze({
 });
 const KNOWN_QUEST_FLAGS =
   QUEST_FLAGS.questsTruncated | QUEST_FLAGS.objectivesTruncated;
+const INVENTORY_FLAGS = Object.freeze({
+  itemsTruncated: 1 << 0,
+});
 
 /** @param {number} value */
 function validCoordinate(value) {
@@ -543,6 +552,253 @@ function readQuests(view) {
   });
 }
 
+const ITEM_TYPE_NAMES = Object.freeze({
+  0: 'Salvage',
+  2: 'Axe',
+  3: 'Bag',
+  4: 'Boots',
+  5: 'Bow',
+  6: 'Bundle',
+  7: 'Chestpiece',
+  8: 'Rune_Mod',
+  9: 'Usable',
+  10: 'Dye',
+  11: 'Materials_Zcoins',
+  12: 'Offhand',
+  13: 'Gloves',
+  15: 'Hammer',
+  16: 'Headpiece',
+  17: 'CC_Shards',
+  18: 'Key',
+  19: 'Leggings',
+  20: 'Gold_Coin',
+  21: 'Quest_Item',
+  22: 'Wand',
+  24: 'Shield',
+  26: 'Staff',
+  27: 'Sword',
+  29: 'Kit',
+  30: 'Trophy',
+  31: 'Scroll',
+  32: 'Daggers',
+  33: 'Present',
+  34: 'Minipet',
+  35: 'Scythe',
+  36: 'Spear',
+  43: 'Storybook',
+  44: 'Costume',
+  45: 'Costume_Headpiece',
+  255: 'Unknown',
+});
+
+function expectedBagType(bagId) {
+  if (bagId >= 1 && bagId <= 5) return 1;
+  if (bagId === 6) return 5;
+  if (bagId === 7) return 3;
+  if (bagId >= 8 && bagId <= 21) return 4;
+  if (bagId === 22) return 2;
+  return null;
+}
+
+function bagKind(bagType) {
+  return ['None', 'Inventory', 'Equipped', 'NotCollected', 'Storage', 'MaterialStorage']
+    [bagType] ?? 'Unknown';
+}
+
+function readInventory(view) {
+  const flags = view.getUint32(12048, true);
+  const goldCharacter = view.getUint32(12052, true);
+  const goldStorage = view.getUint32(12056, true);
+  const storagePanesUnlocked = view.getUint32(12060, true);
+  const bagCount = view.getUint32(12064, true);
+  const itemCount = view.getUint32(12068, true);
+  const total = view.getUint32(12072, true);
+  const itemsTruncated = (flags & INVENTORY_FLAGS.itemsTruncated) !== 0;
+  if (
+    (flags & ~INVENTORY_FLAGS.itemsTruncated) !== 0
+    || storagePanesUnlocked > 14
+    || bagCount < 1
+    || bagCount > MAX_INVENTORY_BAGS
+    || itemCount > MAX_INVENTORY_ITEMS
+    || total < itemCount
+    || total > MAX_TOTAL_BAG_SLOTS
+    || (
+      itemsTruncated
+        ? itemCount !== MAX_INVENTORY_ITEMS || total <= itemCount
+        : total !== itemCount
+    )
+  ) {
+    return null;
+  }
+
+  const bags = [];
+  const bagsById = new Map();
+  let previousBagId = 0;
+  let totalCapacity = 0;
+  let expectedItems = 0;
+  for (let index = 0; index < MAX_INVENTORY_BAGS; index += 1) {
+    const offset = 12076 + index * 20;
+    if (index >= bagCount) {
+      if (!wordsAreZero(view, offset, 20)) return null;
+      continue;
+    }
+    const bagId = view.getUint32(offset, true);
+    const bagType = view.getUint32(offset + 4, true);
+    const containerItem = view.getUint32(offset + 8, true);
+    const capacity = view.getUint32(offset + 12, true);
+    const bagItemCount = view.getUint32(offset + 16, true);
+    if (
+      bagId <= previousBagId
+      || bagId > MAX_INVENTORY_BAGS
+      || expectedBagType(bagId) !== bagType
+      || containerItem > MAX_INVENTORY_ITEM_ID
+      || capacity > 256
+      || bagItemCount > capacity
+    ) {
+      return null;
+    }
+    previousBagId = bagId;
+    totalCapacity += capacity;
+    expectedItems += bagItemCount;
+    if (totalCapacity > MAX_TOTAL_BAG_SLOTS || expectedItems > MAX_TOTAL_BAG_SLOTS) {
+      return null;
+    }
+    const bag = Object.freeze({
+      bagId,
+      bagType,
+      kind: bagKind(bagType),
+      containerItem,
+      capacity,
+      itemCount: bagItemCount,
+      isInventory: bagType === 1,
+      isEquipped: bagType === 2,
+      isNotCollected: bagType === 3,
+      isStorage: bagType === 4,
+      isMaterialStorage: bagType === 5,
+    });
+    bags.push(bag);
+    bagsById.set(bagId, bag);
+  }
+  if (!bagsById.has(1) || expectedItems !== total) return null;
+
+  const items = [];
+  const itemIds = new Set();
+  const locations = new Set();
+  const itemsByBag = new Map();
+  let previousBag = 0;
+  let previousSlot = -1;
+  for (let index = 0; index < MAX_INVENTORY_ITEMS; index += 1) {
+    const offset = 12516 + index * 64;
+    if (index >= itemCount) {
+      if (!wordsAreZero(view, offset, 64)) return null;
+      continue;
+    }
+    const itemId = view.getUint32(offset, true);
+    const agentId = view.getUint32(offset + 4, true);
+    const bagId = view.getUint32(offset + 8, true);
+    const slot = view.getUint32(offset + 12, true);
+    const modelFileId = view.getUint32(offset + 16, true);
+    const type = view.getUint32(offset + 20, true);
+    const value = view.getUint32(offset + 24, true);
+    const interaction = view.getUint32(offset + 28, true);
+    const modelId = view.getUint32(offset + 32, true);
+    const itemFormula = view.getUint32(offset + 36, true);
+    const quantity = view.getUint32(offset + 40, true);
+    const equipped = view.getUint32(offset + 44, true);
+    const profession = view.getUint32(offset + 48, true);
+    const metadataFlags = view.getUint32(offset + 52, true);
+    const modifierCount = view.getUint32(offset + 56, true);
+    const dyeInfo = view.getUint32(offset + 60, true);
+    const bag = bagsById.get(bagId);
+    const location = `${bagId}:${slot}`;
+    if (
+      itemId === 0
+      || itemId > MAX_INVENTORY_ITEM_ID
+      || itemIds.has(itemId)
+      || agentId > MAX_AGENT_ID
+      || !bag
+      || slot >= bag.capacity
+      || locations.has(location)
+      || bagId < previousBag
+      || (bagId === previousBag && slot <= previousSlot)
+      || modelFileId === 0
+      || ITEM_TYPE_NAMES[type] === undefined
+      || value > 0xffff
+      || modelId === 0
+      || itemFormula > 0xffff
+      || quantity === 0
+      || quantity > 0xffff
+      || equipped > 1
+      || (profession > 10 && profession !== 0xff)
+      || (metadataFlags & ~0x3) !== 0
+      || modifierCount > 64
+      || dyeInfo > 0xff_ffff
+    ) {
+      return null;
+    }
+    itemIds.add(itemId);
+    locations.add(location);
+    previousBag = bagId;
+    previousSlot = slot;
+    itemsByBag.set(bagId, (itemsByBag.get(bagId) ?? 0) + 1);
+    items.push(Object.freeze({
+      itemId,
+      agentId,
+      bagId,
+      slot,
+      modelFileId,
+      type,
+      typeName: ITEM_TYPE_NAMES[type],
+      value,
+      interaction,
+      modelId,
+      itemFormula,
+      quantity,
+      equipped: equipped === 1,
+      profession,
+      customized: (metadataFlags & 1) !== 0,
+      materialSalvageable: (metadataFlags & 2) !== 0,
+      modifierCount,
+      dyeTint: dyeInfo & 0xff,
+      dye1: (dyeInfo >>> 8) & 0xf,
+      dye2: (dyeInfo >>> 12) & 0xf,
+      dye3: (dyeInfo >>> 16) & 0xf,
+      dye4: (dyeInfo >>> 20) & 0xf,
+      isStackable: (interaction & 0x8_0000) !== 0,
+      isInscribable: (interaction & 0x800_0000) !== 0,
+      isIdentified: (interaction & 1) !== 0,
+      isTradable: (interaction & 0x100) === 0,
+      isUsable: (interaction & 0x100_0000) !== 0,
+      isPrefixUpgradable: (interaction & 0x4000) === 0,
+      isSuffixUpgradable: (interaction & 0x8000) === 0,
+      isInscription: (interaction & 0x2500_0000) === 0x2500_0000,
+      isPurple: (interaction & 0x40_0000) !== 0,
+      isGreen: (interaction & 0x10) !== 0,
+      isGold: (interaction & 0x2_0000) !== 0,
+      isInventoryItem: bag.bagType === 1 || bag.bagType === 2,
+      isStorageItem: bag.bagType === 4 || bag.bagType === 5,
+    }));
+  }
+  for (const bag of bags) {
+    const published = itemsByBag.get(bag.bagId) ?? 0;
+    if (
+      published > bag.itemCount
+      || (!itemsTruncated && published !== bag.itemCount)
+    ) {
+      return null;
+    }
+  }
+  return Object.freeze({
+    itemsTruncated,
+    total,
+    goldCharacter,
+    goldStorage,
+    storagePanesUnlocked,
+    bags: Object.freeze(bags),
+    items: Object.freeze(items),
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -699,6 +955,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const inventoryValid = (flags & FLAGS.inventory) !== 0;
+  const inventory = inventoryValid ? readInventory(view) : null;
+  if (
+    (inventoryValid && inventory === null)
+    || (!inventoryValid && !wordsAreZero(view, 12048, 33236))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -717,6 +981,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(effects ? { effects } : {}),
     ...(agents ? { agents } : {}),
     ...(quests ? { quests } : {}),
+    ...(inventory ? { inventory } : {}),
   });
 }
 

@@ -26,6 +26,7 @@ const PUBLIC_FIELDS = Object.freeze([
   'effects',
   'agents',
   'quests',
+  'inventory',
 ]);
 
 export function publicState(state) {

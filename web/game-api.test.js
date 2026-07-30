@@ -56,12 +56,17 @@ describe('public game state', () => {
       activeQuestId: 44,
       quests: Object.freeze([{ questId: 44 }]),
     });
+    const inventory = Object.freeze({
+      total: 1,
+      bags: Object.freeze([{ bagId: 1 }]),
+      items: Object.freeze([{ itemId: 500 }]),
+    });
     assert.deepEqual(
       publicState({
-        status: 'ready', party, skillbar, effects, agents, quests,
+        status: 'ready', party, skillbar, effects, agents, quests, inventory,
       }),
       {
-        status: 'ready', party, skillbar, effects, agents, quests,
+        status: 'ready', party, skillbar, effects, agents, quests, inventory,
       },
     );
   });

@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 4;
+const SNAPSHOT_ABI = 5;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -40,6 +40,7 @@ const FLAG_SKILLBAR = 1 << 5;
 const FLAG_EFFECTS = 1 << 6;
 const FLAG_AGENTS = 1 << 7;
 const FLAG_QUESTS = 1 << 8;
+const FLAG_INVENTORY = 1 << 9;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -111,7 +112,8 @@ function domainSnapshot() {
       | FLAG_SKILLBAR
       | FLAG_EFFECTS
       | FLAG_AGENTS
-      | FLAG_QUESTS,
+      | FLAG_QUESTS
+      | FLAG_INVENTORY,
   });
   const view = new DataView(buffer);
   view.setUint32(64, 3, true);
@@ -182,6 +184,33 @@ function domainSnapshot() {
   view.setUint32(10024, 56, true);
   view.setUint32(11792, 7, true);
   view.setUint32(11796, 2, true);
+  view.setUint32(12052, 1_234, true);
+  view.setUint32(12056, 50_000, true);
+  view.setUint32(12060, 4, true);
+  view.setUint32(12064, 1, true);
+  view.setUint32(12068, 1, true);
+  view.setUint32(12072, 1, true);
+  view.setUint32(12076, 1, true);
+  view.setUint32(12080, 1, true);
+  view.setUint32(12084, 0, true);
+  view.setUint32(12088, 20, true);
+  view.setUint32(12092, 1, true);
+  view.setUint32(12516, 500, true);
+  view.setUint32(12520, 0, true);
+  view.setUint32(12524, 1, true);
+  view.setUint32(12528, 0, true);
+  view.setUint32(12532, 123, true);
+  view.setUint32(12536, 9, true);
+  view.setUint32(12540, 100, true);
+  view.setUint32(12544, 0x01_0a_0001, true);
+  view.setUint32(12548, 456, true);
+  view.setUint32(12552, 0, true);
+  view.setUint32(12556, 5, true);
+  view.setUint32(12560, 0, true);
+  view.setUint32(12564, 0xff, true);
+  view.setUint32(12568, 1, true);
+  view.setUint32(12572, 2, true);
+  view.setUint32(12576, 7 | (2 << 8) | (3 << 12) | (4 << 16) | (5 << 20), true);
   return buffer;
 }
 
@@ -251,7 +280,7 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state));
   });
 
-  it('decodes bounded party, skillbar, effects, agents, and quests', () => {
+  it('decodes every bounded nested domain', () => {
     const state = readCompanionSnapshot(domainSnapshot(), 0);
     assert.equal(state.status, 'ready');
     assert.equal(state.party.id, 3);
@@ -344,11 +373,82 @@ describe('companion snapshot', () => {
       objectiveId: 7,
       type: 2,
     }]);
+    assert.equal(state.inventory.goldCharacter, 1_234);
+    assert.equal(state.inventory.goldStorage, 50_000);
+    assert.equal(state.inventory.storagePanesUnlocked, 4);
+    assert.equal(state.inventory.total, 1);
+    assert.deepEqual(state.inventory.bags, [{
+      bagId: 1,
+      bagType: 1,
+      kind: 'Inventory',
+      containerItem: 0,
+      capacity: 20,
+      itemCount: 1,
+      isInventory: true,
+      isEquipped: false,
+      isNotCollected: false,
+      isStorage: false,
+      isMaterialStorage: false,
+    }]);
+    assert.equal(state.inventory.items[0].itemId, 500);
+    assert.equal(state.inventory.items[0].typeName, 'Usable');
+    assert.equal(state.inventory.items[0].quantity, 5);
+    assert.equal(state.inventory.items[0].customized, true);
+    assert.equal(state.inventory.items[0].modifierCount, 2);
+    assert.equal(state.inventory.items[0].dyeTint, 7);
+    assert.equal(state.inventory.items[0].dye4, 5);
+    assert.equal(state.inventory.items[0].isIdentified, true);
+    assert.equal(state.inventory.items[0].isStackable, true);
+    assert.equal(state.inventory.items[0].isUsable, true);
     assert.ok(Object.isFrozen(state.party.players));
     assert.ok(Object.isFrozen(state.skillbar.skills));
     assert.ok(Object.isFrozen(state.effects.effects));
     assert.ok(Object.isFrozen(state.agents.agents));
     assert.ok(Object.isFrozen(state.quests.quests));
+    assert.ok(Object.isFrozen(state.inventory.items));
+  });
+
+  it('accepts a complete bounded inventory page with an explicit remainder', () => {
+    const buffer = domainSnapshot();
+    const view = new DataView(buffer);
+    view.setUint32(12048, 1, true);
+    view.setUint32(12064, 3, true);
+    view.setUint32(12068, 512, true);
+    view.setUint32(12072, 513, true);
+    for (let index = 0; index < 3; index += 1) {
+      const offset = 12076 + index * 20;
+      view.setUint32(offset, index + 1, true);
+      view.setUint32(offset + 4, 1, true);
+      view.setUint32(offset + 8, 0, true);
+      view.setUint32(offset + 12, index < 2 ? 256 : 1, true);
+      view.setUint32(offset + 16, index < 2 ? 256 : 1, true);
+    }
+    for (let index = 0; index < 512; index += 1) {
+      const offset = 12516 + index * 64;
+      view.setUint32(offset, index + 1, true);
+      view.setUint32(offset + 4, 0, true);
+      view.setUint32(offset + 8, index < 256 ? 1 : 2, true);
+      view.setUint32(offset + 12, index % 256, true);
+      view.setUint32(offset + 16, 1, true);
+      view.setUint32(offset + 20, 9, true);
+      view.setUint32(offset + 24, 0, true);
+      view.setUint32(offset + 28, 0, true);
+      view.setUint32(offset + 32, 1, true);
+      view.setUint32(offset + 36, 0, true);
+      view.setUint32(offset + 40, 1, true);
+      view.setUint32(offset + 44, 0, true);
+      view.setUint32(offset + 48, 0xff, true);
+      view.setUint32(offset + 52, 0, true);
+      view.setUint32(offset + 56, 0, true);
+      view.setUint32(offset + 60, 0, true);
+    }
+
+    const state = readCompanionSnapshot(buffer, 0);
+    assert.equal(state.status, 'ready');
+    assert.equal(state.inventory.itemsTruncated, true);
+    assert.equal(state.inventory.items.length, 512);
+    assert.equal(state.inventory.total, 513);
+    assert.equal(state.inventory.bags[2].itemCount, 1);
   });
 
   it('refuses partial party, skillbar, and effect records', () => {
@@ -403,6 +503,22 @@ describe('companion snapshot', () => {
     const badQuestTruncation = domainSnapshot();
     new DataView(badQuestTruncation).setUint32(9988, 1, true);
     assert.equal(readCompanionSnapshot(badQuestTruncation, 0).reason, 'corrupt');
+
+    const badBagType = domainSnapshot();
+    new DataView(badBagType).setUint32(12080, 4, true);
+    assert.equal(readCompanionSnapshot(badBagType, 0).reason, 'corrupt');
+
+    const badItemSlot = domainSnapshot();
+    new DataView(badItemSlot).setUint32(12528, 20, true);
+    assert.equal(readCompanionSnapshot(badItemSlot, 0).reason, 'corrupt');
+
+    const badInventoryTruncation = domainSnapshot();
+    new DataView(badInventoryTruncation).setUint32(12048, 1, true);
+    assert.equal(readCompanionSnapshot(badInventoryTruncation, 0).reason, 'corrupt');
+
+    const unusedInventoryItem = domainSnapshot();
+    new DataView(unusedInventoryItem).setUint32(12580, 1, true);
+    assert.equal(readCompanionSnapshot(unusedInventoryItem, 0).reason, 'corrupt');
   });
 
   // The seqlock, which is the whole reason this can be read on the animation
@@ -422,7 +538,7 @@ describe('companion snapshot', () => {
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
       // A flag this build has no name for. The companion sets only four, so a
       // fifth is either a newer companion or not a companion at all.
-      { flags: FLAG_READY | FLAG_PLAYER | (1 << 9) },
+      { flags: FLAG_READY | FLAG_PLAYER | (1 << 10) },
     ]) {
       assert.equal(read(overrides).reason, 'snapshot', JSON.stringify(overrides));
     }
