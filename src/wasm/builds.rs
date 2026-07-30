@@ -488,6 +488,12 @@ pub(super) struct EnhancementLayout {
     pub mission_objective_stride: u32,
     pub mission_objective_id: u32,
     pub mission_objective_type: u32,
+    pub world_missions_completed: u32,
+    pub world_missions_bonus: u32,
+    pub world_missions_completed_hm: u32,
+    pub world_missions_bonus_hm: u32,
+    pub world_unlocked_map: u32,
+    pub world_vanquished_areas: u32,
     pub game_item_context: u32,
     pub item_context_inventory: u32,
     pub inventory_bags: u32,
@@ -659,6 +665,12 @@ impl EnhancementLayout {
             self.mission_objective_stride,
             self.mission_objective_id,
             self.mission_objective_type,
+            self.world_missions_completed,
+            self.world_missions_bonus,
+            self.world_missions_completed_hm,
+            self.world_missions_bonus_hm,
+            self.world_unlocked_map,
+            self.world_vanquished_areas,
             self.game_item_context,
             self.item_context_inventory,
             self.inventory_bags,
@@ -734,7 +746,7 @@ impl EnhancementLayout {
 
 /// Fields in [`EnhancementLayout`]. Named because the companion's own `Layout`
 /// is this many words long and the two have to agree.
-pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 157;
+pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 163;
 
 pub(super) struct EnhancementBuild {
     /// The *template-save* output, not ArenaNet's own module. That transform is
@@ -767,7 +779,7 @@ pub(super) struct EnhancementBuild {
 pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     EnhancementBuild {
         sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-        output_sha256: "e9530483e1f0d2b4be082f3872b482baaad04357468d1f1f3ba548ef1f4ca055",
+        output_sha256: "0ab9946f5a9da234445fbcfb2780de5e1e37ef235bf1e02e0ed0f5e4b76b7b10",
         import_count: 219,
         program_id: 1,
         build_id: 38771,
@@ -864,6 +876,12 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             mission_objective_stride: 0x0c,
             mission_objective_id: 0x00,
             mission_objective_type: 0x08,
+            world_missions_completed: 0x5cc,
+            world_missions_bonus: 0x5dc,
+            world_missions_completed_hm: 0x5ec,
+            world_missions_bonus_hm: 0x5fc,
+            world_unlocked_map: 0x60c,
+            world_vanquished_areas: 0x83c,
             game_item_context: 0x40,
             item_context_inventory: 0xf8,
             inventory_bags: 0x00,
@@ -937,7 +955,7 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     },
     EnhancementBuild {
         sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
-        output_sha256: "574c043ad942495c9033eceb4f78258b8ccae0a92f7d773ce4c77450cd34592f",
+        output_sha256: "36d557f53b2fe2687ec743f6cbf802c5b390001b29268152dd94cf377cd106b4",
         import_count: 219,
         program_id: 1,
         build_id: 38790,
@@ -1034,6 +1052,12 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             mission_objective_stride: 0x0c,
             mission_objective_id: 0x00,
             mission_objective_type: 0x08,
+            world_missions_completed: 0x5cc,
+            world_missions_bonus: 0x5dc,
+            world_missions_completed_hm: 0x5ec,
+            world_missions_bonus_hm: 0x5fc,
+            world_unlocked_map: 0x60c,
+            world_vanquished_areas: 0x83c,
             game_item_context: 0x40,
             item_context_inventory: 0xf8,
             inventory_bags: 0x00,
@@ -1107,7 +1131,7 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     },
     EnhancementBuild {
         sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
-        output_sha256: "3885bd79d0ac85af75e3788679be4003b51a272bf5d88882fbb12c877a00cd58",
+        output_sha256: "79200038cf9d7328c6ddbb9f4fca5c5b2e11680fce284df2272203b1bbbeb438",
         import_count: 219,
         program_id: 1,
         build_id: 38795,
@@ -1204,6 +1228,12 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             mission_objective_stride: 0x0c,
             mission_objective_id: 0x00,
             mission_objective_type: 0x08,
+            world_missions_completed: 0x5cc,
+            world_missions_bonus: 0x5dc,
+            world_missions_completed_hm: 0x5ec,
+            world_missions_bonus_hm: 0x5fc,
+            world_unlocked_map: 0x60c,
+            world_vanquished_areas: 0x83c,
             game_item_context: 0x40,
             item_context_inventory: 0xf8,
             inventory_bags: 0x00,
@@ -1350,5 +1380,17 @@ mod tests {
         }
         assert!(find_enhancement_build("not a hash").is_none());
         assert!(find_enhancement_build(ENHANCEMENT_BUILDS[0].sha256).is_some());
+    }
+
+    #[test]
+    fn every_certified_build_uses_the_verified_completion_layout() {
+        for build in ENHANCEMENT_BUILDS {
+            assert_eq!(build.layout.world_missions_completed, 0x5cc);
+            assert_eq!(build.layout.world_missions_bonus, 0x5dc);
+            assert_eq!(build.layout.world_missions_completed_hm, 0x5ec);
+            assert_eq!(build.layout.world_missions_bonus_hm, 0x5fc);
+            assert_eq!(build.layout.world_unlocked_map, 0x60c);
+            assert_eq!(build.layout.world_vanquished_areas, 0x83c);
+        }
     }
 }

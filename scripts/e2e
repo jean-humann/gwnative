@@ -561,6 +561,7 @@ def main() -> int:
                 "quests",
                 "inventory",
                 "social",
+                "completion",
             }:
                 raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)

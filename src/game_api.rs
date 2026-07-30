@@ -313,6 +313,22 @@ pub struct Social {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompletionMode {
+    pub completed_missions: Vec<u32>,
+    pub completed_bonuses: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Completion {
+    pub normal_mode: CompletionMode,
+    pub hard_mode: CompletionMode,
+    pub unlocked_maps: Vec<u32>,
+    pub vanquished_areas: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,6 +375,8 @@ pub struct State {
     pub inventory: Option<Inventory>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub social: Option<Social>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<Completion>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -467,7 +485,7 @@ impl Hub {
             "state": {
                 "domains": [
                     "player", "map", "target", "party", "skillbar", "effects",
-                    "agents", "quests", "inventory", "social"
+                    "agents", "quests", "inventory", "social", "completion"
                 ],
                 "available": self.state_json().is_some(),
             },
@@ -573,6 +591,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(social) = &state.social {
             validate_social(social)?;
         }
+        if let Some(completion) = &state.completion {
+            validate_completion(completion)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -593,6 +614,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.quests.is_some()
         || state.inventory.is_some()
         || state.social.is_some()
+        || state.completion.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -1078,6 +1100,30 @@ fn validate_social(social: &Social) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_map_bitmap(values: &[u32]) -> bool {
+    values.len() <= 1_024
+        && values.iter().all(|map_id| *map_id < 1_024)
+        && values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn validate_completion(completion: &Completion) -> Result<(), String> {
+    let categories = [
+        completion.normal_mode.completed_missions.as_slice(),
+        completion.normal_mode.completed_bonuses.as_slice(),
+        completion.hard_mode.completed_missions.as_slice(),
+        completion.hard_mode.completed_bonuses.as_slice(),
+        completion.unlocked_maps.as_slice(),
+        completion.vanquished_areas.as_slice(),
+    ];
+    if categories
+        .iter()
+        .any(|category| !validate_map_bitmap(category))
+    {
+        return Err("completion bitmap is outside its certified bounds".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,6 +1274,30 @@ mod tests {
             "Friend"
         );
         assert_eq!(value["state"]["social"]["guild"]["factionName"], "Kurzick");
+    }
+
+    #[test]
+    fn completion_map_ids_are_sorted_and_bounded() {
+        let hub = Hub::default();
+        let state = br#"{
+            "status":"ready","tickCount":1,"mapId":55,"instanceType":0,
+            "instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "completion":{
+                "normalMode":{"completedMissions":[55,56],"completedBonuses":[55]},
+                "hardMode":{"completedMissions":[55],"completedBonuses":[]},
+                "unlockedMaps":[55,248],"vanquishedAreas":[56]
+            }
+        }"#;
+        hub.publish(state).unwrap();
+
+        for state in [
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","completion":{"normalMode":{"completedMissions":[56,55],"completedBonuses":[]},"hardMode":{"completedMissions":[],"completedBonuses":[]},"unlockedMaps":[],"vanquishedAreas":[]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","completion":{"normalMode":{"completedMissions":[],"completedBonuses":[]},"hardMode":{"completedMissions":[],"completedBonuses":[]},"unlockedMaps":[1024],"vanquishedAreas":[]}}"#.as_slice(),
+            br#"{"status":"waiting","completion":{"normalMode":{"completedMissions":[],"completedBonuses":[]},"hardMode":{"completedMissions":[],"completedBonuses":[]},"unlockedMaps":[],"vanquishedAreas":[]}}"#.as_slice(),
+        ] {
+            assert!(hub.publish(state).is_err());
+        }
     }
 
     #[test]

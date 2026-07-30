@@ -41,7 +41,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 6;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 7;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -54,6 +54,7 @@ const FLAG_MAP_AGENTS_VALID: u32 = 1 << 7;
 const FLAG_QUESTS_VALID: u32 = 1 << 8;
 const FLAG_INVENTORY_VALID: u32 = 1 << 9;
 const FLAG_SOCIAL_VALID: u32 = 1 << 10;
+const FLAG_COMPLETION_VALID: u32 = 1 << 11;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -78,6 +79,7 @@ const MAX_RAW_FRIENDS: u32 = 256;
 const MAX_FRIENDS: usize = 128;
 const MAX_GUILDS: u32 = 64;
 const MAX_GUILD_ROSTER: u32 = 100;
+const MAX_COMPLETION_WORDS: u32 = 32;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -189,6 +191,12 @@ struct Layout {
     mission_objective_stride: u32,
     mission_objective_id: u32,
     mission_objective_type: u32,
+    world_missions_completed: u32,
+    world_missions_bonus: u32,
+    world_missions_completed_hm: u32,
+    world_missions_bonus_hm: u32,
+    world_unlocked_map: u32,
+    world_vanquished_areas: u32,
     game_item_context: u32,
     item_context_inventory: u32,
     inventory_bags: u32,
@@ -350,6 +358,12 @@ impl Layout {
         mission_objective_stride: 0,
         mission_objective_id: 0,
         mission_objective_type: 0,
+        world_missions_completed: 0,
+        world_missions_bonus: 0,
+        world_missions_completed_hm: 0,
+        world_missions_bonus_hm: 0,
+        world_unlocked_map: 0,
+        world_vanquished_areas: 0,
         game_item_context: 0,
         item_context_inventory: 0,
         inventory_bags: 0,
@@ -632,6 +646,8 @@ struct Snapshot {
     guild_roster_total: u32,
     guild_cape: [u32; 7],
     friends: [Friend; MAX_FRIENDS],
+    completion_counts: [u32; 6],
+    completion_words: [[u32; MAX_COMPLETION_WORDS as usize]; 6],
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -652,8 +668,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 628] = [(); size_of::<Layout>()];
-const _: [(); 47940] = [(); size_of::<Snapshot>()];
+const _: [(); 652] = [(); size_of::<Layout>()];
+const _: [(); 48732] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 static mut SNAPSHOT_PTR: u32 = 0;
@@ -1018,6 +1034,20 @@ impl SocialSource {
     };
 }
 
+// Each completion category is a fixed-cap bitmap in WorldContext. Keep only
+// the six validated source descriptors between collect and publish; JavaScript
+// expands set bits into sorted numeric map IDs.
+#[derive(Clone, Copy)]
+struct CompletionSource {
+    arrays: [ArrayView; 6],
+}
+
+impl CompletionSource {
+    const EMPTY: Self = Self {
+        arrays: [ArrayView::EMPTY; 6],
+    };
+}
+
 #[derive(Clone, Copy)]
 struct State {
     flags: u32,
@@ -1034,6 +1064,7 @@ struct State {
     quests: QuestsSource,
     inventory: InventorySource,
     social: SocialSource,
+    completion: CompletionSource,
 }
 
 impl State {
@@ -1059,6 +1090,7 @@ impl State {
             quests: QuestsSource::EMPTY,
             inventory: InventorySource::EMPTY,
             social: SocialSource::EMPTY,
+            completion: CompletionSource::EMPTY,
         }
     }
 }
@@ -1144,6 +1176,10 @@ unsafe fn read_map_agent(layout: Layout, address: u32, id: u32) -> Option<MapAge
 struct ArrayView {
     buffer: u32,
     size: u32,
+}
+
+impl ArrayView {
+    const EMPTY: Self = Self { buffer: 0, size: 0 };
 }
 
 unsafe fn read_array(
@@ -1261,6 +1297,35 @@ unsafe fn collect_quests(layout: Layout, game: u32) -> Option<QuestsSource> {
         quest_buffer: quests.buffer,
         objective_buffer: objectives.buffer,
     })
+}
+
+unsafe fn collect_completion(layout: Layout, game: u32) -> Option<CompletionSource> {
+    let world = unsafe {
+        pointer(
+            offset(game, layout.game_world_context)?,
+            layout.world_vanquished_areas.checked_add(16)?,
+        )?
+    };
+    let fields = [
+        layout.world_missions_completed,
+        layout.world_missions_bonus,
+        layout.world_missions_completed_hm,
+        layout.world_missions_bonus_hm,
+        layout.world_unlocked_map,
+        layout.world_vanquished_areas,
+    ];
+    let mut arrays = [ArrayView::EMPTY; 6];
+    for (index, field) in fields.iter().enumerate() {
+        arrays[index] = unsafe {
+            read_array(
+                offset(world, *field)?,
+                4,
+                MAX_COMPLETION_WORDS,
+                MAX_COMPLETION_WORDS,
+            )?
+        };
+    }
+    Some(CompletionSource { arrays })
 }
 
 fn expected_bag_type(bag_id: u32) -> Option<u32> {
@@ -1924,6 +1989,10 @@ unsafe fn collect(layout: Layout) -> State {
         state.flags |= FLAG_SOCIAL_VALID;
         state.social = social;
     }
+    if let Some(completion) = unsafe { collect_completion(layout, game) } {
+        state.flags |= FLAG_COMPLETION_VALID;
+        state.completion = completion;
+    }
     state
 }
 
@@ -2488,6 +2557,62 @@ unsafe fn publish_social(
     valid
 }
 
+unsafe fn publish_completion(
+    snapshot: *mut Snapshot,
+    source: CompletionSource,
+) -> bool {
+    let mut valid = true;
+    for category in 0..source.arrays.len() {
+        let array = source.arrays[category];
+        valid &= array.size <= MAX_COMPLETION_WORDS
+            && (array.size == 0
+                || (array.buffer != 0
+                    && array.buffer & 3 == 0
+                    && checked_mul(array.size, 4)
+                        .is_some_and(|bytes| contains(array.buffer, bytes))));
+        unsafe {
+            write_volatile(
+                &mut (*snapshot).completion_counts[category],
+                if valid { array.size } else { 0 },
+            );
+        }
+        for index in 0..MAX_COMPLETION_WORDS as usize {
+            let word = if valid && index < array.size as usize {
+                indexed(array.buffer, index as u32, 4)
+                    .and_then(|address| unsafe { read_u32(address) })
+                    .unwrap_or_else(|| {
+                        valid = false;
+                        0
+                    })
+            } else {
+                0
+            };
+            unsafe {
+                write_volatile(
+                    &mut (*snapshot).completion_words[category][index],
+                    word,
+                );
+            }
+        }
+    }
+    if !valid {
+        for category in 0..6 {
+            unsafe {
+                write_volatile(&mut (*snapshot).completion_counts[category], 0);
+            }
+            for index in 0..MAX_COMPLETION_WORDS as usize {
+                unsafe {
+                    write_volatile(
+                        &mut (*snapshot).completion_words[category][index],
+                        0,
+                    );
+                }
+            }
+        }
+    }
+    valid
+}
+
 unsafe fn publish(mut state: State, layout: Layout) {
     let next = unsafe { SEQUENCE }.wrapping_add(2) & !1;
     let snapshot = unsafe { SNAPSHOT_PTR as *mut Snapshot };
@@ -2626,6 +2751,9 @@ unsafe fn publish(mut state: State, layout: Layout) {
         }
         if !publish_social(snapshot, layout, state.social) {
             state.flags &= !FLAG_SOCIAL_VALID;
+        }
+        if !publish_completion(snapshot, state.completion) {
+            state.flags &= !FLAG_COMPLETION_VALID;
         }
         write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).sequence, next);

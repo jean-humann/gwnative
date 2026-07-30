@@ -48,6 +48,7 @@ const guildPointers = 0x15e000;
 const guild = 0x15f000;
 const rosterPointers = 0x160000;
 const guildPlayer = 0x161000;
+const completionWords = 0x162000;
 const snapshot = 0x180000;
 const config = 0x18c000;
 
@@ -195,7 +196,18 @@ for (let index = 0; index < 7; index += 1) {
   u32(guild + 0x90 + index * 4, index + 1);
 }
 
-const layout = Array(157).fill(0);
+// WorldContext completion arrays are bounded bitmaps: bit index equals map ID.
+const completionOffsets = [0x5cc, 0x5dc, 0x5ec, 0x5fc, 0x60c, 0x83c];
+for (let category = 0; category < completionOffsets.length; category += 1) {
+  const buffer = completionWords + category * 0x100;
+  u32(world + completionOffsets[category], buffer);
+  u32(world + completionOffsets[category] + 4, 25);
+  u32(world + completionOffsets[category] + 8, 25);
+  const mapId = 55 + category;
+  u32(buffer + Math.floor(mapId / 32) * 4, 2 ** (mapId % 32));
+}
+
+const layout = Array(163).fill(0);
 Object.assign(layout, {
   0: contextRoot,
   1: agentArray,
@@ -263,63 +275,69 @@ Object.assign(layout, {
   85: 0x0c,
   86: 0,
   87: 8,
-  88: 0x40,
-  89: 0xf8,
-  90: 0,
-  91: 0x60,
-  92: 0x90,
-  93: 0x94,
-  94: 0,
-  95: 4,
-  96: 0x0c,
-  97: 0x10,
-  98: 0x18,
-  99: 0,
-  100: 4,
-  101: 0x0c,
-  102: 0x10,
-  103: 0x14,
+  88: 0x5cc,
+  89: 0x5dc,
+  90: 0x5ec,
+  91: 0x5fc,
+  92: 0x60c,
+  93: 0x83c,
+  94: 0x40,
+  95: 0xf8,
+  96: 0,
+  97: 0x60,
+  98: 0x90,
+  99: 0x94,
+  100: 0,
+  101: 4,
+  102: 0x0c,
+  103: 0x10,
   104: 0x18,
-  105: 0x1c,
-  106: 0x20,
-  107: 0x21,
-  108: 0x24,
-  109: 0x28,
-  110: 0x2c,
-  111: 0x48,
-  112: 0x4a,
-  113: 0x4c,
-  114: 0x4e,
-  115: 0x4f,
-  116: 0x50,
-  117: friendList,
-  118: 0,
-  119: 0x24,
-  120: 0x28,
-  121: 0x2c,
-  122: 0x30,
-  123: 0xa0,
+  105: 0,
+  106: 4,
+  107: 0x0c,
+  108: 0x10,
+  109: 0x14,
+  110: 0x18,
+  111: 0x1c,
+  112: 0x20,
+  113: 0x21,
+  114: 0x24,
+  115: 0x28,
+  116: 0x2c,
+  117: 0x48,
+  118: 0x4a,
+  119: 0x4c,
+  120: 0x4e,
+  121: 0x4f,
+  122: 0x50,
+  123: friendList,
   124: 0,
-  125: 4,
-  126: 0x40,
-  127: 0x44,
-  128: 0x3c,
-  129: 0x60,
-  130: 0x64,
-  131: 0x2a0,
-  132: 0x2f8,
-  133: 0x358,
-  134: 0,
-  135: 0x24,
-  136: 0x28,
-  137: 0x2c,
-  138: 0x70,
-  139: 0x74,
-  140: 0x78,
-  141: 0x7c,
-  142: 0x90,
-  143: 0x174,
-  144: 4,
+  125: 0x24,
+  126: 0x28,
+  127: 0x2c,
+  128: 0x30,
+  129: 0xa0,
+  130: 0,
+  131: 4,
+  132: 0x40,
+  133: 0x44,
+  134: 0x3c,
+  135: 0x60,
+  136: 0x64,
+  137: 0x2a0,
+  138: 0x2f8,
+  139: 0x358,
+  140: 0,
+  141: 0x24,
+  142: 0x28,
+  143: 0x2c,
+  144: 0x70,
+  145: 0x74,
+  146: 0x78,
+  147: 0x7c,
+  148: 0x90,
+  149: 0x174,
+  150: 4,
 });
 new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
@@ -329,7 +347,7 @@ const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
 });
 const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 628, 0, 0, 1 << 1),
+  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 652, 0, 0, 1 << 1),
   1,
 );
 tick(0);
@@ -367,6 +385,12 @@ assert.equal(state.social.guild.index, 2);
 assert.equal(state.social.guild.factionName, 'Kurzick');
 assert.equal(state.social.guild.rosterTotal, 1);
 assert.equal(state.social.guild.cape.trim, 7);
+assert.deepEqual(state.completion.normalMode.completedMissions, [55]);
+assert.deepEqual(state.completion.normalMode.completedBonuses, [56]);
+assert.deepEqual(state.completion.hardMode.completedMissions, [57]);
+assert.deepEqual(state.completion.hardMode.completedBonuses, [58]);
+assert.deepEqual(state.completion.unlockedMaps, [59]);
+assert.deepEqual(state.completion.vanquishedAreas, [60]);
 
 // Index zero is the authoritative no-guild state even when the context keeps
 // stale rank and roster fields alive across a transition.

@@ -10,8 +10,8 @@ import {
   COMPANION_SNAPSHOT_BYTES,
 } from './companion-snapshot.js';
 
-const ENHANCEMENT_TRANSFORM_ABI = 9;
-const ENHANCEMENT_LAYOUT_WORDS = 157;
+const ENHANCEMENT_TRANSFORM_ABI = 10;
+const ENHANCEMENT_LAYOUT_WORDS = 163;
 
 /**
  * The manifest the host wrote into the module, or `null` if it is not one this

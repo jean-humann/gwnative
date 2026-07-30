@@ -37,7 +37,7 @@ use super::{Outcome, digest};
 /// Bumped whenever a derived module stops being interchangeable with one an
 /// older build published. Shared with the companion, which refuses a manifest
 /// it does not recognise rather than reading the wrong words out of it.
-pub(super) const ENHANCEMENT_TRANSFORM_ABI: u32 = 9;
+pub(super) const ENHANCEMENT_TRANSFORM_ABI: u32 = 10;
 
 /// The mutable global the dispatcher reads: zero for the untouched game, or one
 /// past the table slot holding the tick.
@@ -54,8 +54,8 @@ const MANIFEST_SECTION: &str = "enhancement_manifest";
 /// block beside it. Named here because they are the manifest's own words and
 /// the companion's `Snapshot`/`CursorSnapshot` at once — see
 /// `web/companion-snapshot.js`, which reads both back.
-const SNAPSHOT_ABI: u32 = 6;
-const SNAPSHOT_BYTES: u32 = 47_940;
+const SNAPSHOT_ABI: u32 = 7;
+const SNAPSHOT_BYTES: u32 = 48_732;
 const CURSOR_SNAPSHOT_ABI: u32 = 1;
 const CURSOR_SNAPSHOT_BYTES: u32 = 4160;
 
@@ -447,13 +447,13 @@ mod tests {
             .strip_prefix(&format!("\u{14}{MANIFEST_SECTION}",))
             .expect("the section does not start with its own name");
         assert!(
-            json.starts_with(r#"{"transformAbi":9,"snapshotAbi":6,"snapshotBytes":47940,"#),
+            json.starts_with(r#"{"transformAbi":10,"snapshotAbi":7,"snapshotBytes":48732,"#),
             "the key order changed, and with it the module's hash: {json}",
         );
-        assert!(json.contains(r#""configBytes":628,"programId":1,"buildId":38771,"tableSlot":0,"#));
+        assert!(json.contains(r#""configBytes":652,"programId":1,"buildId":38771,"tableSlot":0,"#));
         assert!(json.contains(r#""layoutWords":[5901856,5918104,5912716,5912712,6,"#));
 
-        // Still valid JSON, and still the 157 words the companion expects.
+        // Still valid JSON, and still the 163 words the companion expects.
         let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
         let words = parsed["layoutWords"].as_array().unwrap();
         assert_eq!(words.len(), ENHANCEMENT_LAYOUT_WORDS);
