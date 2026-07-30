@@ -50,6 +50,9 @@ const rosterPointers = 0x160000;
 const guildPlayer = 0x161000;
 const completionWords = 0x162000;
 const camera = 0x163000;
+const trade = 0x164000;
+const tradePlayerItems = 0x165000;
+const tradePartnerItems = 0x166000;
 const snapshot = 0x180000;
 const config = 0x18c000;
 
@@ -60,6 +63,7 @@ u32(game + 0x44, character);
 u32(game + 0x2c, world);
 u32(game + 0x3c, guildContext);
 u32(game + 0x40, itemContext);
+u32(game + 0x58, trade);
 u32(character + 0x198, 55);
 u32(character + 0x19c, 1);
 u32(character + 0x234, 55);
@@ -222,7 +226,25 @@ f32(camera + 0xb0, 3);
 f32(camera + 0xc0, 1.2);
 u32(camera + 0x11c, 2);
 
-const layout = Array(173).fill(0);
+// TradeContext: local offer has two items and the partner offers one. The
+// compiled client reaches this pointer through GameContext +0x58.
+u32(trade, 3);
+u32(trade + 0x10, 2_222);
+u32(trade + 0x14, tradePlayerItems);
+u32(trade + 0x18, 2);
+u32(trade + 0x1c, 2);
+u32(tradePlayerItems, 700);
+u32(tradePlayerItems + 4, 5);
+u32(tradePlayerItems + 8, 701);
+u32(tradePlayerItems + 12, 1);
+u32(trade + 0x24, 3_333);
+u32(trade + 0x28, tradePartnerItems);
+u32(trade + 0x2c, 1);
+u32(trade + 0x30, 1);
+u32(tradePartnerItems, 800);
+u32(tradePartnerItems + 4, 2);
+
+const layout = Array(182).fill(0);
 Object.assign(layout, {
   0: contextRoot,
   1: agentArray,
@@ -363,6 +385,15 @@ Object.assign(layout, {
   170: 0xa8,
   171: 0xc0,
   172: 0x11c,
+  173: 0x58,
+  174: 0,
+  175: 0x10,
+  176: 0x14,
+  177: 0x24,
+  178: 0x28,
+  179: 8,
+  180: 0,
+  181: 4,
 });
 new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
@@ -372,7 +403,7 @@ const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
 });
 const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 692, 0, 0, 1 << 1),
+  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 728, 0, 0, 1 << 1),
   1,
 );
 tick(0);
@@ -425,6 +456,50 @@ assert.deepEqual(state.camera.position, { x: 110, y: -260, z: -50 });
 assert.deepEqual(state.camera.lookAt, { x: 100, y: -250, z: 3 });
 assert.ok(Math.abs(state.camera.fieldOfView - 1.2) < 0.000001);
 assert.ok(state.camera.renderFieldOfView > 0);
+assert.equal(state.trade.statusName, 'OfferSent');
+assert.equal(state.trade.open, true);
+assert.equal(state.trade.initiated, true);
+assert.equal(state.trade.offerSent, true);
+assert.equal(state.trade.accepted, false);
+assert.equal(state.trade.player.gold, 2_222);
+assert.deepEqual(state.trade.player.items, [
+  { slot: 1, itemId: 700, quantity: 5 },
+  { slot: 2, itemId: 701, quantity: 1 },
+]);
+assert.equal(state.trade.partner.gold, 3_333);
+assert.deepEqual(state.trade.partner.items, [
+  { slot: 1, itemId: 800, quantity: 2 },
+]);
+
+u32(trade + 0x18, 17);
+u32(trade + 0x1c, 17);
+for (let index = 0; index < 17; index += 1) {
+  u32(tradePlayerItems + index * 8, 700 + index);
+  u32(tradePlayerItems + index * 8 + 4, 1);
+}
+tick(0);
+const truncatedTrade = readCompanionSnapshot(memory.buffer, snapshot);
+assert.equal(truncatedTrade.status, 'ready');
+assert.equal(truncatedTrade.trade.player.items.length, 16);
+assert.equal(truncatedTrade.trade.player.itemsTruncated, true);
+assert.equal(truncatedTrade.trade.player.items[15].itemId, 715);
+
+// The client can leave the last offer in memory after closing the window.
+// Closed is authoritative and must never leak that stale gold or item list.
+u32(trade, 0);
+tick(0);
+const closedTrade = readCompanionSnapshot(memory.buffer, snapshot);
+assert.equal(closedTrade.status, 'ready');
+assert.deepEqual(closedTrade.trade, {
+  flags: 0,
+  statusName: 'Closed',
+  open: false,
+  initiated: false,
+  offerSent: false,
+  accepted: false,
+  player: { gold: 0, itemsTruncated: false, items: [] },
+  partner: { gold: 0, itemsTruncated: false, items: [] },
+});
 
 // Index zero is the authoritative no-guild state even when the context keeps
 // stale rank and roster fields alive across a transition.

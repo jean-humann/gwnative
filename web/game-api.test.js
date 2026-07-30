@@ -77,6 +77,13 @@ describe('public game state', () => {
       modeName: 'Unlocked',
       position: Object.freeze({ x: 1, y: 2, z: 3 }),
     });
+    const trade = Object.freeze({
+      flags: 1,
+      statusName: 'Initiated',
+      open: true,
+      player: Object.freeze({ gold: 0, items: Object.freeze([]) }),
+      partner: Object.freeze({ gold: 0, items: Object.freeze([]) }),
+    });
     assert.deepEqual(
       publicState({
         status: 'ready',
@@ -89,6 +96,7 @@ describe('public game state', () => {
         social,
         completion,
         camera,
+        trade,
       }),
       {
         status: 'ready',
@@ -101,6 +109,7 @@ describe('public game state', () => {
         social,
         completion,
         camera,
+        trade,
       },
     );
   });

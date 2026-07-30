@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 8;
+const SNAPSHOT_ABI = 9;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -44,6 +44,7 @@ const FLAG_INVENTORY = 1 << 9;
 const FLAG_SOCIAL = 1 << 10;
 const FLAG_COMPLETION = 1 << 11;
 const FLAG_CAMERA = 1 << 12;
+const FLAG_TRADE = 1 << 13;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -119,7 +120,8 @@ function domainSnapshot() {
       | FLAG_INVENTORY
       | FLAG_SOCIAL
       | FLAG_COMPLETION
-      | FLAG_CAMERA,
+      | FLAG_CAMERA
+      | FLAG_TRADE,
   });
   const view = new DataView(buffer);
   view.setUint32(64, 3, true);
@@ -259,6 +261,17 @@ function domainSnapshot() {
   view.setFloat32(48772, -250, true);
   view.setFloat32(48776, 3, true);
   view.setFloat32(48780, 1.2, true);
+  view.setUint32(48784, 3, true);
+  view.setUint32(48788, 2_222, true);
+  view.setUint32(48792, 3_333, true);
+  view.setUint32(48796, 2, true);
+  view.setUint32(48800, 1, true);
+  view.setUint32(48808, 700, true);
+  view.setUint32(48812, 5, true);
+  view.setUint32(48816, 701, true);
+  view.setUint32(48820, 1, true);
+  view.setUint32(48936, 800, true);
+  view.setUint32(48940, 2, true);
   return buffer;
 }
 
@@ -480,6 +493,24 @@ describe('companion snapshot', () => {
     assert.ok(Math.abs(state.camera.fieldOfView - 1.2) < 0.000001);
     assert.ok(Number.isFinite(state.camera.currentYaw));
     assert.ok(Number.isFinite(state.camera.renderFieldOfView));
+    assert.equal(state.trade.statusName, 'OfferSent');
+    assert.equal(state.trade.open, true);
+    assert.equal(state.trade.initiated, true);
+    assert.equal(state.trade.offerSent, true);
+    assert.equal(state.trade.accepted, false);
+    assert.deepEqual(state.trade.player, {
+      gold: 2_222,
+      itemsTruncated: false,
+      items: [
+        { slot: 1, itemId: 700, quantity: 5 },
+        { slot: 2, itemId: 701, quantity: 1 },
+      ],
+    });
+    assert.deepEqual(state.trade.partner, {
+      gold: 3_333,
+      itemsTruncated: false,
+      items: [{ slot: 1, itemId: 800, quantity: 2 }],
+    });
     assert.ok(Object.isFrozen(state.party.players));
     assert.ok(Object.isFrozen(state.skillbar.skills));
     assert.ok(Object.isFrozen(state.effects.effects));
@@ -492,6 +523,9 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state.completion));
     assert.ok(Object.isFrozen(state.camera.position));
     assert.ok(Object.isFrozen(state.camera));
+    assert.ok(Object.isFrozen(state.trade.player.items));
+    assert.ok(Object.isFrozen(state.trade.player));
+    assert.ok(Object.isFrozen(state.trade));
   });
 
   it('accepts a complete bounded inventory page with an explicit remainder', () => {
@@ -535,6 +569,30 @@ describe('companion snapshot', () => {
     assert.equal(state.inventory.items.length, 512);
     assert.equal(state.inventory.total, 513);
     assert.equal(state.inventory.bags[2].itemCount, 1);
+  });
+
+  it('normalizes a closed trade to an empty offer', () => {
+    const buffer = domainSnapshot();
+    const view = new DataView(buffer);
+    view.setUint32(48784, 0, true);
+    view.setUint32(48788, 0, true);
+    view.setUint32(48792, 0, true);
+    view.setUint32(48796, 0, true);
+    view.setUint32(48800, 0, true);
+    for (let offset = 48808; offset < 49064; offset += 4) {
+      view.setUint32(offset, 0, true);
+    }
+    const state = readCompanionSnapshot(buffer, 0);
+    assert.deepEqual(state.trade, {
+      flags: 0,
+      statusName: 'Closed',
+      open: false,
+      initiated: false,
+      offerSent: false,
+      accepted: false,
+      player: { gold: 0, itemsTruncated: false, items: [] },
+      partner: { gold: 0, itemsTruncated: false, items: [] },
+    });
   });
 
   it('refuses partial party, skillbar, and effect records', () => {
@@ -658,6 +716,35 @@ describe('companion snapshot', () => {
       true,
     );
     assert.equal(readCompanionSnapshot(absentCamera, 0).reason, 'corrupt');
+
+    const unknownTradeFlag = domainSnapshot();
+    new DataView(unknownTradeFlag).setUint32(48784, 8, true);
+    assert.equal(readCompanionSnapshot(unknownTradeFlag, 0).reason, 'corrupt');
+
+    const duplicateTradeItem = domainSnapshot();
+    new DataView(duplicateTradeItem).setUint32(48816, 700, true);
+    assert.equal(readCompanionSnapshot(duplicateTradeItem, 0).reason, 'corrupt');
+
+    const badTradeTruncation = domainSnapshot();
+    new DataView(badTradeTruncation).setUint32(48804, 1, true);
+    assert.equal(readCompanionSnapshot(badTradeTruncation, 0).reason, 'corrupt');
+
+    const staleClosedTrade = domainSnapshot();
+    new DataView(staleClosedTrade).setUint32(48784, 0, true);
+    assert.equal(readCompanionSnapshot(staleClosedTrade, 0).reason, 'corrupt');
+
+    const unusedTradeItem = domainSnapshot();
+    new DataView(unusedTradeItem).setUint32(48824, 1, true);
+    assert.equal(readCompanionSnapshot(unusedTradeItem, 0).reason, 'corrupt');
+
+    const absentTrade = domainSnapshot();
+    const absentTradeView = new DataView(absentTrade);
+    absentTradeView.setUint32(
+      12,
+      absentTradeView.getUint32(12, true) & ~FLAG_TRADE,
+      true,
+    );
+    assert.equal(readCompanionSnapshot(absentTrade, 0).reason, 'corrupt');
   });
 
   // The seqlock, which is the whole reason this can be read on the animation
@@ -677,7 +764,7 @@ describe('companion snapshot', () => {
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
       // A flag this build has no name for. The companion sets only four, so a
       // fifth is either a newer companion or not a companion at all.
-      { flags: FLAG_READY | FLAG_PLAYER | (1 << 13) },
+      { flags: FLAG_READY | FLAG_PLAYER | (1 << 14) },
     ]) {
       assert.equal(read(overrides).reason, 'snapshot', JSON.stringify(overrides));
     }
