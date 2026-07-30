@@ -103,7 +103,7 @@ client, not an in-game automation API.
 | Map and instance | GWCA Map; PyMap; native map resolvers | Certified map ID, instance identity, and 128-entry map-agent page | Add mission and map completion state |
 | Party and heroes | GWCA Party; PyParty; native party resolvers | Certified bounded roster, flags, IDs, summary widget, and agent-derived profession/health records | Join party members to agent summaries by ID |
 | Skills and effects | GWCA Skillbar/Effect; PySkill/PySkillbar/PyEffects | Certified player slots, adrenaline, recharge, event, disabled mask, cast count, and bounded buff/effect snapshots | Add effect expiry semantics only after live timing validation |
-| Items and inventory | GWCA Item; PyItem/PyInventory; item resolvers | Not exposed | Bounded bag/item summaries with privacy review |
+| Items and inventory | GWCA Item; PyItem/PyInventory; item resolvers | Certified 22-bag/512-item page with location, model/type/value/quantity metadata, gold, storage panes, dye components, modifier counts, and interaction-derived flags | Encoded names and modifier words only after lifetime and size certification |
 | Quests | GWCA Quest; PyQuest; quest resolvers | Certified active ID, 64-entry quest page, state-bit derivatives, markers, and 32 mission objectives | Encoded quest/objective text only after decoder certification |
 | Chat, friends, and guild | GWCA Chat/FriendList/Guild; matching Python modules | Not exposed | Read-only presence first; no message action by default |
 | Camera and rendering | GWCA Camera/Render; PyCamera/PyRender/PyWorldRender | Native cursor and local overlay composition | Read-only camera state; keep WebGL ownership isolated |
@@ -129,7 +129,7 @@ A mapped domain reaches the public API only when it has:
 5. an end-to-end observation proving that the client keeps rendering; and
 6. a separate policy decision for every state-changing operation.
 
-The next implementation sequence is inventory and account storage, then
-read-only guild/friend presence and map completion. Native action bindings,
+The next implementation sequence is read-only guild/friend presence, then map
+completion and camera/render state. Native action bindings,
 packet injection, virtual input, and pathing automation are reference evidence
 only; they are not candidates for bulk exposure.

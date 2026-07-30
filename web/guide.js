@@ -116,9 +116,9 @@ export const GUIDE = [
         'rate widgets plus a build and team library. Widgets are off until selected. ' +
         'Use Edit layout or ⌘⇧O to move them.',
       'The library names, groups, imports and exports template codes in this profile. ' +
-        'It does not apply them to the game. Party, inventory, chat and quest tools are ' +
-        'listed honestly as unavailable until this app has a certified layout for the ' +
-        'exact client ArenaNet is shipping.',
+        'It does not apply them to the game. Certified builds also offer read-only party, ' +
+        'skillbar, effects, map-agent, quest and inventory summaries. Chat, completion ' +
+        'and other unmapped tools remain listed as unavailable rather than guessed.',
       'These hotkeys open local interface only. They never synthesize game input, and ' +
         'unattended gameplay automation is not part of the companion tools.',
     ],

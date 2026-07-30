@@ -26,7 +26,7 @@ The names-only, reproducible comparison is in the
 | Guild Wars CLI recognition | Available | Every documented switch parsed; native translations or explicit notices |
 | Isolated launch profiles | Available | Per-profile mutable state, Keychain identity, origin, overlays, and build library |
 | Explicit `.gwmod` sessions | Available | Compatible format, host-side ZIP/graph validation, double hash validation, ordered runtime |
-| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests state |
+| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory state |
 | Overlay framework | Available | Profile-local movable widgets and exact-context hotkeys |
 | Clock, session timer, FPS | Available | Built-in Companion Tools widgets |
 | Target distance/range | Available on certified builds | Bounds-checked companion snapshot |
@@ -38,8 +38,8 @@ The names-only, reproducible comparison is in the
 | Effects and buffs | Available on certified builds | Bounded player buff/effect records, explicit truncation, and summary widget |
 | Map agents | Available on certified builds | 128-entry bounded page with PyAgent-compatible position, profession, health, allegiance, and derived state |
 | Quests and mission objectives | Available on certified builds | Active ID, 64 bounded quest records, log-state derivatives, markers, and 32 objective records |
+| Inventory and account storage | Available on certified builds | 22 bounded bag summaries, 512 ordered item records, explicit truncation, gold, storage panes, PyItem-compatible numeric metadata and derived flags |
 | Mission and map completion | Needs certified layout | No certified completion arrays or account-wide summary |
-| Inventory and account storage | Needs certified layout | No certified item/bag/storage schema |
 | Chat, party search, trade | Needs certified layout and policy | No chat write or packet injection surface |
 | Skill activation or build application | Read-only only | Codes can be stored; no game action is exposed |
 | Texture/shader packs | Research | WebGL/WASM pipeline differs from native DirectX replacement |
@@ -69,9 +69,9 @@ returns 409 until a specific operation passes certification.
 
 The dependency order for further parity is:
 
-1. add inventory schemas with strict privacy and size bounds;
-2. add guild/friend presence without chat content;
-3. certify mission and map completion arrays;
+1. add guild/friend presence without chat content;
+2. certify mission and map completion arrays;
+3. add read-only camera and render state;
 4. research WebGL-native texture replacement without patching unknown modules;
 5. consider narrowly named, user-triggered actions one at a time.
 
