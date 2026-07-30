@@ -18,16 +18,16 @@ function uleb(value) {
 
 function moduleWithManifest(overrides = {}) {
   const manifest = {
-    transformAbi: 12,
-    snapshotAbi: 9,
-    snapshotBytes: 49_064,
+    transformAbi: 13,
+    snapshotAbi: 10,
+    snapshotBytes: 56_252,
     cursorSnapshotAbi: 1,
     cursorSnapshotBytes: 4_160,
-    configBytes: 728,
+    configBytes: 792,
     programId: 1,
     buildId: 38_795,
     tableSlot: 0,
-    layoutWords: Array(182).fill(0),
+    layoutWords: Array(198).fill(0),
     ...overrides,
   };
   const name = encoder.encode('enhancement_manifest');
@@ -42,11 +42,11 @@ function moduleWithManifest(overrides = {}) {
 describe('enhancement manifest', () => {
   it('accepts exactly the host and companion ABI', () => {
     const manifest = decodeEnhancementManifest(moduleWithManifest());
-    assert.equal(manifest.transformAbi, 12);
-    assert.equal(manifest.snapshotAbi, 9);
-    assert.equal(manifest.snapshotBytes, 49_064);
-    assert.equal(manifest.configBytes, 728);
-    assert.equal(manifest.layoutWords.length, 182);
+    assert.equal(manifest.transformAbi, 13);
+    assert.equal(manifest.snapshotAbi, 10);
+    assert.equal(manifest.snapshotBytes, 56_252);
+    assert.equal(manifest.configBytes, 792);
+    assert.equal(manifest.layoutWords.length, 198);
     assert(Object.isFrozen(manifest));
   });
 

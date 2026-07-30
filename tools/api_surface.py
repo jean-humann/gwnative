@@ -48,6 +48,7 @@ CERTIFIED_DOMAIN_FIELDS = {
     "skillbar": "skillbar",
     "target": "target_valid",
     "trade": "trade",
+    "ui": "ui",
 }
 
 

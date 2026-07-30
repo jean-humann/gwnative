@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 9;
+const SNAPSHOT_ABI = 10;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -45,6 +45,7 @@ const FLAG_SOCIAL = 1 << 10;
 const FLAG_COMPLETION = 1 << 11;
 const FLAG_CAMERA = 1 << 12;
 const FLAG_TRADE = 1 << 13;
+const FLAG_UI = 1 << 14;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -121,7 +122,8 @@ function domainSnapshot() {
       | FLAG_SOCIAL
       | FLAG_COMPLETION
       | FLAG_CAMERA
-      | FLAG_TRADE,
+      | FLAG_TRADE
+      | FLAG_UI,
   });
   const view = new DataView(buffer);
   view.setUint32(64, 3, true);
@@ -272,6 +274,33 @@ function domainSnapshot() {
   view.setUint32(48820, 1, true);
   view.setUint32(48936, 800, true);
   view.setUint32(48940, 2, true);
+  view.setUint32(49068, 2, true);
+  view.setUint32(49072, 2, true);
+  view.setUint32(49076, 2, true);
+  view.setUint32(49080, 1, true);
+  view.setUint32(49084, 1, true);
+  view.setUint32(49088, 0, true);
+  view.setUint32(49092, 0xffff_ffff, true);
+  view.setUint32(49096, 0, true);
+  view.setUint32(49100, 0x1111, true);
+  view.setUint32(49104, 3, true);
+  view.setUint32(49108, 4, true);
+  view.setUint32(49112, 5, true);
+  view.setUint32(49116, 0x4, true);
+  view.setUint32(49120, 9, true);
+  view.setFloat32(49124, 10, true);
+  view.setFloat32(49128, 100, true);
+  view.setFloat32(49132, 200, true);
+  view.setFloat32(49136, 20, true);
+  view.setUint32(49140, 0, true);
+  view.setUint32(49144, 1, true);
+  view.setUint32(49148, 0, true);
+  view.setUint32(49152, 2, true);
+  view.setUint32(49156, 0x2222, true);
+  view.setUint32(49160, 1, true);
+  view.setUint32(49164, 7, true);
+  view.setUint32(49168, 8, true);
+  view.setUint32(49172, 0x204, true);
   return buffer;
 }
 
@@ -511,6 +540,48 @@ describe('companion snapshot', () => {
       itemsTruncated: false,
       items: [{ slot: 1, itemId: 800, quantity: 2 }],
     });
+    assert.equal(state.ui.total, 2);
+    assert.equal(state.ui.createdTotal, 2);
+    assert.equal(state.ui.visibleTotal, 1);
+    assert.equal(state.ui.truncated, false);
+    assert.deepEqual(state.ui.frames, [
+      {
+        frameId: 0,
+        parentId: null,
+        childOffsetId: 0,
+        frameHash: 0x1111,
+        visibilityFlags: 3,
+        type: 4,
+        templateType: 5,
+        state: 0x4,
+        created: true,
+        destroying: false,
+        disabled: false,
+        hidden: false,
+        locallyVisible: true,
+        positionValid: true,
+        positionFlags: 9,
+        position: { left: 10, bottom: 100, right: 200, top: 20 },
+      },
+      {
+        frameId: 1,
+        parentId: 0,
+        childOffsetId: 2,
+        frameHash: 0x2222,
+        visibilityFlags: 1,
+        type: 7,
+        templateType: 8,
+        state: 0x204,
+        created: true,
+        destroying: false,
+        disabled: false,
+        hidden: true,
+        locallyVisible: false,
+        positionValid: false,
+        positionFlags: 0,
+        position: { left: 0, bottom: 0, right: 0, top: 0 },
+      },
+    ]);
     assert.ok(Object.isFrozen(state.party.players));
     assert.ok(Object.isFrozen(state.skillbar.skills));
     assert.ok(Object.isFrozen(state.effects.effects));
@@ -526,6 +597,9 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state.trade.player.items));
     assert.ok(Object.isFrozen(state.trade.player));
     assert.ok(Object.isFrozen(state.trade));
+    assert.ok(Object.isFrozen(state.ui.frames));
+    assert.ok(Object.isFrozen(state.ui.frames[0].position));
+    assert.ok(Object.isFrozen(state.ui));
   });
 
   it('accepts a complete bounded inventory page with an explicit remainder', () => {
@@ -595,7 +669,7 @@ describe('companion snapshot', () => {
     });
   });
 
-  it('refuses partial party, skillbar, and effect records', () => {
+  it('refuses partial or inconsistent nested records', () => {
     const party = domainSnapshot();
     new DataView(party).setUint32(244, 21, true);
     assert.equal(readCompanionSnapshot(party, 0).reason, 'corrupt');
@@ -745,6 +819,42 @@ describe('companion snapshot', () => {
       true,
     );
     assert.equal(readCompanionSnapshot(absentTrade, 0).reason, 'corrupt');
+
+    const unknownUiRecordFlag = domainSnapshot();
+    new DataView(unknownUiRecordFlag).setUint32(49084, 2, true);
+    assert.equal(readCompanionSnapshot(unknownUiRecordFlag, 0).reason, 'corrupt');
+
+    const duplicateUiFrame = domainSnapshot();
+    new DataView(duplicateUiFrame).setUint32(49144, 0, true);
+    assert.equal(readCompanionSnapshot(duplicateUiFrame, 0).reason, 'corrupt');
+
+    const absentUiParent = domainSnapshot();
+    new DataView(absentUiParent).setUint32(49148, 7, true);
+    assert.equal(readCompanionSnapshot(absentUiParent, 0).reason, 'corrupt');
+
+    const badUiGeometry = domainSnapshot();
+    new DataView(badUiGeometry).setFloat32(49124, Number.NaN, true);
+    assert.equal(readCompanionSnapshot(badUiGeometry, 0).reason, 'corrupt');
+
+    const badUiTotals = domainSnapshot();
+    new DataView(badUiTotals).setUint32(49080, 3, true);
+    assert.equal(readCompanionSnapshot(badUiTotals, 0).reason, 'corrupt');
+
+    const inconsistentUiTotals = domainSnapshot();
+    new DataView(inconsistentUiTotals).setUint32(49076, 1, true);
+    assert.equal(
+      readCompanionSnapshot(inconsistentUiTotals, 0).reason,
+      'corrupt',
+    );
+
+    const absentUi = domainSnapshot();
+    const absentUiView = new DataView(absentUi);
+    absentUiView.setUint32(
+      12,
+      absentUiView.getUint32(12, true) & ~FLAG_UI,
+      true,
+    );
+    assert.equal(readCompanionSnapshot(absentUi, 0).reason, 'corrupt');
   });
 
   // The seqlock, which is the whole reason this can be read on the animation
@@ -762,9 +872,9 @@ describe('companion snapshot', () => {
       { magic: MAGIC + 1 },
       { abi: SNAPSHOT_ABI + 1 },
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
-      // A flag this build has no name for. The companion sets only four, so a
-      // fifth is either a newer companion or not a companion at all.
-      { flags: FLAG_READY | FLAG_PLAYER | (1 << 14) },
+      // A flag this build has no name for is either a newer companion or not a
+      // companion at all.
+      { flags: FLAG_READY | FLAG_PLAYER | (1 << 15) },
     ]) {
       assert.equal(read(overrides).reason, 'snapshot', JSON.stringify(overrides));
     }

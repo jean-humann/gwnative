@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 9;
-export const COMPANION_SNAPSHOT_BYTES = 49_064;
+export const COMPANION_SNAPSHOT_ABI = 10;
+export const COMPANION_SNAPSHOT_BYTES = 56_252;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -50,6 +50,7 @@ const FLAGS = Object.freeze({
   completion: 1 << 11,
   camera: 1 << 12,
   trade: 1 << 13,
+  ui: 1 << 14,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -65,7 +66,8 @@ const KNOWN_FLAGS =
   | FLAGS.social
   | FLAGS.completion
   | FLAGS.camera
-  | FLAGS.trade;
+  | FLAGS.trade
+  | FLAGS.ui;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -111,6 +113,14 @@ const TRADE_PAGE_FLAGS = Object.freeze({
 const KNOWN_TRADE_PAGE_FLAGS =
   TRADE_PAGE_FLAGS.playerItemsTruncated
   | TRADE_PAGE_FLAGS.partnerItemsTruncated;
+const MAX_RAW_UI_FRAMES = 2_048;
+const MAX_UI_FRAMES = 128;
+const UI_PAGE_TRUNCATED = 1 << 0;
+const UI_RECORD_POSITION_VALID = 1 << 0;
+const UI_FRAME_CREATED = 0x4;
+const UI_FRAME_DESTROYING = 0x8;
+const UI_FRAME_DISABLED = 0x10;
+const UI_FRAME_HIDDEN = 0x200;
 const EFFECT_FLAGS = Object.freeze({
   buffsTruncated: 1 << 0,
   effectsTruncated: 1 << 1,
@@ -1192,6 +1202,118 @@ function readTrade(view) {
   });
 }
 
+function readUi(view) {
+  const base = 49064;
+  const pageFlags = view.getUint32(base, true);
+  const frameCount = view.getUint32(base + 4, true);
+  const total = view.getUint32(base + 8, true);
+  const createdTotal = view.getUint32(base + 12, true);
+  const visibleTotal = view.getUint32(base + 16, true);
+  const truncated = (pageFlags & UI_PAGE_TRUNCATED) !== 0;
+  if (
+    (pageFlags & ~UI_PAGE_TRUNCATED) !== 0
+    || frameCount > MAX_UI_FRAMES
+    || total < frameCount
+    || total > MAX_RAW_UI_FRAMES
+    || createdTotal > total
+    || visibleTotal > createdTotal
+    || (truncated
+      ? frameCount !== MAX_UI_FRAMES || total <= MAX_UI_FRAMES
+      : frameCount !== total)
+  ) {
+    return null;
+  }
+
+  const frames = [];
+  const frameIds = new Set();
+  let publishedCreated = 0;
+  let publishedVisible = 0;
+  for (let index = 0; index < MAX_UI_FRAMES; index += 1) {
+    const offset = base + 20 + index * 56;
+    if (index >= frameCount) {
+      if (!wordsAreZero(view, offset, 56)) return null;
+      continue;
+    }
+    const recordFlags = view.getUint32(offset, true);
+    const frameId = view.getUint32(offset + 4, true);
+    const parentValue = view.getUint32(offset + 8, true);
+    const childOffsetId = view.getUint32(offset + 12, true);
+    const frameHash = view.getUint32(offset + 16, true);
+    const visibilityFlags = view.getUint32(offset + 20, true);
+    const type = view.getUint32(offset + 24, true);
+    const templateType = view.getUint32(offset + 28, true);
+    const state = view.getUint32(offset + 32, true);
+    const positionFlags = view.getUint32(offset + 36, true);
+    const position = {
+      left: view.getFloat32(offset + 40, true),
+      bottom: view.getFloat32(offset + 44, true),
+      right: view.getFloat32(offset + 48, true),
+      top: view.getFloat32(offset + 52, true),
+    };
+    const positionValid =
+      (recordFlags & UI_RECORD_POSITION_VALID) !== 0;
+    if (
+      (recordFlags & ~UI_RECORD_POSITION_VALID) !== 0
+      || frameId >= MAX_RAW_UI_FRAMES
+      || frameIds.has(frameId)
+      || (parentValue !== 0xffff_ffff
+        && (parentValue >= MAX_RAW_UI_FRAMES || parentValue === frameId))
+      || (positionValid
+        ? !Object.values(position).every(validCoordinate)
+        : positionFlags !== 0
+          || Object.values(position).some((value) => value !== 0))
+    ) {
+      return null;
+    }
+    frameIds.add(frameId);
+    const created = (state & UI_FRAME_CREATED) !== 0;
+    const destroying = (state & UI_FRAME_DESTROYING) !== 0;
+    const disabled = (state & UI_FRAME_DISABLED) !== 0;
+    const hidden = (state & UI_FRAME_HIDDEN) !== 0;
+    const locallyVisible = created && !destroying && !hidden;
+    publishedCreated += Number(created);
+    publishedVisible += Number(locallyVisible);
+    frames.push(Object.freeze({
+      frameId,
+      parentId: parentValue === 0xffff_ffff ? null : parentValue,
+      childOffsetId,
+      frameHash,
+      visibilityFlags,
+      type,
+      templateType,
+      state,
+      created,
+      destroying,
+      disabled,
+      hidden,
+      locallyVisible,
+      positionValid,
+      positionFlags,
+      position: Object.freeze(position),
+    }));
+  }
+  if (
+    publishedCreated > createdTotal
+    || publishedVisible > visibleTotal
+    || (!truncated
+      && (publishedCreated !== createdTotal
+        || publishedVisible !== visibleTotal))
+    || (!truncated
+      && frames.some(
+        (frame) => frame.parentId !== null && !frameIds.has(frame.parentId),
+      ))
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    truncated,
+    total,
+    createdTotal,
+    visibleTotal,
+    frames: Object.freeze(frames),
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -1388,6 +1510,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const uiValid = (flags & FLAGS.ui) !== 0;
+  const ui = uiValid ? readUi(view) : null;
+  if (
+    (uiValid && ui === null)
+    || (!uiValid && !wordsAreZero(view, 49064, 7188))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -1411,6 +1541,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(completion ? { completion } : {}),
     ...(camera ? { camera } : {}),
     ...(trade ? { trade } : {}),
+    ...(ui ? { ui } : {}),
   });
 }
 

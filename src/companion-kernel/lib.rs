@@ -41,7 +41,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 9;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 10;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -57,6 +57,7 @@ const FLAG_SOCIAL_VALID: u32 = 1 << 10;
 const FLAG_COMPLETION_VALID: u32 = 1 << 11;
 const FLAG_CAMERA_VALID: u32 = 1 << 12;
 const FLAG_TRADE_VALID: u32 = 1 << 13;
+const FLAG_UI_VALID: u32 = 1 << 14;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -92,6 +93,13 @@ const TRADE_OFFER_SENT: u32 = 2;
 const TRADE_ACCEPTED: u32 = 4;
 const KNOWN_TRADE_FLAGS: u32 =
     TRADE_INITIATED | TRADE_OFFER_SENT | TRADE_ACCEPTED;
+const MAX_RAW_UI_FRAMES: u32 = 2_048;
+const MAX_UI_FRAMES: usize = 128;
+const UI_FRAME_CREATED: u32 = 0x4;
+const UI_FRAME_DESTROYING: u32 = 0x8;
+const UI_FRAME_DISABLED: u32 = 0x10;
+const UI_FRAME_HIDDEN: u32 = 0x200;
+const UI_RECORD_POSITION_VALID: u32 = 1;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -297,6 +305,22 @@ struct Layout {
     trade_item_stride: u32,
     trade_item_id: u32,
     trade_item_quantity: u32,
+    ui_frame_array: u32,
+    ui_frame_size: u32,
+    ui_frame_visibility_flags: u32,
+    ui_frame_type: u32,
+    ui_frame_template_type: u32,
+    ui_frame_child_offset_id: u32,
+    ui_frame_id: u32,
+    ui_frame_position: u32,
+    ui_position_flags: u32,
+    ui_position_left: u32,
+    ui_position_bottom: u32,
+    ui_position_right: u32,
+    ui_position_top: u32,
+    ui_frame_parent_relation: u32,
+    ui_frame_hash: u32,
+    ui_frame_state: u32,
 }
 
 impl Layout {
@@ -483,6 +507,22 @@ impl Layout {
         trade_item_stride: 0,
         trade_item_id: 0,
         trade_item_quantity: 0,
+        ui_frame_array: 0,
+        ui_frame_size: 0,
+        ui_frame_visibility_flags: 0,
+        ui_frame_type: 0,
+        ui_frame_template_type: 0,
+        ui_frame_child_offset_id: 0,
+        ui_frame_id: 0,
+        ui_frame_position: 0,
+        ui_position_flags: 0,
+        ui_position_left: 0,
+        ui_position_bottom: 0,
+        ui_position_right: 0,
+        ui_position_top: 0,
+        ui_frame_parent_relation: 0,
+        ui_frame_hash: 0,
+        ui_frame_state: 0,
     };
 }
 
@@ -674,6 +714,53 @@ struct TradeState {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct UiFrame {
+    record_flags: u32,
+    frame_id: u32,
+    parent_id: u32,
+    child_offset_id: u32,
+    frame_hash: u32,
+    visibility_flags: u32,
+    frame_type: u32,
+    template_type: u32,
+    frame_state: u32,
+    position_flags: u32,
+    left: f32,
+    bottom: f32,
+    right: f32,
+    top: f32,
+}
+
+const EMPTY_UI_FRAME: UiFrame = UiFrame {
+    record_flags: 0,
+    frame_id: 0,
+    parent_id: 0,
+    child_offset_id: 0,
+    frame_hash: 0,
+    visibility_flags: 0,
+    frame_type: 0,
+    template_type: 0,
+    frame_state: 0,
+    position_flags: 0,
+    left: 0.0,
+    bottom: 0.0,
+    right: 0.0,
+    top: 0.0,
+};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UiState {
+    page_flags: u32,
+    frame_count: u32,
+    frame_total: u32,
+    created_total: u32,
+    visible_total: u32,
+    frames: [UiFrame; MAX_UI_FRAMES],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -753,6 +840,7 @@ struct Snapshot {
     completion_words: [[u32; MAX_COMPLETION_WORDS as usize]; 6],
     camera: CameraState,
     trade: TradeState,
+    ui: UiState,
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -773,8 +861,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 728] = [(); size_of::<Layout>()];
-const _: [(); 49064] = [(); size_of::<Snapshot>()];
+const _: [(); 792] = [(); size_of::<Layout>()];
+const _: [(); 56252] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 static mut SNAPSHOT_PTR: u32 = 0;
@@ -1180,6 +1268,21 @@ impl TradeSource {
     };
 }
 
+// UI frames are owned by one global GWArray. Keep the descriptor only and
+// revalidate its slots, frame IDs, parent back-references, and geometry during
+// publication. Labels, callback tables, tooltips, and relation lists never
+// cross the boundary.
+#[derive(Clone, Copy)]
+struct UiSource {
+    frames: ArrayView,
+}
+
+impl UiSource {
+    const EMPTY: Self = Self {
+        frames: ArrayView::EMPTY,
+    };
+}
+
 #[derive(Clone, Copy)]
 struct State {
     flags: u32,
@@ -1199,6 +1302,7 @@ struct State {
     completion: CompletionSource,
     camera: CameraState,
     trade: TradeSource,
+    ui: UiSource,
 }
 
 impl State {
@@ -1227,6 +1331,7 @@ impl State {
             completion: CompletionSource::EMPTY,
             camera: CameraState::EMPTY,
             trade: TradeSource::EMPTY,
+            ui: UiSource::EMPTY,
         }
     }
 }
@@ -1618,6 +1723,95 @@ unsafe fn collect_trade(layout: Layout, game: u32) -> Option<TradeSource> {
         partner_gold,
         player_items,
         partner_items,
+    })
+}
+
+unsafe fn collect_ui(layout: Layout) -> Option<UiSource> {
+    if layout.ui_frame_size != 0x1c8
+        || layout.ui_frame_array == 0
+        || layout.ui_frame_array & 3 != 0
+    {
+        return None;
+    }
+    let frames = unsafe {
+        read_array(
+            layout.ui_frame_array,
+            4,
+            MAX_RAW_UI_FRAMES,
+            4_096,
+        )?
+    };
+    Some(UiSource { frames })
+}
+
+unsafe fn read_ui_frame(
+    layout: Layout,
+    frames: ArrayView,
+    frame_id: u32,
+    address: u32,
+) -> Option<UiFrame> {
+    if address & 3 != 0
+        || !contains(address, layout.ui_frame_size)
+        || unsafe { read_u32(offset(address, layout.ui_frame_id)?)? } != frame_id
+    {
+        return None;
+    }
+
+    let parent_relation =
+        unsafe { read_u32(offset(address, layout.ui_frame_parent_relation)?)? };
+    let parent_id = if parent_relation == 0 {
+        u32::MAX
+    } else {
+        let parent = parent_relation.checked_sub(layout.ui_frame_parent_relation)?;
+        if parent & 3 != 0 || !contains(parent, layout.ui_frame_size) {
+            return None;
+        }
+        let id = unsafe { read_u32(offset(parent, layout.ui_frame_id)?)? };
+        if id >= frames.size
+            || indexed(frames.buffer, id, 4)
+                .and_then(|slot| unsafe { read_u32(slot) })
+                != Some(parent)
+        {
+            return None;
+        }
+        id
+    };
+
+    let position = offset(address, layout.ui_frame_position)?;
+    let position_flags =
+        unsafe { read_u32(offset(position, layout.ui_position_flags)?)? };
+    let left = unsafe { read_f32(offset(position, layout.ui_position_left)?)? };
+    let bottom =
+        unsafe { read_f32(offset(position, layout.ui_position_bottom)?)? };
+    let right = unsafe { read_f32(offset(position, layout.ui_position_right)?)? };
+    let top = unsafe { read_f32(offset(position, layout.ui_position_top)?)? };
+    let position_valid = [left, bottom, right, top]
+        .into_iter()
+        .all(finite_position);
+
+    Some(UiFrame {
+        record_flags: u32::from(position_valid) * UI_RECORD_POSITION_VALID,
+        frame_id,
+        parent_id,
+        child_offset_id: unsafe {
+            read_u32(offset(address, layout.ui_frame_child_offset_id)?)?
+        },
+        frame_hash: unsafe { read_u32(offset(address, layout.ui_frame_hash)?)? },
+        visibility_flags: unsafe {
+            read_u32(offset(address, layout.ui_frame_visibility_flags)?)?
+        },
+        frame_type: unsafe { read_u32(offset(address, layout.ui_frame_type)?)? },
+        template_type: unsafe {
+            read_u32(offset(address, layout.ui_frame_template_type)?)?
+        },
+        frame_state: unsafe {
+            read_u32(offset(address, layout.ui_frame_state)?)?
+        },
+        position_flags: if position_valid { position_flags } else { 0 },
+        left: if position_valid { left } else { 0.0 },
+        bottom: if position_valid { bottom } else { 0.0 },
+        right: if position_valid { right } else { 0.0 },
+        top: if position_valid { top } else { 0.0 },
     })
 }
 
@@ -2293,6 +2487,10 @@ unsafe fn collect(layout: Layout) -> State {
     if let Some(trade) = unsafe { collect_trade(layout, game) } {
         state.flags |= FLAG_TRADE_VALID;
         state.trade = trade;
+    }
+    if let Some(ui) = unsafe { collect_ui(layout) } {
+        state.flags |= FLAG_UI_VALID;
+        state.ui = ui;
     }
     state
 }
@@ -2993,6 +3191,83 @@ unsafe fn publish_trade(
     valid
 }
 
+unsafe fn publish_ui(
+    snapshot: *mut Snapshot,
+    layout: Layout,
+    source: UiSource,
+) -> bool {
+    let frames = source.frames;
+    let mut valid = frames.size <= MAX_RAW_UI_FRAMES
+        && (frames.size == 0
+            || (frames.buffer != 0
+                && frames.buffer & 3 == 0
+                && checked_mul(frames.size, 4)
+                    .is_some_and(|bytes| contains(frames.buffer, bytes))));
+    let mut frame_count = 0usize;
+    let mut frame_total = 0u32;
+    let mut created_total = 0u32;
+    let mut visible_total = 0u32;
+
+    if valid {
+        for frame_id in 0..frames.size {
+            let value = indexed(frames.buffer, frame_id, 4)
+                .and_then(|slot| unsafe { read_u32(slot) });
+            let Some(address) = value else {
+                valid = false;
+                break;
+            };
+            if address == 0 || address == u32::MAX {
+                continue;
+            }
+            let Some(frame) =
+                (unsafe { read_ui_frame(layout, frames, frame_id, address) })
+            else {
+                valid = false;
+                break;
+            };
+            frame_total += 1;
+            created_total += u32::from(frame.frame_state & UI_FRAME_CREATED != 0);
+            visible_total += u32::from(
+                frame.frame_state
+                    & (UI_FRAME_CREATED | UI_FRAME_DESTROYING | UI_FRAME_HIDDEN)
+                    == UI_FRAME_CREATED,
+            );
+            if frame_count < MAX_UI_FRAMES {
+                unsafe {
+                    write_volatile(&mut (*snapshot).ui.frames[frame_count], frame);
+                }
+                frame_count += 1;
+            }
+        }
+    }
+
+    if !valid {
+        frame_count = 0;
+        frame_total = 0;
+        created_total = 0;
+        visible_total = 0;
+    }
+    for index in frame_count..MAX_UI_FRAMES {
+        unsafe {
+            write_volatile(&mut (*snapshot).ui.frames[index], EMPTY_UI_FRAME);
+        }
+    }
+    unsafe {
+        write_volatile(
+            &mut (*snapshot).ui.page_flags,
+            u32::from(valid && frame_total > MAX_UI_FRAMES as u32),
+        );
+        write_volatile(
+            &mut (*snapshot).ui.frame_count,
+            if valid { frame_count as u32 } else { 0 },
+        );
+        write_volatile(&mut (*snapshot).ui.frame_total, frame_total);
+        write_volatile(&mut (*snapshot).ui.created_total, created_total);
+        write_volatile(&mut (*snapshot).ui.visible_total, visible_total);
+    }
+    valid
+}
+
 unsafe fn publish(mut state: State, layout: Layout) {
     let next = unsafe { SEQUENCE }.wrapping_add(2) & !1;
     let snapshot = unsafe { SNAPSHOT_PTR as *mut Snapshot };
@@ -3138,6 +3413,9 @@ unsafe fn publish(mut state: State, layout: Layout) {
         write_volatile(&mut (*snapshot).camera, state.camera);
         if !publish_trade(snapshot, layout, state.trade) {
             state.flags &= !FLAG_TRADE_VALID;
+        }
+        if !publish_ui(snapshot, layout, state.ui) {
+            state.flags &= !FLAG_UI_VALID;
         }
         write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).sequence, next);

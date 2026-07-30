@@ -596,6 +596,26 @@ pub(super) struct EnhancementLayout {
     pub trade_item_stride: u32,
     pub trade_item_id: u32,
     pub trade_item_quantity: u32,
+    /// Direct `GWArray<Frame*>` descriptor selected from the compiled
+    /// `GetFrameById` accessor in this exact client. GWCA and Py4GW agree on
+    /// the scalar identity, state, and position fields below. Callback,
+    /// label, relation-list, and message fields deliberately stay closed.
+    pub ui_frame_array: u32,
+    pub ui_frame_size: u32,
+    pub ui_frame_visibility_flags: u32,
+    pub ui_frame_type: u32,
+    pub ui_frame_template_type: u32,
+    pub ui_frame_child_offset_id: u32,
+    pub ui_frame_id: u32,
+    pub ui_frame_position: u32,
+    pub ui_position_flags: u32,
+    pub ui_position_left: u32,
+    pub ui_position_bottom: u32,
+    pub ui_position_right: u32,
+    pub ui_position_top: u32,
+    pub ui_frame_parent_relation: u32,
+    pub ui_frame_hash: u32,
+    pub ui_frame_state: u32,
 }
 
 impl EnhancementLayout {
@@ -785,13 +805,29 @@ impl EnhancementLayout {
             self.trade_item_stride,
             self.trade_item_id,
             self.trade_item_quantity,
+            self.ui_frame_array,
+            self.ui_frame_size,
+            self.ui_frame_visibility_flags,
+            self.ui_frame_type,
+            self.ui_frame_template_type,
+            self.ui_frame_child_offset_id,
+            self.ui_frame_id,
+            self.ui_frame_position,
+            self.ui_position_flags,
+            self.ui_position_left,
+            self.ui_position_bottom,
+            self.ui_position_right,
+            self.ui_position_top,
+            self.ui_frame_parent_relation,
+            self.ui_frame_hash,
+            self.ui_frame_state,
         ]
     }
 }
 
 /// Fields in [`EnhancementLayout`]. Named because the companion's own `Layout`
 /// is this many words long and the two have to agree.
-pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 182;
+pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 198;
 
 pub(super) struct EnhancementBuild {
     /// The *template-save* output, not ArenaNet's own module. That transform is
@@ -824,7 +860,7 @@ pub(super) struct EnhancementBuild {
 pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     EnhancementBuild {
         sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-        output_sha256: "3796f53d783ed74367cff1830c5637a4860f1b518af30b9fe347e3f064097a54",
+        output_sha256: "6a86b6397860880f92bd5f54e2b22593cf4ce3d20978caeab4db1f36922d9201",
         import_count: 219,
         program_id: 1,
         build_id: 38771,
@@ -1015,11 +1051,27 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             trade_item_stride: 0x08,
             trade_item_id: 0x00,
             trade_item_quantity: 0x04,
+            ui_frame_array: 0x5a_1f8c,
+            ui_frame_size: 0x1c8,
+            ui_frame_visibility_flags: 0x18,
+            ui_frame_type: 0x20,
+            ui_frame_template_type: 0x24,
+            ui_frame_child_offset_id: 0xb8,
+            ui_frame_id: 0xbc,
+            ui_frame_position: 0xd8,
+            ui_position_flags: 0x00,
+            ui_position_left: 0x04,
+            ui_position_bottom: 0x08,
+            ui_position_right: 0x0c,
+            ui_position_top: 0x10,
+            ui_frame_parent_relation: 0x128,
+            ui_frame_hash: 0x134,
+            ui_frame_state: 0x18c,
         },
     },
     EnhancementBuild {
         sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
-        output_sha256: "0996c3c4f081ac4a8286c2f64436ded0ab33c75f2771b7d9ce4b7ab6e2041c9a",
+        output_sha256: "3ded6e2aee14af8523168961406d511173ee857d97e0ca318bfacbac2bbe381a",
         import_count: 219,
         program_id: 1,
         build_id: 38790,
@@ -1210,11 +1262,27 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             trade_item_stride: 0x08,
             trade_item_id: 0x00,
             trade_item_quantity: 0x04,
+            ui_frame_array: 0x5a_207c,
+            ui_frame_size: 0x1c8,
+            ui_frame_visibility_flags: 0x18,
+            ui_frame_type: 0x20,
+            ui_frame_template_type: 0x24,
+            ui_frame_child_offset_id: 0xb8,
+            ui_frame_id: 0xbc,
+            ui_frame_position: 0xd8,
+            ui_position_flags: 0x00,
+            ui_position_left: 0x04,
+            ui_position_bottom: 0x08,
+            ui_position_right: 0x0c,
+            ui_position_top: 0x10,
+            ui_frame_parent_relation: 0x128,
+            ui_frame_hash: 0x134,
+            ui_frame_state: 0x18c,
         },
     },
     EnhancementBuild {
         sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
-        output_sha256: "46d9fad9d7a8180e8d484744e54d7a57990c543d994bd74938cf3c8e0528fbc5",
+        output_sha256: "cfc1d0c27d5a17b03b63eac385351acecea07e1bf70c5d9ca0d4bcf912e15db0",
         import_count: 219,
         program_id: 1,
         build_id: 38795,
@@ -1405,6 +1473,22 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             trade_item_stride: 0x08,
             trade_item_id: 0x00,
             trade_item_quantity: 0x04,
+            ui_frame_array: 0x5a_204c,
+            ui_frame_size: 0x1c8,
+            ui_frame_visibility_flags: 0x18,
+            ui_frame_type: 0x20,
+            ui_frame_template_type: 0x24,
+            ui_frame_child_offset_id: 0xb8,
+            ui_frame_id: 0xbc,
+            ui_frame_position: 0xd8,
+            ui_position_flags: 0x00,
+            ui_position_left: 0x04,
+            ui_position_bottom: 0x08,
+            ui_position_right: 0x0c,
+            ui_position_top: 0x10,
+            ui_frame_parent_relation: 0x128,
+            ui_frame_hash: 0x134,
+            ui_frame_state: 0x18c,
         },
     },
 ];
@@ -1525,6 +1609,29 @@ mod tests {
             assert_eq!(build.layout.trade_item_stride, 0x08);
             assert_eq!(build.layout.trade_item_id, 0x00);
             assert_eq!(build.layout.trade_item_quantity, 0x04);
+        }
+    }
+
+    #[test]
+    fn every_certified_build_uses_the_verified_ui_frame_layout() {
+        let arrays = [0x5a_1f8c, 0x5a_207c, 0x5a_204c];
+        for (build, array) in ENHANCEMENT_BUILDS.iter().zip(arrays) {
+            assert_eq!(build.layout.ui_frame_array, array);
+            assert_eq!(build.layout.ui_frame_size, 0x1c8);
+            assert_eq!(build.layout.ui_frame_visibility_flags, 0x18);
+            assert_eq!(build.layout.ui_frame_type, 0x20);
+            assert_eq!(build.layout.ui_frame_template_type, 0x24);
+            assert_eq!(build.layout.ui_frame_child_offset_id, 0xb8);
+            assert_eq!(build.layout.ui_frame_id, 0xbc);
+            assert_eq!(build.layout.ui_frame_position, 0xd8);
+            assert_eq!(build.layout.ui_position_flags, 0x00);
+            assert_eq!(build.layout.ui_position_left, 0x04);
+            assert_eq!(build.layout.ui_position_bottom, 0x08);
+            assert_eq!(build.layout.ui_position_right, 0x0c);
+            assert_eq!(build.layout.ui_position_top, 0x10);
+            assert_eq!(build.layout.ui_frame_parent_relation, 0x128);
+            assert_eq!(build.layout.ui_frame_hash, 0x134);
+            assert_eq!(build.layout.ui_frame_state, 0x18c);
         }
     }
 }

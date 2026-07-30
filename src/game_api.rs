@@ -384,6 +384,47 @@ pub struct Trade {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiPosition {
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    pub top: f32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiFrame {
+    pub frame_id: u32,
+    pub parent_id: Option<u32>,
+    pub child_offset_id: u32,
+    pub frame_hash: u32,
+    pub visibility_flags: u32,
+    #[serde(rename = "type")]
+    pub frame_type: u32,
+    pub template_type: u32,
+    pub state: u32,
+    pub created: bool,
+    pub destroying: bool,
+    pub disabled: bool,
+    pub hidden: bool,
+    pub locally_visible: bool,
+    pub position_valid: bool,
+    pub position_flags: u32,
+    pub position: UiPosition,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Ui {
+    pub truncated: bool,
+    pub total: u32,
+    pub created_total: u32,
+    pub visible_total: u32,
+    pub frames: Vec<UiFrame>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -436,6 +477,8 @@ pub struct State {
     pub camera: Option<Camera>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trade: Option<Trade>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<Ui>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -545,7 +588,7 @@ impl Hub {
                 "domains": [
                     "player", "map", "target", "party", "skillbar", "effects",
                     "agents", "quests", "inventory", "social", "completion", "camera",
-                    "trade"
+                    "trade", "ui"
                 ],
                 "available": self.state_json().is_some(),
             },
@@ -660,6 +703,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(trade) = &state.trade {
             validate_trade(trade)?;
         }
+        if let Some(ui) = &state.ui {
+            validate_ui(ui)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -683,6 +729,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.completion.is_some()
         || state.camera.is_some()
         || state.trade.is_some()
+        || state.ui.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -1303,6 +1350,70 @@ fn validate_trade(trade: &Trade) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_ui(ui: &Ui) -> Result<(), String> {
+    if ui.frames.len() > 128
+        || ui.total > 2_048
+        || ui.total < ui.frames.len() as u32
+        || ui.created_total > ui.total
+        || ui.visible_total > ui.created_total
+        || (ui.truncated && (ui.frames.len() != 128 || ui.total <= 128))
+        || (!ui.truncated && ui.total != ui.frames.len() as u32)
+    {
+        return Err("ui frame page is outside its certified bounds".into());
+    }
+
+    let mut ids = std::collections::HashSet::with_capacity(ui.frames.len());
+    let mut created = 0u32;
+    let mut visible = 0u32;
+    for frame in &ui.frames {
+        let position = [
+            frame.position.left,
+            frame.position.bottom,
+            frame.position.right,
+            frame.position.top,
+        ];
+        let expected_created = frame.state & 0x4 != 0;
+        let expected_destroying = frame.state & 0x8 != 0;
+        let expected_disabled = frame.state & 0x10 != 0;
+        let expected_hidden = frame.state & 0x200 != 0;
+        let expected_visible = expected_created && !expected_destroying && !expected_hidden;
+        if frame.frame_id >= 2_048
+            || !ids.insert(frame.frame_id)
+            || frame
+                .parent_id
+                .is_some_and(|id| id >= 2_048 || id == frame.frame_id)
+            || frame.created != expected_created
+            || frame.destroying != expected_destroying
+            || frame.disabled != expected_disabled
+            || frame.hidden != expected_hidden
+            || frame.locally_visible != expected_visible
+            || (frame.position_valid
+                && position
+                    .iter()
+                    .any(|value| !value.is_finite() || value.abs() > 1_000_000.0))
+            || (!frame.position_valid
+                && (frame.position_flags != 0 || position.iter().any(|value| *value != 0.0)))
+        {
+            return Err("ui frame state is outside its certified bounds".into());
+        }
+        created += u32::from(frame.created);
+        visible += u32::from(frame.locally_visible);
+    }
+    if created > ui.created_total
+        || visible > ui.visible_total
+        || (!ui.truncated && (created != ui.created_total || visible != ui.visible_total))
+        || (!ui.truncated
+            && ui.frames.iter().any(|frame| {
+                frame
+                    .parent_id
+                    .is_some_and(|parent_id| !ids.contains(&parent_id))
+            }))
+    {
+        return Err("ui frame totals do not match the published page".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1571,6 +1682,49 @@ mod tests {
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","trade":{"flags":0,"statusName":"Closed","open":false,"initiated":false,"offerSent":false,"accepted":false,"player":{"gold":1,"itemsTruncated":false,"items":[]},"partner":{"gold":0,"itemsTruncated":false,"items":[]}}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","trade":{"flags":1,"statusName":"Initiated","open":true,"initiated":true,"offerSent":false,"accepted":false,"player":{"gold":0,"itemsTruncated":true,"items":[{"slot":1,"itemId":7,"quantity":1}]},"partner":{"gold":0,"itemsTruncated":false,"items":[]}}}"#.as_slice(),
             br#"{"status":"waiting","trade":{"flags":0,"statusName":"Closed","open":false,"initiated":false,"offerSent":false,"accepted":false,"player":{"gold":0,"itemsTruncated":false,"items":[]},"partner":{"gold":0,"itemsTruncated":false,"items":[]}}}"#.as_slice(),
+        ] {
+            assert!(hub.publish(state).is_err());
+        }
+    }
+
+    #[test]
+    fn ui_frame_state_is_derived_and_bounded() {
+        let hub = Hub::default();
+        let valid = br#"{
+            "status":"ready","tickCount":1,"mapId":55,"instanceType":0,
+            "instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "ui":{
+                "truncated":false,"total":2,"createdTotal":2,"visibleTotal":1,
+                "frames":[
+                    {
+                        "frameId":0,"parentId":null,"childOffsetId":0,
+                        "frameHash":4369,"visibilityFlags":3,"type":4,
+                        "templateType":5,"state":4,"created":true,
+                        "destroying":false,"disabled":false,"hidden":false,
+                        "locallyVisible":true,"positionValid":true,
+                        "positionFlags":9,
+                        "position":{"left":10,"bottom":100,"right":200,"top":20}
+                    },
+                    {
+                        "frameId":1,"parentId":0,"childOffsetId":2,
+                        "frameHash":8738,"visibilityFlags":1,"type":7,
+                        "templateType":8,"state":516,"created":true,
+                        "destroying":false,"disabled":false,"hidden":true,
+                        "locallyVisible":false,"positionValid":false,
+                        "positionFlags":0,
+                        "position":{"left":0,"bottom":0,"right":0,"top":0}
+                    }
+                ]
+            }
+        }"#;
+        hub.publish(valid).unwrap();
+
+        for state in [
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","ui":{"truncated":false,"total":1,"createdTotal":1,"visibleTotal":1,"frames":[{"frameId":1,"parentId":7,"childOffsetId":0,"frameHash":1,"visibilityFlags":0,"type":0,"templateType":0,"state":4,"created":true,"destroying":false,"disabled":false,"hidden":false,"locallyVisible":true,"positionValid":false,"positionFlags":0,"position":{"left":0,"bottom":0,"right":0,"top":0}}]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","ui":{"truncated":false,"total":1,"createdTotal":1,"visibleTotal":1,"frames":[{"frameId":1,"parentId":null,"childOffsetId":0,"frameHash":1,"visibilityFlags":0,"type":0,"templateType":0,"state":4,"created":false,"destroying":false,"disabled":false,"hidden":false,"locallyVisible":true,"positionValid":false,"positionFlags":0,"position":{"left":0,"bottom":0,"right":0,"top":0}}]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","ui":{"truncated":false,"total":1,"createdTotal":1,"visibleTotal":1,"frames":[{"frameId":1,"parentId":null,"childOffsetId":0,"frameHash":1,"visibilityFlags":0,"type":0,"templateType":0,"state":4,"created":true,"destroying":false,"disabled":false,"hidden":false,"locallyVisible":true,"positionValid":false,"positionFlags":1,"position":{"left":0,"bottom":0,"right":0,"top":0}}]}}"#.as_slice(),
+            br#"{"status":"waiting","ui":{"truncated":false,"total":0,"createdTotal":0,"visibleTotal":0,"frames":[]}}"#.as_slice(),
         ] {
             assert!(hub.publish(state).is_err());
         }

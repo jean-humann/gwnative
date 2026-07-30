@@ -37,6 +37,7 @@ class ApiSurfaceTests(unittest.TestCase):
                 "    pub completion: Option<Completion>,\n"
                 "    pub camera: Option<Camera>,\n"
                 "    pub trade: Option<Trade>,\n"
+                "    pub ui: Option<Ui>,\n"
                 "}\n"
             )
             (wasm / "builds.rs").write_text(
@@ -63,6 +64,7 @@ class ApiSurfaceTests(unittest.TestCase):
                 "skillbar",
                 "target",
                 "trade",
+                "ui",
             ],
         )
 
