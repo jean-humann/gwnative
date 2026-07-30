@@ -39,6 +39,30 @@ class Failure(RuntimeError):
     pass
 
 
+def profile_web_root(
+    profile: str | None,
+    base: Path | None = None,
+) -> Path:
+    base = base or Path.home() / "Library/Application Support/gwnative"
+    if not profile or profile == "default":
+        return base / "web"
+    valid = (
+        1 <= len(profile) <= 64
+        and profile not in {".", ".."}
+        and all(
+            character.isascii()
+            and (character.isalnum() or character in "._-")
+            for character in profile
+        )
+    )
+    if not valid:
+        raise Failure("profile is not a safe directory component")
+    directory = base / "profiles" / profile
+    if not (directory / "profile.json").is_file():
+        raise Failure(f"profile {profile!r} does not exist")
+    return directory / "web"
+
+
 def run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, cwd=ROOT, check=True, text=True, **kwargs)
 
@@ -433,6 +457,13 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--profile",
+        help=(
+            "launch an existing isolated profile; the application selects that "
+            "profile's Keychain item without exposing it to this runner"
+        ),
+    )
+    parser.add_argument(
         "--no-gameplay",
         action="store_true",
         help="stop after Keychain, first-frame, page UI, and API-contract checks",
@@ -451,7 +482,7 @@ def main() -> int:
         raise Failure("--auth-timeout must be positive")
 
     run(["cargo", "build"])
-    support_web = Path.home() / "Library/Application Support/gwnative/web"
+    support_web = profile_web_root(args.profile)
     if not (support_web / "Gw.jspi.wasm").is_file():
         raise Failure(f"the installed client is missing from {support_web}")
 
@@ -488,9 +519,10 @@ def main() -> int:
             str(ROOT / "scripts/signed-run"),
             str(ROOT / "target/debug/gwnative"),
             "--no-update",
-            "-autologin",
-            "-windowed",
         ]
+        if args.profile:
+            command.extend(["--profile", args.profile])
+        command.extend(["-autologin", "-windowed"])
         if args.character:
             command.extend(["-character", args.character])
         if args.fps is not None:
