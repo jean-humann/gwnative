@@ -208,10 +208,13 @@ instantiates the companion, fills the table slot, and only then enables the
 hook.
 
 The validated companion state is narrowed into the versioned v1 map, player,
-and target schema. The page publishes no faster than four times per second and
-Rust validates it again before making it available on token-gated loopback
-routes. There is no certified action endpoint. The overlay registry and
-Companion Tools consume the same read-only state; see
+target, party, skillbar, effects, agent, and quest schema. Large agent, quest,
+and effect pages remain fixed and bounded in the seqlock block rather than
+being copied onto the companion’s imported-memory stack. The page publishes no
+faster than four times per second and Rust validates it again before making it
+available on token-gated loopback routes. There is no certified action
+endpoint. The overlay registry and Companion Tools consume the same read-only
+state; see
 [Game API and overlays](game-api.md).
 
 Explicit mods follow a separate trust path. `src/mods.rs` parses the selected

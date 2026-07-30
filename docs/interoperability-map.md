@@ -99,12 +99,12 @@ client, not an in-game automation API.
 | Domain | Upstream evidence | gwnative today | Safe next boundary |
 | --- | --- | --- | --- |
 | Runtime and host services | JSPI host paths and both WASM contracts mapped | Official artifact, image, DNS, socket, login, and storage bridges implemented | Keep callback contract tests generation-pinned |
-| Player and target | GWCA Agent/Player; PyAgent/PyPlayer; native resolvers | Certified IDs, coordinates, target kind, distance, and range | Add bounded read fields only after live invariants |
-| Map and instance | GWCA Map; PyMap; native map resolvers | Certified map ID and instance identity | Map-agent summary, then completion state |
-| Party and heroes | GWCA Party; PyParty; native party resolvers | Certified bounded roster, flags, IDs, and summary widget | Add agent-derived profession/health state |
+| Player and target | GWCA Agent/Player; PyAgent/PyPlayer; native resolvers | Certified IDs, coordinates, target kind, distance, range, and bounded agent summaries | Add names only after encoded-string lifetime validation |
+| Map and instance | GWCA Map; PyMap; native map resolvers | Certified map ID, instance identity, and 128-entry map-agent page | Add mission and map completion state |
+| Party and heroes | GWCA Party; PyParty; native party resolvers | Certified bounded roster, flags, IDs, summary widget, and agent-derived profession/health records | Join party members to agent summaries by ID |
 | Skills and effects | GWCA Skillbar/Effect; PySkill/PySkillbar/PyEffects | Certified player slots, adrenaline, recharge, event, disabled mask, cast count, and bounded buff/effect snapshots | Add effect expiry semantics only after live timing validation |
 | Items and inventory | GWCA Item; PyItem/PyInventory; item resolvers | Not exposed | Bounded bag/item summaries with privacy review |
-| Quests | GWCA Quest; PyQuest; quest resolvers | Not exposed | Current quest and objective state |
+| Quests | GWCA Quest; PyQuest; quest resolvers | Certified active ID, 64-entry quest page, state-bit derivatives, markers, and 32 mission objectives | Encoded quest/objective text only after decoder certification |
 | Chat, friends, and guild | GWCA Chat/FriendList/Guild; matching Python modules | Not exposed | Read-only presence first; no message action by default |
 | Camera and rendering | GWCA Camera/Render; PyCamera/PyRender/PyWorldRender | Native cursor and local overlay composition | Read-only camera state; keep WebGL ownership isolated |
 | UI and dialogs | GWCA UI; PyUIManager/PyDialog; UI resolvers | gwnative-owned panels and widgets only | Stable read-only frame identity before any interaction |
@@ -129,7 +129,7 @@ A mapped domain reaches the public API only when it has:
 5. an end-to-end observation proving that the client keeps rendering; and
 6. a separate policy decision for every state-changing operation.
 
-The next implementation sequence is map agents and quests, then inventory and
-presence. Native action bindings, packet injection, virtual
-input, and pathing automation are reference evidence only; they are not
-candidates for bulk exposure.
+The next implementation sequence is inventory and account storage, then
+read-only guild/friend presence and map completion. Native action bindings,
+packet injection, virtual input, and pathing automation are reference evidence
+only; they are not candidates for bulk exposure.
