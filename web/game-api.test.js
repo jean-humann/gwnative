@@ -54,7 +54,7 @@ describe('public game state', () => {
     });
     const quests = Object.freeze({
       activeQuestId: 44,
-      quests: Object.freeze([{ questId: 44 }]),
+      quests: Object.freeze([{ questId: 44, hasMarker: true }]),
     });
     const inventory = Object.freeze({
       total: 1,

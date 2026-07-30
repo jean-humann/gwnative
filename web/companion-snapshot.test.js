@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 12;
+const SNAPSHOT_ABI = 13;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -478,6 +478,7 @@ describe('companion snapshot', () => {
       markerX: 10,
       markerY: 20,
       markerPlane: 3,
+      hasMarker: true,
       mapTo: 56,
       completed: true,
       currentMission: false,
@@ -648,6 +649,30 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state.progression.factions));
     assert.ok(Object.isFrozen(state.progression.skillPoints));
     assert.ok(Object.isFrozen(state.progression));
+  });
+
+  it('normalizes the GWCA no-map-marker sentinel', () => {
+    const buffer = domainSnapshot();
+    const view = new DataView(buffer);
+    view.setFloat32(10012, 0, true);
+    view.setFloat32(10016, 0, true);
+    view.setUint32(10020, 0xffff_ffff, true);
+
+    const [quest] = readCompanionSnapshot(buffer, 0).quests.quests;
+    assert.deepEqual(
+      {
+        markerX: quest.markerX,
+        markerY: quest.markerY,
+        markerPlane: quest.markerPlane,
+        hasMarker: quest.hasMarker,
+      },
+      {
+        markerX: 0,
+        markerY: 0,
+        markerPlane: 0,
+        hasMarker: false,
+      },
+    );
   });
 
   it('accepts a complete bounded inventory page with an explicit remainder', () => {

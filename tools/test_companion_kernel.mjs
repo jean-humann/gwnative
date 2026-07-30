@@ -150,11 +150,11 @@ u32(world + 0x7bc, 10_000);
 u32(world + 0x7c0, 10_000);
 u32(world + 0x7c4, 15_000);
 
-// One active quest and one mission objective.
+// One active quest, one quest without a map marker, and one mission objective.
 u32(world + 0x528, 44);
 u32(world + 0x52c, questLog);
-u32(world + 0x530, 1);
-u32(world + 0x534, 1);
+u32(world + 0x530, 2);
+u32(world + 0x534, 2);
 u32(questLog, 44);
 u32(questLog + 4, 0x22);
 u32(questLog + 0x14, 55);
@@ -162,6 +162,13 @@ f32(questLog + 0x18, 10);
 f32(questLog + 0x1c, 20);
 u32(questLog + 0x20, 3);
 u32(questLog + 0x28, 56);
+u32(questLog + 0x34, 45);
+u32(questLog + 0x38, 0x20);
+u32(questLog + 0x48, 55);
+f32(questLog + 0x4c, Number.POSITIVE_INFINITY);
+f32(questLog + 0x50, Number.NEGATIVE_INFINITY);
+u32(questLog + 0x54, 0xffff_ffff);
+u32(questLog + 0x5c, 56);
 u32(world + 0x564, objectives);
 u32(world + 0x568, 1);
 u32(world + 0x56c, 1);
@@ -561,6 +568,21 @@ assert.equal(state.agents.agents[0].isCasting, true);
 assert.equal(state.quests.activeQuestId, 44);
 assert.equal(state.quests.quests[0].completed, true);
 assert.equal(state.quests.quests[0].primary, true);
+assert.equal(state.quests.quests[0].hasMarker, true);
+assert.deepEqual(state.quests.quests[1], {
+  questId: 45,
+  logState: 0x20,
+  mapFrom: 55,
+  markerX: 0,
+  markerY: 0,
+  markerPlane: 0,
+  hasMarker: false,
+  mapTo: 56,
+  completed: false,
+  currentMission: false,
+  primary: true,
+  areaPrimary: false,
+});
 assert.deepEqual(state.quests.missionObjectives, [{ objectiveId: 7, type: 2 }]);
 assert.equal(state.inventory.goldCharacter, 1_234);
 assert.equal(state.inventory.goldStorage, 50_000);

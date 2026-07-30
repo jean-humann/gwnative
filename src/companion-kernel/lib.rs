@@ -38,7 +38,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 12;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 13;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -73,6 +73,10 @@ const MAX_RAW_QUESTS: u32 = 256;
 const MAX_QUESTS: usize = 64;
 const MAX_RAW_MISSION_OBJECTIVES: u32 = 128;
 const MAX_MISSION_OBJECTIVES: usize = 32;
+/// Snapshot sentinel for a quest whose client-side `GamePos` carries infinite
+/// coordinates. GWCA treats either infinity as "this quest has no map marker";
+/// the public API normalises it to zero coordinates plus `hasMarker: false`.
+const NO_QUEST_MARKER: u32 = u32::MAX;
 const MAX_INVENTORY_BAGS: usize = 22;
 const MAX_INVENTORY_ITEMS: usize = 512;
 const MAX_BAG_SLOTS: u32 = 256;
@@ -1581,7 +1585,7 @@ unsafe fn read_array(
 unsafe fn read_quest(layout: Layout, buffer: u32, index: u32) -> Option<Quest> {
     let entry = indexed(buffer, index, layout.quest_stride)?;
     let marker = offset(entry, layout.quest_marker)?;
-    let quest = Quest {
+    let mut quest = Quest {
         quest_id: unsafe { read_u32(offset(entry, layout.quest_id)?)? },
         log_state: unsafe { read_u32(offset(entry, layout.quest_log_state)?)? },
         map_from: unsafe { read_u32(offset(entry, layout.quest_map_from)?)? },
@@ -1590,13 +1594,20 @@ unsafe fn read_quest(layout: Layout, buffer: u32, index: u32) -> Option<Quest> {
         marker_plane: unsafe { read_u32(offset(marker, 8)?)? },
         map_to: unsafe { read_u32(offset(entry, layout.quest_map_to)?)? },
     };
+    let marker_missing = quest.marker_x.is_infinite() || quest.marker_y.is_infinite();
+    if marker_missing {
+        quest.marker_x = 0.0;
+        quest.marker_y = 0.0;
+        quest.marker_plane = NO_QUEST_MARKER;
+    }
     if quest.quest_id == 0
         || quest.quest_id > 100_000
         || quest.map_from > 2_000
         || quest.map_to > 2_000
-        || !finite_position(quest.marker_x)
-        || !finite_position(quest.marker_y)
-        || quest.marker_plane > 100_000
+        || (!marker_missing
+            && (!finite_position(quest.marker_x)
+                || !finite_position(quest.marker_y)
+                || quest.marker_plane > 100_000))
     {
         return None;
     }

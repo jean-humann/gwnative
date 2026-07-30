@@ -154,6 +154,7 @@ pub struct Quest {
     pub marker_x: f32,
     pub marker_y: f32,
     pub marker_plane: u32,
+    pub has_marker: bool,
     pub map_to: u32,
     pub completed: bool,
     pub current_mission: bool,
@@ -978,11 +979,14 @@ fn validate_quests(quests: &Quests) -> Result<(), String> {
             || !quest_ids.insert(quest.quest_id)
             || quest.map_from > 2_000
             || quest.map_to > 2_000
-            || !quest.marker_x.is_finite()
-            || quest.marker_x.abs() > 1_000_000.0
-            || !quest.marker_y.is_finite()
-            || quest.marker_y.abs() > 1_000_000.0
-            || quest.marker_plane > 100_000
+            || (quest.has_marker
+                && (!quest.marker_x.is_finite()
+                    || quest.marker_x.abs() > 1_000_000.0
+                    || !quest.marker_y.is_finite()
+                    || quest.marker_y.abs() > 1_000_000.0
+                    || quest.marker_plane > 100_000))
+            || (!quest.has_marker
+                && (quest.marker_x != 0.0 || quest.marker_y != 0.0 || quest.marker_plane != 0))
             || quest.completed != (quest.log_state & 0x2 != 0)
             || quest.current_mission != (quest.log_state & 0x10 != 0)
             || quest.primary != (quest.log_state & 0x20 != 0)
@@ -1584,6 +1588,7 @@ mod tests {
                 "quests":[{
                     "questId":44,"logState":34,"mapFrom":55,
                     "markerX":10,"markerY":20,"markerPlane":3,"mapTo":56,
+                    "hasMarker":true,
                     "completed":true,"currentMission":false,
                     "primary":true,"areaPrimary":false
                 }],
@@ -1894,7 +1899,7 @@ mod tests {
             br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","effects":{"agentId":2,"buffsTruncated":false,"effectsTruncated":false,"buffs":[],"effects":[{"skillId":1,"attributeLevel":0,"effectId":7,"agentId":0,"duration":1,"timestamp":1},{"skillId":2,"attributeLevel":0,"effectId":7,"agentId":0,"duration":1,"timestamp":2}]}}"#.as_slice(),
             br#"{"status":"waiting","effects":{"agentId":2,"buffsTruncated":false,"effectsTruncated":false,"buffs":[],"effects":[]}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","agents":{"truncated":false,"total":1,"agents":[{"agentId":2,"typeBits":219,"kind":"Living","playerNumber":1,"primary":0,"secondary":0,"level":20,"health":1,"rotation":0,"x":0,"y":0,"z":0,"modelState":65,"effects":0,"allegiance":1,"isLiving":true,"isItem":false,"isGadget":false,"isDead":false,"isMoving":false,"isAttacking":false,"isKnockedDown":false,"isCasting":false}]}}"#.as_slice(),
-            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","quests":{"activeQuestId":2,"questsTruncated":false,"objectivesTruncated":false,"quests":[{"questId":1,"logState":0,"mapFrom":0,"markerX":0,"markerY":0,"markerPlane":0,"mapTo":0,"completed":false,"currentMission":false,"primary":false,"areaPrimary":false}],"missionObjectives":[]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","quests":{"activeQuestId":2,"questsTruncated":false,"objectivesTruncated":false,"quests":[{"questId":1,"logState":0,"mapFrom":0,"markerX":0,"markerY":0,"markerPlane":0,"hasMarker":false,"mapTo":0,"completed":false,"currentMission":false,"primary":false,"areaPrimary":false}],"missionObjectives":[]}}"#.as_slice(),
             br#"{"status":"waiting","agents":{"truncated":false,"total":0,"agents":[]}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","inventory":{"itemsTruncated":false,"total":1,"goldCharacter":0,"goldStorage":0,"storagePanesUnlocked":0,"bags":[{"bagId":1,"bagType":4,"kind":"Storage","containerItem":0,"capacity":20,"itemCount":1,"isInventory":false,"isEquipped":false,"isNotCollected":false,"isStorage":true,"isMaterialStorage":false}],"items":[]}}"#.as_slice(),
             br#"{"status":"waiting","inventory":{"itemsTruncated":false,"total":0,"goldCharacter":0,"goldStorage":0,"storagePanesUnlocked":0,"bags":[],"items":[]}}"#.as_slice(),
