@@ -220,6 +220,19 @@ describe('end-to-end helpers', () => {
       contextDeltas: [-48],
       agentDeltas: [-48],
       commonDeltas: [-48],
+      quest: {
+        worldAvailable: true,
+        activeQuestId: 0,
+        questCapacity: 0,
+        questCount: 0,
+        questInvalidIndex: 0xffff_ffff,
+        questInvalidMask: 0,
+        objectiveCapacity: 0,
+        objectiveCount: 0,
+        questRecordsValid: true,
+        activeQuestPresent: true,
+        objectiveRecordsValid: true,
+      },
     });
     const window = {
       Module: {},

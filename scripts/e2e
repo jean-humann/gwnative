@@ -909,6 +909,14 @@ def main() -> int:
                 if isinstance(quests, dict)
                 else None
             )
+            quest_probe = None
+            if not isinstance(quests, dict):
+                probe = submit_action(origin, token, "probe-layout")
+                stream.wait_for_action(probe, 10)
+                probe_event = stream.wait_optional("layout-probe", 2)
+                quest_probe = (
+                    (probe_event or {}).get("detail", {}).get("quest")
+                )
             if (
                 quests is None
                 or not isinstance(quests.get("activeQuestId"), int)
@@ -934,7 +942,10 @@ def main() -> int:
                 )
                 != len(objectives)
             ):
-                raise Failure("certified quest state is incomplete")
+                raise Failure(
+                    "certified quest state is incomplete "
+                    f"(bounded probe={quest_probe})"
+                )
             bags = (
                 inventory.get("bags")
                 if isinstance(inventory, dict)
