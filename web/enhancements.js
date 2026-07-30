@@ -39,6 +39,8 @@ import * as diagnostics from './diagnostics.js';
 /** Must match `FEATURE_*` in `src/companion-kernel/lib.rs`. */
 const FEATURE_NATIVE_CURSOR = 1 << 0;
 const FEATURE_TARGET_READOUT = 1 << 1;
+const ENHANCEMENT_TRANSFORM_ABI = 5;
+const ENHANCEMENT_LAYOUT_WORDS = 63;
 
 /** How many render-cost samples to keep for `window.gwCompanionRuntime`. */
 const SAMPLE_WINDOW = 240;
@@ -60,7 +62,8 @@ function decodeManifest(module) {
   try {
     const value = JSON.parse(new TextDecoder().decode(sections[0]));
     if (
-      value?.snapshotAbi !== COMPANION_SNAPSHOT_ABI
+      value?.transformAbi !== ENHANCEMENT_TRANSFORM_ABI
+      || value?.snapshotAbi !== COMPANION_SNAPSHOT_ABI
       || value?.snapshotBytes !== COMPANION_SNAPSHOT_BYTES
       || value?.cursorSnapshotAbi !== COMPANION_CURSOR_ABI
       || value?.cursorSnapshotBytes !== COMPANION_CURSOR_BYTES
@@ -71,7 +74,7 @@ function decodeManifest(module) {
       || !Number.isSafeInteger(value?.tableSlot)
       || value.tableSlot < 0
       || !Array.isArray(value?.layoutWords)
-      || value.layoutWords.length === 0
+      || value.layoutWords.length !== ENHANCEMENT_LAYOUT_WORDS
       || value.layoutWords.some(
         (/** @type {unknown} */ word) =>
           !Number.isInteger(word)

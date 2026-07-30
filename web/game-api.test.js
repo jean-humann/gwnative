@@ -34,6 +34,21 @@ describe('public game state', () => {
     );
   });
 
+  it('keeps the typed party and skillbar domains', () => {
+    const party = Object.freeze({
+      id: 1,
+      players: Object.freeze([{ loginNumber: 42 }]),
+    });
+    const skillbar = Object.freeze({
+      agentId: 2,
+      skills: Object.freeze([{ slot: 1, skillId: 100 }]),
+    });
+    assert.deepEqual(
+      publicState({ status: 'ready', party, skillbar }),
+      { status: 'ready', party, skillbar },
+    );
+  });
+
   it('omits fixed snapshot target slots when no target is valid', () => {
     assert.deepEqual(
       publicState({

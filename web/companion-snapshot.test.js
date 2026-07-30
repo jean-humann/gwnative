@@ -28,12 +28,15 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const ABI = 1;
+const SNAPSHOT_ABI = 2;
+const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
 const FLAG_PLAYER = 1 << 1;
 const FLAG_TARGET = 1 << 2;
 const FLAG_LOADING = 1 << 3;
+const FLAG_PARTY = 1 << 4;
+const FLAG_SKILLBAR = 1 << 5;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -50,7 +53,7 @@ const CURSOR_UNSUPPORTED = 1 << 2;
 function snapshot(overrides = {}) {
   const fields = {
     magic: MAGIC,
-    abi: ABI,
+    abi: SNAPSHOT_ABI,
     byteLength: COMPANION_SNAPSHOT_BYTES,
     sequence: 2,
     flags: FLAG_READY | FLAG_PLAYER | FLAG_TARGET,
@@ -95,6 +98,42 @@ function read(overrides) {
   return readCompanionSnapshot(snapshot(overrides), 0);
 }
 
+function domainSnapshot() {
+  const buffer = snapshot({
+    flags: FLAG_READY | FLAG_PLAYER | FLAG_TARGET | FLAG_PARTY | FLAG_SKILLBAR,
+  });
+  const view = new DataView(buffer);
+  view.setUint32(64, 3, true);
+  view.setUint32(68, 1 << 2, true);
+  view.setUint32(72, 1, true);
+  view.setUint32(76, 1, true);
+  view.setUint32(80, 1, true);
+  view.setUint32(84, 1, true);
+  view.setUint32(88, 42, true);
+  view.setUint32(92, 7, true);
+  view.setUint32(96, 3, true);
+  view.setUint32(232, 8, true);
+  view.setUint32(236, 42, true);
+  view.setUint32(240, 5, true);
+  view.setUint32(244, 20, true);
+  view.setUint32(424, 9, true);
+  view.setUint32(428, 6, true);
+  view.setUint32(432, 20, true);
+  view.setUint32(568, 10, true);
+  view.setUint32(696, 1, true);
+  view.setUint32(700, 1 << 2, true);
+  view.setUint32(704, 1, true);
+  for (let slot = 0; slot < 8; slot += 1) {
+    const offset = 708 + slot * 20;
+    view.setUint32(offset, slot, true);
+    view.setUint32(offset + 4, slot + 1, true);
+    view.setUint32(offset + 8, slot === 0 ? 500 : 0, true);
+    view.setUint32(offset + 12, 100 + slot, true);
+    view.setUint32(offset + 16, slot + 10, true);
+  }
+  return buffer;
+}
+
 /**
  * A cursor block. `pixel` fills every pixel word, so a payload read can be
  * checked without spelling out a thousand of them.
@@ -104,7 +143,7 @@ function read(overrides) {
 function cursorBlock(overrides = {}) {
   const fields = {
     magic: CURSOR_MAGIC,
-    abi: ABI,
+    abi: CURSOR_ABI,
     byteLength: COMPANION_CURSOR_BYTES,
     sequence: 4,
     flags: CURSOR_VALID,
@@ -161,6 +200,65 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state));
   });
 
+  it('decodes bounded party and player skillbar state', () => {
+    const state = readCompanionSnapshot(domainSnapshot(), 0);
+    assert.equal(state.status, 'ready');
+    assert.equal(state.party.id, 3);
+    assert.equal(state.party.leader, true);
+    assert.deepEqual(state.party.players, [{
+      loginNumber: 42,
+      calledTargetId: 7,
+      state: 3,
+      connected: true,
+      ticked: true,
+    }]);
+    assert.deepEqual(state.party.heroes, [{
+      agentId: 8,
+      ownerPlayerId: 42,
+      heroId: 5,
+      level: 20,
+    }]);
+    assert.deepEqual(state.party.henchmen, [{
+      agentId: 9,
+      profession: 6,
+      level: 20,
+    }]);
+    assert.deepEqual(state.party.allies, [10]);
+    assert.equal(state.skillbar.agentId, 1);
+    assert.equal(state.skillbar.disabledMask, 4);
+    assert.equal(state.skillbar.castCount, 1);
+    assert.equal(state.skillbar.casting, true);
+    assert.equal(state.skillbar.skills.length, 8);
+    assert.equal(state.skillbar.skills[0].skillId, 100);
+    assert.equal(state.skillbar.skills[0].recharge, 500);
+    assert.equal(state.skillbar.skills[0].disabled, false);
+    assert.equal(state.skillbar.skills[2].disabled, true);
+    assert.ok(Object.isFrozen(state.party.players));
+    assert.ok(Object.isFrozen(state.skillbar.skills));
+  });
+
+  it('refuses partial party and skillbar records', () => {
+    const party = domainSnapshot();
+    new DataView(party).setUint32(244, 21, true);
+    assert.equal(readCompanionSnapshot(party, 0).reason, 'corrupt');
+
+    const heroOwner = domainSnapshot();
+    new DataView(heroOwner).setUint32(236, 43, true);
+    assert.equal(readCompanionSnapshot(heroOwner, 0).reason, 'corrupt');
+
+    const skillbar = domainSnapshot();
+    new DataView(skillbar).setUint32(720, 100_001, true);
+    assert.equal(readCompanionSnapshot(skillbar, 0).reason, 'corrupt');
+
+    const disabledMask = domainSnapshot();
+    new DataView(disabledMask).setUint32(700, 1 << 8, true);
+    assert.equal(readCompanionSnapshot(disabledMask, 0).reason, 'corrupt');
+
+    const castCount = domainSnapshot();
+    new DataView(castCount).setUint32(704, 65, true);
+    assert.equal(readCompanionSnapshot(castCount, 0).reason, 'corrupt');
+  });
+
   // The seqlock, which is the whole reason this can be read on the animation
   // frame while the game is mid-update. An odd sequence means a publish is in
   // flight; the reader's job is to come back next frame, not to read anyway.
@@ -174,7 +272,7 @@ describe('companion snapshot', () => {
   it('refuses a header from anything but this ABI', () => {
     for (const overrides of [
       { magic: MAGIC + 1 },
-      { abi: ABI + 1 },
+      { abi: SNAPSHOT_ABI + 1 },
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
       // A flag this build has no name for. The companion sets only four, so a
       // fifth is either a newer companion or not a companion at all.
@@ -286,7 +384,7 @@ describe('companion cursor', () => {
   it('refuses a cursor header from anything but this ABI', () => {
     for (const overrides of [
       { magic: CURSOR_MAGIC + 1 },
-      { abi: ABI + 1 },
+      { abi: CURSOR_ABI + 1 },
       { byteLength: COMPANION_CURSOR_BYTES - 4 },
       { flags: CURSOR_VALID | (1 << 8) },
       // The companion zeroes the reserved words once and never writes them
