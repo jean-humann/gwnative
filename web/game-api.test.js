@@ -61,12 +61,17 @@ describe('public game state', () => {
       bags: Object.freeze([{ bagId: 1 }]),
       items: Object.freeze([{ itemId: 500 }]),
     });
+    const social = Object.freeze({
+      playerStatus: 1,
+      friends: Object.freeze({ total: 1, entries: Object.freeze([]) }),
+      guild: null,
+    });
     assert.deepEqual(
       publicState({
-        status: 'ready', party, skillbar, effects, agents, quests, inventory,
+        status: 'ready', party, skillbar, effects, agents, quests, inventory, social,
       }),
       {
-        status: 'ready', party, skillbar, effects, agents, quests, inventory,
+        status: 'ready', party, skillbar, effects, agents, quests, inventory, social,
       },
     );
   });

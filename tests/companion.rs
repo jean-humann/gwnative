@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 #[test]
-fn companion_kernel_publishes_agents_quests_and_inventory_end_to_end() {
+fn companion_kernel_publishes_agents_quests_inventory_and_social_end_to_end() {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/test_companion_kernel.mjs");
     let output = match Command::new("node")
         .arg(script)

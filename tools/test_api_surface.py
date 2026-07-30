@@ -33,6 +33,7 @@ class ApiSurfaceTests(unittest.TestCase):
                 "    pub agents: Option<MapAgents>,\n"
                 "    pub quests: Option<Quests>,\n"
                 "    pub inventory: Option<Inventory>,\n"
+                "    pub social: Option<Social>,\n"
                 "}\n"
             )
             (wasm / "builds.rs").write_text(
@@ -47,6 +48,8 @@ class ApiSurfaceTests(unittest.TestCase):
             [
                 "agent",
                 "effects",
+                "friend_list",
+                "guild",
                 "item",
                 "map",
                 "party",

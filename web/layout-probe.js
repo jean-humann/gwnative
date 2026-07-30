@@ -116,7 +116,7 @@ export function probeLayout(buffer, layoutWords, radiusBytes = 2048) {
   if (
     !(buffer instanceof ArrayBuffer)
     || !Array.isArray(layoutWords)
-    || layoutWords.length !== 129
+    || layoutWords.length !== 157
     || layoutWords.some((word) => !Number.isInteger(word) || word < 0)
     || !Number.isInteger(radiusBytes)
     || radiusBytes < 0

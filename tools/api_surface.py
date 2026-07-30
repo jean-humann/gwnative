@@ -36,6 +36,8 @@ VERSION = re.compile(r'#define\s+GWCA_VERSION\s+"([^"]+)"')
 CERTIFIED_DOMAIN_FIELDS = {
     "agent": "agents",
     "effects": "effects",
+    "friend_list": "social",
+    "guild": "social",
     "item": "inventory",
     "map": "map_id",
     "party": "party",

@@ -250,6 +250,69 @@ pub struct Inventory {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Friend {
+    pub slot: u32,
+    #[serde(rename = "type")]
+    pub friend_type: u32,
+    pub type_name: String,
+    pub status: u32,
+    pub status_name: String,
+    pub friend_id: u32,
+    pub zone_id: u32,
+    pub is_online: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Friends {
+    pub truncated: bool,
+    pub total: u32,
+    pub friends: u32,
+    pub ignores: u32,
+    pub partners: u32,
+    pub traders: u32,
+    pub entries: Vec<Friend>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GuildCape {
+    pub background_color: u32,
+    pub detail_color: u32,
+    pub emblem_color: u32,
+    pub shape: u32,
+    pub detail: u32,
+    pub emblem: u32,
+    pub trim: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Guild {
+    pub index: u32,
+    pub player_rank: u32,
+    pub rank: u32,
+    pub features: u32,
+    pub rating: u32,
+    pub faction: u32,
+    pub faction_name: String,
+    pub faction_points: u32,
+    pub qualifier_points: u32,
+    pub roster_total: u32,
+    pub cape: GuildCape,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Social {
+    pub player_status: u32,
+    pub player_status_name: String,
+    pub friends: Friends,
+    pub guild: Option<Guild>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -294,6 +357,8 @@ pub struct State {
     pub quests: Option<Quests>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inventory: Option<Inventory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub social: Option<Social>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -402,7 +467,7 @@ impl Hub {
             "state": {
                 "domains": [
                     "player", "map", "target", "party", "skillbar", "effects",
-                    "agents", "quests", "inventory"
+                    "agents", "quests", "inventory", "social"
                 ],
                 "available": self.state_json().is_some(),
             },
@@ -505,6 +570,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(inventory) = &state.inventory {
             validate_inventory(inventory)?;
         }
+        if let Some(social) = &state.social {
+            validate_social(social)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -524,6 +592,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.agents.is_some()
         || state.quests.is_some()
         || state.inventory.is_some()
+        || state.social.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -918,6 +987,97 @@ fn validate_inventory(inventory: &Inventory) -> Result<(), String> {
     Ok(())
 }
 
+fn friend_type_name(value: u32) -> Option<&'static str> {
+    ["Unknown", "Friend", "Ignore", "Partner", "Trade"]
+        .get(value as usize)
+        .copied()
+}
+
+fn friend_status_name(value: u32) -> Option<&'static str> {
+    ["Offline", "Online", "DoNotDisturb", "Away", "Unknown"]
+        .get(value as usize)
+        .copied()
+}
+
+fn validate_social(social: &Social) -> Result<(), String> {
+    let Some(player_status_name) = friend_status_name(social.player_status) else {
+        return Err("player social status is outside its certified bounds".into());
+    };
+    if social.player_status_name != player_status_name {
+        return Err("player social status name is inconsistent".into());
+    }
+
+    let friends = &social.friends;
+    let declared = friends
+        .friends
+        .checked_add(friends.ignores)
+        .and_then(|value| value.checked_add(friends.partners))
+        .and_then(|value| value.checked_add(friends.traders));
+    if friends.entries.len() > 128
+        || friends.total < friends.entries.len() as u32
+        || friends.total > 256
+        || declared.is_none_or(|value| value > friends.total)
+        || if friends.truncated {
+            friends.entries.len() != 128 || friends.total <= 128
+        } else {
+            friends.total != friends.entries.len() as u32
+        }
+    {
+        return Err("friend page is outside its certified bounds".into());
+    }
+
+    let mut previous_slot = None;
+    let mut observed = [0u32; 5];
+    for friend in &friends.entries {
+        let Some(type_name) = friend_type_name(friend.friend_type) else {
+            return Err("friend type is outside its certified bounds".into());
+        };
+        let Some(status_name) = friend_status_name(friend.status) else {
+            return Err("friend status is outside its certified bounds".into());
+        };
+        if previous_slot.is_some_and(|slot| friend.slot <= slot)
+            || friend.slot >= 256
+            || friend.type_name != type_name
+            || friend.status_name != status_name
+            || friend.friend_id > 1_000_000
+            || friend.zone_id > 2_000
+            || friend.is_online != matches!(friend.status, 1..=3)
+        {
+            return Err("friend record is outside its certified bounds".into());
+        }
+        previous_slot = Some(friend.slot);
+        observed[friend.friend_type as usize] += 1;
+    }
+    let unknown = friends
+        .total
+        .checked_sub(declared.unwrap_or_default())
+        .ok_or("friend category totals are inconsistent")?;
+    let declared_by_type = [
+        unknown,
+        friends.friends,
+        friends.ignores,
+        friends.partners,
+        friends.traders,
+    ];
+    if observed
+        .iter()
+        .zip(declared_by_type)
+        .any(|(actual, expected)| *actual > expected || (!friends.truncated && *actual != expected))
+    {
+        return Err("friend category totals are inconsistent".into());
+    }
+
+    if let Some(guild) = &social.guild
+        && (!(1..64).contains(&guild.index)
+            || guild.faction > 1
+            || guild.faction_name != ["Kurzick", "Luxon"][guild.faction as usize]
+            || guild.roster_total > 100)
+    {
+        return Err("guild summary is outside its certified bounds".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,6 +1181,29 @@ mod tests {
                     "isGold":true,"isInventoryItem":true,
                     "isStorageItem":false
                 }]
+            },
+            "social":{
+                "playerStatus":1,"playerStatusName":"Online",
+                "friends":{
+                    "truncated":false,"total":1,"friends":1,
+                    "ignores":0,"partners":0,"traders":0,
+                    "entries":[{
+                        "slot":0,"type":1,"typeName":"Friend",
+                        "status":1,"statusName":"Online",
+                        "friendId":77,"zoneId":55,"isOnline":true
+                    }]
+                },
+                "guild":{
+                    "index":2,"playerRank":3,"rank":1,"features":9,
+                    "rating":1200,"faction":0,"factionName":"Kurzick",
+                    "factionPoints":1000,"qualifierPoints":10,
+                    "rosterTotal":50,
+                    "cape":{
+                        "backgroundColor":1,"detailColor":2,
+                        "emblemColor":3,"shape":4,"detail":5,
+                        "emblem":6,"trim":7
+                    }
+                }
             }
         }"#;
         hub.publish(state).unwrap();
@@ -1040,6 +1223,11 @@ mod tests {
             "Usable"
         );
         assert_eq!(value["state"]["inventory"]["items"][0]["isGold"], true);
+        assert_eq!(
+            value["state"]["social"]["friends"]["entries"][0]["typeName"],
+            "Friend"
+        );
+        assert_eq!(value["state"]["social"]["guild"]["factionName"], "Kurzick");
     }
 
     #[test]
@@ -1057,6 +1245,9 @@ mod tests {
             br#"{"status":"waiting","agents":{"truncated":false,"total":0,"agents":[]}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","inventory":{"itemsTruncated":false,"total":1,"goldCharacter":0,"goldStorage":0,"storagePanesUnlocked":0,"bags":[{"bagId":1,"bagType":4,"kind":"Storage","containerItem":0,"capacity":20,"itemCount":1,"isInventory":false,"isEquipped":false,"isNotCollected":false,"isStorage":true,"isMaterialStorage":false}],"items":[]}}"#.as_slice(),
             br#"{"status":"waiting","inventory":{"itemsTruncated":false,"total":0,"goldCharacter":0,"goldStorage":0,"storagePanesUnlocked":0,"bags":[],"items":[]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","social":{"playerStatus":1,"playerStatusName":"Away","friends":{"truncated":false,"total":0,"friends":0,"ignores":0,"partners":0,"traders":0,"entries":[]},"guild":null}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":1,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","social":{"playerStatus":1,"playerStatusName":"Online","friends":{"truncated":false,"total":1,"friends":1,"ignores":0,"partners":0,"traders":0,"entries":[]},"guild":null}}"#.as_slice(),
+            br#"{"status":"waiting","social":{"playerStatus":0,"playerStatusName":"Offline","friends":{"truncated":false,"total":0,"friends":0,"ignores":0,"partners":0,"traders":0,"entries":[]},"guild":null}}"#.as_slice(),
         ] {
             assert!(hub.publish(state).is_err());
         }
