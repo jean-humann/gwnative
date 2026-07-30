@@ -11,7 +11,7 @@ import {
 } from './companion-snapshot.js';
 
 const ENHANCEMENT_TRANSFORM_ABI = 15;
-const ENHANCEMENT_LAYOUT_WORDS = 228;
+const ENHANCEMENT_LAYOUT_WORDS = 232;
 
 /**
  * The manifest the host wrote into the module, or `null` if it is not one this

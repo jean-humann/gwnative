@@ -40,6 +40,7 @@ class ApiSurfaceTests(unittest.TestCase):
                 "    pub ui: Option<Ui>,\n"
                 "    pub merchant: Option<Merchant>,\n"
                 "    pub progression: Option<Progression>,\n"
+                "    pub skill_unlocks: Option<SkillUnlocks>,\n"
                 "}\n"
             )
             (wasm / "builds.rs").write_text(
@@ -65,6 +66,7 @@ class ApiSurfaceTests(unittest.TestCase):
                 "player",
                 "progression",
                 "quest",
+                "skill_unlocks",
                 "skillbar",
                 "target",
                 "trade",

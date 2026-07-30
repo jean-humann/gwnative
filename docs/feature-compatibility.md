@@ -26,7 +26,7 @@ The names-only, reproducible comparison is in the
 | Guild Wars CLI recognition | Available | Every documented switch parsed; native translations or explicit notices |
 | Isolated launch profiles | Available | Per-profile mutable state, Keychain identity, origin, overlays, and build library |
 | Explicit `.gwmod` sessions | Available | Compatible format, host-side ZIP/graph validation, double hash validation, ordered runtime |
-| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory/social/completion/camera/trade/UI/merchant/progression state |
+| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory/social/completion/camera/trade/UI/merchant/progression/skill-unlock state |
 | Overlay framework | Available | Profile-local movable widgets and exact-context hotkeys |
 | Clock, session timer, FPS | Available | Built-in Companion Tools widgets |
 | Target distance/range | Available on certified builds | Bounds-checked companion snapshot |
@@ -46,6 +46,7 @@ The names-only, reproducible comparison is in the
 | UI frame inventory | Available on certified builds | 128-frame read-only page with exact array identity, parent back-references, state-bit derivatives, local geometry, full totals, and explicit truncation |
 | Merchant item IDs | Available on certified builds | Ordered 128-of-512 numeric WorldContext item-ID page; no window-open, catalog, price, quote, identity, or action claim |
 | Character progression | Available on certified builds | Hard-mode availability, level, experience, four bounded current/earned/maximum faction counters, and current/earned skill points |
+| Character skill availability | Available on certified builds | Separate bounded trainer-visible IDs, character-learned bitmap, and account-unlocked bitmap; no unlock or activation action |
 | Chat and party search | Needs certified layout and policy | No chat write or packet injection surface |
 | Skill activation or build application | Read-only only | Codes can be stored; no game action is exposed |
 | Texture/shader packs | Research | WebGL/WASM pipeline differs from native DirectX replacement |

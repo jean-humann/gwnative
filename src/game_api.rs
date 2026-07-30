@@ -468,6 +468,16 @@ pub struct Progression {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillUnlocks {
+    pub learnable_truncated: bool,
+    pub learnable_total: u32,
+    pub learnable_skill_ids: Vec<u32>,
+    pub character_learned_skill_ids: Vec<u32>,
+    pub account_unlocked_skill_ids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -526,6 +536,8 @@ pub struct State {
     pub merchant: Option<Merchant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progression: Option<Progression>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_unlocks: Option<SkillUnlocks>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -635,7 +647,7 @@ impl Hub {
                 "domains": [
                     "player", "map", "target", "party", "skillbar", "effects",
                     "agents", "quests", "inventory", "social", "completion", "camera",
-                    "trade", "ui", "merchant", "progression"
+                    "trade", "ui", "merchant", "progression", "skillUnlocks"
                 ],
                 "available": self.state_json().is_some(),
             },
@@ -759,6 +771,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(progression) = &state.progression {
             validate_progression(progression)?;
         }
+        if let Some(skill_unlocks) = &state.skill_unlocks {
+            validate_skill_unlocks(skill_unlocks)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -785,6 +800,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.ui.is_some()
         || state.merchant.is_some()
         || state.progression.is_some()
+        || state.skill_unlocks.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -1520,6 +1536,33 @@ fn validate_progression(progression: &Progression) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_skill_unlocks(skill_unlocks: &SkillUnlocks) -> Result<(), String> {
+    const MAX_SKILL_ID: u32 = 108 * 32 - 1;
+    let bitmap_ids_are_valid = |values: &[u32]| {
+        values.len() <= (MAX_SKILL_ID + 1) as usize
+            && values.iter().all(|skill_id| *skill_id <= MAX_SKILL_ID)
+            && values.windows(2).all(|pair| pair[0] < pair[1])
+    };
+    if skill_unlocks.learnable_skill_ids.len() > 512
+        || skill_unlocks.learnable_total > MAX_SKILL_ID + 1
+        || skill_unlocks.learnable_total < skill_unlocks.learnable_skill_ids.len() as u32
+        || skill_unlocks
+            .learnable_skill_ids
+            .iter()
+            .any(|skill_id| *skill_id > MAX_SKILL_ID)
+        || if skill_unlocks.learnable_truncated {
+            skill_unlocks.learnable_skill_ids.len() != 512 || skill_unlocks.learnable_total <= 512
+        } else {
+            skill_unlocks.learnable_total != skill_unlocks.learnable_skill_ids.len() as u32
+        }
+        || !bitmap_ids_are_valid(&skill_unlocks.character_learned_skill_ids)
+        || !bitmap_ids_are_valid(&skill_unlocks.account_unlocked_skill_ids)
+    {
+        return Err("skill unlock state is outside its certified bounds".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1889,6 +1932,33 @@ mod tests {
             br#"{"status":"waiting","progression":{"hardModeUnlocked":false,"level":1,"experience":0,"factions":{"kurzick":{"current":0,"totalEarned":0,"maximum":0},"luxon":{"current":0,"totalEarned":0,"maximum":0},"imperial":{"current":0,"totalEarned":0,"maximum":0},"balthazar":{"current":0,"totalEarned":0,"maximum":0}},"skillPoints":{"current":0,"totalEarned":0}}}"#.as_slice(),
         ] {
             assert!(hub.publish(state).is_err());
+        }
+    }
+
+    #[test]
+    fn skill_unlock_sets_preserve_their_distinct_semantics() {
+        let hub = Hub::default();
+        let valid = br#"{
+            "status":"ready","tickCount":1,"mapId":55,"instanceType":0,
+            "instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "skillUnlocks":{
+                "learnableTruncated":false,
+                "learnableTotal":2,
+                "learnableSkillIds":[111,222],
+                "characterLearnedSkillIds":[3,100],
+                "accountUnlockedSkillIds":[3,200]
+            }
+        }"#;
+        assert_eq!(hub.publish(valid).unwrap(), 1);
+
+        for invalid in [
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","skillUnlocks":{"learnableTruncated":false,"learnableTotal":1,"learnableSkillIds":[111,222],"characterLearnedSkillIds":[],"accountUnlockedSkillIds":[]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","skillUnlocks":{"learnableTruncated":false,"learnableTotal":0,"learnableSkillIds":[],"characterLearnedSkillIds":[100,3],"accountUnlockedSkillIds":[]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","skillUnlocks":{"learnableTruncated":false,"learnableTotal":0,"learnableSkillIds":[],"characterLearnedSkillIds":[],"accountUnlockedSkillIds":[3456]}}"#.as_slice(),
+            br#"{"status":"waiting","skillUnlocks":{"learnableTruncated":false,"learnableTotal":0,"learnableSkillIds":[],"characterLearnedSkillIds":[],"accountUnlockedSkillIds":[]}}"#.as_slice(),
+        ] {
+            assert!(hub.publish(invalid).is_err());
         }
     }
 

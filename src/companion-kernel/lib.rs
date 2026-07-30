@@ -41,7 +41,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 13;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 14;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -60,6 +60,7 @@ const FLAG_TRADE_VALID: u32 = 1 << 13;
 const FLAG_UI_VALID: u32 = 1 << 14;
 const FLAG_MERCHANT_VALID: u32 = 1 << 15;
 const FLAG_PROGRESSION_VALID: u32 = 1 << 16;
+const FLAG_SKILL_UNLOCKS_VALID: u32 = 1 << 17;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -115,6 +116,15 @@ const MAX_FACTION_CURRENT: u32 = 100_000_000;
 const MAX_FACTION_TOTAL: u32 = 2_000_000_000;
 const MAX_SKILL_POINTS_CURRENT: u32 = 1_000_000;
 const MAX_SKILL_POINTS_TOTAL: u32 = 2_000_000_000;
+// Py4GW Native's independently maintained shared-memory bridge reserves 108
+// bitmap words for the complete live skill-ID range. Trainer lists are plain
+// IDs rather than bitmaps; keep a bounded page while retaining their total.
+const MAX_SKILL_BITMAP_WORDS: u32 = 108;
+const MAX_SKILL_ID: u32 = MAX_SKILL_BITMAP_WORDS * 32 - 1;
+const MAX_LEARNABLE_SKILLS: u32 = 512;
+const MAX_RAW_LEARNABLE_SKILLS: u32 = MAX_SKILL_ID + 1;
+const MAX_SKILL_ARRAY_CAPACITY: u32 = 4_096;
+const SKILL_UNLOCK_LEARNABLE_TRUNCATED: u32 = 1;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -366,6 +376,10 @@ struct Layout {
     world_skill_points_current_duplicate: u32,
     world_skill_points_total: u32,
     world_skill_points_total_duplicate: u32,
+    game_account_context: u32,
+    account_unlocked_skills: u32,
+    world_learnable_character_skills: u32,
+    world_unlocked_character_skills: u32,
 }
 
 impl Layout {
@@ -598,6 +612,10 @@ impl Layout {
         world_skill_points_current_duplicate: 0,
         world_skill_points_total: 0,
         world_skill_points_total_duplicate: 0,
+        game_account_context: 0,
+        account_unlocked_skills: 0,
+        world_learnable_character_skills: 0,
+        world_unlocked_character_skills: 0,
     };
 }
 
@@ -889,6 +907,32 @@ impl ProgressionState {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct SkillUnlockState {
+    page_flags: u32,
+    learnable_count: u32,
+    learnable_total: u32,
+    learned_word_count: u32,
+    account_word_count: u32,
+    learnable_skill_ids: [u32; MAX_LEARNABLE_SKILLS as usize],
+    learned_words: [u32; MAX_SKILL_BITMAP_WORDS as usize],
+    account_words: [u32; MAX_SKILL_BITMAP_WORDS as usize],
+}
+
+impl SkillUnlockState {
+    const EMPTY: Self = Self {
+        page_flags: 0,
+        learnable_count: 0,
+        learnable_total: 0,
+        learned_word_count: 0,
+        account_word_count: 0,
+        learnable_skill_ids: [0; MAX_LEARNABLE_SKILLS as usize],
+        learned_words: [0; MAX_SKILL_BITMAP_WORDS as usize],
+        account_words: [0; MAX_SKILL_BITMAP_WORDS as usize],
+    };
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -971,6 +1015,7 @@ struct Snapshot {
     ui: UiState,
     merchant: MerchantState,
     progression: ProgressionState,
+    skill_unlocks: SkillUnlockState,
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -991,8 +1036,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 912] = [(); size_of::<Layout>()];
-const _: [(); 56844] = [(); size_of::<Snapshot>()];
+const _: [(); 928] = [(); size_of::<Layout>()];
+const _: [(); 59776] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 static mut SNAPSHOT_PTR: u32 = 0;
@@ -1427,6 +1472,24 @@ impl MerchantSource {
     };
 }
 
+// The three arrays intentionally keep their native meanings separate:
+// learnable is a trainer-visible list of IDs, while learned and account-wide
+// unlocks are independent bitmaps.
+#[derive(Clone, Copy)]
+struct SkillUnlockSource {
+    learnable: ArrayView,
+    learned: ArrayView,
+    account: ArrayView,
+}
+
+impl SkillUnlockSource {
+    const EMPTY: Self = Self {
+        learnable: ArrayView::EMPTY,
+        learned: ArrayView::EMPTY,
+        account: ArrayView::EMPTY,
+    };
+}
+
 #[derive(Clone, Copy)]
 struct State {
     flags: u32,
@@ -1449,6 +1512,7 @@ struct State {
     ui: UiSource,
     merchant: MerchantSource,
     progression: ProgressionState,
+    skill_unlocks: SkillUnlockSource,
 }
 
 impl State {
@@ -1480,6 +1544,7 @@ impl State {
             ui: UiSource::EMPTY,
             merchant: MerchantSource::EMPTY,
             progression: ProgressionState::EMPTY,
+            skill_unlocks: SkillUnlockSource::EMPTY,
         }
     }
 }
@@ -1909,6 +1974,55 @@ unsafe fn collect_progression(
             current_skill_points,
             total_skill_points,
         })
+}
+
+unsafe fn collect_skill_unlocks(
+    layout: Layout,
+    game: u32,
+) -> Option<SkillUnlockSource> {
+    let world = unsafe {
+        pointer(
+            offset(game, layout.game_world_context)?,
+            layout
+                .world_unlocked_character_skills
+                .checked_add(16)?,
+        )?
+    };
+    let account = unsafe {
+        pointer(
+            offset(game, layout.game_account_context)?,
+            layout.account_unlocked_skills.checked_add(16)?,
+        )?
+    };
+    let learnable = unsafe {
+        read_array(
+            offset(world, layout.world_learnable_character_skills)?,
+            4,
+            MAX_RAW_LEARNABLE_SKILLS,
+            MAX_SKILL_ARRAY_CAPACITY,
+        )?
+    };
+    let learned = unsafe {
+        read_array(
+            offset(world, layout.world_unlocked_character_skills)?,
+            4,
+            MAX_SKILL_BITMAP_WORDS,
+            MAX_SKILL_ARRAY_CAPACITY,
+        )?
+    };
+    let account = unsafe {
+        read_array(
+            offset(account, layout.account_unlocked_skills)?,
+            4,
+            MAX_SKILL_BITMAP_WORDS,
+            MAX_SKILL_ARRAY_CAPACITY,
+        )?
+    };
+    Some(SkillUnlockSource {
+        learnable,
+        learned,
+        account,
+    })
 }
 
 unsafe fn collect_camera(layout: Layout) -> Option<CameraState> {
@@ -2842,6 +2956,10 @@ unsafe fn collect(layout: Layout) -> State {
         state.flags |= FLAG_PROGRESSION_VALID;
         state.progression = progression;
     }
+    if let Some(skill_unlocks) = unsafe { collect_skill_unlocks(layout, game) } {
+        state.flags |= FLAG_SKILL_UNLOCKS_VALID;
+        state.skill_unlocks = skill_unlocks;
+    }
     state
 }
 
@@ -3457,6 +3575,120 @@ unsafe fn publish_completion(
     valid
 }
 
+unsafe fn publish_skill_unlocks(
+    snapshot: *mut Snapshot,
+    source: SkillUnlockSource,
+) -> bool {
+    let learnable_count = source.learnable.size.min(MAX_LEARNABLE_SKILLS);
+    let mut valid = source.learnable.size <= MAX_RAW_LEARNABLE_SKILLS
+        && source.learned.size <= MAX_SKILL_BITMAP_WORDS
+        && source.account.size <= MAX_SKILL_BITMAP_WORDS;
+
+    for index in 0..MAX_LEARNABLE_SKILLS as usize {
+        let skill_id = if valid && index < learnable_count as usize {
+            indexed(source.learnable.buffer, index as u32, 4)
+                .and_then(|address| unsafe { read_u32(address) })
+                .filter(|skill_id| *skill_id <= MAX_SKILL_ID)
+                .unwrap_or_else(|| {
+                    valid = false;
+                    0
+                })
+        } else {
+            0
+        };
+        unsafe {
+            write_volatile(
+                &mut (*snapshot).skill_unlocks.learnable_skill_ids[index],
+                skill_id,
+            );
+        }
+    }
+
+    for index in 0..MAX_SKILL_BITMAP_WORDS as usize {
+        let learned = if valid && index < source.learned.size as usize {
+            indexed(source.learned.buffer, index as u32, 4)
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or_else(|| {
+                    valid = false;
+                    0
+                })
+        } else {
+            0
+        };
+        let account = if valid && index < source.account.size as usize {
+            indexed(source.account.buffer, index as u32, 4)
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or_else(|| {
+                    valid = false;
+                    0
+                })
+        } else {
+            0
+        };
+        unsafe {
+            write_volatile(
+                &mut (*snapshot).skill_unlocks.learned_words[index],
+                learned,
+            );
+            write_volatile(
+                &mut (*snapshot).skill_unlocks.account_words[index],
+                account,
+            );
+        }
+    }
+
+    if !valid {
+        for index in 0..MAX_LEARNABLE_SKILLS as usize {
+            unsafe {
+                write_volatile(
+                    &mut (*snapshot).skill_unlocks.learnable_skill_ids[index],
+                    0,
+                );
+            }
+        }
+        for index in 0..MAX_SKILL_BITMAP_WORDS as usize {
+            unsafe {
+                write_volatile(
+                    &mut (*snapshot).skill_unlocks.learned_words[index],
+                    0,
+                );
+                write_volatile(
+                    &mut (*snapshot).skill_unlocks.account_words[index],
+                    0,
+                );
+            }
+        }
+    }
+
+    unsafe {
+        write_volatile(
+            &mut (*snapshot).skill_unlocks.page_flags,
+            if valid && source.learnable.size > MAX_LEARNABLE_SKILLS {
+                SKILL_UNLOCK_LEARNABLE_TRUNCATED
+            } else {
+                0
+            },
+        );
+        write_volatile(
+            &mut (*snapshot).skill_unlocks.learnable_count,
+            if valid { learnable_count } else { 0 },
+        );
+        write_volatile(
+            &mut (*snapshot).skill_unlocks.learnable_total,
+            if valid { source.learnable.size } else { 0 },
+        );
+        write_volatile(
+            &mut (*snapshot).skill_unlocks.learned_word_count,
+            if valid { source.learned.size } else { 0 },
+        );
+        write_volatile(
+            &mut (*snapshot).skill_unlocks.account_word_count,
+            if valid { source.account.size } else { 0 },
+        );
+    }
+    valid
+}
+
 unsafe fn publish_trade(
     snapshot: *mut Snapshot,
     layout: Layout,
@@ -3802,6 +4034,9 @@ unsafe fn publish(mut state: State, layout: Layout) {
             state.flags &= !FLAG_MERCHANT_VALID;
         }
         write_volatile(&mut (*snapshot).progression, state.progression);
+        if !publish_skill_unlocks(snapshot, state.skill_unlocks) {
+            state.flags &= !FLAG_SKILL_UNLOCKS_VALID;
+        }
         write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).sequence, next);
         SEQUENCE = next;

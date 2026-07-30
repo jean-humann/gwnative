@@ -6,6 +6,7 @@ import {
   formatDuration,
   formatMerchantSummary,
   formatProgressionSummary,
+  formatSkillUnlockSummary,
   formatTradeSummary,
   formatUiSummary,
   setPanelVisible,
@@ -37,6 +38,7 @@ describe('companion tools', () => {
     assert.equal(FEATURES.find((feature) => feature.id === 'ui').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'merchant').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'progression').status, 'available');
+    assert.equal(FEATURES.find((feature) => feature.id === 'skill-unlocks').status, 'available');
   });
 
   it('summarises the bounded UI frame inventory', () => {
@@ -119,6 +121,30 @@ describe('companion tools', () => {
       }),
       'Level 20 · 1337500 XP · 5/125 skill points · HM unlocked · '
         + 'factions K 1000/10000, L 2000/10000, I 100/15000, B 500/10000',
+    );
+  });
+
+  it('keeps trainer, character, and account skill sets distinct', () => {
+    assert.equal(formatSkillUnlockSummary(null), 'Unavailable for this client build');
+    assert.equal(
+      formatSkillUnlockSummary({
+        learnableTruncated: false,
+        learnableTotal: 2,
+        learnableSkillIds: [111, 222],
+        characterLearnedSkillIds: [3, 100],
+        accountUnlockedSkillIds: [3, 200],
+      }),
+      '2 learnable · 2 learned · 2 account unlocked',
+    );
+    assert.equal(
+      formatSkillUnlockSummary({
+        learnableTruncated: true,
+        learnableTotal: 600,
+        learnableSkillIds: Array(512).fill(1),
+        characterLearnedSkillIds: [],
+        accountUnlockedSkillIds: [],
+      }),
+      '512/600 learnable · 0 learned · 0 account unlocked',
     );
   });
 

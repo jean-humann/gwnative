@@ -212,8 +212,10 @@ hook.
 The validated companion state is narrowed into the versioned v1 map, player,
 target, party, skillbar, effects, agent, quest, inventory, social, completion,
 camera, trade, UI-frame, merchant item-ID, and character-progression schema.
-Large agent, quest,
-effect, bag, item, friend, UI-frame, and merchant pages remain fixed and
+Character skill availability is a separate schema so trainer-visible IDs,
+character-learned bits, and account-unlocked bits cannot be conflated. Large
+agent, quest, effect, bag, item, friend, UI-frame, merchant, and skill pages
+remain fixed and
 bounded in the seqlock block rather than being copied onto the companion’s
 imported-memory stack. Inventory traversal retains only the owning
 pointer across the original tick, then rechecks bag arrays and every item
@@ -244,6 +246,11 @@ in both GWCA and Py4GW Reforged Native. It bounds both client copies of every
 duplicated counter before selecting the higher one, then enforces level,
 faction-cap, total-earned, and skill-point relationships. The append-only
 snapshot exposes no title derivation, encoded text, or progression write.
+Skill-unlock collection follows the verified `GameContext` account and world
+owners, bounds the trainer list and both 108-word bitmaps, and revalidates every
+published trainer ID during seqlock publication. The page expands only the
+copied bitmap words into sorted IDs. It exposes neither skill metadata nor an
+unlock, template-load, or activation write.
 The page publishes no faster than four times per second and Rust validates it
 again before making it available on token-gated loopback routes. There is no
 certified action endpoint. The overlay registry and Companion Tools consume the

@@ -742,6 +742,10 @@ pub(super) struct EnhancementLayout {
     pub world_skill_points_current_duplicate: u32,
     pub world_skill_points_total: u32,
     pub world_skill_points_total_duplicate: u32,
+    pub game_account_context: u32,
+    pub account_unlocked_skills: u32,
+    pub world_learnable_character_skills: u32,
+    pub world_unlocked_character_skills: u32,
 }
 
 impl EnhancementLayout {
@@ -977,13 +981,17 @@ impl EnhancementLayout {
             self.world_skill_points_current_duplicate,
             self.world_skill_points_total,
             self.world_skill_points_total_duplicate,
+            self.game_account_context,
+            self.account_unlocked_skills,
+            self.world_learnable_character_skills,
+            self.world_unlocked_character_skills,
         ]
     }
 }
 
 /// Fields in [`EnhancementLayout`]. Named because the companion's own `Layout`
 /// is this many words long and the two have to agree.
-pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 228;
+pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 232;
 
 pub(super) struct EnhancementBuild {
     /// The *template-save* output, not ArenaNet's own module. That transform is
@@ -1012,7 +1020,7 @@ pub(super) struct EnhancementBuild {
     pub table_slot: u32,
     /// Returns the exact memory layout certified for this build. A function
     /// pointer lets a data-identical client revision deliberately reuse the
-    /// preceding layout without copying 228 words and inviting transcription
+    /// preceding layout without copying 232 words and inviting transcription
     /// drift; the registry tests still exercise every resolved build.
     pub layout: fn() -> &'static EnhancementLayout,
 }
@@ -1020,7 +1028,7 @@ pub(super) struct EnhancementBuild {
 pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     EnhancementBuild {
         sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-        output_sha256: "f1d88222aa36cacfe5bbb8e526466e5597894ce7e3b9ed85bb0bf63a1b4720a6",
+        output_sha256: "0457351b37f73ddda4e34ccd54d9271a3425199013a850c5bf06bf0c4db8ec77",
         import_count: 219,
         program_id: 1,
         build_id: 38771,
@@ -1257,11 +1265,15 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             world_skill_points_current_duplicate: 0x7ac,
             world_skill_points_total: 0x7b0,
             world_skill_points_total_duplicate: 0x7b4,
+            game_account_context: 0x28,
+            account_unlocked_skills: 0x124,
+            world_learnable_character_skills: 0x700,
+            world_unlocked_character_skills: 0x710,
         },
     },
     EnhancementBuild {
         sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
-        output_sha256: "87b41902956bb9b23576c3dc4a4c3397394ae665a502c3e75d469b044c05080b",
+        output_sha256: "0e78fef6a2487818345549e6aac9ac86b4dd39af5744f7b29fb3ce67299a46df",
         import_count: 219,
         program_id: 1,
         build_id: 38790,
@@ -1498,11 +1510,15 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             world_skill_points_current_duplicate: 0x7ac,
             world_skill_points_total: 0x7b0,
             world_skill_points_total_duplicate: 0x7b4,
+            game_account_context: 0x28,
+            account_unlocked_skills: 0x124,
+            world_learnable_character_skills: 0x700,
+            world_unlocked_character_skills: 0x710,
         },
     },
     EnhancementBuild {
         sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
-        output_sha256: "6542da8ab8fd4751603e58fc460ade0fe8a0751b53dd58f68ae49c82740d9872",
+        output_sha256: "1664c2e19c0fd41eaf3162581755b2de3bcb2c9c772370a5be04b155fbaf6e34",
         import_count: 219,
         program_id: 1,
         build_id: 38795,
@@ -1739,11 +1755,15 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             world_skill_points_current_duplicate: 0x7ac,
             world_skill_points_total: 0x7b0,
             world_skill_points_total_duplicate: 0x7b4,
+            game_account_context: 0x28,
+            account_unlocked_skills: 0x124,
+            world_learnable_character_skills: 0x700,
+            world_unlocked_character_skills: 0x710,
         },
     },
     EnhancementBuild {
         sha256: "9ee332604a9b2adbdfa1a8ab217f4fd1dac58b01a2443e037bc5bd11f279d094",
-        output_sha256: "936e62cef5d84accfb7072cbceec99cfb26696cad201f7b4854d8309baf68238",
+        output_sha256: "b96cb0ef41cd0384499d4427e5eb5b088d11bf8117bbdd4a01745bbcb1003196",
         import_count: 219,
         program_id: 1,
         build_id: 38797,
@@ -1947,6 +1967,18 @@ mod tests {
             assert_eq!(layout.world_luxon_maximum, 0x7bc);
             assert_eq!(layout.world_balthazar_maximum, 0x7c0);
             assert_eq!(layout.world_imperial_maximum, 0x7c4);
+        }
+    }
+
+    #[test]
+    fn every_certified_build_uses_the_verified_skill_unlock_layout() {
+        for build in ENHANCEMENT_BUILDS {
+            let layout = (build.layout)();
+            assert_eq!(layout.game_world_context, 0x2c);
+            assert_eq!(layout.game_account_context, 0x28);
+            assert_eq!(layout.account_unlocked_skills, 0x124);
+            assert_eq!(layout.world_learnable_character_skills, 0x700);
+            assert_eq!(layout.world_unlocked_character_skills, 0x710);
         }
     }
 }

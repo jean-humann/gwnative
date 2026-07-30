@@ -34,6 +34,7 @@ const PUBLIC_FIELDS = Object.freeze([
   'ui',
   'merchant',
   'progression',
+  'skillUnlocks',
 ]);
 
 export function publicState(state) {

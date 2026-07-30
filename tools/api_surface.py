@@ -46,6 +46,7 @@ CERTIFIED_DOMAIN_FIELDS = {
     "party": "party",
     "player": "player_id",
     "progression": "progression",
+    "skill_unlocks": "skill_unlocks",
     "quest": "quests",
     "skillbar": "skillbar",
     "target": "target_valid",

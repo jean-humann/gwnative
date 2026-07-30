@@ -54,8 +54,8 @@ const MANIFEST_SECTION: &str = "enhancement_manifest";
 /// block beside it. Named here because they are the manifest's own words and
 /// the companion's `Snapshot`/`CursorSnapshot` at once — see
 /// `web/companion-snapshot.js`, which reads both back.
-const SNAPSHOT_ABI: u32 = 13;
-const SNAPSHOT_BYTES: u32 = 56_844;
+const SNAPSHOT_ABI: u32 = 14;
+const SNAPSHOT_BYTES: u32 = 59_776;
 const CURSOR_SNAPSHOT_ABI: u32 = 1;
 const CURSOR_SNAPSHOT_BYTES: u32 = 4160;
 
@@ -447,13 +447,13 @@ mod tests {
             .strip_prefix(&format!("\u{14}{MANIFEST_SECTION}",))
             .expect("the section does not start with its own name");
         assert!(
-            json.starts_with(r#"{"transformAbi":15,"snapshotAbi":13,"snapshotBytes":56844,"#),
+            json.starts_with(r#"{"transformAbi":15,"snapshotAbi":14,"snapshotBytes":59776,"#),
             "the key order changed, and with it the module's hash: {json}",
         );
-        assert!(json.contains(r#""configBytes":912,"programId":1,"buildId":38771,"tableSlot":0,"#));
+        assert!(json.contains(r#""configBytes":928,"programId":1,"buildId":38771,"tableSlot":0,"#));
         assert!(json.contains(r#""layoutWords":[5901856,5918104,5912716,5912712,6,"#));
 
-        // Still valid JSON, and still the 228 words the companion expects.
+        // Still valid JSON, and still the 232 words the companion expects.
         let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
         let words = parsed["layoutWords"].as_array().unwrap();
         assert_eq!(words.len(), ENHANCEMENT_LAYOUT_WORDS);
