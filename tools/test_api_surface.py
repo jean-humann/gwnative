@@ -8,6 +8,7 @@ from pathlib import Path
 from tools.api_surface import (
     SurfaceError,
     inspect_gwca,
+    inspect_gwnative,
     inspect_py4gw,
     inspect_py4gw_native,
     _domain,
@@ -15,6 +16,33 @@ from tools.api_surface import (
 
 
 class ApiSurfaceTests(unittest.TestCase):
+    def test_gwnative_domains_follow_the_public_state_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "src"
+            wasm = source / "wasm"
+            wasm.mkdir(parents=True)
+            (source / "game_api.rs").write_text(
+                "pub struct State {\n"
+                "    pub map_id: Option<u32>,\n"
+                "    pub player_id: Option<u32>,\n"
+                "    pub target_valid: Option<bool>,\n"
+                "    pub party: Option<Party>,\n"
+                "    pub skillbar: Option<Skillbar>,\n"
+                "}\n"
+            )
+            (wasm / "builds.rs").write_text(
+                "pub(super) struct EnhancementLayout {\n"
+                "    pub context_root: u32,\n"
+                "}\n"
+            )
+            report = inspect_gwnative(root)
+
+        self.assertEqual(
+            report["certifiedDomains"],
+            ["map", "party", "player", "skillbar", "target"],
+        )
+
     def test_gwca_inventory_keeps_names_but_not_declarations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

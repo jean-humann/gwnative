@@ -33,6 +33,13 @@ BINDING_NAME = re.compile(
 )
 RUST_FIELD = re.compile(r"^\s*pub\s+([a-zA-Z_]\w*)\s*:", re.MULTILINE)
 VERSION = re.compile(r'#define\s+GWCA_VERSION\s+"([^"]+)"')
+CERTIFIED_DOMAIN_FIELDS = {
+    "map": "map_id",
+    "party": "party",
+    "player": "player_id",
+    "skillbar": "skillbar",
+    "target": "target_valid",
+}
 
 
 class SurfaceError(ValueError):
@@ -292,11 +299,16 @@ def inspect_gwnative(
     report = _source(root)
     game_api = (root / "src/game_api.rs").read_text()
     builds = (root / "src/wasm/builds.rs").read_text()
+    state_fields = _rust_struct(game_api, "pub struct State")
     report.update(
         {
             "license": "GPL-2.0-or-later",
-            "stateFields": _rust_struct(game_api, "pub struct State"),
-            "certifiedDomains": ["map", "player", "target"],
+            "stateFields": state_fields,
+            "certifiedDomains": sorted(
+                domain
+                for domain, field in CERTIFIED_DOMAIN_FIELDS.items()
+                if field in state_fields
+            ),
             "enhancementLayoutFields": _rust_struct(
                 builds, "pub(super) struct EnhancementLayout"
             ),
