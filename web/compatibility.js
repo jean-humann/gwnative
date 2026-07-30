@@ -23,7 +23,8 @@
  * What to tell the player about build templates, or null when there is nothing
  * to tell.
  *
- * @param {unknown} state `window.__gwnativeTemplateSave` — 'ready', 'uncertified' or 'failed'
+ * @param {unknown} state `window.__gwnativeTemplateSave` — 'ready',
+ *   'uncertified', 'asyncify' or 'failed'
  * @returns {string | null}
  */
 export function templateSaveNotice(state) {
@@ -33,6 +34,14 @@ export function templateSaveNotice(state) {
       'the client build ArenaNet is currently shipping. Everything else works, ' +
       'including the characters and settings already on this Mac. Saving comes ' +
       'back in a later release of this app.'
+    );
+  }
+  if (state === 'asyncify') {
+    return (
+      'This Mac uses ArenaNet\'s Asyncify compatibility client, so the game is ' +
+      'playable but build-template saving and optional enhancements are ' +
+      'unavailable. The system WKWebView does not implement JSPI; installing ' +
+      'Safari Technology Preview does not change WKWebView.'
     );
   }
   if (state === 'failed') {
@@ -47,11 +56,12 @@ export function templateSaveNotice(state) {
 /**
  * Whether this launch should interrupt to say it, and what it would say.
  *
- * Only the uncertified case qualifies. `failed` is a fault on this Mac rather
- * than news about the client, it is already in the log and in the settings
- * panel, and — because a build that failed to prepare has no hash — there would
- * be nothing to remember an acknowledgement by, so it would ask at every launch
- * forever. A notice that cannot be silenced is one that stops being read.
+ * The uncertified and Asyncify cases qualify. `failed` is a fault on this Mac
+ * rather than news about the client, it is already in the log and in the
+ * settings panel, and — because a build that failed to prepare has no hash —
+ * there would be nothing to remember an acknowledgement by, so it would ask at
+ * every launch forever. A notice that cannot be silenced is one that stops
+ * being read.
  *
  * @param {{ state: unknown, build: unknown, seenFor: unknown }} where
  *   `state` and `build` are what the host injected; `seenFor` is the build the
@@ -59,7 +69,7 @@ export function templateSaveNotice(state) {
  * @returns {{ sentence: string, build: string } | null}
  */
 export function announcement({ state, build, seenFor }) {
-  if (state !== 'uncertified') return null;
+  if (state !== 'uncertified' && state !== 'asyncify') return null;
   const sentence = templateSaveNotice(state);
   if (sentence === null) return null;
   // No hash means nothing to key the acknowledgement to. Saying it anyway would

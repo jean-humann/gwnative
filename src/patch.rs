@@ -42,7 +42,8 @@ const PREFETCH_JOBS: usize = 8;
 /// service does not have. Retrying these only burns time and looks like abuse.
 const FATAL_STATUS: [u16; 3] = [401, 403, 404];
 
-const CLIENT_ARTIFACTS: [&str; 2] = ["Gw.jspi.js", "Gw.jspi.wasm"];
+/// Both official Emscripten outputs; the page selects one inside WKWebView.
+const CLIENT_ARTIFACTS: [&str; 4] = ["Gw.jspi.js", "Gw.jspi.wasm", "Gw.js", "Gw.wasm"];
 const COMMON_ARTIFACTS: [&str; 1] = ["version.json"];
 /// The prebuilt filesystem image the chunk store hydrates IDBFS from. Not part
 /// of the startup sync — it is hundreds of megabytes and fetched on demand.
@@ -616,6 +617,20 @@ mod tests {
     use super::*;
 
     use crate::scratch::TempDir;
+
+    #[test]
+    fn installs_both_official_runtime_pairs() {
+        assert_eq!(
+            artifacts(),
+            [
+                "Gw.jspi.js",
+                "Gw.jspi.wasm",
+                "Gw.js",
+                "Gw.wasm",
+                "version.json"
+            ]
+        );
+    }
 
     fn gzip(data: &[u8]) -> Vec<u8> {
         let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
