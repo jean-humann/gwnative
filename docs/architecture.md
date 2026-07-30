@@ -124,10 +124,12 @@ Because WebKit keys IndexedDB and local storage by origin, the stable port also
 isolates page data, overlays, and the build library.
 
 Content-addressed snapshot chunks and the mod discovery directory remain
-shared. A second instance bypasses only the global primary lock and requires an
-explicit non-default profile. Its profile lock is still mandatory, preventing
-an accidental pair of writers to the same settings, window, and page origin.
-See [Profiles](profiles.md) for the storage map.
+shared. Chunk pruning retains the union of valid cached manifests so an older
+installed profile generation is not evicted by a newer one. A second instance
+bypasses only the global primary lock and requires an explicit non-default
+profile. Its profile lock is still mandatory, preventing an accidental pair of
+writers to the same settings, window, and page origin. See
+[Profiles](profiles.md) for the storage map.
 
 ## Client artifacts and generation rollback
 

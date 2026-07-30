@@ -199,6 +199,7 @@ fn main() {
             client,
             manifest,
             paths.cache_dir(),
+            &base_support,
             invocation.no_prefetch || force_sync,
         ),
         // Without a manifest there is no chunk list, so there is no snapshot —
@@ -640,6 +641,7 @@ fn open_and_warm_snapshot(
     client: patch::Client,
     manifest: manifest::Manifest,
     cache_dir: &Path,
+    base_support: &Path,
     no_prefetch: bool,
 ) -> Option<Arc<chunks::ChunkStore>> {
     let cache_dir = cache_dir.to_owned();
@@ -648,7 +650,8 @@ fn open_and_warm_snapshot(
     // forty-eight fetches holding descriptors into it. See `cache::request_clear`
     // for why the deletion is a launch behind the button that asks for it.
     cache::take_clear_request(&cache_dir);
-    match chunks::ChunkStore::open(client, manifest, cache_dir).map(Arc::new) {
+    let protected_chunks = client.cached_profile_chunk_names(base_support);
+    match chunks::ChunkStore::open(client, manifest, cache_dir, protected_chunks).map(Arc::new) {
         Ok(store) => {
             note!(
                 "[gwnative] snapshot: {:.1} GB in {} KiB chunks, on demand",

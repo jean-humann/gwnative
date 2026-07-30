@@ -6,7 +6,9 @@ Keychain credentials, WebKit origin, overlays, and the build library all follow
 the selected profile.
 
 Immutable content-addressed game chunks and the opt-in mod directory are shared
-so multiple profiles do not each consume another 4.2 GB.
+so multiple profiles do not each consume another 4.2 GB. Cache cleanup retains
+the union named by every valid cached profile manifest, allowing profiles on
+different installed client generations to keep launching independently.
 
 ## Create and use a profile
 

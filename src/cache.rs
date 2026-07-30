@@ -154,7 +154,7 @@ pub fn sweep_orphans(cache_dir: &Path) {
     }
 }
 
-/// Drop every cached chunk the live manifest can no longer name.
+/// Drop every cached chunk no retained profile manifest can name.
 ///
 /// The cache is content-addressed, which is what makes deduplication free and
 /// what makes this necessary: when ArenaNet patches, the chunks whose contents
@@ -164,10 +164,10 @@ pub fn sweep_orphans(cache_dir: &Path) {
 /// 4.2 GB after the first patch, and another after the next.
 ///
 /// Safe against a fetch happening right now, because the set to keep comes from
-/// the manifest rather than from a listing: a chunk being written this instant
-/// is one this manifest named, so it is in `live` whether or not it is yet on
-/// disk. Anything that is not a chunk file — the boot list at the top level, a
-/// `.tmp` a live writer still owns — fails the name test and is left alone.
+/// manifests rather than from a listing: a chunk being written this instant is
+/// one a retained manifest named, so it is in `live` whether or not it is yet
+/// on disk. Anything that is not a chunk file — the boot list at the top level,
+/// a `.tmp` a live writer still owns — fails the name test and is left alone.
 ///
 /// Runs at Utility QoS behind the orphan sweep, so it yields to the boot it is
 /// sharing a disk with.
@@ -202,7 +202,7 @@ pub fn prune(cache_dir: &Path, live: &HashSet<String>) {
     }
     if removed > 0 {
         note!(
-            "[gwnative] dropped {removed} chunks ({:.2} GB) the current build no longer uses",
+            "[gwnative] dropped {removed} chunks ({:.2} GB) no cached profile uses",
             bytes as f64 / 1e9
         );
     }
