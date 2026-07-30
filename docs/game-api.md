@@ -23,6 +23,8 @@ The resulting state covers the numeric player agent and position, map/instance
 identity, current target position/range, bounded party roster, the player’s
 eight-slot skillbar and effects, a bounded map-agent page, and the quest log
 with mission objectives, plus bounded inventory and account-storage summaries.
+It also includes a privacy-minimised friend-presence page and numeric guild
+summary. Client-owned names, UUIDs, messages, and announcements are not read.
 
 ## Loopback endpoints
 
@@ -306,6 +308,51 @@ The envelope is revisioned and timestamped:
           "isStorageItem": false
         }
       ]
+    },
+    "social": {
+      "playerStatus": 1,
+      "playerStatusName": "Online",
+      "friends": {
+        "truncated": false,
+        "total": 1,
+        "friends": 1,
+        "ignores": 0,
+        "partners": 0,
+        "traders": 0,
+        "entries": [
+          {
+            "slot": 0,
+            "type": 1,
+            "typeName": "Friend",
+            "status": 1,
+            "statusName": "Online",
+            "friendId": 77,
+            "zoneId": 55,
+            "isOnline": true
+          }
+        ]
+      },
+      "guild": {
+        "index": 2,
+        "playerRank": 3,
+        "rank": 1,
+        "features": 9,
+        "rating": 1200,
+        "faction": 0,
+        "factionName": "Kurzick",
+        "factionPoints": 1000,
+        "qualifierPoints": 10,
+        "rosterTotal": 50,
+        "cape": {
+          "backgroundColor": 1,
+          "detailColor": 2,
+          "emblemColor": 3,
+          "shape": 4,
+          "detail": 5,
+          "emblem": 6,
+          "trim": 7
+        }
+      }
     }
   }
 }
@@ -377,9 +424,25 @@ merchant/trade state are not read in this ABI. Inventory is sensitive account
 state: the loopback token is mandatory, the page publishes no faster than four
 times per second, and the domain has no move/use/equip/salvage/gold action.
 
+The social domain follows the GWCA/Py4GW `FriendList`, `Friend`, `GuildContext`,
+`Guild`, and `GuildPlayer` read layouts. It publishes the player's numeric
+presence, at most 128 of 256 bounded contacts, exact category totals, contact
+type/status, an opaque numeric friend ID, and last zone ID. `isOnline` is true
+only for Online, Do Not Disturb, and Away. `truncated` distinguishes a complete
+list from the 128-record page.
+
+`guild` is `null` when the client reports player guild index zero. Otherwise it
+contains the numeric guild index, player/guild ranks, features, rating,
+faction/points, qualifier points, bounded non-null roster count, and seven
+numeric cape fields. The guild record must match both the context key and
+index before publication. The key itself is used only for validation and is
+never exposed. Friend aliases, character names, UUIDs, guild names/tags,
+member names, announcements, history, chat, and every social write action are
+excluded. This is sensitive account-derived state and remains token-gated.
+
 The token is a session capability, not a long-lived API key. Do not persist or
-publish it. The API has no remote listener, WebSocket transport, account data,
-account identity, chat, encoded game text, or action surface.
+publish it. The API has no remote listener, WebSocket transport, account
+identity, chat, encoded game text, or action surface.
 
 Long polling sleeps in the native server until the page publishes a newer
 revision. A consumer can therefore follow live state without a timer repeatedly
@@ -409,6 +472,7 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - map-agent totals;
 - quest and mission-objective counts;
 - inventory, storage, and gold totals; and
+- friend presence and numeric guild summary; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact

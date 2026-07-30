@@ -26,7 +26,7 @@ The names-only, reproducible comparison is in the
 | Guild Wars CLI recognition | Available | Every documented switch parsed; native translations or explicit notices |
 | Isolated launch profiles | Available | Per-profile mutable state, Keychain identity, origin, overlays, and build library |
 | Explicit `.gwmod` sessions | Available | Compatible format, host-side ZIP/graph validation, double hash validation, ordered runtime |
-| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory state |
+| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory/social state |
 | Overlay framework | Available | Profile-local movable widgets and exact-context hotkeys |
 | Clock, session timer, FPS | Available | Built-in Companion Tools widgets |
 | Target distance/range | Available on certified builds | Bounds-checked companion snapshot |
@@ -39,6 +39,7 @@ The names-only, reproducible comparison is in the
 | Map agents | Available on certified builds | 128-entry bounded page with PyAgent-compatible position, profession, health, allegiance, and derived state |
 | Quests and mission objectives | Available on certified builds | Active ID, 64 bounded quest records, log-state derivatives, markers, and 32 objective records |
 | Inventory and account storage | Available on certified builds | 22 bounded bag summaries, 512 ordered item records, explicit truncation, gold, storage panes, PyItem-compatible numeric metadata and derived flags |
+| Friends and guild | Available on certified builds | 128-entry bounded presence page, exact category totals, numeric status/zone/ID, and privacy-minimised guild/rank/faction/roster/cape summary |
 | Mission and map completion | Needs certified layout | No certified completion arrays or account-wide summary |
 | Chat, party search, trade | Needs certified layout and policy | No chat write or packet injection surface |
 | Skill activation or build application | Read-only only | Codes can be stored; no game action is exposed |
@@ -69,11 +70,10 @@ returns 409 until a specific operation passes certification.
 
 The dependency order for further parity is:
 
-1. add guild/friend presence without chat content;
-2. certify mission and map completion arrays;
-3. add read-only camera and render state;
-4. research WebGL-native texture replacement without patching unknown modules;
-5. consider narrowly named, user-triggered actions one at a time.
+1. certify mission and map completion arrays;
+2. add read-only camera and render state;
+3. research WebGL-native texture replacement without patching unknown modules;
+4. consider narrowly named, user-triggered actions one at a time.
 
 Large upstream windows should not be ported as one monolith. Each slice needs
 its own schema, fixtures, compatibility fallback, and Conventional Commit.
