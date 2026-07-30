@@ -1,4 +1,4 @@
-// Host for Gw.jspi.wasm inside WKWebView.
+// Host for ArenaNet's JSPI or Asyncify client inside WKWebView.
 //
 // Module MUST be `var`: the generated glue does
 // `var Module = typeof Module != 'undefined' ? Module : {}`, and a const/let
@@ -10,6 +10,7 @@ var Module;
 
 const LOG_LINES = 400;
 const logBuf = [];
+let client;
 
 // WKWebView has no stdout, so log lines are batched back to the host to land in
 // the terminal alongside its own. Batched because a chatty boot would otherwise
@@ -87,7 +88,7 @@ window.addEventListener('unhandledrejection', (e) => forward(`[unhandled] ${e.re
 // capturing it, so both the swap in and the swap back reach the client without
 // touching any vendored code. The handle returned while the wrapper is armed is
 // not a usable frame id, which is safe only because the client never cancels a
-// frame — cancelAnimationFrame appears nowhere in Gw.jspi.js.
+// frame — cancelAnimationFrame appears in neither generated glue file.
 const launchOptions =
   window.__gwnativeLaunch && typeof window.__gwnativeLaunch === 'object'
     ? window.__gwnativeLaunch
@@ -481,7 +482,7 @@ Module = {
       log,
     });
 
-    const url = 'Gw.jspi.wasm';
+    const url = client.wasm;
     performance.mark('gw.wasm.instantiate.begin');
     (async () => {
       let result;
@@ -515,9 +516,10 @@ Module = {
     return {};   // signals that instantiation is in flight
   },
 
-  // Both builds share an output basename, so Gw.jspi.js also asks for
-  // "Gw.wasm". Without this it silently pairs with the Asyncify binary.
-  locateFile: (path) => (path === 'Gw.wasm' ? 'Gw.jspi.wasm' : path),
+  // Both generated glue files ask for the shared output basename "Gw.wasm".
+  // Pair that request with the module selected by the WKWebView capability
+  // probe; otherwise JSPI glue silently opens the Asyncify binary.
+  locateFile: (path) => (path === 'Gw.wasm' ? client.wasm : path),
 
   // Module.image is assigned in boot(), once the snapshot size that makes
   // fileSize() answerable synchronously has arrived.
@@ -758,8 +760,8 @@ function installMods() {
 }
 
 function appendGlue() {
-  const src = 'Gw.jspi.js';
-  log('loading', src, '(wasm: Gw.jspi.wasm)…');
+  const src = client.glue;
+  log('loading', src, `(wasm: ${client.wasm}, runtime: ${client.mode})…`);
   const script = document.createElement('script');
   script.src = src;
   script.onerror = () => fail('The game client could not be loaded.');
@@ -783,7 +785,7 @@ function appendGlue() {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
       frameRate, start, panel, data, compat, guide, gameApi, overlay, tools, hotkeys, e2e,
-      clientArguments, metrics,
+      clientArguments, metrics, runtime,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -808,6 +810,7 @@ function appendGlue() {
       import('./e2e.js'),
       import('./client-arguments.js'),
       import('./diagnostics.js'),
+      import('./client-runtime.js'),
     ]);
     host = {
       ...graphics,
@@ -832,6 +835,7 @@ function appendGlue() {
       ...hotkeys,
       ...e2e,
       ...clientArguments,
+      ...runtime,
     };
     // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
     // contract could plausibly want for something else.
@@ -839,6 +843,23 @@ function appendGlue() {
   } catch (error) {
     return fail(`The game host contract could not be loaded: ${error}`);
   }
+
+  // This has to run in the WKWebView itself. Safari Technology Preview can use
+  // a newer bundled WebKit while this process still uses the system framework,
+  // and checking a browser installed elsewhere would select the wrong client.
+  try {
+    client = await host.selectClient();
+  } catch (error) {
+    log(`[err] client runtime selection failed: ${error}`);
+    return fail(`The requested game runtime is unavailable: ${error}`);
+  }
+  host.applyClientLimits(client, host.currentSettings(), window);
+  log(
+    `client runtime: ${client.mode}`,
+    client.mode === 'jspi'
+      ? '(functional JSPI suspend/resume returned 42)'
+      : '(JSPI unavailable; using official Asyncify build)',
+  );
 
   // The settings that decide how the client is built, applied before it exists.
   // Synchronous on purpose — see settings.js for why they are injected rather
@@ -921,21 +942,6 @@ function appendGlue() {
       openGuide: window.gwOpenGuide,
       log,
     });
-  }
-
-  // The only failure here that will still be a failure tomorrow. Everything
-  // else the overlay catches is transient, which is why its first offer is to
-  // try again; this one is a WebKit that predates JSPI, so trying again does
-  // the same thing forever and the offer beside it deletes the player's game
-  // data for nothing. The remedy is not in this app at all — the bundle asks
-  // for macOS 15.2 because that is the first release whose WebKit has this —
-  // so the sentence says where it is rather than naming the API.
-  if (!('Suspending' in WebAssembly)) {
-    log('[err] WebAssembly.Suspending is missing; the client cannot be run here');
-    return fail(
-      'Guild Wars cannot run on this version of macOS. Updating macOS updates ' +
-        'the web engine the game needs, which is missing here.',
-    );
   }
 
   // ArenaNet's glue never dials its own API hosts. Outside Capacitor it folds

@@ -1,11 +1,31 @@
-# gwnative
+<p align="center">
+  <img src="docs/assets/app-icon.png" width="128" alt="gwnative application icon">
+</p>
 
-[![CI](https://github.com/jean-humann/gwnative/actions/workflows/ci.yml/badge.svg)](https://github.com/jean-humann/gwnative/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/jean-humann/gwnative)](https://github.com/jean-humann/gwnative/releases/latest)
+<h1 align="center">gwnative</h1>
 
-An unofficial native macOS host for the Guild Wars Reforged WebAssembly client.
-One Rust binary drives AppKit and WKWebView directly, without an embedded
-browser distribution.
+<p align="center">
+  A lightweight native macOS host for Guild Wars Reforged on Apple Silicon.
+</p>
+
+<p align="center">
+  <a href="https://github.com/jean-humann/gwnative/releases/latest"><img src="https://img.shields.io/badge/Download_for_macOS-Apple_Silicon-000000?style=for-the-badge&amp;logo=apple&amp;logoColor=white" alt="Download gwnative for macOS"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/jean-humann/gwnative/actions/workflows/ci.yml"><img src="https://github.com/jean-humann/gwnative/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/jean-humann/gwnative/releases/latest"><img src="https://img.shields.io/github/v/release/jean-humann/gwnative" alt="Latest release"></a>
+</p>
+
+<p align="center"><strong>Apple Silicon · macOS 15.2 or newer</strong></p>
+
+gwnative runs the official Guild Wars Reforged WebAssembly client in one native
+Rust application. AppKit and WKWebView provide the platform directly, without
+an embedded browser distribution, Windows, Wine, or a virtual machine.
+
+<p align="center">
+  <img src="docs/assets/game-login.jpg" width="1000" alt="Guild Wars Reforged running in a native gwnative window">
+</p>
 
 gwnative is an independent interoperability project. It is not affiliated with,
 endorsed, sponsored, or approved by ArenaNet or NCSOFT. See the
@@ -25,9 +45,15 @@ project lineage.
 - Apple Silicon
 - macOS 15.2 or newer
 
-Both are hard requirements. The application ships only an `arm64` binary, and
-the client depends on WebKit's JavaScript Promise Integration support introduced
-with Safari 18.2 on macOS 15.2.
+Both are hard requirements. The application ships only an `arm64` binary. The
+app tests JSPI inside its own WKWebView and falls back to ArenaNet's official
+Asyncify client when the system WebKit does not support it. Installing Safari
+Technology Preview does not replace the system WebKit used by WKWebView.
+
+The Asyncify path is verified end to end on macOS 26.6, and the JSPI path on
+macOS 27 beta. macOS 15.2–15.x meet the known WebKit requirements but have not
+yet had the same end-to-end run; 15.2 is the deployment floor, not a claim of
+verified gameplay on every later point release.
 
 ## What works
 
@@ -53,9 +79,9 @@ gwnative is playable. It:
 
 ## Install
 
-Download the disk image from the
-[latest release](https://github.com/jean-humann/gwnative/releases/latest), open
-it, and drag **Guild Wars** to **Applications**.
+1. [Download the latest disk image](https://github.com/jean-humann/gwnative/releases/latest).
+2. Open it and drag **Guild Wars** to **Applications**.
+3. Open **Guild Wars** and choose how to store the game image.
 
 The first launch downloads the small client artifacts and asks how to handle the
 game image:
@@ -63,6 +89,15 @@ game image:
 - **Quick Start** streams areas when first needed and keeps them.
 - **Full Game** downloads and verifies missing chunks in the background. You can
   wait for it to finish or start playing while it continues.
+
+<details>
+<summary>See the first-launch storage choice</summary>
+
+<p align="center">
+  <img src="docs/assets/first-run.png" width="800" alt="gwnative offering Quick Start and Full Game on first launch">
+</p>
+
+</details>
 
 See the [user guide](docs/user-guide.md) for settings, storage, updates, and
 troubleshooting.

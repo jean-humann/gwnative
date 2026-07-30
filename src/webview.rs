@@ -150,13 +150,16 @@ fn preamble(
     invocation: &cli::Invocation,
 ) -> String {
     let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
+    let forced_runtime = std::env::var("GWNATIVE_CLIENT_RUNTIME")
+        .ok()
+        .filter(|value| value == "jspi" || value == "asyncify");
     format!(
         "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
          window.__gwnativeTemplateSave = {};\nwindow.__gwnativeClientBuild = {};\n\
          window.__gwnativeUpdates = {};\nwindow.__gwnativeAutoInstall = {};\n\
          window.__gwnativeEnhancements = {};\nwindow.__gwnativeLaunch = {};\n\
-         window.__gwnativeE2E = {e2e};",
+         window.__gwnativeE2E = {e2e};\nwindow.__gwnativeClientRuntime = {};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
@@ -175,6 +178,7 @@ fn preamble(
         serde_json::Value::from(crate::updater::available()),
         serde_json::Value::from(module.enhancements),
         invocation.client_json(),
+        serde_json::Value::from(forced_runtime),
     )
 }
 
