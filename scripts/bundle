@@ -64,13 +64,11 @@ cp packaging/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 # it, and the latter is the durable copy behind the shorter in-app disclosure.
 cp LICENSE NOTICE.md "$app/Contents/Resources/"
 
-# The shell only. Gw.jspi.js, Gw.jspi.wasm and version.json are the client
-# itself, fetched from ArenaNet against the live manifest; shipping a copy would
-# freeze the game at whatever build this was packaged from, because the patch
-# sync only runs for an artifact that is missing.
+# The shell only. Both client builds are fetched live from ArenaNet; bundling
+# either one would freeze the game at the packaged build.
 for path in web/*.js web/*.html; do
 	case ${path##*/} in
-	Gw.jspi.*) continue ;;
+	Gw.js|Gw.jspi.*) continue ;;
 	# Nothing at runtime imports these, and `paths::seed_web` copies whatever the
 	# bundle carries into the live web root, so shipping them would leave a
 	# player's Application Support directory holding this app's test suite.

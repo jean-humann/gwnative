@@ -43,9 +43,15 @@ Rust implementation.
 - Apple Silicon
 - macOS 15.2 or newer
 
-Both are hard requirements. The application ships only an `arm64` binary, and
-the client depends on WebKit's JavaScript Promise Integration support introduced
-with Safari 18.2 on macOS 15.2.
+Both are hard requirements. The application ships only an `arm64` binary. The
+app tests JSPI inside its own WKWebView and falls back to ArenaNet's official
+Asyncify client when the system WebKit does not support it. Installing Safari
+Technology Preview does not replace the system WebKit used by WKWebView.
+
+The Asyncify path is verified end to end on macOS 26.6, and the JSPI path on
+macOS 27 beta. macOS 15.2–15.x meet the known WebKit requirements but have not
+yet had the same end-to-end run; 15.2 is the deployment floor, not a claim of
+verified gameplay on every later point release.
 
 ## What works
 

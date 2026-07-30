@@ -144,12 +144,15 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences) {
 /// tick that arrived a round trip later would have missed the frames it exists
 /// to run in.
 fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -> String {
+    let forced_runtime = std::env::var("GWNATIVE_CLIENT_RUNTIME")
+        .ok()
+        .filter(|value| value == "jspi" || value == "asyncify");
     format!(
         "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
          window.__gwnativeTemplateSave = {};\nwindow.__gwnativeClientBuild = {};\n\
          window.__gwnativeUpdates = {};\nwindow.__gwnativeAutoInstall = {};\n\
-         window.__gwnativeEnhancements = {};",
+         window.__gwnativeEnhancements = {};\nwindow.__gwnativeClientRuntime = {};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
@@ -167,6 +170,7 @@ fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -
         // promise nothing could keep.
         serde_json::Value::from(crate::updater::available()),
         serde_json::Value::from(module.enhancements),
+        serde_json::Value::from(forced_runtime),
     )
 }
 

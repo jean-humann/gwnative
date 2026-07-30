@@ -34,7 +34,7 @@ const pageModules = readdirSync(here)
   .filter((name) => name.endsWith('.js') && !name.endsWith('.test.js'))
   // ArenaNet's build. It names `registerTouchEventCallback` and constructs
   // nothing; it is also not ours to change, so a finding in it would be noise.
-  .filter((name) => name !== 'Gw.jspi.js');
+  .filter((name) => name !== 'Gw.jspi.js' && name !== 'Gw.js');
 
 describe('interfaces macOS WebKit does not have', () => {
   it('has page modules to check', () => {
