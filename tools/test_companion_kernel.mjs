@@ -34,6 +34,12 @@ const item = 0x147000;
 const world = 0x150000;
 const questLog = 0x152000;
 const objectives = 0x153000;
+const itemContext = 0x154000;
+const inventory = 0x155000;
+const backpack = 0x156000;
+const backpackItems = 0x157000;
+const inventoryItem = 0x158000;
+const itemModifiers = 0x159000;
 const snapshot = 0x160000;
 const config = 0x164000;
 
@@ -42,6 +48,7 @@ u32(contextRoot, contexts);
 u32(contexts + 6 * 4, game);
 u32(game + 0x44, character);
 u32(game + 0x2c, world);
+u32(game + 0x40, itemContext);
 u32(character + 0x198, 55);
 u32(character + 0x19c, 1);
 u32(character + 0x234, 55);
@@ -101,7 +108,44 @@ u32(world + 0x56c, 1);
 u32(objectives, 7);
 u32(objectives + 8, 2);
 
-const layout = Array(100).fill(0);
+// One inventory bag and one item. The companion follows the real ItemContext
+// and Inventory graph, including the bag/item back-references and slot.
+u32(itemContext + 0xf8, inventory);
+u32(inventory + 4, backpack);
+u32(inventory + 0x60, 4);
+u32(inventory + 0x90, 1_234);
+u32(inventory + 0x94, 50_000);
+u32(backpack, 1);
+u32(backpack + 4, 0);
+u32(backpack + 0x0c, 0);
+u32(backpack + 0x10, 1);
+u32(backpack + 0x18, backpackItems);
+u32(backpack + 0x1c, 20);
+u32(backpack + 0x20, 20);
+u32(backpackItems, inventoryItem);
+u32(inventoryItem, 500);
+u32(inventoryItem + 4, 0);
+u32(inventoryItem + 0x0c, backpack);
+u32(inventoryItem + 0x10, itemModifiers);
+u32(inventoryItem + 0x14, 2);
+u32(inventoryItem + 0x18, 1);
+u32(inventoryItem + 0x1c, 123);
+u8(inventoryItem + 0x20, 9);
+u8(inventoryItem + 0x21, 7);
+u16(inventoryItem + 0x22, 2 | (3 << 4) | (4 << 8) | (5 << 12));
+u16(inventoryItem + 0x24, 100);
+u32(inventoryItem + 0x28, 0x01_0a_0001);
+u32(inventoryItem + 0x2c, 456);
+u16(inventoryItem + 0x48, 0);
+u8(inventoryItem + 0x4a, 0);
+u16(inventoryItem + 0x4c, 5);
+u8(inventoryItem + 0x4e, 0);
+u8(inventoryItem + 0x4f, 0xff);
+u8(inventoryItem + 0x50, 0);
+u32(itemModifiers, 0x1234_5678);
+u32(itemModifiers + 4, 0x8765_4321);
+
+const layout = Array(129).fill(0);
 Object.assign(layout, {
   0: contextRoot,
   1: agentArray,
@@ -169,6 +213,35 @@ Object.assign(layout, {
   85: 0x0c,
   86: 0,
   87: 8,
+  88: 0x40,
+  89: 0xf8,
+  90: 0,
+  91: 0x60,
+  92: 0x90,
+  93: 0x94,
+  94: 0,
+  95: 4,
+  96: 0x0c,
+  97: 0x10,
+  98: 0x18,
+  99: 0,
+  100: 4,
+  101: 0x0c,
+  102: 0x10,
+  103: 0x14,
+  104: 0x18,
+  105: 0x1c,
+  106: 0x20,
+  107: 0x21,
+  108: 0x24,
+  109: 0x28,
+  110: 0x2c,
+  111: 0x48,
+  112: 0x4a,
+  113: 0x4c,
+  114: 0x4e,
+  115: 0x4f,
+  116: 0x50,
 });
 new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
@@ -178,7 +251,7 @@ const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
 });
 const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 400, 0, 0, 1 << 1),
+  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 516, 0, 0, 1 << 1),
   1,
 );
 tick(0);
@@ -200,3 +273,12 @@ assert.equal(state.quests.activeQuestId, 44);
 assert.equal(state.quests.quests[0].completed, true);
 assert.equal(state.quests.quests[0].primary, true);
 assert.deepEqual(state.quests.missionObjectives, [{ objectiveId: 7, type: 2 }]);
+assert.equal(state.inventory.goldCharacter, 1_234);
+assert.equal(state.inventory.goldStorage, 50_000);
+assert.equal(state.inventory.total, 1);
+assert.equal(state.inventory.bags[0].kind, 'Inventory');
+assert.equal(state.inventory.items[0].typeName, 'Usable');
+assert.equal(state.inventory.items[0].quantity, 5);
+assert.equal(state.inventory.items[0].modifierCount, 2);
+assert.equal(state.inventory.items[0].isStackable, true);
+assert.equal(state.inventory.items[0].isGold, true);
