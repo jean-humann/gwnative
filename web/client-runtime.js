@@ -85,3 +85,25 @@ export async function selectClient(
   }
   return jspi ? CLIENTS.jspi : CLIENTS.asyncify;
 }
+
+/**
+ * Apply only the feature limits introduced by the selected runtime.
+ *
+ * The native host prepared and described the JSPI module before the page
+ * existed. A capable WebKit must keep those values byte-for-byte; changing them
+ * here would silently disable the certified template and enhancement transforms
+ * on macOS 27. Asyncify is the untransformed compatibility module, so only that
+ * path replaces the two affected states.
+ *
+ * @param {(typeof CLIENTS)[keyof typeof CLIENTS]} client
+ * @param {{ nativeCursor?: unknown, targetReadout?: unknown }} settings
+ * @param {Record<string, unknown>} target
+ */
+export function applyClientLimits(client, settings, target = globalThis) {
+  if (client.mode !== 'asyncify') return;
+  target.__gwnativeTemplateSave = 'asyncify';
+  target.__gwnativeEnhancements =
+    settings.nativeCursor === true || settings.targetReadout === true
+      ? 'uncertified'
+      : 'off';
+}

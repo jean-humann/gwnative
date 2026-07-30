@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { selectClient, supportsJspi } from './client-runtime.js';
+import { applyClientLimits, selectClient, supportsJspi } from './client-runtime.js';
 
 const workingJspi = {
   Module: class {},
@@ -50,5 +50,41 @@ describe('client runtime selection', () => {
       selectClient({}, 'jspi'),
       /failed its suspend\/resume probe/,
     );
+  });
+
+  it('leaves the native JSPI module state completely untouched', () => {
+    const state = {
+      __gwnativeTemplateSave: 'ready',
+      __gwnativeClientBuild: 'certified-jspi-build',
+      __gwnativeEnhancements: 'ready',
+    };
+    applyClientLimits(
+      { mode: 'jspi', glue: 'Gw.jspi.js', wasm: 'Gw.jspi.wasm' },
+      { nativeCursor: true, targetReadout: true },
+      state,
+    );
+    assert.deepEqual(state, {
+      __gwnativeTemplateSave: 'ready',
+      __gwnativeClientBuild: 'certified-jspi-build',
+      __gwnativeEnhancements: 'ready',
+    });
+  });
+
+  it('limits only the untransformed Asyncify module', () => {
+    const state = {
+      __gwnativeTemplateSave: 'ready',
+      __gwnativeClientBuild: 'same-patch-identity',
+      __gwnativeEnhancements: 'ready',
+    };
+    applyClientLimits(
+      { mode: 'asyncify', glue: 'Gw.js', wasm: 'Gw.wasm' },
+      { nativeCursor: true, targetReadout: false },
+      state,
+    );
+    assert.deepEqual(state, {
+      __gwnativeTemplateSave: 'asyncify',
+      __gwnativeClientBuild: 'same-patch-identity',
+      __gwnativeEnhancements: 'uncertified',
+    });
   });
 });

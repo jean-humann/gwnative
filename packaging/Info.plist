@@ -71,9 +71,11 @@
 	<string>public.app-category.games</string>
 
 	<!--
-	  The client is Gw.jspi.wasm: it suspends and resumes WebAssembly stacks
-	  through the JavaScript Promise Integration API, which WebKit shipped in
-	  Safari 18.2. Anything older loads the page and then fails to instantiate.
+	  This is the native deployment floor, not a WebKit feature assertion. The
+	  page functionally probes JSPI inside its own WKWebView and uses ArenaNet's
+	  official Asyncify client when the system framework does not implement it.
+	  A separately installed Safari or Technology Preview does not change that
+	  framework.
 	-->
 	<key>LSMinimumSystemVersion</key>
 	<string>15.2</string>

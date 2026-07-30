@@ -698,14 +698,7 @@ function appendGlue() {
     log(`[err] client runtime selection failed: ${error}`);
     return fail(`The requested game runtime is unavailable: ${error}`);
   }
-  if (client.mode === 'asyncify') {
-    window.__gwnativeTemplateSave = 'asyncify';
-    const settings = host.currentSettings();
-    window.__gwnativeEnhancements =
-      settings.nativeCursor === true || settings.targetReadout === true
-        ? 'uncertified'
-        : 'off';
-  }
+  host.applyClientLimits(client, host.currentSettings(), window);
   log(
     `client runtime: ${client.mode}`,
     client.mode === 'jspi'
