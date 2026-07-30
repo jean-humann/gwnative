@@ -16,7 +16,10 @@ import {
   COMPANION_SNAPSHOT_BYTES,
 } from './companion-snapshot.js';
 import * as diagnostics from './diagnostics.js';
-import { createPassiveObserver } from './passive-observer.js';
+import {
+  asyncifyStateReader,
+  createPassiveObserver,
+} from './passive-observer.js';
 
 /** Must match `FEATURE_*` in `src/companion-kernel/lib.rs`. */
 const FEATURE_NATIVE_CURSOR = 1 << 0;
@@ -148,7 +151,8 @@ function observeSnapshots(runtime, cursor, readout, observeState, observeGame) {
  *
  * @param {WebAssembly.Instance} instance
  * @param {unknown} manifestValue
- * @param {{ nativeCursor: boolean, targetReadout: boolean }} selection
+ * @param {{ nativeCursor: boolean, targetReadout: boolean,
+ *           runtime: 'jspi' | 'asyncify' }} selection
  */
 export async function installEnhancements(instance, manifestValue, selection) {
   const featureFlags =
@@ -181,9 +185,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
   }
 
   const free = /** @type {(pointer: number) => void} */ (exports.free);
-  const asyncifyState = typeof exports.asyncify_get_state === 'function'
-    ? () => Number(exports.asyncify_get_state())
-    : null;
+  const asyncifyState = asyncifyStateReader(exports, selection.runtime);
   const runtimeIdle = () => asyncifyState === null || asyncifyState() === 0;
   if (!runtimeIdle()) throw new Error('the client is currently unwinding or rewinding');
 

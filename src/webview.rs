@@ -139,10 +139,10 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences) {
 /// beside it is what the page compares against
 /// [`settings::Settings::compatibility_notice_seen_for`], and is `null` on the
 /// one launch where the module could not be read at all. Enhancement state rides
-/// alongside for the same reason and one more: the page installs its tick from
-/// inside `instantiateWasm`, before anything it could await has happened, and a
-/// tick that arrived a round trip later would have missed the frames it exists
-/// to run in.
+/// alongside for the same reason and one more: after runtime initialization
+/// the page installs a passive observer from this exact preselected layout.
+/// A later round trip could pair a refreshed certificate with the already
+/// instantiated artifact, so the immutable launch snapshot is injected here.
 fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -> String {
     let forced_runtime = std::env::var("GWNATIVE_CLIENT_RUNTIME")
         .ok()

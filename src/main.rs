@@ -322,6 +322,9 @@ fn install_client(
     ));
     match generations.recover(root) {
         generation::Recovery::None => {}
+        generation::Recovery::InstallationRestored => note!(
+            "[gwnative] restored the proven client and manifest after an interrupted installation"
+        ),
         generation::Recovery::TransformDisabled { runtime, build } => note!(
             "[gwnative] {runtime} transform {}… did not reach a first frame; \
              retrying the same official client unmodified",
@@ -380,18 +383,24 @@ fn install_client(
         Err(e) => Some(e.clone()),
     };
     if let Some(detail) = failure {
-        // A stale-but-complete web root still boots, so a failed refresh is
-        // only fatal when the client is not on disk at all.
-        if missing.is_empty() {
+        // Recheck after the failed transaction. Promotion and restoration both
+        // touch live paths; the entry-state `missing` answer is not proof that
+        // the client is still complete now. A stale but verified root can boot.
+        // A partially restored root must stop here instead of handing mixed
+        // runtime pairs to the page.
+        let now_unsound = generations.unsound(root, &names);
+        if now_unsound.is_empty() {
             note!("[gwnative] patch sync failed: {detail}");
         } else {
             alert::fatal(
                 windowed,
                 "Guild Wars could not be installed",
                 &format!(
-                    "The client files could not be downloaded, and there is no \
-                     complete copy on this Mac to fall back to. Check the network \
-                     connection and open Guild Wars again.\n\n{detail}"
+                    "The client files could not be downloaded or restored as one \
+                     verified set, so Guild Wars will not start with mixed client \
+                     files. Check the network connection and open Guild Wars \
+                     again.\n\nAffected: {}\n\n{detail}",
+                    now_unsound.join(", ")
                 ),
             );
         }
@@ -597,14 +606,27 @@ fn sync(
         )
         .into());
     }
-    let fetched =
-        patch::sync_with(client, manifest, root).inspect_err(|_| generations.forget_stash())?;
+    let fetched = match patch::sync_with(client, manifest, root) {
+        Ok(fetched) => fetched,
+        Err(error) => {
+            // Promotion has its own best-effort restore, but a failure in that
+            // restore is exactly when the durable, verified generation stash
+            // matters. Keep its record until the whole pair is back in place.
+            if matches!(
+                generations.recover(root),
+                generation::Recovery::InstallationRestored
+            ) {
+                note!("[gwnative] restored the proven client after sync failed");
+            }
+            return Err(error);
+        }
+    };
     if let Err(error) = client.activate_manifest(&paths::support_dir()) {
-        if let Err(restore) = generations.restore_stash(root, &names) {
-            note!(
-                "[gwnative] could not restore the previous client after manifest activation \
-                 failed: {restore}"
-            );
+        if matches!(
+            generations.recover(root),
+            generation::Recovery::InstallationRestored
+        ) {
+            note!("[gwnative] restored the proven client after manifest activation failed");
         }
         return Err(error);
     }

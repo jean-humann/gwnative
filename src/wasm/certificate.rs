@@ -27,7 +27,7 @@ use sha2::Digest;
 use super::Outcome;
 
 const SCHEMA_VERSION: u32 = 1;
-pub(super) const TRANSFORM_ABI: u32 = 2;
+pub(super) const TRANSFORM_ABI: u32 = 3;
 const MAX_FAMILIES: usize = 256;
 const MAX_FEED_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 256;
@@ -187,6 +187,10 @@ pub struct BridgeCertificate {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallSiteCertificate {
     pub local_function: usize,
+    /// Exact identity of the caller before any mutation. A matching bridge
+    /// target and occurrence are not enough to prove that the function at a
+    /// reused index still performs the reviewed template operation.
+    pub caller_body_sha256: String,
     /// Zero-based occurrence among calls to this bridge's certified target.
     pub occurrence: usize,
     /// Counted before rewriting.  This prevents a function that gained or lost
@@ -207,7 +211,11 @@ impl CertificateFeed {
         wasm_sha256: &str,
         glue_sha256: &str,
     ) -> Option<Selected<'_>> {
-        self.families.iter().find_map(|family| {
+        // Feed order is certification order. An exact runtime artifact can be
+        // reused in a later four-file family, and a later signed record may
+        // correct its data-only certificate without changing those official
+        // bytes. The newest exact attestation must therefore win.
+        self.families.iter().rev().find_map(|family| {
             family
                 .runtimes
                 .iter()
@@ -398,6 +406,7 @@ impl TemplateCertificate {
             }
             hash("stub body", &bridge.stub_body_sha256)?;
             for site in &bridge.call_sites {
+                hash("caller body", &site.caller_body_sha256)?;
                 if site.expected_target_calls == 0 || site.occurrence >= site.expected_target_calls
                 {
                     return Err(format!(
@@ -648,6 +657,24 @@ mod tests {
         next.family_id = artifact_family_id(&next.runtimes).unwrap();
         feed.families.push(next);
         feed.validate().unwrap();
+    }
+
+    #[test]
+    fn the_newest_certificate_wins_for_a_reused_exact_runtime_pair() {
+        let mut feed = bundled().unwrap();
+        let jspi_wasm = feed.families[0].runtimes[0].wasm_sha256.clone();
+        let jspi_glue = feed.families[0].runtimes[0].glue_sha256.clone();
+        let old_output = feed.families[0].runtimes[0].template.output_sha256.clone();
+        let mut next = feed.families[0].clone();
+        next.runtimes[0].template.output_sha256 = "a".repeat(64);
+        next.runtimes[1].glue_sha256 = "b".repeat(64);
+        next.family_id = artifact_family_id(&next.runtimes).unwrap();
+        feed.families.push(next);
+        feed.validate().unwrap();
+
+        let selected = feed.select(Runtime::Jspi, &jspi_wasm, &jspi_glue).unwrap();
+        assert_eq!(selected.runtime.template.output_sha256, "a".repeat(64));
+        assert_ne!(selected.runtime.template.output_sha256, old_output);
     }
 
     #[test]

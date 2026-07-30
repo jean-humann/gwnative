@@ -2,7 +2,7 @@
 //
 // The client is ArenaNet's and it changes without warning. One feature depends
 // on recognising the inside of it — saving a build template writes a file, and
-// the five routines that do the writing are the ones `src/wasm.rs` patches. On a
+// the five routines that do the writing are the ones `src/wasm` patches. On a
 // build this release has never been checked against, the patch is not applied
 // and the Save button in the template window does nothing at all.
 //

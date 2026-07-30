@@ -1,5 +1,9 @@
 # Client artifact certification
 
+This is the publishing runbook. The authoritative installation, runtime
+fallback, failure-outcome, and audit state model is
+[Client compatibility mechanism](client-compatibility.md).
+
 ArenaNet publishes two official WebAssembly runtimes from one client source:
 JSPI for engines with JavaScript Promise Integration and Asyncify for older
 engines. They share game data, but they do not share control flow or byte
@@ -52,7 +56,7 @@ contains:
 - the independently expected template-transform output SHA-256;
 - five fixed bridge kinds implemented in the application;
 - semantic call identities (function, target-call occurrence and total);
-- exact hashes of every target function body; and
+- exact hashes of every target and caller function body; and
 - when available, an artifact-family proof for shared data, element and
   global-prefix bytes.
 

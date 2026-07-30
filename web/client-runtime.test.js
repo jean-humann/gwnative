@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { applyClientLimits, selectClient, supportsJspi } from './client-runtime.js';
+import {
+  applyClientLimits,
+  postRuntimeState,
+  selectClient,
+  supportsJspi,
+} from './client-runtime.js';
 
 const workingJspi = {
   Module: class {},
@@ -120,5 +125,21 @@ describe('client runtime selection', () => {
     assert.equal(state.__gwnativeTemplateSave, 'uncertified');
     assert.equal(state.__gwnativeEnhancements, 'uncertified');
     assert.equal(state.__gwnativeEnhancementManifest, null);
+  });
+
+  it('does not let runtime-state persistence hold client startup', async () => {
+    const neverAnswers = (_path, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        reject(new DOMException('timed out', 'AbortError'));
+      });
+    });
+    await assert.rejects(
+      postRuntimeState('__runtime', {}, {
+        fetch: neverAnswers,
+        token: 'test',
+        deadlineMs: 1,
+      }),
+      { name: 'AbortError' },
+    );
   });
 });

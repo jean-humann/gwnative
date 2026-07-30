@@ -130,6 +130,7 @@ impl Default for State {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Recovery {
     None,
+    InstallationRestored,
     TransformDisabled { runtime: String, build: String },
     GenerationRolledBack(String),
 }
@@ -355,6 +356,47 @@ impl Store {
     /// Only an attempted unmodified runtime may restore and reject a generation.
     pub fn recover(&self, root: &Path) -> Recovery {
         let mut state = self.state.lock().unwrap();
+
+        // `stash` commits `previous` before download or live-file promotion.
+        // Settle an interrupted transaction before interpreting a page attempt.
+        //
+        // For a proven current set, `previous` is the entry generation and
+        // `record` was never reached. For an unproven current set, `previous`
+        // predates this sync and remains a rollback target; keep it while the
+        // current files are still exact, restore it only when they are not.
+        if let Some(previous) = state.previous.clone() {
+            let live_is_expected = if state.proven {
+                generation_matches(root, &self.active_manifest, &previous).is_ok()
+            } else {
+                state.current.as_ref().is_some_and(|current| {
+                    generation_matches(root, &self.active_manifest, current).is_ok()
+                })
+            };
+            if state.proven && live_is_expected {
+                state.previous = None;
+                self.save(&state);
+                let _ = fs::remove_dir_all(self.dir.join("previous"));
+            } else if !live_is_expected {
+                match self.restore_recorded(root, &previous) {
+                    Ok(()) => {
+                        state.current = Some(previous);
+                        state.proven = true;
+                        state.previous = None;
+                        state.attempt = None;
+                        self.save(&state);
+                        let _ = fs::remove_dir_all(self.dir.join("previous"));
+                        return Recovery::InstallationRestored;
+                    }
+                    Err(reason) => {
+                        note!(
+                            "[generation] cannot recover the interrupted installation — {reason}"
+                        );
+                        return Recovery::None;
+                    }
+                }
+            }
+        }
+
         let Some(attempt) = state.attempt.take() else {
             return Recovery::None;
         };
@@ -389,36 +431,8 @@ impl Store {
             return Recovery::None;
         };
 
-        // Verified before it is trusted, for the same reason the current set is:
-        // restoring a stash that rotted would replace a build that does not work
-        // with one that does not work either, and lose the record of both.
-        for (name, expected) in &previous.artifacts {
-            if let Err(reason) = check(&self.dir.join("previous").join(name), expected) {
-                note!("[generation] cannot roll back — the stashed {name}: {reason}");
-                self.save(&state);
-                return Recovery::None;
-            }
-        }
-        let Some(expected_manifest) = &previous.manifest else {
-            note!("[generation] cannot roll back — the previous manifest was not recorded");
-            self.save(&state);
-            return Recovery::None;
-        };
-        let stashed_manifest = self.dir.join("previous").join("manifest.cache");
-        if let Err(reason) = check(&stashed_manifest, expected_manifest) {
-            note!("[generation] cannot roll back — the stashed manifest: {reason}");
-            self.save(&state);
-            return Recovery::None;
-        }
-        for name in previous.artifacts.keys() {
-            if let Err(e) = copy_atomic(&self.dir.join("previous").join(name), &root.join(name)) {
-                note!("[generation] cannot roll back — restoring {name}: {e}");
-                self.save(&state);
-                return Recovery::None;
-            }
-        }
-        if let Err(e) = copy_atomic(&stashed_manifest, &self.active_manifest) {
-            note!("[generation] cannot roll back — restoring the manifest: {e}");
+        if let Err(reason) = self.restore_recorded(root, &previous) {
+            note!("[generation] cannot roll back — {reason}");
             self.save(&state);
             return Recovery::None;
         }
@@ -443,7 +457,9 @@ impl Store {
         self.record_attempt("asyncify", None, false).unwrap();
         match self.recover(root) {
             Recovery::GenerationRolledBack(id) => Some(id),
-            Recovery::None | Recovery::TransformDisabled { .. } => None,
+            Recovery::None
+            | Recovery::InstallationRestored
+            | Recovery::TransformDisabled { .. } => None,
         }
     }
 
@@ -463,6 +479,17 @@ impl Store {
         let Some(mut current) = state.current.clone() else {
             return true;
         };
+        // Older state records did not include the active-manifest digest.
+        // Validate every recorded client artifact here, then measure and attach
+        // the manifest while copying it below. That keeps the format migration
+        // safe without ever accepting changed client bytes as a rollback target.
+        if let Err(reason) = artifacts_match(root, &current) {
+            note!(
+                "[generation] cannot stash the current client because it no longer matches its \
+                 proven record ({reason})"
+            );
+            return false;
+        }
         let stash = self.dir.join("previous");
         let mut copy = || -> Result<()> {
             fs::create_dir_all(&stash)?;
@@ -488,48 +515,30 @@ impl Store {
         true
     }
 
-    /// A sync wrote the client files but could not activate their manifest.
-    ///
-    /// `current` is still the proven generation at this point, so putting its
-    /// stash back restores the entry state rather than performing a rollback.
-    pub fn restore_stash(&self, root: &Path, names: &[&'static str]) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        let previous = state
-            .previous
-            .clone()
-            .ok_or_else(|| Error::Decode("no client stash to restore".to_owned()))?;
-        for name in names {
-            copy_atomic(&self.dir.join("previous").join(name), &root.join(name))?;
+    /// Verify and restore the exact generation in `previous/`.
+    fn restore_recorded(
+        &self,
+        root: &Path,
+        generation: &Generation,
+    ) -> std::result::Result<(), String> {
+        let stash = self.dir.join("previous");
+        for (name, expected) in &generation.artifacts {
+            check(&stash.join(name), expected)
+                .map_err(|reason| format!("the stashed {name}: {reason}"))?;
         }
-        if previous.manifest.is_some() {
-            copy_atomic(
-                &self.dir.join("previous").join("manifest.cache"),
-                &self.active_manifest,
-            )?;
+        let expected_manifest = generation
+            .manifest
+            .as_ref()
+            .ok_or_else(|| "the previous manifest was not recorded".to_owned())?;
+        let stashed_manifest = stash.join("manifest.cache");
+        check(&stashed_manifest, expected_manifest)
+            .map_err(|reason| format!("the stashed manifest: {reason}"))?;
+        for name in generation.artifacts.keys() {
+            copy_atomic(&stash.join(name), &root.join(name))
+                .map_err(|error| format!("restoring {name}: {error}"))?;
         }
-        state.previous = None;
-        self.save(&state);
-        let _ = fs::remove_dir_all(self.dir.join("previous"));
-        Ok(())
-    }
-
-    /// Drop the stash, after a sync that replaced nothing.
-    ///
-    /// [`Store::stash`] runs before the download, because afterwards there is
-    /// nothing left to copy — so a download that fails leaves a stashed copy of
-    /// the set that is still installed. Nothing can ever use it: [`Store::record`]
-    /// was not reached, so the current set is still proven, and [`Store::roll_back`]
-    /// only ever undoes an unproven one. What is left is the size of a client in
-    /// Application Support and a record claiming a rollback target that would
-    /// restore what is already there.
-    pub fn forget_stash(&self) {
-        let mut state = self.state.lock().unwrap();
-        if state.previous.is_none() {
-            return;
-        }
-        state.previous = None;
-        self.save(&state);
-        let _ = fs::remove_dir_all(self.dir.join("previous"));
+        copy_atomic(&stashed_manifest, &self.active_manifest)
+            .map_err(|error| format!("restoring the manifest: {error}"))
     }
 
     /// Record a freshly written set as current, unproven — unless it is the set
@@ -558,8 +567,7 @@ impl Store {
         state.proven = same && state.proven;
         state.attempt = None;
         if state.proven {
-            // And with nothing to undo, nothing to undo it with. See
-            // [`Store::forget_stash`], which this is the other half of.
+            // And with nothing to undo, nothing to undo it with.
             state.previous = None;
         }
         self.save(&state);
@@ -710,6 +718,28 @@ fn copy_atomic(source: &Path, destination: &Path) -> Result<()> {
         let _ = fs::remove_file(&temporary);
     })?;
     Ok(())
+}
+
+/// Whether every client artifact still is the generation that was recorded.
+fn artifacts_match(root: &Path, generation: &Generation) -> std::result::Result<(), String> {
+    for (name, expected) in &generation.artifacts {
+        check(&root.join(name), expected).map_err(|reason| format!("{name}: {reason}"))?;
+    }
+    Ok(())
+}
+
+/// Whether the live client and active manifest are the exact recorded pair.
+fn generation_matches(
+    root: &Path,
+    active_manifest: &Path,
+    generation: &Generation,
+) -> std::result::Result<(), String> {
+    artifacts_match(root, generation)?;
+    let expected = generation
+        .manifest
+        .as_ref()
+        .ok_or_else(|| "the active manifest was not recorded".to_owned())?;
+    check(active_manifest, expected).map_err(|reason| format!("manifest.cache: {reason}"))
 }
 
 /// Whether the file at `path` is the artifact that was recorded.
@@ -992,7 +1022,7 @@ mod tests {
     /// stash. A download can fail on any of the artifacts, and what it leaves
     /// behind must not look like a build worth going back to.
     #[test]
-    fn a_sync_that_downloads_nothing_leaves_nothing_stashed() {
+    fn a_sync_that_downloads_nothing_restores_and_clears_its_stash() {
         let temp = TempDir::new("generation-failed-sync");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
@@ -1003,7 +1033,7 @@ mod tests {
 
         // The download failed here — nothing was overwritten and nothing was
         // recorded, so the set on disk is still the proven one.
-        store.forget_stash();
+        assert_eq!(store.recover(&root), Recovery::None);
         assert!(
             !state.join("previous").exists(),
             "and nothing on disk either"
@@ -1016,6 +1046,120 @@ mod tests {
             "there was never anything to undo"
         );
         assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
+    #[test]
+    fn an_interrupted_download_discards_the_redundant_stash_on_next_launch() {
+        let temp = TempDir::new("generation-interrupted-download");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "old");
+
+        assert!(store.stash(&root, &NAMES));
+        assert!(state.join("previous").is_dir());
+        drop(store); // The process disappeared before a live file changed.
+
+        let store = Store::open(state.clone());
+        assert_eq!(store.recover(&root), Recovery::None);
+        assert!(!state.join("previous").exists());
+        assert!(store.state.lock().unwrap().previous.is_none());
+        assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
+    #[test]
+    fn an_interrupted_promotion_restores_the_entry_generation() {
+        let temp = TempDir::new("generation-interrupted-promotion");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "old");
+
+        assert!(store.stash(&root, &NAMES));
+        write_client(&root, "new");
+        drop(store); // The process disappeared before `record`.
+
+        let store = Store::open(state.clone());
+        assert_eq!(store.recover(&root), Recovery::InstallationRestored);
+        assert_eq!(
+            fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
+            "old:Gw.jspi.js"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.0.join("manifest.cache")).unwrap(),
+            "old:manifest"
+        );
+        assert!(!state.join("previous").exists());
+        assert!(!store.rejected("new"));
+        assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
+    #[test]
+    fn an_interrupted_repair_of_an_unproven_set_restores_the_proven_predecessor() {
+        let temp = TempDir::new("generation-interrupted-unproven-repair");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "old");
+
+        assert!(store.stash(&root, &NAMES));
+        write_client(&root, "new");
+        store.record("new", &root, &NAMES);
+        // A repair started before this generation reached a frame, promoted
+        // only one live artifact, and the process disappeared.
+        fs::write(root.join("Gw.jspi.js"), "partial").unwrap();
+        drop(store);
+
+        let store = Store::open(state);
+        assert_eq!(store.recover(&root), Recovery::InstallationRestored);
+        assert_eq!(
+            fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
+            "old:Gw.jspi.js"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.0.join("manifest.cache")).unwrap(),
+            "old:manifest"
+        );
+        assert!(!store.rejected("new"));
+        assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
+    #[test]
+    fn corrupted_live_bytes_are_never_saved_as_a_rollback_target() {
+        let temp = TempDir::new("generation-corrupt-stash");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "working");
+
+        fs::write(root.join("Gw.jspi.js"), "corrupt").unwrap();
+
+        assert!(!store.stash(&root, &NAMES));
+        assert!(!state.join("previous").exists());
+        assert!(store.state.lock().unwrap().previous.is_none());
+    }
+
+    #[test]
+    fn a_pre_manifest_record_can_still_be_stashed_safely() {
+        let temp = TempDir::new("generation-old-record-migration");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "working");
+
+        {
+            let mut saved = store.state.lock().unwrap();
+            saved.current.as_mut().unwrap().manifest = None;
+            store.save(&saved);
+        }
+        drop(store);
+
+        let store = Store::open(state.clone());
+        assert!(store.stash(&root, &NAMES));
+        let saved = store.state.lock().unwrap();
+        assert!(
+            saved
+                .previous
+                .as_ref()
+                .and_then(|generation| generation.manifest.as_ref())
+                .is_some(),
+            "stashing migrates the old record by measuring its active manifest"
+        );
     }
 
     #[test]

@@ -15,7 +15,8 @@ use wasmparser::{
 };
 
 use super::certificate::{
-    BridgeCertificate, BridgeKind, LayoutCertificate, RuntimeCertificate, TemplateCertificate,
+    BridgeCertificate, BridgeKind, CallSiteCertificate, LayoutCertificate, RuntimeCertificate,
+    TemplateCertificate,
 };
 use super::codec::{
     Section, WASM_HEADER, encode_code, encode_index_vector, encode_section, parse_code,
@@ -263,12 +264,7 @@ fn patches_without_types(bodies: &[Vec<u8>], template: &TemplateCertificate) -> 
                 .map_err(|_| "template-save: too many forwarders".to_owned())?;
         forwarders.push(forwarder(bridge.kind, template.carrier_import, target));
         for site in &bridge.call_sites {
-            let body = bodies.get(site.local_function).ok_or_else(|| {
-                format!(
-                    "template-save: {} call site is out of range",
-                    bridge.kind.key()
-                )
-            })?;
+            let body = certify_caller(bodies, bridge, site)?;
             let calls = call_ranges(body, target)?;
             if calls.len() != site.expected_target_calls {
                 return Err(format!(
@@ -308,6 +304,27 @@ fn certify_stub(bodies: &[Vec<u8>], bridge: &BridgeCertificate) -> Outcome<()> {
     Ok(())
 }
 
+fn certify_caller<'a>(
+    bodies: &'a [Vec<u8>],
+    bridge: &BridgeCertificate,
+    site: &CallSiteCertificate,
+) -> Outcome<&'a [u8]> {
+    let body = bodies.get(site.local_function).ok_or_else(|| {
+        format!(
+            "template-save: {} call site is out of range",
+            bridge.kind.key()
+        )
+    })?;
+    if digest(body) != site.caller_body_sha256 {
+        return Err(format!(
+            "template-save: {} caller {} has an unexpected body",
+            bridge.kind.key(),
+            site.local_function
+        ));
+    }
+    Ok(body)
+}
+
 fn authorized_calls(
     bodies: &[Vec<u8>],
     template: &TemplateCertificate,
@@ -321,12 +338,7 @@ fn authorized_calls(
             + u32::try_from(bridge_index)
                 .map_err(|_| "template-save: too many forwarders".to_owned())?;
         for site in &bridge.call_sites {
-            let body = bodies.get(site.local_function).ok_or_else(|| {
-                format!(
-                    "template-save: {} call site is out of range",
-                    bridge.kind.key()
-                )
-            })?;
+            let body = certify_caller(bodies, bridge, site)?;
             let calls = call_ranges(body, target)?;
             if calls.len() != site.expected_target_calls {
                 return Err(format!(
@@ -641,5 +653,29 @@ mod tests {
         let mut unauthorized = output;
         unauthorized[6] = 0x01;
         assert!(verify_body_mutations(&input, &unauthorized, &calls).is_err());
+    }
+
+    #[test]
+    fn candidate_generation_rejects_a_reused_index_with_a_changed_caller() {
+        let original = vec![0x00, 0x10, 0x01, 0x0b];
+        let bridge = BridgeCertificate {
+            kind: BridgeKind::FileExists,
+            stub_function: 0,
+            stub_body_sha256: "0".repeat(64),
+            call_sites: Vec::new(),
+        };
+        let site = CallSiteCertificate {
+            local_function: 0,
+            caller_body_sha256: digest(&original),
+            occurrence: 0,
+            expected_target_calls: 1,
+        };
+
+        certify_caller(std::slice::from_ref(&original), &bridge, &site).unwrap();
+        let changed = vec![0x00, 0x01, 0x10, 0x01, 0x0b];
+        assert!(
+            certify_caller(&[changed], &bridge, &site).is_err(),
+            "the same function index and target-call count do not certify new semantics"
+        );
     }
 }

@@ -28,6 +28,8 @@ const CLIENTS = Object.freeze({
   }),
 });
 
+const RUNTIME_STATE_DEADLINE_MS = 1_500;
+
 /**
  * Prove that this realm implements the JSPI operation the client needs.
  *
@@ -105,4 +107,36 @@ export function applyClientLimits(client, settings, target = globalThis) {
   target.__gwnativeTemplateSave = selected?.templateSave ?? 'uncertified';
   target.__gwnativeEnhancements = selected?.enhancements ?? (wanted ? 'uncertified' : 'off');
   target.__gwnativeEnhancementManifest = selected?.enhancementManifest ?? null;
+}
+
+/**
+ * Persist launch/fallback state without allowing an auxiliary loopback write
+ * to hold the client boot indefinitely.
+ *
+ * @param {string} path
+ * @param {object} body
+ * @param {{ fetch?: typeof fetch, token?: string, deadlineMs?: number }} options
+ */
+export async function postRuntimeState(path, body, options = {}) {
+  const send = options.fetch ?? fetch;
+  const token = options.token ?? globalThis.__gwnativeToken ?? '';
+  const deadlineMs = options.deadlineMs ?? RUNTIME_STATE_DEADLINE_MS;
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), deadlineMs);
+  try {
+    const response = await send(path, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Gwnative-Token': token,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error((await response.text()) || `${path} failed: ${response.status}`);
+    }
+  } finally {
+    clearTimeout(deadline);
+  }
 }

@@ -612,6 +612,7 @@ function installTools() {
   const selection = {
     nativeCursor: settings.nativeCursor === true,
     targetReadout: settings.targetReadout === true,
+    runtime: client.mode,
   };
   if (!selection.nativeCursor && !selection.targetReadout) return;
   if (window.__gwnativeEnhancements !== 'ready') {
@@ -641,22 +642,8 @@ function appendGlue() {
   document.body.appendChild(script);
 }
 
-async function postRuntimeState(path, body) {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Gwnative-Token': window.__gwnativeToken ?? '',
-    },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    throw new Error((await response.text()) || `${path} failed: ${response.status}`);
-  }
-}
-
 function reportRuntimeAttempt() {
-  return postRuntimeState('__runtime', {
+  return host.postRuntimeState('__runtime', {
     runtime: client.mode,
     build: window.__gwnativeClientBuild,
     transformed: window.__gwnativeTemplateSave === 'ready',
@@ -664,7 +651,7 @@ function reportRuntimeAttempt() {
 }
 
 function reportTransformFailure() {
-  return postRuntimeState('__transform-failed', {
+  return host.postRuntimeState('__transform-failed', {
     runtime: client.mode,
     build: window.__gwnativeClientBuild,
   });

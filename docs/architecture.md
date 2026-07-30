@@ -121,7 +121,8 @@ under a running or unsuccessfully updated client.
 Artifact presence is not treated as integrity:
 
 - each installed client artifact is recorded by length and SHA-256;
-- launch checks the record and downloads only unsound artifacts;
+- launch checks the record and stages a complete replacement set when any
+  artifact is unsound or the offered generation is newer;
 - the offered generation ID is derived from manifest data before download; and
 - a newly installed generation is unproven until `POST /__booted`.
 
@@ -214,8 +215,10 @@ reports Normal (0); Unwinding and Rewinding are skipped, and the companion has
 no game import through which it could resume or re-enter the instrumented call
 graph.
 
-The certificate feed, fast ArenaNet patch workflow, signing boundary and
-rollback rules are detailed in [Client build certification](certification.md).
+The complete transaction and fallback state model is in
+[Client compatibility mechanism](client-compatibility.md). The certificate
+feed, fast ArenaNet patch workflow, signing boundary and operator runbook are
+detailed in [Client build certification](certification.md).
 
 ## WebKit and native integration
 
