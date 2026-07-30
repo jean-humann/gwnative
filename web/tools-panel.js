@@ -18,6 +18,7 @@ export const FEATURES = Object.freeze([
   { id: 'agents', group: 'Game state', name: 'Map agents', status: 'available' },
   { id: 'quests', group: 'Game state', name: 'Quest log and objectives', status: 'available' },
   { id: 'completion', group: 'Game state', name: 'Mission and map completion', status: 'available' },
+  { id: 'camera', group: 'Game state', name: 'Camera and render state', status: 'available' },
   { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'available' },
   { id: 'social', group: 'Game state', name: 'Friends and guild summary', status: 'available' },
   { id: 'chat', group: 'Game state', name: 'Chat and party search', status: 'needs-layout' },
@@ -215,6 +216,23 @@ function installWidgets(overlays) {
       );
     },
   });
+  const camera = overlays.register({
+    id: 'camera',
+    title: 'Camera and render state',
+    position: { x: 16, y: 688 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      if (!state.camera) return setText(body, 'Unavailable for this client build');
+      const pitch = Math.round((state.camera.pitch * 180) / Math.PI);
+      const fieldOfView = Math.round((state.camera.renderFieldOfView * 180) / Math.PI);
+      setText(
+        body,
+        `${state.camera.modeName} · ${Math.round(state.camera.distance)} units · `
+          + `pitch ${pitch}° · render FOV ${fieldOfView}°`,
+      );
+    },
+  });
 
   const updateTime = () => {
     if (clock.isVisible()) clock.update(new Date().toLocaleTimeString());
@@ -247,6 +265,7 @@ function installWidgets(overlays) {
     if (inventory.isVisible()) inventory.update(event.detail);
     if (completion.isVisible()) completion.update(event.detail);
     if (social.isVisible()) social.update(event.detail);
+    if (camera.isVisible()) camera.update(event.detail);
   });
 
   return Object.freeze({
@@ -262,6 +281,7 @@ function installWidgets(overlays) {
     inventory,
     completion,
     social,
+    camera,
     dispose: () => clearInterval(interval),
   });
 }
@@ -355,6 +375,7 @@ export function installToolsPanel({
     ['Inventory', widgets.inventory],
     ['Mission and map completion', widgets.completion],
     ['Friends and guild', widgets.social],
+    ['Camera and render state', widgets.camera],
   ]) {
     widgetButtons.append(
       button(document, label, () => widget.visible(!widget.isVisible())),
