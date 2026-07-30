@@ -19,6 +19,7 @@ export const FEATURES = Object.freeze([
   { id: 'quests', group: 'Game state', name: 'Quest log and objectives', status: 'available' },
   { id: 'completion', group: 'Game state', name: 'Mission and map completion', status: 'available' },
   { id: 'camera', group: 'Game state', name: 'Camera and render state', status: 'available' },
+  { id: 'trade', group: 'Game state', name: 'Trade offer', status: 'available' },
   { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'available' },
   { id: 'social', group: 'Game state', name: 'Friends and guild summary', status: 'available' },
   { id: 'chat', group: 'Game state', name: 'Chat and party search', status: 'needs-layout' },
@@ -34,6 +35,19 @@ export function formatDuration(milliseconds) {
   return hours > 0
     ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
     : `${minutes}:${String(remainder).padStart(2, '0')}`;
+}
+
+export function formatTradeSummary(trade) {
+  if (!trade) return 'Unavailable for this client build';
+  if (!trade.open) return 'Closed · no active offer';
+  const itemCount = (items) => `${items.length} item${items.length === 1 ? '' : 's'}`;
+  const truncated =
+    trade.player.itemsTruncated || trade.partner.itemsTruncated
+      ? ' · truncated'
+      : '';
+  return `${trade.statusName} · you ${itemCount(trade.player.items)} + `
+    + `${trade.player.gold}g · partner ${itemCount(trade.partner.items)} + `
+    + `${trade.partner.gold}g${truncated}`;
 }
 
 const setText = (element, value) => {
@@ -233,6 +247,16 @@ function installWidgets(overlays) {
       );
     },
   });
+  const trade = overlays.register({
+    id: 'trade',
+    title: 'Trade offer',
+    position: { x: 16, y: 744 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      setText(body, formatTradeSummary(state.trade));
+    },
+  });
 
   const updateTime = () => {
     if (clock.isVisible()) clock.update(new Date().toLocaleTimeString());
@@ -266,6 +290,7 @@ function installWidgets(overlays) {
     if (completion.isVisible()) completion.update(event.detail);
     if (social.isVisible()) social.update(event.detail);
     if (camera.isVisible()) camera.update(event.detail);
+    if (trade.isVisible()) trade.update(event.detail);
   });
 
   return Object.freeze({
@@ -282,6 +307,7 @@ function installWidgets(overlays) {
     completion,
     social,
     camera,
+    trade,
     dispose: () => clearInterval(interval),
   });
 }
@@ -376,6 +402,7 @@ export function installToolsPanel({
     ['Mission and map completion', widgets.completion],
     ['Friends and guild', widgets.social],
     ['Camera and render state', widgets.camera],
+    ['Trade offer', widgets.trade],
   ]) {
     widgetButtons.append(
       button(document, label, () => widget.visible(!widget.isVisible())),

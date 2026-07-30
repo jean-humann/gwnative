@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { FEATURES, formatDuration, setPanelVisible } from './tools-panel.js';
+import {
+  FEATURES,
+  formatDuration,
+  formatTradeSummary,
+  setPanelVisible,
+} from './tools-panel.js';
 
 describe('companion tools', () => {
   it('formats timer lengths without wrapping at one hour', () => {
@@ -25,6 +30,28 @@ describe('companion tools', () => {
     assert.equal(FEATURES.find((feature) => feature.id === 'social').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'completion').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'camera').status, 'available');
+    assert.equal(FEATURES.find((feature) => feature.id === 'trade').status, 'available');
+  });
+
+  it('summarises closed and bounded trade offers', () => {
+    assert.equal(formatTradeSummary(null), 'Unavailable for this client build');
+    assert.equal(
+      formatTradeSummary({
+        open: false,
+        player: { items: [], itemsTruncated: false, gold: 0 },
+        partner: { items: [], itemsTruncated: false, gold: 0 },
+      }),
+      'Closed · no active offer',
+    );
+    assert.equal(
+      formatTradeSummary({
+        open: true,
+        statusName: 'OfferSent',
+        player: { items: [{}, {}], itemsTruncated: false, gold: 2_222 },
+        partner: { items: [{}], itemsTruncated: true, gold: 3_333 },
+      }),
+      'OfferSent · you 2 items + 2222g · partner 1 item + 3333g · truncated',
+    );
   });
 
   it('makes inline flex panels genuinely hide and reopen', () => {
