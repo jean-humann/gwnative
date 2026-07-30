@@ -5,6 +5,7 @@ import {
   FEATURES,
   formatDuration,
   formatTradeSummary,
+  formatUiSummary,
   setPanelVisible,
 } from './tools-panel.js';
 
@@ -31,6 +32,29 @@ describe('companion tools', () => {
     assert.equal(FEATURES.find((feature) => feature.id === 'completion').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'camera').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'trade').status, 'available');
+    assert.equal(FEATURES.find((feature) => feature.id === 'ui').status, 'available');
+  });
+
+  it('summarises the bounded UI frame inventory', () => {
+    assert.equal(formatUiSummary(null), 'Unavailable for this client build');
+    assert.equal(
+      formatUiSummary({
+        visibleTotal: 12,
+        createdTotal: 18,
+        total: 20,
+        truncated: false,
+      }),
+      '12/18 locally visible · 20 frames',
+    );
+    assert.equal(
+      formatUiSummary({
+        visibleTotal: 90,
+        createdTotal: 150,
+        total: 180,
+        truncated: true,
+      }),
+      '90/150 locally visible · 180 frames · first 128',
+    );
   });
 
   it('summarises closed and bounded trade offers', () => {

@@ -502,6 +502,7 @@ export async function runAppE2E({
       ['social', 'Friends and guild'],
       ['camera', 'Camera and render state'],
       ['trade', 'Trade offer'],
+      ['ui-frames', 'UI frame inventory'],
     ]);
     for (const widget of widgets) {
       const id = widget.dataset.widget;
@@ -584,6 +585,7 @@ export async function runAppE2E({
           ['social', 'Friends and guild'],
           ['camera', 'Camera and render state'],
           ['trade', 'Trade offer'],
+          ['ui-frames', 'UI frame inventory'],
         ]).get(id);
         if (label && !widget.hidden !== wanted) buttonNamed(surface, label).click();
       }
