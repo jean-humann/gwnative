@@ -1,7 +1,7 @@
 // Built-in companion tools.
 //
 // These are deliberately useful on the narrow certified state available
-// today. Features requiring chat, completion, or other layouts are named as
+// today. Features requiring chat or other layouts are named as
 // unavailable instead of reading guessed offsets from a live client.
 
 import { createBuildLibrary } from './build-library.js';
@@ -17,7 +17,7 @@ export const FEATURES = Object.freeze([
   { id: 'effects', group: 'Game state', name: 'Effects and buffs', status: 'available' },
   { id: 'agents', group: 'Game state', name: 'Map agents', status: 'available' },
   { id: 'quests', group: 'Game state', name: 'Quest log and objectives', status: 'available' },
-  { id: 'completion', group: 'Game state', name: 'Mission and map completion', status: 'needs-layout' },
+  { id: 'completion', group: 'Game state', name: 'Mission and map completion', status: 'available' },
   { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'available' },
   { id: 'social', group: 'Game state', name: 'Friends and guild summary', status: 'available' },
   { id: 'chat', group: 'Game state', name: 'Chat and party search', status: 'needs-layout' },
@@ -178,10 +178,28 @@ function installWidgets(overlays) {
       );
     },
   });
+  const completion = overlays.register({
+    id: 'completion',
+    title: 'Mission and map completion',
+    position: { x: 16, y: 576 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      if (!state.completion) return setText(body, 'Unavailable for this client build');
+      const normal = state.completion.normalMode.completedMissions.length;
+      const hard = state.completion.hardMode.completedMissions.length;
+      setText(
+        body,
+        `${normal} normal · ${hard} hard · `
+          + `${state.completion.unlockedMaps.length} maps · `
+          + `${state.completion.vanquishedAreas.length} vanquishes`,
+      );
+    },
+  });
   const social = overlays.register({
     id: 'social',
     title: 'Friends and guild',
-    position: { x: 16, y: 576 },
+    position: { x: 16, y: 632 },
     visible: false,
     render: (body, state) => {
       if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
@@ -227,6 +245,7 @@ function installWidgets(overlays) {
     if (agents.isVisible()) agents.update(event.detail);
     if (quests.isVisible()) quests.update(event.detail);
     if (inventory.isVisible()) inventory.update(event.detail);
+    if (completion.isVisible()) completion.update(event.detail);
     if (social.isVisible()) social.update(event.detail);
   });
 
@@ -241,6 +260,7 @@ function installWidgets(overlays) {
     agents,
     quests,
     inventory,
+    completion,
     social,
     dispose: () => clearInterval(interval),
   });
@@ -333,6 +353,7 @@ export function installToolsPanel({
     ['Map agents', widgets.agents],
     ['Quest log', widgets.quests],
     ['Inventory', widgets.inventory],
+    ['Mission and map completion', widgets.completion],
     ['Friends and guild', widgets.social],
   ]) {
     widgetButtons.append(

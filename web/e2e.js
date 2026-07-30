@@ -539,6 +539,7 @@ export async function runAppE2E({
       ['map-agents', 'Map agents'],
       ['quest-log', 'Quest log'],
       ['inventory', 'Inventory'],
+      ['completion', 'Mission and map completion'],
       ['social', 'Friends and guild'],
     ]);
     for (const widget of widgets) {
@@ -618,6 +619,7 @@ export async function runAppE2E({
           ['map-agents', 'Map agents'],
           ['quest-log', 'Quest log'],
           ['inventory', 'Inventory'],
+          ['completion', 'Mission and map completion'],
           ['social', 'Friends and guild'],
         ]).get(id);
         if (label && !widget.hidden !== wanted) buttonNamed(surface, label).click();
