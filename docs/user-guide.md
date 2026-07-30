@@ -106,7 +106,7 @@ tools:
 
 - movable clock, session timer, target/range, frame-rate, party, skillbar,
   player-effects, map-agent, quest, inventory, completion, friend/guild, and
-  camera/render, trade-offer, and UI-frame inventory widgets;
+  camera/render, trade-offer, UI-frame inventory, and merchant item-ID widgets;
 - overlay layout editing, also toggled with **⌘⇧O**;
 - an opaque-code build and team library with validated JSON import/export; and
 - the current compatibility status of researched feature families.
@@ -121,12 +121,15 @@ guild-summary, normal/hard mission, bonus, unlocked-map, and vanquish reads are
 available on recognised client builds, together with bounded camera mode,
 position/look-at geometry, distance, orientation, and field-of-view state, plus
 bounded trade status, gold, and item offers for both sides and a bounded
-numeric UI-frame identity/state/geometry page.
+numeric UI-frame identity/state/geometry page, plus the bounded numeric
+merchant item-ID array. Merchant window state, identity, prices, quotes, and
+transactions are not inferred from that array.
 Encoded item, friend, character, guild, and member names; UUIDs; messages; and
 announcements are not exposed. UI labels, callbacks, tooltips, dialog payloads,
 and interactions are also excluded. The widgets cannot change inventory,
-social, completion, camera, trade, or game UI state. Chat and texture features
-remain labelled as requiring another certified layout or further research.
+social, completion, camera, trade, merchant, or game UI state. Chat and texture
+features remain labelled as requiring another certified layout or further
+research.
 Unattended gameplay automation is blocked. See
 [Feature compatibility](feature-compatibility.md) and
 [Game API and overlays](game-api.md).

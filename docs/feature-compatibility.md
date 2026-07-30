@@ -26,7 +26,7 @@ The names-only, reproducible comparison is in the
 | Guild Wars CLI recognition | Available | Every documented switch parsed; native translations or explicit notices |
 | Isolated launch profiles | Available | Per-profile mutable state, Keychain identity, origin, overlays, and build library |
 | Explicit `.gwmod` sessions | Available | Compatible format, host-side ZIP/graph validation, double hash validation, ordered runtime |
-| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory/social/completion/camera/trade/UI state |
+| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory/social/completion/camera/trade/UI/merchant state |
 | Overlay framework | Available | Profile-local movable widgets and exact-context hotkeys |
 | Clock, session timer, FPS | Available | Built-in Companion Tools widgets |
 | Target distance/range | Available on certified builds | Bounds-checked companion snapshot |
@@ -44,6 +44,7 @@ The names-only, reproducible comparison is in the
 | Camera and render state | Available on certified builds | Bounded camera mode, agent target, position/look-at vectors, distance, yaw/pitch, raw FOV, and derived render FOV |
 | Trade offer | Available on certified builds | Bounded local status flags, both gold offers, and two 16-item read-only pages with explicit truncation and stale-close normalisation |
 | UI frame inventory | Available on certified builds | 128-frame read-only page with exact array identity, parent back-references, state-bit derivatives, local geometry, full totals, and explicit truncation |
+| Merchant item IDs | Available on certified builds | Ordered 128-of-512 numeric WorldContext item-ID page; no window-open, catalog, price, quote, identity, or action claim |
 | Chat and party search | Needs certified layout and policy | No chat write or packet injection surface |
 | Skill activation or build application | Read-only only | Codes can be stored; no game action is exposed |
 | Texture/shader packs | Research | WebGL/WASM pipeline differs from native DirectX replacement |
@@ -75,7 +76,7 @@ The dependency order for further parity is:
 
 1. certify bounded dialog identity from read-only state or observed typed events;
 2. research WebGL-native texture replacement without patching unknown modules;
-3. map bounded read-only merchant inventory; and
+3. certify merchant identity and quote semantics from an independent typed source; and
 4. consider narrowly named, user-triggered actions one at a time.
 
 Large upstream windows should not be ported as one monolith. Each slice needs

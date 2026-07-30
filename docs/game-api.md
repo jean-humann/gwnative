@@ -27,7 +27,9 @@ It also includes a privacy-minimised friend-presence page and numeric guild
 summary, six completion bitmaps, the current camera/render geometry, and a
 bounded read-only trade-offer summary. A capped UI inventory exposes numeric
 frame identity, state bits, parent identity, and local geometry without
-following client-owned labels or callbacks.
+following client-owned labels or callbacks. The numeric merchant item array is
+available as a separately bounded page without implying that a merchant window
+is open.
 Client-owned names, UUIDs, messages, and announcements are not read.
 
 ## Loopback endpoints
@@ -446,6 +448,11 @@ The envelope is revisioned and timestamped:
           }
         }
       ]
+    },
+    "merchant": {
+      "truncated": false,
+      "total": 2,
+      "itemIds": [900, 901]
     }
   }
 }
@@ -513,9 +520,9 @@ modifier-count fields. The boolean stackable, inscribable, identified,
 tradable, usable, upgrade, inscription, rarity, inventory, and storage fields
 are exact derivatives of the same interaction and bag words and are checked
 again by Rust. Encoded item names, customization text, modifier words, and
-merchant state are not read in this ABI. Inventory is sensitive account
-state: the loopback token is mandatory, the page publishes no faster than four
-times per second, and the domain has no move/use/equip/salvage/gold action.
+merchant prices are not read in this ABI. Inventory is sensitive account state:
+the loopback token is mandatory, the page publishes no faster than four times
+per second, and the domain has no move/use/equip/salvage/gold action.
 
 The social domain follows the GWCA/Py4GW `FriendList`, `Friend`, `GuildContext`,
 `Guild`, and `GuildPlayer` read layouts. It publishes the player's numeric
@@ -605,6 +612,19 @@ endpoint exposes no click, focus, visibility, frame-message, or dialog action.
 This keeps the UI inventory useful for diagnostics and future certification
 without turning it into an interaction surface.
 
+The merchant domain follows the numeric `WorldContext::merch_items` array at
+the independently mapped `WorldContext + 0x24` field used by GWCA and Py4GW
+Reforged Native. The companion validates at most 512 non-zero numeric item IDs,
+preserves their client order, and publishes the first 128 with `total` and an
+explicit `truncated` flag. Repeated IDs are preserved rather than assigned
+invented uniqueness semantics.
+
+This array alone does not establish that a merchant window is open, that the
+entries form the current visible catalog, or that a transaction is possible.
+The API therefore exposes no `open`, merchant identity, item names, stock,
+prices, quotes, currencies, buy/sell state, or transaction action. Consumers
+must treat it only as the latest validated client-side merchant item-ID array.
+
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account
 identity, chat, encoded game text, or action surface.
@@ -641,7 +661,8 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - friend presence and numeric guild summary;
 - camera mode, distance, pitch, and render FOV;
 - trade status, item counts, and gold for both sides;
-- validated UI-frame totals and local visibility; and
+- validated UI-frame totals and local visibility;
+- bounded merchant item-ID totals; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact

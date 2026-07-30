@@ -210,11 +210,11 @@ instantiates the companion, fills the table slot, and only then enables the
 hook.
 
 The validated companion state is narrowed into the versioned v1 map, player,
-target, party, skillbar, effects, agent, quest, inventory, social, and
-completion, camera, trade, and UI-frame schema. Large agent, quest, effect,
-bag, item, friend, and UI-frame pages
-remain fixed and bounded in the seqlock block rather than being copied onto the
-companion’s imported-memory stack. Inventory traversal retains only the owning
+target, party, skillbar, effects, agent, quest, inventory, social, completion,
+camera, trade, UI-frame, and merchant item-ID schema. Large agent, quest,
+effect, bag, item, friend, UI-frame, and merchant pages remain fixed and
+bounded in the seqlock block rather than being copied onto the companion’s
+imported-memory stack. Inventory traversal retains only the owning
 pointer across the original tick, then rechecks bag arrays and every item
 back-reference while publishing. Social traversal likewise retains only the
 friend-list and guild-context owners, rechecks every numeric friend and
@@ -234,6 +234,10 @@ compiled frame lookup routine. Publication rechecks each slot's embedded ID,
 parent back-reference, scalar state, and finite local rectangle while excluding
 labels, callbacks, tooltips, relation lists, dialog payloads, and every UI
 write. The 128-record page retains full-array totals and explicit truncation.
+Merchant collection reads only the independently verified numeric
+`WorldContext::merch_items` array. It validates at most 512 IDs and publishes
+128 with explicit totals and truncation, without inferring a merchant window,
+catalog, price, quote, identity, or action from that transient array.
 The page publishes no faster than four times per second and Rust validates it
 again before making it available on token-gated loopback routes. There is no
 certified action endpoint. The overlay registry and Companion Tools consume the

@@ -108,7 +108,7 @@ client, not an in-game automation API.
 | Chat, friends, and guild | GWCA Chat/FriendList/Guild; matching Python modules | Certified 128-entry numeric friend-presence page and privacy-minimised guild/rank/faction/roster/cape summary; no names, UUIDs, messages, or actions | Add no encoded text until lifetime/privacy validation; keep message actions closed |
 | Camera and rendering | GWCA Camera/Render; PyCamera/PyRender/PyWorldRender | Certified bounded camera mode, target, vectors, distance, orientation, raw FOV, and derived render FOV; native cursor and local overlays | Keep controller pointers, writes, and WebGL ownership isolated |
 | UI and dialogs | GWCA UI; PyUIManager/PyDialog; UI resolvers | Certified 128-frame read-only identity/state/geometry page plus gwnative-owned panels; labels, dialog payloads, callbacks, and interactions remain closed | Bounded dialog identity only after its typed event or stable state source is certified |
-| Merchant and trade | GWCA Merchant/Trade; matching Python modules | Certified bounded TradeContext status, local/partner gold, and item offers; merchant inventory and every trade action remain closed | Read-only merchant inventory only after its transient UI/event semantics are certified |
+| Merchant and trade | GWCA Merchant/Trade; matching Python modules | Certified bounded TradeContext status, local/partner gold, item offers, and the ordered numeric `WorldContext::merch_items` page; merchant window state, prices, quotes, and every action remain closed | Certify merchant identity and quote semantics only from an independent typed source |
 | Events and packets | GWCA Event/StoC; listener and packet modules | Diagnostics expose host milestones, not game packets | Typed, bounded events derived from certified state |
 | Pathing | PyPathing and native pathing resolvers | Not exposed | Geometry inspection only; no unattended movement |
 | Input and actions | PyKeystroke/PyMouse and native action bindings | Only normal user input plus finite E2E actions | Review each named, user-triggered action independently |
@@ -130,7 +130,7 @@ A mapped domain reaches the public API only when it has:
 6. a separate policy decision for every state-changing operation.
 
 The next implementation sequence is bounded read-only dialog identity, then
-bounded merchant inventory and the remaining read-only domains with
+merchant identity/quote semantics and the remaining read-only domains with
 independently verified layouts.
 Native action bindings,
 packet injection, virtual input, and pathing automation are reference evidence
