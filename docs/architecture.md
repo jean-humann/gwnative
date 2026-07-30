@@ -259,7 +259,8 @@ detailed in [Client build certification](certification.md).
 
 The validated companion state is narrowed into the versioned v1 map, player,
 target, party, skillbar, effects, agent, quest, inventory, social, completion,
-camera, trade, UI-frame, and merchant item-ID schema. Large agent, quest,
+camera, trade, UI-frame, merchant item-ID, and character-progression schema.
+Large agent, quest,
 effect, bag, item, friend, UI-frame, and merchant pages remain fixed and
 bounded in the seqlock block rather than being copied onto the companion’s
 imported-memory stack. Inventory traversal retains only the owning
@@ -286,6 +287,11 @@ Merchant collection reads only the independently verified numeric
 `WorldContext::merch_items` array. It validates at most 512 IDs and publishes
 128 with explicit totals and truncation, without inferring a merchant window,
 catalog, price, quote, identity, or action from that transient array.
+Progression collection reads only fixed scalar `WorldContext` fields verified
+in both GWCA and Py4GW Reforged Native. It bounds both client copies of every
+duplicated counter before selecting the higher one, then enforces level,
+faction-cap, total-earned, and skill-point relationships. The append-only
+snapshot exposes no title derivation, encoded text, or progression write.
 The page publishes no faster than four times per second and Rust validates it
 again before making it available on token-gated loopback routes. There is no
 certified action endpoint. The overlay registry and Companion Tools consume the
