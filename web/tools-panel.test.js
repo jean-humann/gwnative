@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import {
   FEATURES,
   formatDuration,
+  formatMerchantSummary,
   formatTradeSummary,
   formatUiSummary,
   setPanelVisible,
@@ -33,6 +34,7 @@ describe('companion tools', () => {
     assert.equal(FEATURES.find((feature) => feature.id === 'camera').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'trade').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'ui').status, 'available');
+    assert.equal(FEATURES.find((feature) => feature.id === 'merchant').status, 'available');
   });
 
   it('summarises the bounded UI frame inventory', () => {
@@ -75,6 +77,26 @@ describe('companion tools', () => {
         partner: { items: [{}], itemsTruncated: true, gold: 3_333 },
       }),
       'OfferSent · you 2 items + 2222g · partner 1 item + 3333g · truncated',
+    );
+  });
+
+  it('summarises the bounded merchant item-ID page', () => {
+    assert.equal(formatMerchantSummary(null), 'Unavailable for this client build');
+    assert.equal(
+      formatMerchantSummary({ truncated: false, total: 0, itemIds: [] }),
+      'No merchant item IDs published',
+    );
+    assert.equal(
+      formatMerchantSummary({ truncated: false, total: 2, itemIds: [900, 901] }),
+      '2/2 merchant item IDs',
+    );
+    assert.equal(
+      formatMerchantSummary({
+        truncated: true,
+        total: 200,
+        itemIds: Array(128).fill(900),
+      }),
+      '128/200 merchant item IDs · first 128',
     );
   });
 
