@@ -87,23 +87,22 @@ export async function selectClient(
 }
 
 /**
- * Apply only the feature limits introduced by the selected runtime.
+ * Apply the independently certified facts for the selected official runtime.
  *
- * The native host prepared and described the JSPI module before the page
- * existed. A capable WebKit must keep those values byte-for-byte; changing them
- * here would silently disable the certified template and enhancement transforms
- * on macOS 27. Asyncify is the untransformed compatibility module, so only that
- * path replaces the two affected states.
+ * The host prepares both modules before this realm can perform the JSPI probe.
+ * Keeping the facts keyed by runtime prevents a macOS 26 Asyncify selection
+ * from inheriting JSPI hashes, while preserving the JSPI certificate unchanged
+ * on macOS 27.
  *
  * @param {(typeof CLIENTS)[keyof typeof CLIENTS]} client
  * @param {{ nativeCursor?: unknown, targetReadout?: unknown }} settings
  * @param {Record<string, unknown>} target
  */
 export function applyClientLimits(client, settings, target = globalThis) {
-  if (client.mode !== 'asyncify') return;
-  target.__gwnativeTemplateSave = 'asyncify';
-  target.__gwnativeEnhancements =
-    settings.nativeCursor === true || settings.targetReadout === true
-      ? 'uncertified'
-      : 'off';
+  const selected = target.__gwnativeRuntimeCapabilities?.[client.mode];
+  const wanted = settings.nativeCursor === true || settings.targetReadout === true;
+  target.__gwnativeClientBuild = selected?.build ?? null;
+  target.__gwnativeTemplateSave = selected?.templateSave ?? 'uncertified';
+  target.__gwnativeEnhancements = selected?.enhancements ?? (wanted ? 'uncertified' : 'off');
+  target.__gwnativeEnhancementManifest = selected?.enhancementManifest ?? null;
 }

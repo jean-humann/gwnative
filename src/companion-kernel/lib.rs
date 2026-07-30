@@ -1,36 +1,33 @@
 //! The companion module: a second WebAssembly instance that shares the client's
-//! memory and runs once per frame inside it.
+//! memory and observes it from a page-owned animation frame.
 //!
 //! It is built by `build.rs`, not by Cargo — no `Cargo.toml`, no dependencies,
 //! `no_std`, and a bare `rustc` invocation with `--import-memory` so the linker
 //! leaves `env.memory` to be supplied at instantiation. That memory is the
 //! game's own. Everything below reads it and nothing writes to it except the
-//! two regions the host allocated from the game's allocator and passed to
+//! private regions the host allocated from the game's allocator and passed to
 //! [`companion_init`].
 //!
-//! Why a separate module rather than code in the host: what it needs is a read
-//! of game state *at a consistent point in the frame*, and the only such point
-//! is inside the main loop. The host is on the other side of an event loop and
-//! sees memory at arbitrary moments, halfway through the update that moves
-//! every agent. So `crate::wasm::enhancement` clones the client's main loop and
-//! points its export at a dispatcher, the page installs [`companion_tick`] in
-//! the table slot that dispatcher calls, and this module calls the original
-//! loop first and then reads what it just finished writing.
+//! Why a separate module rather than code in the host: it can share the
+//! client's memory without copying the heap across the native/WebKit boundary.
+//! It deliberately never imports or calls a game function. That keeps it
+//! outside Asyncify's generated unwind/rewind call graph and prevents a
+//! suspension from resuming twice through a host-inserted dispatcher.
 //!
-//! Nothing here can trap. A trap inside the main loop takes the client with it,
-//! so every read is bounds-checked against the current memory size and every
-//! pointer chase is an `Option` that gives up rather than guesses. A layout
-//! that has gone stale therefore costs a snapshot, never the session.
+//! Every game-memory read is bounds-checked against the current memory size and
+//! every pointer chase is an `Option` that gives up rather than guesses. The
+//! page also catches a companion trap and permanently stops observation, so a
+//! stale layout fails closed rather than being retried every frame.
 //!
 //! Both snapshots are published under a seqlock: an odd sequence means a write
 //! is in flight, and a reader that sees the same even value before and after
 //! its copy knows nothing moved underneath it. That is what lets the renderer
 //! read from JavaScript without stopping the frame.
 //!
-//! `static mut` throughout, and `unsafe` throughout, because the wasm32 target
-//! is single-threaded and this is a freestanding module with no allocator, no
-//! atomics and no runtime — there is nothing for a `Mutex` or a `Cell` to buy
-//! and no second thread for either to protect against.
+//! The module has no mutable statics and no active data segments: both would
+//! live at linker-chosen addresses in the imported game memory. JavaScript
+//! allocates its state and stack through the game's allocator, relocates the
+//! exported stack pointer, and passes the private state explicitly.
 
 #![no_std]
 
@@ -101,40 +98,6 @@ struct Layout {
     cursor_texture_height: u32,
 }
 
-impl Layout {
-    const EMPTY: Self = Self {
-        context_root: 0,
-        agent_array: 0,
-        manual_target_agent_id: 0,
-        automatic_target_agent_id: 0,
-        game_context_slot: 0,
-        character_context: 0,
-        map_id: 0,
-        is_explorable: 0,
-        current_map_id: 0,
-        current_instance_type: 0,
-        player_number: 0,
-        agent_id: 0,
-        agent_x: 0,
-        agent_y: 0,
-        agent_type: 0,
-        agent_player_number: 0,
-        agent_model_type: 0,
-        cursor_active_art: 0,
-        cursor_software_model: 0,
-        cursor_show_count: 0,
-        cursor_color_buffer: 0,
-        cursor_art_hotspot: 0,
-        cursor_art_texture: 0,
-        cursor_handle_key: 0,
-        cursor_handle_object: 0,
-        cursor_view_texture: 0,
-        cursor_texture_type: 0,
-        cursor_texture_width: 0,
-        cursor_texture_height: 0,
-    };
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Snapshot {
@@ -177,23 +140,6 @@ struct CursorSnapshot {
 const _: [(); 116] = [(); size_of::<Layout>()];
 const _: [(); 64] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
-
-static mut SNAPSHOT_PTR: u32 = 0;
-static mut LAYOUT: Layout = Layout::EMPTY;
-static mut INITIALIZED: bool = false;
-static mut FEATURES: u32 = 0;
-static mut TICK_COUNT: u32 = 0;
-static mut SEQUENCE: u32 = 0;
-static mut CURSOR_PTR: u32 = 0;
-static mut CURSOR_SEQUENCE: u32 = 0;
-static mut CURSOR_GENERATION: u32 = 0;
-static mut CURSOR_PUBLISHED: CursorPublished = CursorPublished::EMPTY;
-
-#[link(wasm_import_module = "game")]
-extern "C" {
-    #[link_name = "enhancement_tick_original"]
-    fn tick_original(context: u32);
-}
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
@@ -252,7 +198,7 @@ unsafe fn read_f32(address: u32) -> Option<f32> {
 
 unsafe fn pointer(address: u32, required_bytes: u32) -> Option<u32> {
     let value = unsafe { read_u32(address)? };
-    (value & 3 == 0 && contains(value, required_bytes)).then_some(value)
+    (value != 0 && value & 3 == 0 && contains(value, required_bytes)).then_some(value)
 }
 
 fn finite_position(value: f32) -> bool {
@@ -275,19 +221,27 @@ fn square_root(value: f32) -> f32 {
 }
 
 fn range_band(distance_squared: f32) -> u32 {
-    const RANGES: [f32; 7] = [
-        166.0 * 166.0,
-        252.0 * 252.0,
-        322.0 * 322.0,
-        1_012.0 * 1_012.0,
-        1_248.0 * 1_248.0,
-        2_500.0 * 2_500.0,
-        5_000.0 * 5_000.0,
-    ];
-    RANGES
-        .iter()
-        .position(|limit| distance_squared <= *limit)
-        .map_or(8, |index| index as u32 + 1)
+    // Written out rather than iterated from an array. LLVM lowers a constant
+    // array to an active data segment, and this module imports the game's
+    // memory: instantiating such a segment would overwrite the same addresses
+    // in the client before the observer ever ran.
+    if distance_squared <= 166.0 * 166.0 {
+        1
+    } else if distance_squared <= 252.0 * 252.0 {
+        2
+    } else if distance_squared <= 322.0 * 322.0 {
+        3
+    } else if distance_squared <= 1_012.0 * 1_012.0 {
+        4
+    } else if distance_squared <= 1_248.0 * 1_248.0 {
+        5
+    } else if distance_squared <= 2_500.0 * 2_500.0 {
+        6
+    } else if distance_squared <= 5_000.0 * 5_000.0 {
+        7
+    } else {
+        8
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -500,15 +454,15 @@ unsafe fn collect(layout: Layout) -> State {
     state
 }
 
-unsafe fn publish(state: State) {
-    let next = unsafe { SEQUENCE }.wrapping_add(2) & !1;
-    let snapshot = unsafe { SNAPSHOT_PTR as *mut Snapshot };
+unsafe fn publish(runtime: &mut RuntimeState, state: State) {
+    let next = runtime.sequence.wrapping_add(2) & !1;
+    let snapshot = runtime.snapshot_ptr as *mut Snapshot;
     unsafe {
         write_volatile(&mut (*snapshot).sequence, next.wrapping_sub(1));
         write_volatile(&mut (*snapshot).magic, MAGIC);
         write_volatile(&mut (*snapshot).abi_and_size, ABI_AND_SIZE);
         write_volatile(&mut (*snapshot).flags, state.flags);
-        write_volatile(&mut (*snapshot).tick_count, TICK_COUNT);
+        write_volatile(&mut (*snapshot).tick_count, runtime.tick_count);
         write_volatile(&mut (*snapshot).map_id, state.map_id);
         write_volatile(&mut (*snapshot).instance_type, state.instance_type);
         write_volatile(&mut (*snapshot).player_id, state.player.id);
@@ -521,8 +475,8 @@ unsafe fn publish(state: State) {
         write_volatile(&mut (*snapshot).distance, state.distance);
         write_volatile(&mut (*snapshot).range_band, state.band);
         write_volatile(&mut (*snapshot).sequence, next);
-        SEQUENCE = next;
     }
+    runtime.sequence = next;
 }
 
 #[derive(Clone, Copy)]
@@ -544,14 +498,27 @@ struct CursorPublished {
     hotspot_y: u32,
 }
 
-impl CursorPublished {
-    const EMPTY: Self = Self {
-        flags: 0,
-        hash: 0,
-        hotspot_x: 0,
-        hotspot_y: 0,
-    };
+const RUNTIME_MAGIC: u32 = 0x5254_5747;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RuntimeState {
+    magic: u32,
+    abi_and_size: u32,
+    layout: Layout,
+    snapshot_ptr: u32,
+    cursor_ptr: u32,
+    features: u32,
+    tick_count: u32,
+    sequence: u32,
+    cursor_sequence: u32,
+    cursor_generation: u32,
+    cursor_published: CursorPublished,
 }
+
+const RUNTIME_BYTES: u32 = size_of::<RuntimeState>() as u32;
+const RUNTIME_ABI_AND_SIZE: u32 = (RUNTIME_BYTES << 16) | 1;
+const _: [(); 168] = [(); size_of::<RuntimeState>()];
 
 // FNV-1a over the source BGRA words, so an unchanged cursor costs one pass and
 // no conversion. None means unreadable or never committed by the game.
@@ -620,9 +587,13 @@ unsafe fn collect_cursor(layout: Layout) -> Result<CursorState, u32> {
 
 // `source` is None for a header-only update: it clears CURSOR_VALID without
 // disturbing the last good pixels.
-unsafe fn publish_cursor(published: CursorPublished, source: Option<u32>) {
-    let next = unsafe { CURSOR_SEQUENCE }.wrapping_add(2) & !1;
-    let cursor = unsafe { CURSOR_PTR as *mut CursorSnapshot };
+unsafe fn publish_cursor(
+    runtime: &mut RuntimeState,
+    published: CursorPublished,
+    source: Option<u32>,
+) {
+    let next = runtime.cursor_sequence.wrapping_add(2) & !1;
+    let cursor = runtime.cursor_ptr as *mut CursorSnapshot;
     unsafe {
         write_volatile(&mut (*cursor).sequence, next.wrapping_sub(1));
         write_volatile(&mut (*cursor).magic, CURSOR_MAGIC);
@@ -631,8 +602,8 @@ unsafe fn publish_cursor(published: CursorPublished, source: Option<u32>) {
     }
     if let Some(source) = source {
         unsafe {
-            CURSOR_GENERATION = CURSOR_GENERATION.wrapping_add(1);
-            write_volatile(&mut (*cursor).generation, CURSOR_GENERATION);
+            runtime.cursor_generation = runtime.cursor_generation.wrapping_add(1);
+            write_volatile(&mut (*cursor).generation, runtime.cursor_generation);
             write_volatile(&mut (*cursor).width, CURSOR_EDGE);
             write_volatile(&mut (*cursor).height, CURSOR_EDGE);
             write_volatile(&mut (*cursor).hotspot_x, published.hotspot_x);
@@ -651,14 +622,14 @@ unsafe fn publish_cursor(published: CursorPublished, source: Option<u32>) {
     }
     unsafe {
         write_volatile(&mut (*cursor).sequence, next);
-        CURSOR_SEQUENCE = next;
-        CURSOR_PUBLISHED = published;
     }
+    runtime.cursor_sequence = next;
+    runtime.cursor_published = published;
 }
 
-unsafe fn tick_cursor(layout: Layout) {
-    let last = unsafe { CURSOR_PUBLISHED };
-    match unsafe { collect_cursor(layout) } {
+unsafe fn tick_cursor(runtime: &mut RuntimeState) {
+    let last = runtime.cursor_published;
+    match unsafe { collect_cursor(runtime.layout) } {
         Ok(state) => {
             let published = CursorPublished {
                 flags: FLAG_CURSOR_VALID
@@ -674,12 +645,16 @@ unsafe fn tick_cursor(layout: Layout) {
                     || published.hash != last.hash
                     || published.hotspot_x != last.hotspot_x
                     || published.hotspot_y != last.hotspot_y;
-                unsafe { publish_cursor(published, bitmap.then_some(state.source)) };
+                unsafe {
+                    publish_cursor(runtime, published, bitmap.then_some(state.source))
+                };
             }
         }
         Err(flags) => {
             if flags != last.flags {
-                unsafe { publish_cursor(CursorPublished { flags, ..last }, None) };
+                unsafe {
+                    publish_cursor(runtime, CursorPublished { flags, ..last }, None)
+                };
             }
         }
     }
@@ -687,8 +662,8 @@ unsafe fn tick_cursor(layout: Layout) {
 
 // The region comes from the game's allocator, so clear it before the renderer
 // can observe it.
-unsafe fn clear_cursor() {
-    let cursor = unsafe { CURSOR_PTR as *mut CursorSnapshot };
+unsafe fn clear_cursor(runtime: &RuntimeState) {
+    let cursor = runtime.cursor_ptr as *mut CursorSnapshot;
     unsafe {
         write_volatile(&mut (*cursor).generation, 0);
         write_volatile(&mut (*cursor).width, 0);
@@ -707,6 +682,8 @@ unsafe fn clear_cursor() {
 
 #[no_mangle]
 pub unsafe extern "C" fn companion_init(
+    runtime_ptr: u32,
+    runtime_size: u32,
     snapshot_ptr: u32,
     snapshot_size: u32,
     config_ptr: u32,
@@ -715,61 +692,99 @@ pub unsafe extern "C" fn companion_init(
     cursor_size: u32,
     features: u32,
 ) -> u32 {
-    if features == 0
-        || features & !KNOWN_FEATURES != 0
-        || config_size != CONFIG_BYTES
+    if runtime_size != RUNTIME_BYTES
+        || runtime_ptr == 0
+        || runtime_ptr & 3 != 0
+        || !contains(runtime_ptr, runtime_size)
+    {
+        return 2;
+    }
+    if features == 0 || features & !KNOWN_FEATURES != 0 {
+        return 3;
+    }
+    if config_size != CONFIG_BYTES
         || config_ptr & 3 != 0
         || !contains(config_ptr, config_size)
-        || !valid_region(
-            features & FEATURE_TARGET_READOUT != 0,
-            snapshot_ptr,
-            snapshot_size,
-            SNAPSHOT_BYTES,
-        )
-        || !valid_region(
-            features & FEATURE_NATIVE_CURSOR != 0,
-            cursor_ptr,
-            cursor_size,
-            CURSOR_BYTES,
-        )
     {
-        return 0;
+        return 4;
+    }
+    if !valid_region(
+        features & FEATURE_TARGET_READOUT != 0,
+        snapshot_ptr,
+        snapshot_size,
+        SNAPSHOT_BYTES,
+    ) {
+        return 5;
+    }
+    if !valid_region(
+        features & FEATURE_NATIVE_CURSOR != 0,
+        cursor_ptr,
+        cursor_size,
+        CURSOR_BYTES,
+    ) {
+        return 6;
     }
     unsafe {
-        SNAPSHOT_PTR = snapshot_ptr;
-        CURSOR_PTR = cursor_ptr;
-        LAYOUT = read_volatile(config_ptr as *const Layout);
-        FEATURES = features;
-        INITIALIZED = true;
-        TICK_COUNT = 0;
-        SEQUENCE = 0;
-        CURSOR_SEQUENCE = 0;
-        CURSOR_GENERATION = 0;
-        CURSOR_PUBLISHED = CursorPublished::EMPTY;
+        let runtime = &mut *(runtime_ptr as *mut RuntimeState);
+        write_volatile(&mut runtime.magic, RUNTIME_MAGIC);
+        write_volatile(&mut runtime.abi_and_size, RUNTIME_ABI_AND_SIZE);
+        write_volatile(
+            &mut runtime.layout,
+            read_volatile(config_ptr as *const Layout),
+        );
+        write_volatile(&mut runtime.snapshot_ptr, snapshot_ptr);
+        write_volatile(&mut runtime.cursor_ptr, cursor_ptr);
+        write_volatile(&mut runtime.features, features);
+        write_volatile(&mut runtime.tick_count, 0);
+        write_volatile(&mut runtime.sequence, 0);
+        write_volatile(&mut runtime.cursor_sequence, 0);
+        write_volatile(&mut runtime.cursor_generation, 0);
+        write_volatile(&mut runtime.cursor_published.flags, 0);
+        write_volatile(&mut runtime.cursor_published.hash, 0);
+        write_volatile(&mut runtime.cursor_published.hotspot_x, 0);
+        write_volatile(&mut runtime.cursor_published.hotspot_y, 0);
         if features & FEATURE_TARGET_READOUT != 0 {
-            publish(State::empty());
+            publish(runtime, State::empty());
         }
         if features & FEATURE_NATIVE_CURSOR != 0 {
-            clear_cursor();
-            publish_cursor(CursorPublished::EMPTY, None);
+            clear_cursor(runtime);
+            publish_cursor(
+                runtime,
+                CursorPublished {
+                    flags: 0,
+                    hash: 0,
+                    hotspot_x: 0,
+                    hotspot_y: 0,
+                },
+                None,
+            );
         }
     }
     1
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn companion_tick(context: u32) {
-    unsafe {
-        tick_original(context);
-        if !INITIALIZED {
-            return;
-        }
-        if FEATURES & FEATURE_TARGET_READOUT != 0 {
-            TICK_COUNT = TICK_COUNT.wrapping_add(1);
-            publish(collect(LAYOUT));
-        }
-        if FEATURES & FEATURE_NATIVE_CURSOR != 0 {
-            tick_cursor(LAYOUT);
-        }
+pub unsafe extern "C" fn companion_observe(runtime_ptr: u32) {
+    if runtime_ptr == 0 || runtime_ptr & 3 != 0 || !contains(runtime_ptr, RUNTIME_BYTES) {
+        return;
+    }
+    let runtime = unsafe { &mut *(runtime_ptr as *mut RuntimeState) };
+    if runtime.magic != RUNTIME_MAGIC
+        || runtime.abi_and_size != RUNTIME_ABI_AND_SIZE
+        || runtime.features == 0
+        || runtime.features & !KNOWN_FEATURES != 0
+    {
+        return;
+    }
+    if runtime.features & FEATURE_TARGET_READOUT != 0
+        && valid_region(true, runtime.snapshot_ptr, SNAPSHOT_BYTES, SNAPSHOT_BYTES)
+    {
+        runtime.tick_count = runtime.tick_count.wrapping_add(1);
+        unsafe { publish(runtime, collect(runtime.layout)) };
+    }
+    if runtime.features & FEATURE_NATIVE_CURSOR != 0
+        && valid_region(true, runtime.cursor_ptr, CURSOR_BYTES, CURSOR_BYTES)
+    {
+        unsafe { tick_cursor(runtime) };
     }
 }

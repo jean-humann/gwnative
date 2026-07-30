@@ -190,7 +190,7 @@ The secrets are:
 | `APPLE_NOTARY_KEY_P8` | Base64-encoded App Store Connect API key |
 | `APPLE_NOTARY_KEY_ID` | API key ID |
 | `APPLE_NOTARY_KEY_ISSUER` | API issuer UUID |
-| `SPARKLE_PRIVATE_KEY` | EdDSA private key for update archives |
+| `SPARKLE_PRIVATE_KEY` | EdDSA private key for update archives and client-certificate feeds |
 
 The workflow creates a temporary Keychain, imports the identity and public
 intermediate chain, grants access only to signing tools, stores the notarization

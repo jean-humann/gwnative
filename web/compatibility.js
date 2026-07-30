@@ -24,7 +24,7 @@
  * to tell.
  *
  * @param {unknown} state `window.__gwnativeTemplateSave` — 'ready',
- *   'uncertified', 'asyncify' or 'failed'
+ *   'uncertified' or 'failed'
  * @returns {string | null}
  */
 export function templateSaveNotice(state) {
@@ -34,14 +34,6 @@ export function templateSaveNotice(state) {
       'the client build ArenaNet is currently shipping. Everything else works, ' +
       'including the characters and settings already on this Mac. Saving comes ' +
       'back in a later release of this app.'
-    );
-  }
-  if (state === 'asyncify') {
-    return (
-      'This Mac uses ArenaNet\'s Asyncify compatibility client, so the game is ' +
-      'playable but build-template saving and optional enhancements are ' +
-      'unavailable. The system WKWebView does not implement JSPI; installing ' +
-      'Safari Technology Preview does not change WKWebView.'
     );
   }
   if (state === 'failed') {
@@ -54,23 +46,58 @@ export function templateSaveNotice(state) {
 }
 
 /**
+ * What to tell a player who enabled an optional observer tool.
+ *
+ * Template certification and read-only layout certification are deliberately
+ * independent: a new pair can safely regain template saving before both live
+ * runtime fixtures have proved its memory layout.
+ *
+ * @param {unknown} state `window.__gwnativeEnhancements`
+ * @returns {string | null}
+ */
+export function enhancementNotice(state) {
+  if (state === 'uncertified') {
+    return (
+      'The native cursor and target-distance tools are disabled for this client ' +
+      'build because its read-only layout has not passed both runtime checks yet. ' +
+      'The game and build templates still work.'
+    );
+  }
+  if (state === 'failed') {
+    return (
+      'The native cursor and target-distance tools are disabled because preparing ' +
+      'their certified observer did not finish. The Diagnostics window says what failed.'
+    );
+  }
+  return null;
+}
+
+/**
  * Whether this launch should interrupt to say it, and what it would say.
  *
- * The uncertified and Asyncify cases qualify. `failed` is a fault on this Mac
- * rather than news about the client, it is already in the log and in the
- * settings panel, and — because a build that failed to prepare has no hash —
- * there would be nothing to remember an acknowledgement by, so it would ask at
- * every launch forever. A notice that cannot be silenced is one that stops
- * being read.
+ * The uncertified case qualifies. `failed` is a fault on this Mac rather than
+ * news about the client, it is already in the log and in the settings panel,
+ * and — because a build that failed to prepare has no hash — there would be
+ * nothing to remember an acknowledgement by, so it would ask at every launch
+ * forever. A notice that cannot be silenced is one that stops being read.
  *
- * @param {{ state: unknown, build: unknown, seenFor: unknown }} where
- *   `state` and `build` are what the host injected; `seenFor` is the build the
- *   player has already acknowledged, from settings.
+ * @param {{ state: unknown, enhancements?: unknown, build: unknown,
+ *           seenFor: unknown }} where `state`, `enhancements` and `build` are
+ *   what the host injected; `seenFor` is the build the player has already
+ *   acknowledged, from settings.
  * @returns {{ sentence: string, build: string } | null}
  */
-export function announcement({ state, build, seenFor }) {
-  if (state !== 'uncertified' && state !== 'asyncify') return null;
-  const sentence = templateSaveNotice(state);
+export function announcement({
+  state,
+  enhancements = 'off',
+  build,
+  seenFor,
+}) {
+  const sentence = state === 'uncertified'
+    ? templateSaveNotice(state)
+    : enhancements === 'uncertified'
+      ? enhancementNotice(enhancements)
+      : null;
   if (sentence === null) return null;
   // No hash means nothing to key the acknowledgement to. Saying it anyway would
   // be a sentence the player can never turn off.
@@ -99,6 +126,7 @@ export function announcement({ state, build, seenFor }) {
 export async function announceCompatibility({ log, save, ...where }) {
   const say = announcement({
     state: where.state ?? window.__gwnativeTemplateSave,
+    enhancements: where.enhancements ?? window.__gwnativeEnhancements,
     build: where.build ?? window.__gwnativeClientBuild,
     seenFor: where.seenFor ?? null,
   });

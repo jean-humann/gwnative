@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "sequence": 1,
+  "transformAbi": 2,
+  "families": [
+    {
+      "programId": 1,
+      "buildId": 38797,
+      "layout": {
+        "snapshotAbi": 1,
+        "snapshotBytes": 64,
+        "cursorSnapshotAbi": 1,
+        "cursorSnapshotBytes": 4160,
+        "layoutWords": [
+          5902048,
+          5918296,
+          5912908,
+          5912904,
+          6,
+          68,
+          408,
+          412,
+          564,
+          572,
+          684,
+          44,
+          116,
+          120,
+          156,
+          244,
+          246,
+          5904096,
+          5904100,
+          5904104,
+          2723408,
+          0,
+          12,
+          8,
+          0,
+          8,
+          12,
+          20,
+          24
+        ],
+        "dataSha256": "cd8a8bd6852e1e99a1555ad0db06eaafbe83765c96811c60a0a1b06032d93325",
+        "elementSha256": "8f775957d4dd078f2a1a25eac360cd46ba98ab376182aa1cb4cffda9c713a80a",
+        "sharedGlobalPrefixSha256": "cd51ce84ff53683e64799f05f15a424a797261513dabbd758fa0504b52f17f11",
+        "sharedGlobalCount": 10
+      },
+      "runtimes": [
+        {
+          "runtime": "jspi",
+          "wasmSha256": "3229678d3fd7d2f0e309530086a614d97f02e7eeb3ca12650ababfd2eb360817",
+          "glueSha256": "58ecc6377397f01919d8def58e802e19fbfd6ce13f421dbf14123a667e34f7d0",
+          "template": {
+            "outputSha256": "9ee332604a9b2adbdfa1a8ab217f4fd1dac58b01a2443e037bc5bd11f279d094",
+            "importCount": 219,
+            "carrierImport": 207,
+            "bridges": [
+              {
+                "kind": "ensureDirectory",
+                "stubFunction": 185,
+                "stubBodySha256": "c3cfbb01533c9cdce3fe30fd053d23f0a5244f20f689ca56ecfad671b1fa2f56",
+                "callSites": [
+                  { "localFunction": 9541, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 11528, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 12217, "occurrence": 0, "expectedTargetCalls": 1 }
+                ]
+              },
+              {
+                "kind": "findFiles",
+                "stubFunction": 186,
+                "stubBodySha256": "f09a7a12954169ae595d12d870e69a4c0092003157d72523d626d2a3990241e2",
+                "callSites": [
+                  { "localFunction": 9530, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 9531, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 11528, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 12217, "occurrence": 0, "expectedTargetCalls": 1 }
+                ]
+              },
+              {
+                "kind": "fileBaseName",
+                "stubFunction": 197,
+                "stubBodySha256": "ffa2edca2d3a0ef88bfcea9e5cf488eb6a4d98e7f1b4011ce4fa3de388c0b4ea",
+                "callSites": [
+                  { "localFunction": 9530, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 9531, "occurrence": 0, "expectedTargetCalls": 1 }
+                ]
+              },
+              {
+                "kind": "deleteFile",
+                "stubFunction": 333,
+                "stubBodySha256": "554a16f69a25ac041fba2fac73ffd9dcb5838c8f096c9a7ea26b50b5dde9cb8e",
+                "callSites": [
+                  { "localFunction": 459, "occurrence": 0, "expectedTargetCalls": 1 }
+                ]
+              },
+              {
+                "kind": "fileExists",
+                "stubFunction": 552,
+                "stubBodySha256": null,
+                "callSites": [
+                  { "localFunction": 9541, "occurrence": 0, "expectedTargetCalls": 2 }
+                ]
+              }
+            ]
+          },
+          "passiveEnhancements": true
+        },
+        {
+          "runtime": "asyncify",
+          "wasmSha256": "41f8be442d1a11a378d9cad22615de89c1b30ccc84c1fa73daeed36f08cf6ac6",
+          "glueSha256": "aabef96eb79469cf6099c5427ec970bc43eb4624cf43511e5aef3dda1ca4542d",
+          "template": {
+            "outputSha256": "6061405f54078786549f18ea4cb0c8a5711932388ba1f9bd1b5c30d6acff9ec5",
+            "importCount": 219,
+            "carrierImport": 207,
+            "bridges": [
+              {
+                "kind": "ensureDirectory",
+                "stubFunction": 185,
+                "stubBodySha256": "39c424cc95c7c0615503df80b34ffd66238df56362d9e62ccbc34dff57e3aa66",
+                "callSites": [
+                  { "localFunction": 9541, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 11528, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 12217, "occurrence": 0, "expectedTargetCalls": 1 }
+                ]
+              },
+              {
+                "kind": "findFiles",
+                "stubFunction": 186,
+                "stubBodySha256": "cef640c73dd860a65dde03408a2173dbaf6b9d40e14dd877c2f6fa53f3947992",
+                "callSites": [
+                  { "localFunction": 9530, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 9531, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 11528, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 12217, "occurrence": 0, "expectedTargetCalls": 1 }
+                ]
+              },
+              {
+                "kind": "fileBaseName",
+                "stubFunction": 197,
+                "stubBodySha256": "4c409407282d5d0a7167a0a86d50f56d39ccc0d447a3514007391a15815a3006",
+                "callSites": [
+                  { "localFunction": 9530, "occurrence": 0, "expectedTargetCalls": 1 },
+                  { "localFunction": 9531, "occurrence": 0, "expectedTargetCalls": 1 }
+                ]
+              },
+              {
+                "kind": "deleteFile",
+                "stubFunction": 333,
+                "stubBodySha256": "89814f42218fe9e7a1d9ccf877d013d790d69edce1ab296ae9c4ca3952688516",
+                "callSites": [
+                  { "localFunction": 459, "occurrence": 0, "expectedTargetCalls": 1 }
+                ]
+              },
+              {
+                "kind": "fileExists",
+                "stubFunction": 552,
+                "stubBodySha256": null,
+                "callSites": [
+                  { "localFunction": 9541, "occurrence": 0, "expectedTargetCalls": 2 }
+                ]
+              }
+            ]
+          },
+          "passiveEnhancements": true
+        }
+      ]
+    }
+  ]
+}

@@ -24,7 +24,10 @@
 // unreachable. Tabs keep any one view short enough to fit; the dialog scrolls
 // inside itself for the sizes where even that is not enough.
 
-import { templateSaveNotice } from './compatibility.js';
+import {
+  enhancementNotice,
+  templateSaveNotice,
+} from './compatibility.js';
 import * as diagnostics from './diagnostics.js';
 
 /** How often the game-image figure is re-read while the panel is open. */
@@ -415,9 +418,12 @@ export function installSettingsPanel({
 
   const notice = document.getElementById('settings-compat');
   if (notice) {
-    const sentence = templateSaveNotice(globalThis.__gwnativeTemplateSave);
-    notice.textContent = sentence ?? '';
-    notice.hidden = sentence === null;
+    const sentences = [
+      templateSaveNotice(globalThis.__gwnativeTemplateSave),
+      enhancementNotice(globalThis.__gwnativeEnhancements),
+    ].filter((sentence) => sentence !== null);
+    notice.textContent = sentences.join(' ');
+    notice.hidden = sentences.length === 0;
   }
 
   /** The `<select>` for each control, by key. */

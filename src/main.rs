@@ -79,6 +79,24 @@ fn main() {
             std::process::exit(i32::from(exit.failed) * 2);
         }
     };
+    if command == cli::Command::Certify {
+        let build_id = std::env::var("GWNATIVE_CERTIFICATE_BUILD_ID")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| {
+                eprintln!("GWNATIVE_CERTIFICATE_BUILD_ID must be a positive integer");
+                std::process::exit(2);
+            });
+        match wasm::certificate_candidate(&paths::web_root(), 1, build_id) {
+            Ok(candidate) => println!("{candidate}"),
+            Err(reason) => {
+                eprintln!("{reason}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let force_sync = command == cli::Command::Sync;
     let headless = command == cli::Command::Serve;
     // The two commands above are the runs with a terminal attached. Everything
@@ -153,53 +171,23 @@ fn main() {
     // clicks Save in the client's template window and watches nothing happen is
     // owed a sentence about why, and the log is not where they will look for
     // it; `settings-panel.js` is what turns this into that sentence.
-    let (derived_wasm, module) = match wasm::prepare(
-        &root.join("Gw.jspi.wasm"),
+    let enhance = settings.get().enhancements_enabled();
+    let wasm::Prepared {
+        derived: derived_wasm,
+        module,
+    } = match wasm::prepare(
+        &root,
         &paths::derived_dir(),
-        settings.get().enhancements_enabled(),
+        &paths::certificate_dir(),
+        enhance,
     ) {
-        Ok(wasm::Prepared {
-            client,
-            derived: Some(path),
-            enhancements,
-        }) => (
-            Some(path),
-            wasm::Module {
-                build: Some(client),
-                template_save: "ready",
-                enhancements,
-            },
-        ),
-        Ok(wasm::Prepared {
-            client,
-            derived: None,
-            enhancements,
-        }) => {
-            note!("[gwnative] template save: unavailable, this client build is not certified");
-            (
-                None,
-                wasm::Module {
-                    build: Some(client),
-                    template_save: "uncertified",
-                    enhancements,
-                },
-            )
-        }
+        Ok(prepared) => prepared,
         Err(reason) => {
-            note!("[gwnative] template save unavailable: {reason}");
-            (
-                None,
-                wasm::Module {
-                    build: None,
-                    template_save: "failed",
-                    enhancements: wasm::enhancements::FAILED,
-                },
-            )
+            note!("[gwnative] client certification unavailable: {reason}");
+            wasm::failed(enhance)
         }
     };
-    if module.enhancements != wasm::enhancements::OFF {
-        note!("[gwnative] enhancements: {}", module.enhancements);
-    }
+    module.logs();
 
     let token = session_token();
     let loopback = match server::spawn(

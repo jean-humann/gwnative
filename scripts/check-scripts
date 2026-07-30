@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 for script in \
 	scripts/appcast \
 	scripts/bundle \
+	scripts/certificate-sign \
 	scripts/check-scripts \
 	scripts/icon \
 	scripts/publish \
@@ -16,5 +17,5 @@ for script in \
 	sh -n "$script"
 done
 
-python3 -m py_compile scripts/benchmark scripts/check-docs
+python3 -m py_compile scripts/benchmark scripts/check-docs scripts/client-certify
 echo "scripts: shell and Python syntax ok"

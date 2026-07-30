@@ -29,6 +29,12 @@ pub fn derived_dir() -> PathBuf {
     support_dir().join("derived")
 }
 
+/// Verified build-certificate updates, separate from derived modules so
+/// clearing one never rolls the other back.
+pub fn certificate_dir() -> PathBuf {
+    support_dir().join("certificates")
+}
+
 /// The directory the loopback origin serves, and the one `patch::sync` fills.
 ///
 /// Development runs straight out of the source tree. A packaged build does

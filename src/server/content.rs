@@ -156,11 +156,7 @@ fn static_file(
 ) -> std::io::Result<()> {
     // The derived client answers to the base module's own name, so the page
     // asks for one thing and the glue's `locateFile` needs no special case.
-    let derived = context
-        .derived_wasm
-        .as_ref()
-        .filter(|_| request.path == "Gw.jspi.wasm")
-        .cloned();
+    let derived = context.derived_wasm.get(&request.path).cloned();
     let Some(file) = derived.or_else(|| resolve(&context.root, &request.path)) else {
         note!("[loopback] 403 /{}", request.path);
         return text(stream, 403, "forbidden");

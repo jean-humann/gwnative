@@ -52,39 +52,71 @@ describe('client runtime selection', () => {
     );
   });
 
-  it('leaves the native JSPI module state completely untouched', () => {
+  it('applies only the independently selected JSPI certificate', () => {
     const state = {
-      __gwnativeTemplateSave: 'ready',
-      __gwnativeClientBuild: 'certified-jspi-build',
-      __gwnativeEnhancements: 'ready',
+      __gwnativeRuntimeCapabilities: {
+        jspi: {
+          build: 'certified-jspi-build',
+          templateSave: 'ready',
+          enhancements: 'ready',
+          enhancementManifest: { buildId: 38797 },
+        },
+        asyncify: {
+          build: 'certified-asyncify-build',
+          templateSave: 'ready',
+          enhancements: 'ready',
+          enhancementManifest: { buildId: 38797 },
+        },
+      },
     };
     applyClientLimits(
       { mode: 'jspi', glue: 'Gw.jspi.js', wasm: 'Gw.jspi.wasm' },
       { nativeCursor: true, targetReadout: true },
       state,
     );
-    assert.deepEqual(state, {
-      __gwnativeTemplateSave: 'ready',
-      __gwnativeClientBuild: 'certified-jspi-build',
-      __gwnativeEnhancements: 'ready',
-    });
+    assert.equal(state.__gwnativeTemplateSave, 'ready');
+    assert.equal(state.__gwnativeClientBuild, 'certified-jspi-build');
+    assert.equal(state.__gwnativeEnhancements, 'ready');
+    assert.deepEqual(state.__gwnativeEnhancementManifest, { buildId: 38797 });
   });
 
-  it('limits only the untransformed Asyncify module', () => {
+  it('does not inherit JSPI facts when Asyncify is selected', () => {
     const state = {
-      __gwnativeTemplateSave: 'ready',
-      __gwnativeClientBuild: 'same-patch-identity',
-      __gwnativeEnhancements: 'ready',
+      __gwnativeRuntimeCapabilities: {
+        jspi: {
+          build: 'jspi',
+          templateSave: 'ready',
+          enhancements: 'ready',
+          enhancementManifest: { runtime: 'jspi' },
+        },
+        asyncify: {
+          build: 'asyncify',
+          templateSave: 'ready',
+          enhancements: 'ready',
+          enhancementManifest: { runtime: 'asyncify' },
+        },
+      },
     };
     applyClientLimits(
       { mode: 'asyncify', glue: 'Gw.js', wasm: 'Gw.wasm' },
       { nativeCursor: true, targetReadout: false },
       state,
     );
-    assert.deepEqual(state, {
-      __gwnativeTemplateSave: 'asyncify',
-      __gwnativeClientBuild: 'same-patch-identity',
-      __gwnativeEnhancements: 'uncertified',
-    });
+    assert.equal(state.__gwnativeTemplateSave, 'ready');
+    assert.equal(state.__gwnativeClientBuild, 'asyncify');
+    assert.equal(state.__gwnativeEnhancements, 'ready');
+    assert.deepEqual(state.__gwnativeEnhancementManifest, { runtime: 'asyncify' });
+  });
+
+  it('fails closed when the selected artifact has no certificate', () => {
+    const state = {};
+    applyClientLimits(
+      { mode: 'asyncify', glue: 'Gw.js', wasm: 'Gw.wasm' },
+      { nativeCursor: true, targetReadout: false },
+      state,
+    );
+    assert.equal(state.__gwnativeTemplateSave, 'uncertified');
+    assert.equal(state.__gwnativeEnhancements, 'uncertified');
+    assert.equal(state.__gwnativeEnhancementManifest, null);
   });
 });

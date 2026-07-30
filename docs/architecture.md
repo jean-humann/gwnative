@@ -16,10 +16,11 @@ flowchart LR
 
     subgraph WebKit["WebKit processes"]
         Harness["Web harness\ninput, graphics, audio, filesystem"]
-        Client["ArenaNet client\nGw.jspi.js + Gw.jspi.wasm"]
+        Client["ArenaNet client\nJSPI or Asyncify pair"]
         Companion["Optional companion WASM\nread-only game state"]
         Harness <--> Client
-        Client --> Companion
+        Harness --> Companion
+        Companion -. "shared read-only memory" .-> Client
     end
 
     Origin <--> Harness
@@ -159,31 +160,46 @@ not pay for a full reread.
 
 ## WebAssembly compatibility layers
 
-ArenaNet's current module has broken or missing file routines for build
-templates. `src/wasm` applies a transform only when the input SHA-256 matches a
-certified build:
+ArenaNet's modules have broken or missing file routines for build templates.
+`src/wasm` prepares the official JSPI and Asyncify modules independently. A
+signed build-family certificate must match both the JavaScript and WebAssembly
+SHA-256 for the selected runtime before its transform is considered:
 
 1. append small forwarding functions;
-2. redirect specific call sites without shifting later bytecode;
+2. locate calls by certified target and occurrence rather than byte offset;
 3. use impossible negative directory descriptors as bridge markers; and
 4. handle those markers in `web/template-save.js` against IDBFS.
 
-The transform asserts the exact output hash. Unknown or failed transforms fall
-back to the unmodified module, preserving playability at the cost of the
+Asyncify can change every body and add functions, types and globals, so its
+anchors and output hash are separate from JSPI's. The verifier validates the
+resulting WebAssembly, proves all sections other than function and code are
+byte-identical, proves the existing bodies differ only at authorized calls, and
+then asserts the runtime-specific output hash. Unknown or failed transforms
+fall back to the unmodified module, preserving playability at the cost of the
 compatibility feature.
 
-When either optional enhancement is enabled, a second certified transform
-clones the client's main-loop function, adds a hook slot and manifest, and
-dispatches through an optional table entry. `build.rs` compiles
-`src/companion-kernel/lib.rs` directly as dependency-free `no_std`
-`wasm32-unknown-unknown` code and embeds it in the host.
+Optional enhancements do not transform or call back into the game. `build.rs`
+compiles `src/companion-kernel/lib.rs` directly as dependency-free `no_std`
+`wasm32-unknown-unknown` code and embeds it in the host. The companion imports
+only the selected client's memory, performs bounds-checked read-only pointer
+traversal, and publishes fixed state and cursor blocks through a seqlock. The
+page validates each snapshot before rendering it.
 
-The companion imports the client's memory, performs bounds-checked read-only
-pointer traversal at a coherent point in the game loop, and publishes fixed
-state and cursor blocks through a seqlock. The page validates the snapshot again
-before rendering it. Installation allocates through the client's own allocator,
-instantiates the companion, fills the table slot, and only then enables the
-hook.
+An imported-memory module cannot safely use linker-chosen memory addresses:
+active data segments, mutable statics, and its default stack would all overlap
+the client. The build rejects any companion data segment or start function.
+The page allocates private state and a 64 KiB stack through the client's
+allocator, relocates the exported mutable stack pointer before the first
+companion call, and passes the state pointer explicitly on every observation.
+
+JavaScript drives the observer from its own animation frame. JSPI can be read
+directly. Asyncify is read only while its generated `asyncify_get_state` export
+reports Normal (0); Unwinding and Rewinding are skipped, and the companion has
+no game import through which it could resume or re-enter the instrumented call
+graph.
+
+The certificate feed, fast ArenaNet patch workflow, signing boundary and
+rollback rules are detailed in [Client build certification](certification.md).
 
 ## WebKit and native integration
 

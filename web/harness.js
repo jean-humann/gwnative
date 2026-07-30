@@ -337,10 +337,6 @@ let recovery;
 // `Module.wasmExports`: this build's glue does not export that name, and asking
 // for it does not return undefined — it aborts.
 let gameInstance;
-// Kept beside it because the enhancements read their manifest off the module
-// rather than the instance — `WebAssembly.Module.customSections` — and by the
-// time the runtime is initialised, `instantiateWasm`'s `result` is long gone.
-let gameModule;
 
 Module = {
   canvas: document.getElementById('canvas'),
@@ -430,7 +426,6 @@ Module = {
       );
       log('wasm instantiated');
       gameInstance = result.instance;
-      gameModule = result.module;
       success(result.instance, result.module);
     })().catch((error) => fail(`The game client could not start: ${error}`));
 
@@ -582,13 +577,9 @@ Module = {
 /**
  * Install optional enhancements, if this launch is one that has them.
  *
- * Three things have to line up, and each one is a different party's decision:
- * the player turned a tool on, the host answered by deriving a client that has
- * the hook (`window.__gwnativeEnhancements`, `'ready'`), and the module the
- * page actually instantiated carries the manifest that proves it. The last is
- * checked rather than assumed because it is the only one of the three this
- * page can see for itself, and the cost of being wrong is a companion reading
- * whatever happens to be at those offsets.
+ * Three things have to line up: the player turned a tool on, the host selected
+ * an exact signed runtime certificate, and that certificate carries the
+ * passive-observer layout for the same artifact.
  *
  * `enhancements.js` and everything under it is imported here rather than in
  * `boot` so that a launch with no tools on never fetches it at all.
@@ -606,16 +597,15 @@ function installTools() {
   }
   if (
     !gameInstance
-    || !gameModule
-    || WebAssembly.Module.customSections(gameModule, 'enhancement_manifest').length !== 1
+    || !window.__gwnativeEnhancementManifest
   ) {
-    log('[warn] enhancements: the client the page ran carries no manifest');
+    log('[warn] enhancements: the selected runtime carries no signed manifest');
     return;
   }
   const instance = gameInstance;
-  const module = gameModule;
+  const manifest = window.__gwnativeEnhancementManifest;
   void import('./enhancements.js')
-    .then(({ installEnhancements }) => installEnhancements(instance, module, selection))
+    .then(({ installEnhancements }) => installEnhancements(instance, manifest, selection))
     .catch((error) => log('[warn] enhancements:', error?.message ?? error));
 }
 

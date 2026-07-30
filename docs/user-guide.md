@@ -91,11 +91,13 @@ The optional tools are read-only:
 - **Target distance** displays the distance already held by the client and its
   range band.
 
-Both require a relaunch because they change which WebAssembly module is served.
-They also require gwnative to recognise the exact ArenaNet client build.
+Both require a relaunch because their signed layout certificate is selected
+before the page starts. They require gwnative to recognise the exact official
+JavaScript/WebAssembly pair for the runtime this Mac selected.
 
-Build-template save, rename, list, and delete support uses the same
-build-certification rule. When ArenaNet publishes an unrecognised module,
+Build-template save, rename, list, and delete support uses the same exact-pair
+rule, with independent JSPI and Asyncify transform outputs. When ArenaNet
+publishes an unrecognised pair,
 gwnative runs the original module safely, disables the transform and tools, and
 shows a compatibility notice. Loading existing templates remains available.
 

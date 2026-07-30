@@ -38,6 +38,7 @@ use crate::qos;
 use crate::relaunch;
 use crate::settings;
 use crate::sockets::{self, Registry};
+use crate::wasm;
 
 /// The origin's port. Any constant would do; this one is unassigned by IANA and
 /// sits below macOS's ephemeral floor of 49152, so the kernel will not hand it
@@ -85,7 +86,7 @@ struct Context {
     recorder: Arc<Recorder>,
     /// The derived client, served in place of the one on disk. See `crate::wasm`
     /// for what it changes and why the base module is kept untouched.
-    derived_wasm: Option<PathBuf>,
+    derived_wasm: wasm::DerivedModules,
     settings: Arc<settings::Store>,
     generations: Arc<generation::Store>,
     token: String,
@@ -126,7 +127,7 @@ pub fn spawn(
     root: PathBuf,
     snapshot: Option<Arc<ChunkStore>>,
     recorder: Arc<Recorder>,
-    derived_wasm: Option<PathBuf>,
+    derived_wasm: wasm::DerivedModules,
     settings: Arc<settings::Store>,
     generations: Arc<generation::Store>,
     token: String,
@@ -376,7 +377,7 @@ mod tests {
             dir.clone(),
             None,
             Recorder::open(dir.join("diagnostics")),
-            None,
+            wasm::DerivedModules::default(),
             Arc::new(settings::Store::open(file.clone())),
             Arc::new(generation::Store::open(dir.join("generations"))),
             token.to_owned(),
@@ -452,7 +453,7 @@ mod tests {
             // one.
             None,
             Recorder::open(dir.join("diagnostics")),
-            None,
+            wasm::DerivedModules::default(),
             Arc::new(settings::Store::open(dir.join("settings.json"))),
             Arc::new(generation::Store::open(dir.join("generations"))),
             token.to_owned(),
@@ -497,7 +498,7 @@ mod tests {
             dir.clone(),
             None,
             Recorder::open(diagnostics.clone()),
-            None,
+            wasm::DerivedModules::default(),
             Arc::new(settings::Store::open(dir.join("settings.json"))),
             Arc::new(generation::Store::open(dir.join("generations"))),
             token.to_owned(),

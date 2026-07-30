@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Generate an unsigned build-family certificate candidate.
+
+The Rust transformer performs the WebAssembly parsing and independent output
+verification. This wrapper only merges its reviewed family object into a copy
+of the current feed and increments the monotonic sequence. It never modifies or
+signs the live feed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+FEED = ROOT / "certificates" / "builds.json"
+
+
+def arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--certify-passive-enhancements",
+        action="store_true",
+        help=(
+            "enable the copied layout only after both live runtime fixtures "
+            "passed; signing remains a separate protected step"
+        ),
+    )
+    parser.add_argument("build_id", type=int)
+    parser.add_argument("web_root", type=Path)
+    parser.add_argument(
+        "output",
+        type=Path,
+        nargs="?",
+        default=ROOT / "certificates" / "builds.candidate.json",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = arguments()
+    if args.build_id <= 0:
+        raise SystemExit("build_id must be positive")
+    for name in ("Gw.jspi.js", "Gw.jspi.wasm", "Gw.js", "Gw.wasm"):
+        path = args.web_root / name
+        if not path.is_file():
+            raise SystemExit(f"{path} is missing")
+
+    environment = os.environ.copy()
+    environment["GWNATIVE_WEB_ROOT"] = str(args.web_root.resolve())
+    environment["GWNATIVE_CERTIFICATE_BUILD_ID"] = str(args.build_id)
+    completed = subprocess.run(
+        ["cargo", "run", "--locked", "--quiet", "--", "certify"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        check=True,
+    )
+    family = json.loads(completed.stdout)
+    if any(runtime["passiveEnhancements"] for runtime in family["runtimes"]):
+        raise SystemExit("candidate generation must leave live layouts disabled")
+    if args.certify_passive_enhancements:
+        for runtime in family["runtimes"]:
+            runtime["passiveEnhancements"] = True
+
+    feed = json.loads(FEED.read_text())
+    feed["sequence"] = int(feed["sequence"]) + 1
+    feed["families"] = [
+        current
+        for current in feed["families"]
+        if not (
+            current["programId"] == family["programId"]
+            and current["buildId"] == family["buildId"]
+        )
+    ]
+    feed["families"].append(family)
+    feed["families"].sort(key=lambda item: (item["programId"], item["buildId"]))
+
+    output = args.output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(feed, indent=2) + "\n")
+    temporary.replace(output)
+    print(f"candidate sequence {feed['sequence']}: {output}", file=sys.stderr)
+    for runtime in family["runtimes"]:
+        print(
+            f"{runtime['runtime']}: {runtime['wasmSha256']} -> "
+            f"{runtime['template']['outputSha256']}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

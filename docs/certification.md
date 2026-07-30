@@ -1,0 +1,78 @@
+# Client build certification
+
+ArenaNet publishes two official WebAssembly runtimes from one client source:
+JSPI for engines with JavaScript Promise Integration and Asyncify for older
+engines. They share game data, but they do not share control flow or byte
+offsets. Asyncify instruments the suspendable call graph and adds functions,
+types and globals, so a JSPI transform certificate is never reused as an
+Asyncify certificate.
+
+## What a certificate can authorize
+
+`certificates/builds.json` is data, not a patch language. Each runtime record
+contains:
+
+- exact SHA-256 identities for its official JavaScript and WebAssembly pair;
+- the independently expected template-transform output SHA-256;
+- five fixed bridge kinds implemented in the application;
+- semantic call identities (function, target-call occurrence and total);
+- hashes of stub bodies where the target is a stub; and
+- a build-family proof for the shared data, element and global-prefix bytes.
+
+It cannot provide WebAssembly instructions, imports, exports, table entries or
+native code. The application appends its five compiled-in forwarders, validates
+the resulting module with `wasmparser`, and independently proves that only the
+function and code sections changed before accepting the pinned output hash.
+
+The read-only companion layout is shared by the two runtime records only after
+the section proof matches both exact artifacts. A generated candidate always
+sets `passiveEnhancements` to `false`; login, map transition, socket suspension,
+cursor and target fixtures must pass on both runtimes before a reviewer enables
+it. Template save can be certified independently because it does not use those
+memory offsets.
+
+## Fast patch workflow
+
+The normal ArenaNet patch cycle does not require a gwnative release:
+
+1. Fetch all four official files into one directory.
+2. Run:
+
+   ```sh
+   scripts/client-certify BUILD_ID WEB_ROOT
+   ```
+
+3. Review `certificates/builds.candidate.json`. If semantic anchors moved, the
+   generator fails instead of guessing. Investigate and update the fixed
+   transform before continuing.
+4. Run the candidate transform and live login, map-transition, socket,
+   cursor and target fixtures for both runtimes. Keep `passiveEnhancements`
+   off unless both layouts pass.
+5. From the protected certificate-publishing environment, sign the reviewed
+   feed:
+
+   ```sh
+   scripts/certificate-sign --publish certificates/builds.json
+   ```
+
+6. Review and merge the certificate-only pull request.
+
+The manual `Client certificate` workflow automates fetching, candidate
+generation, static validation and creation of that signed review pull request.
+Its `certify_passive_enhancements` checkbox is an explicit attestation, behind
+the protected publishing environment, that both live runtime fixtures passed.
+Without it the signed certificate enables template saving only. The workflow
+never merges its pull request.
+
+## Trust and rollback
+
+The certificate bundled into an application is covered by the app's code
+signature. A downloaded or cached replacement must verify against the Ed25519
+public key compiled into the app. The same protected secret currently used for
+Sparkle signs the detached feed, but candidate generation and ordinary CI never
+receive or use it.
+
+Feed `sequence` is monotonic. A validly signed lower sequence is ignored, a bad
+signature falls back to the bundled feed, and a refresh is written only after
+the JSON/signature pair verifies. Refreshing happens in the background and
+takes effect on the next launch, so network availability is not part of boot.

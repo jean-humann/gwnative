@@ -1,0 +1,58 @@
+#!/bin/sh
+# Sign and immediately verify a reviewed certificate feed.
+set -eu
+
+cd "$(dirname "$0")/.."
+
+[ "${1:-}" = "--publish" ] || {
+	echo "usage: scripts/certificate-sign --publish FEED [SIGNATURE]" >&2
+	echo "This uses the production update key; candidate generation never does." >&2
+	exit 2
+}
+feed=${2:-}
+signature=${3:-"$feed.sig"}
+[ -n "$feed" ] && [ -f "$feed" ] || {
+	echo "certificate-sign: feed does not exist: $feed" >&2
+	exit 2
+}
+
+signer=packaging/sparkle/sign_update
+public=packaging/sparkle/public-key.txt
+if [ -n "${SPARKLE_PRIVATE_KEY:-}" ]; then
+	value=$(printf '%s' "$SPARKLE_PRIVATE_KEY" |
+		"$signer" -p --ed-key-file - "$feed")
+else
+	value=$("$signer" -p "$feed")
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+printf '%s\n' "$value" >"$work/signature"
+{
+	printf '302a300506032b6570032100' | xxd -r -p
+	base64 -d <"$public"
+} >"$work/public.der"
+base64 -d <"$work/signature" >"$work/signature.raw"
+
+openssl=
+for candidate in "${OPENSSL:-}" openssl \
+	/opt/homebrew/opt/openssl@3/bin/openssl \
+	/usr/local/opt/openssl@3/bin/openssl; do
+	[ -n "$candidate" ] || continue
+	command -v "$candidate" >/dev/null 2>&1 || continue
+	case $("$candidate" version 2>/dev/null) in
+	"OpenSSL 3"* | "OpenSSL 4"*) openssl=$candidate && break ;;
+	esac
+done
+[ -n "$openssl" ] || {
+	echo "certificate-sign: OpenSSL 3 or newer is required to verify" >&2
+	exit 1
+}
+"$openssl" pkeyutl -verify -pubin -keyform DER \
+	-inkey "$work/public.der" -rawin -in "$feed" \
+	-sigfile "$work/signature.raw" >/dev/null
+
+temporary="$signature.tmp"
+printf '%s\n' "$value" >"$temporary"
+mv "$temporary" "$signature"
+echo "certificate-sign: wrote and verified $signature" >&2

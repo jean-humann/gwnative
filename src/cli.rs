@@ -22,6 +22,9 @@ pub enum Command {
     /// Serve the origin without a window, so the snapshot range path can be
     /// exercised from curl or a test.
     Serve,
+    /// Produce an unsigned, reviewable certificate candidate from the four
+    /// official artifacts in `GWNATIVE_WEB_ROOT`.
+    Certify,
 }
 
 /// What to print and what to exit with, when the answer is not a run.
@@ -43,6 +46,7 @@ Commands:
   (none)         open the window
   sync           download the client and exit
   serve          run the origin without a window
+  certify        print a build-family certificate candidate
 
 Options:
   -h, --help     print this and exit
@@ -89,6 +93,7 @@ where
             _ if seen => return Err(usage_error(arg)),
             "sync" => (command, seen) = (Command::Sync, true),
             "serve" => (command, seen) = (Command::Serve, true),
+            "certify" => (command, seen) = (Command::Certify, true),
             _ => return Err(usage_error(arg)),
         }
     }
@@ -117,9 +122,10 @@ mod tests {
     }
 
     #[test]
-    fn the_two_commands_are_still_the_two_commands() {
+    fn commands_select_their_non_windowed_runs() {
         assert_eq!(parse_str(&["sync"]), Ok(Command::Sync));
         assert_eq!(parse_str(&["serve"]), Ok(Command::Serve));
+        assert_eq!(parse_str(&["certify"]), Ok(Command::Certify));
     }
 
     /// The regression this module exists for: it used to open a window.

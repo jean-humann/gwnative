@@ -1,20 +1,38 @@
-//! Appending the forwarders and repointing the certified call sites.
+//! The fixed template-save transform and its independent verifier.
 //!
-//! Rewriting appends rather than inserts, so every existing function index keeps
-//! its meaning and only the chosen call sites change. Call sites are repointed
-//! in place using a five-byte padded index — the width LLVM emits for
-//! relocatable call targets — so no body changes length and no offset downstream
-//! of a patch moves.
+//! Certificates identify calls semantically — the Nth call to the certified
+//! target in a certified function — rather than by a byte offset. Asyncify
+//! rewrites every suspendable body and therefore moves offsets even when the
+//! source-level call graph is unchanged. The transform preserves whatever LEB
+//! width ArenaNet used at the selected call, appends five fixed forwarders, and
+//! then verifies the complete output from fresh parses before returning it.
 
-use super::builds::{BridgeKind, KnownBuild};
+use std::collections::HashMap;
+use std::ops::Range;
+
+use wasmparser::{BinaryReader, FunctionBody, GlobalSectionReader, Operator};
+
+use super::certificate::{
+    BridgeCertificate, BridgeKind, LayoutCertificate, RuntimeCertificate, TemplateCertificate,
+};
 use super::codec::{
-    Section, WASM_HEADER, encode_code, encode_index_vector, encode_section, padded_call,
-    parse_code, parse_index_vector, section_by_id, sleb, split_sections, uleb,
+    Section, WASM_HEADER, encode_code, encode_index_vector, encode_section, parse_code,
+    parse_index_vector, section_by_id, sleb, split_sections, uleb,
 };
 use super::{Outcome, digest};
 
-/// Body of a forwarder that hands the stub's arguments to
-/// `__syscall_newfstatat(dirfd, path, buffer, flags)` behind a dirfd marker.
+#[derive(Clone, Debug)]
+struct Patch {
+    local_function: usize,
+    range: Range<usize>,
+    replacement: Vec<u8>,
+}
+
+struct Plan {
+    patches: Vec<Patch>,
+    forwarders: Vec<Vec<u8>>,
+}
+
 fn forwarder(kind: BridgeKind, carrier: u32, target: u32) -> Vec<u8> {
     let local = |index: u8| [0x20, index];
     let mut body = vec![0x00]; // no locals
@@ -27,46 +45,40 @@ fn forwarder(kind: BridgeKind, carrier: u32, target: u32) -> Vec<u8> {
     };
 
     match kind {
-        // (path, recursive) -> error
         BridgeKind::EnsureDirectory => {
             body.extend_from_slice(&local(0));
             body.extend_from_slice(&[0x41, 0x00]);
             body.extend_from_slice(&local(1));
             call(&mut body);
         }
-        // (path, mode, err) -> handle. Ask the host first; only open when the
-        // file is really there, so the probe cannot create its own answer.
         BridgeKind::FileExists => {
             body.extend_from_slice(&local(0));
             body.extend_from_slice(&[0x41, 0x00]);
             body.extend_from_slice(&[0x41, 0x00]);
             call(&mut body);
-            body.extend_from_slice(&[0x04, 0x7f]); // if (result i32)
+            body.extend_from_slice(&[0x04, 0x7f]);
             body.extend_from_slice(&local(0));
             body.extend_from_slice(&local(1));
             body.extend_from_slice(&local(2));
             body.push(0x10);
             body.extend_from_slice(&uleb(u64::from(target)));
-            body.push(0x05); // else
+            body.push(0x05);
             body.extend_from_slice(&[0x41, 0x00]);
-            body.push(0x0b); // end if
+            body.push(0x0b);
         }
-        // (path) -> deleted
         BridgeKind::DeleteFile => {
             body.extend_from_slice(&local(0));
             body.extend_from_slice(&[0x41, 0x00]);
             body.extend_from_slice(&[0x41, 0x00]);
             call(&mut body);
         }
-        // (out, pattern, flags) -> void
         BridgeKind::FindFiles => {
             body.extend_from_slice(&local(1));
             body.extend_from_slice(&local(0));
             body.extend_from_slice(&local(2));
             call(&mut body);
-            body.push(0x1a); // drop
+            body.push(0x1a);
         }
-        // (dst, _, baseDir, _, path, dstChars) -> written
         BridgeKind::FileBaseName => {
             body.extend_from_slice(&local(4));
             body.extend_from_slice(&local(0));
@@ -74,22 +86,63 @@ fn forwarder(kind: BridgeKind, carrier: u32, target: u32) -> Vec<u8> {
             call(&mut body);
         }
     }
-    body.push(0x0b); // end
+    body.push(0x0b);
     body
 }
 
-/// Rewrite `input` into the derived module for `build`.
+/// Encode an unsigned LEB using at least the width of the certified operand.
 ///
-/// There is no `WebAssembly.validate` on this side, and it would add nothing:
-/// the output hash is pinned in the table above, so a byte-exact match proves
-/// the result is the same module the transform's own certification validated.
-/// A hash check is the stronger of the two, not a substitute for it.
-pub(super) fn rewrite(input: &[u8], build: &KnownBuild) -> Outcome<Vec<u8>> {
-    let input_hash = digest(input);
-    if input_hash != build.sha256 {
-        return Err(format!("template-save: unsupported input {input_hash}"));
+/// LLVM commonly leaves five-byte relocation slots, but neither the
+/// certificate nor this transform assumes that. A canonical one-byte call and
+/// a padded five-byte call are both preserved at their original width. If the
+/// appended target crosses a LEB boundary, as it does in the larger Asyncify
+/// module, the operand grows canonically and the enclosing body is re-sized.
+fn fixed_uleb(mut value: u32, width: usize) -> Outcome<Vec<u8>> {
+    if width == 0 || width > 5 {
+        return Err(format!(
+            "template-save: unsupported call operand width {width}"
+        ));
     }
+    let needed = ((32 - value.leading_zeros()).max(1) as usize).div_ceil(7);
+    let width = width.max(needed);
+    if width > 5 {
+        return Err("template-save: replacement index does not fit".to_owned());
+    }
+    let mut out = Vec::with_capacity(width);
+    for index in 0..width {
+        let last = index + 1 == width;
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if last {
+            out.push(byte);
+        } else {
+            out.push(byte | 0x80);
+        }
+    }
+    Ok(out)
+}
 
+fn call_ranges(body: &[u8], target: u32) -> Outcome<Vec<Range<usize>>> {
+    let function = FunctionBody::new(BinaryReader::new(body, 0));
+    let operators = function
+        .get_operators_reader()
+        .map_err(|e| format!("template-save: cannot read function: {e}"))?
+        .into_iter_with_offsets()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("template-save: cannot read operator: {e}"))?;
+    let mut ranges = Vec::new();
+    for (index, (operator, start)) in operators.iter().enumerate() {
+        if matches!(operator, Operator::Call { function_index } if *function_index == target) {
+            let end = operators
+                .get(index + 1)
+                .map_or(body.len(), |(_, offset)| *offset);
+            ranges.push(*start..end);
+        }
+    }
+    Ok(ranges)
+}
+
+fn build_expected(input: &[u8], certificate: &RuntimeCertificate) -> Outcome<Vec<u8>> {
     let sections = split_sections(input)?;
     let function_types = parse_index_vector(section_by_id(&sections, 3)?)?;
     let bodies = parse_code(section_by_id(&sections, 10)?)?;
@@ -97,48 +150,54 @@ pub(super) fn rewrite(input: &[u8], build: &KnownBuild) -> Outcome<Vec<u8>> {
         return Err("template-save: function and code sections disagree".to_owned());
     }
 
-    let mut next_types = function_types.clone();
-    let mut next_bodies = bodies;
-
-    for bridge in build.bridges {
-        let kind = bridge.kind.key();
-        let stub = next_bodies
-            .get(bridge.stub_function)
-            .ok_or_else(|| format!("template-save: missing stub for {kind}"))?;
-        if let Some(expected) = bridge.stub_body
-            && stub.as_slice() != expected
+    // `patches` needs the actual stub types. Keep its semantic scan separate
+    // from construction, then derive the five types here.
+    let Plan {
+        patches: mut certified,
+        forwarders,
+    } = patches_without_types(&bodies, &certificate.template)?;
+    certified.sort_by_key(|patch| (patch.local_function, patch.range.start));
+    for pair in certified.windows(2) {
+        if pair[0].local_function == pair[1].local_function
+            && pair[0].range.end > pair[1].range.start
         {
-            return Err(format!("template-save: {kind} is not the expected stub"));
-        }
-
-        // Appending keeps every existing function index valid, so only the
-        // chosen call sites change meaning. The forwarder reuses the stub type.
-        let forwarder_index = build.import_count + next_bodies.len() as u32;
-        let stub_type = *function_types
-            .get(bridge.stub_function)
-            .ok_or_else(|| format!("template-save: {kind} stub has no type"))?;
-        next_types.push(stub_type);
-        next_bodies.push(forwarder(
-            bridge.kind,
-            build.carrier_import,
-            build.import_count + bridge.stub_function as u32,
-        ));
-
-        let expected = padded_call(build.import_count + bridge.stub_function as u32);
-        let replacement = padded_call(forwarder_index);
-        for site in bridge.call_sites {
-            let body = next_bodies
-                .get_mut(site.local_function)
-                .ok_or_else(|| format!("template-save: {kind} call site is out of range"))?;
-            let end = site.body_offset + expected.len();
-            if end > body.len() || body[site.body_offset..end] != expected[..] {
-                return Err(format!(
-                    "template-save: {kind} call site signature mismatch"
-                ));
-            }
-            body[site.body_offset..end].copy_from_slice(&replacement);
+            return Err("template-save: overlapping certified call sites".to_owned());
         }
     }
+
+    let mut next_types = function_types.clone();
+    for bridge in &certificate.template.bridges {
+        next_types.push(
+            *function_types
+                .get(bridge.stub_function)
+                .ok_or_else(|| format!("template-save: {} stub has no type", bridge.kind.key()))?,
+        );
+    }
+
+    let mut by_function: HashMap<usize, Vec<&Patch>> = HashMap::new();
+    for patch in &certified {
+        by_function
+            .entry(patch.local_function)
+            .or_default()
+            .push(patch);
+    }
+    let mut next_bodies = Vec::with_capacity(bodies.len() + forwarders.len());
+    for (index, body) in bodies.iter().enumerate() {
+        let Some(function_patches) = by_function.get(&index) else {
+            next_bodies.push(body.clone());
+            continue;
+        };
+        let mut rewritten = Vec::with_capacity(body.len());
+        let mut cursor = 0;
+        for patch in function_patches {
+            rewritten.extend_from_slice(&body[cursor..patch.range.start]);
+            rewritten.extend_from_slice(&patch.replacement);
+            cursor = patch.range.end;
+        }
+        rewritten.extend_from_slice(&body[cursor..]);
+        next_bodies.push(rewritten);
+    }
+    next_bodies.extend(forwarders.iter().cloned());
 
     let mut output = WASM_HEADER.to_vec();
     for section in &sections {
@@ -158,77 +217,229 @@ pub(super) fn rewrite(input: &[u8], build: &KnownBuild) -> Outcome<Vec<u8>> {
         };
         output.extend_from_slice(&encode_section(&rewritten));
     }
+    Ok(output)
+}
 
+fn patches_without_types(bodies: &[Vec<u8>], template: &TemplateCertificate) -> Outcome<Plan> {
+    let mut patches = Vec::new();
+    let mut forwarders = Vec::with_capacity(template.bridges.len());
+    for bridge in &template.bridges {
+        certify_stub(bodies, bridge)?;
+        let target = template.import_count + bridge.stub_function as u32;
+        let forwarder_index = template.import_count
+            + bodies.len() as u32
+            + u32::try_from(forwarders.len())
+                .map_err(|_| "template-save: too many forwarders".to_owned())?;
+        forwarders.push(forwarder(bridge.kind, template.carrier_import, target));
+        for site in &bridge.call_sites {
+            let body = bodies.get(site.local_function).ok_or_else(|| {
+                format!(
+                    "template-save: {} call site is out of range",
+                    bridge.kind.key()
+                )
+            })?;
+            let calls = call_ranges(body, target)?;
+            if calls.len() != site.expected_target_calls {
+                return Err(format!(
+                    "template-save: {} caller {} has {} target calls, expected {}",
+                    bridge.kind.key(),
+                    site.local_function,
+                    calls.len(),
+                    site.expected_target_calls
+                ));
+            }
+            let range = calls[site.occurrence].clone();
+            let mut replacement = vec![0x10];
+            replacement.extend_from_slice(&fixed_uleb(forwarder_index, range.len() - 1)?);
+            patches.push(Patch {
+                local_function: site.local_function,
+                range,
+                replacement,
+            });
+        }
+    }
+    Ok(Plan {
+        patches,
+        forwarders,
+    })
+}
+
+fn certify_stub(bodies: &[Vec<u8>], bridge: &BridgeCertificate) -> Outcome<()> {
+    let body = bodies
+        .get(bridge.stub_function)
+        .ok_or_else(|| format!("template-save: missing stub for {}", bridge.kind.key()))?;
+    if let Some(expected) = &bridge.stub_body_sha256
+        && digest(body) != *expected
+    {
+        return Err(format!(
+            "template-save: {} has an unexpected body",
+            bridge.kind.key()
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn verify_layout(input: &[u8], layout: &LayoutCertificate) -> Outcome<()> {
+    let Some(data_hash) = layout.data_sha256.as_deref() else {
+        return Ok(());
+    };
+    let proof = layout_proof(input, layout.shared_global_count.unwrap_or_default())?;
+    if proof.data_sha256 != data_hash {
+        return Err("certificate: data section does not match the build family".to_owned());
+    }
+    if proof.element_sha256 != layout.element_sha256.as_deref().unwrap_or_default() {
+        return Err("certificate: element section does not match the build family".to_owned());
+    }
+    if proof.shared_global_prefix_sha256
+        != layout
+            .shared_global_prefix_sha256
+            .as_deref()
+            .unwrap_or_default()
+    {
+        return Err("certificate: shared global prefix does not match".to_owned());
+    }
+    Ok(())
+}
+
+pub(super) struct LayoutProof {
+    pub data_sha256: String,
+    pub element_sha256: String,
+    pub shared_global_prefix_sha256: String,
+}
+
+pub(super) fn layout_proof(input: &[u8], global_count: u32) -> Outcome<LayoutProof> {
+    let sections = split_sections(input)?;
+    let globals = section_by_id(&sections, 6)?;
+    let count = global_count as usize;
+    let reader = GlobalSectionReader::new(BinaryReader::new(globals, 0))
+        .map_err(|e| format!("certificate: cannot read globals: {e}"))?;
+    if reader.count() < count as u32 {
+        return Err("certificate: shared global prefix is truncated".to_owned());
+    }
+    let start = reader.original_position();
+    let offsets = reader
+        .into_iter_with_offsets()
+        .map(|entry| {
+            entry
+                .map(|(offset, _)| offset)
+                .map_err(|e| format!("certificate: cannot read global: {e}"))
+        })
+        .collect::<Outcome<Vec<_>>>()?;
+    let end = offsets.get(count).copied().unwrap_or(globals.len());
+    Ok(LayoutProof {
+        data_sha256: digest(section_by_id(&sections, 11)?),
+        element_sha256: digest(section_by_id(&sections, 9)?),
+        shared_global_prefix_sha256: digest(&globals[start..end]),
+    })
+}
+
+fn verify_output(input: &[u8], output: &[u8], certificate: &RuntimeCertificate) -> Outcome<()> {
+    wasmparser::validate(output)
+        .map_err(|e| format!("template-save: output is invalid WebAssembly: {e}"))?;
+    let expected = build_expected(input, certificate)?;
+    if output != expected {
+        return Err("template-save: independent output comparison failed".to_owned());
+    }
+
+    let before = split_sections(input)?;
+    let after = split_sections(output)?;
+    if before.len() != after.len()
+        || before
+            .iter()
+            .zip(&after)
+            .any(|(left, right)| left.id != right.id)
+    {
+        return Err("template-save: section order changed".to_owned());
+    }
+    for (left, right) in before.iter().zip(&after) {
+        if left.id != 3 && left.id != 10 && left.body != right.body {
+            return Err(format!(
+                "template-save: unauthorized mutation of section {}",
+                left.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn rewrite(input: &[u8], certificate: &RuntimeCertificate) -> Outcome<Vec<u8>> {
+    let input_hash = digest(input);
+    if input_hash != certificate.wasm_sha256 {
+        return Err(format!("template-save: unsupported input {input_hash}"));
+    }
+    let output = build_expected(input, certificate)?;
+    verify_output(input, &output, certificate)?;
     let output_hash = digest(&output);
-    if output_hash != build.output_sha256 {
+    if output_hash != certificate.template.output_sha256 {
         return Err(format!("template-save: unexpected output {output_hash}"));
     }
     Ok(output)
 }
 
+pub(super) fn recertify(
+    input: &[u8],
+    glue: &[u8],
+    prototype: &RuntimeCertificate,
+) -> Outcome<(RuntimeCertificate, Vec<u8>)> {
+    wasmparser::validate(input)
+        .map_err(|e| format!("certificate candidate: invalid input WebAssembly: {e}"))?;
+    let sections = split_sections(input)?;
+    let bodies = parse_code(section_by_id(&sections, 10)?)?;
+    let mut certificate = prototype.clone();
+    certificate.wasm_sha256 = digest(input);
+    certificate.glue_sha256 = digest(glue);
+    certificate.passive_enhancements = false;
+    for bridge in &mut certificate.template.bridges {
+        if bridge.stub_body_sha256.is_some() {
+            let body = bodies.get(bridge.stub_function).ok_or_else(|| {
+                format!("certificate candidate: missing {} stub", bridge.kind.key())
+            })?;
+            bridge.stub_body_sha256 = Some(digest(body));
+        }
+    }
+    certificate.template.output_sha256 = "0".repeat(64);
+    let output = build_expected(input, &certificate)?;
+    verify_output(input, &output, &certificate)?;
+    certificate.template.output_sha256 = digest(&output);
+    Ok((certificate, output))
+}
+
+#[cfg(test)]
+pub(super) fn candidate(input: &[u8], certificate: &RuntimeCertificate) -> Outcome<Vec<u8>> {
+    let output = build_expected(input, certificate)?;
+    verify_output(input, &output, certificate)?;
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::Path;
-
-    use super::super::builds::{ALL_BRIDGE_KINDS, BUILDS, find_build};
     use super::*;
 
     #[test]
-    fn a_forwarder_ends_where_a_function_body_must() {
-        for kind in ALL_BRIDGE_KINDS {
+    fn fixed_leb_preserves_the_certified_width() {
+        assert_eq!(fixed_uleb(3, 1).unwrap(), [3]);
+        assert_eq!(
+            fixed_uleb(17_608, 5).unwrap(),
+            [0xc8, 0x89, 0x81, 0x80, 0x00]
+        );
+        assert_eq!(fixed_uleb(128, 1).unwrap(), [0x80, 0x01]);
+        assert!(fixed_uleb(0, 0).is_err());
+    }
+
+    #[test]
+    fn every_forwarder_is_closed_and_calls_the_carrier_once() {
+        for kind in BridgeKind::ALL {
             let body = forwarder(kind, 207, 771);
-            assert_eq!(body[0], 0x00, "{} declares locals", kind.key());
-            assert_eq!(*body.last().unwrap(), 0x0b, "{} does not end", kind.key());
-            // Every forwarder reaches the carrier exactly once.
-            let call = {
-                let mut call = vec![0x10];
-                call.extend_from_slice(&uleb(207));
-                call
-            };
+            assert_eq!(body[0], 0);
+            assert_eq!(*body.last().unwrap(), 0x0b);
+            let mut call = vec![0x10];
+            call.extend_from_slice(&uleb(207));
             assert_eq!(
                 body.windows(call.len())
-                    .filter(|window| **window == call[..])
+                    .filter(|window| **window == call)
                     .count(),
-                1,
-                "{} does not call the carrier once",
-                kind.key()
+                1
             );
         }
-    }
-
-    #[test]
-    fn an_uncertified_input_is_refused_rather_than_guessed_at() {
-        let build = &BUILDS[0];
-        assert!(rewrite(b"\0asm\x01\0\0\0", build).is_err());
-        assert!(find_build("not a hash").is_none());
-        assert!(find_build(build.sha256).is_some());
-    }
-
-    /// The whole port in one assertion.
-    ///
-    /// The output hash is pinned from a transform that was certified against
-    /// this exact input, so producing it byte-for-byte proves every part of the
-    /// rewrite: the LEB128 encoders, the section split and re-encode, each
-    /// forwarder body, and every call-site offset. Nothing short of an exact
-    /// match can pass, and no smaller test covers as much.
-    ///
-    /// Skipped when the client has not been fetched yet, which is the state of
-    /// a clean checkout — this is the one test that needs an 8.2 MB artifact.
-    #[test]
-    fn the_real_client_transforms_to_the_certified_output() {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("web/Gw.jspi.wasm");
-        let Ok(input) = fs::read(&base) else {
-            note!("skipping: {} has not been fetched", base.display());
-            return;
-        };
-        let Some(build) = find_build(&digest(&input)) else {
-            note!("skipping: the fetched client is not a certified build");
-            return;
-        };
-        let output = rewrite(&input, build).expect("the certified build rewrites");
-        assert_eq!(digest(&output), build.output_sha256);
-        // Appending five forwarders is the only growth; nothing is removed.
-        assert!(output.len() > input.len());
     }
 }

@@ -1,307 +1,412 @@
-//! The template-save compatibility transform, and the WebAssembly section
-//! codec it needs.
+//! Certified compatibility transforms for both official client runtimes.
 //!
-//! ArenaNet's Emscripten build ships four `Base/Os` file routines unimplemented.
-//! Creating a directory always fails with error 2, so a build cannot be saved.
-//! Enumerating a directory does nothing and deriving a name from an entry writes
-//! nothing, so "Load from Skills Template" stays empty. Deleting a file is
-//! `assert("not implemented")` followed by `unreachable`, so removing or
-//! renaming a build **aborts the client**. A fifth routine is implemented but
-//! wrong: the probe that asks whether a rename's destination is taken opens the
-//! file `O_RDWR | O_CREAT`, so it creates the file it is testing for and every
-//! rename is refused.
+//! ArenaNet publishes a JSPI build and an Asyncify build from the same source.
+//! Their data layout is shared, but Asyncify rewrites the suspendable call graph
+//! and cannot inherit JSPI byte offsets or output hashes. A signed build-family
+//! certificate therefore binds both exact artifacts to one independently
+//! checked read-only layout while giving each runtime its own semantic
+//! template-save anchors and output hash.
 //!
-//! None of that is repairable from JavaScript. The client never reaches a
-//! syscall, and the module imports no `mkdir`, `getdents` or `unlink`. So one
-//! derived module — accepted only for an exact official hash — appends
-//! forwarders and repoints the template, chat-log and screenshot call sites at
-//! them. Each forwarder hands the stub's own arguments to
-//! `__syscall_newfstatat` behind a dirfd that no real call can produce, and
-//! `web/template-save.js` answers it against the mounted IDBFS.
-//!
-//! A second transform, [`enhancement`], is layered on top of the first when the
-//! player has turned on an optional enhancement. It clones the client's main
-//! loop so a companion module can run beside it; the module doc there is the
-//! account of why that is the only extension point the client offers. It is
-//! chained rather than offered as an alternative, so opting in never costs
-//! template save — and it is opt-in rather than always-on because a module that
-//! nothing installs a tick into is a strictly larger module for no gain.
-//!
-//! Split four ways: [`codec`] is the WebAssembly binary format and knows
-//! nothing about Guild Wars, [`builds`] is the certified builds described in
-//! enough detail that anything else fails closed, and [`rewrite`] and
-//! [`enhancement`] are the transforms themselves. What is left here is the
-//! cache that keeps their output.
+//! Optional tools no longer rewrite or call through the game's main loop. The
+//! companion is a passive observer driven from JavaScript only while the game
+//! is not in an Asyncify unwind/rewind. That makes the layout certificate
+//! reusable across the two runtimes without claiming their control flow is the
+//! same.
 
-mod builds;
+mod certificate;
 mod codec;
-mod enhancement;
 mod rewrite;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use sha2::Digest;
 
-use builds::{ALL_BRIDGE_KINDS, KnownBuild, find_build, find_enhancement_build};
-use enhancement::ENHANCEMENT_TRANSFORM_ABI;
-pub use enhancement::{COMPANION_KERNEL, COMPANION_KERNEL_PATH};
+pub use certificate::Runtime;
+use certificate::{CertificateFeed, Selected};
 
-/// A structural or policy fault. These are all "this is not the build we
-/// certified", which is never worth failing a launch over: the caller falls
-/// back to the untransformed module and the player loses template save, not the
-/// game.
 type Fault = String;
-
 type Outcome<T> = std::result::Result<T, Fault>;
 
 fn digest(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
 }
 
-/// Bumped whenever a derived module stops being interchangeable with one an
-/// older build published.
-const TRANSFORM_ABI: u32 = 1;
-
-const DERIVED: &str = "Gw.jspi.wasm";
 const STAMP: &str = "derived.json";
-/// Where the enhancement output lives, under the template-save entry it was
-/// derived from. Nested rather than parallel because it is *that* output's
-/// transform: an entry orphaned from its input is one nobody can check.
-const ENHANCED: &str = "enhanced";
 
-/// How the enhancement layer fared, for the page and for the log.
-///
-/// A string rather than an enum for the same reason [`Module::template_save`]
-/// is one: it is injected into the page, compared there, and never matched on
-/// in Rust.
+pub const COMPANION_KERNEL: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/companion-kernel.wasm"));
+pub const COMPANION_KERNEL_PATH: &str = "companion-kernel.wasm";
+
 pub mod enhancements {
-    /// The player asked for a tool, and the module serving them has the hook.
     pub const READY: &str = "ready";
-    /// No tool is on, so nothing was derived. The ordinary state.
     pub const OFF: &str = "off";
-    /// A tool is on, but this client build is not one the transform knows.
     pub const UNCERTIFIED: &str = "uncertified";
-    /// A tool is on and the transform was tried and did not produce what it
-    /// was certified to produce. The template-save module is served instead.
     pub const FAILED: &str = "failed";
 }
 
-/// What a launch found when it looked at the client.
-pub struct Prepared {
-    /// The sha256 of ArenaNet's own `Gw.jspi.wasm`, whatever came of
-    /// transforming it.
-    ///
-    /// The identity of the client build, and the only thing in a launch that
-    /// distinguishes one ArenaNet patch from the next. It reaches the page so
-    /// that a notice about *this* build can be dismissed for this build and
-    /// come back for the following one — see
-    /// [`crate::settings::Settings::compatibility_notice_seen_for`].
-    pub client: String,
-    /// The module to serve instead of the client's own, when this is a build we
-    /// certified. `None` is the ordinary state of affairs the day after
-    /// ArenaNet ships a patch: the caller serves the untransformed module and
-    /// template save goes back to being broken — which is where it started, and
-    /// much better than refusing to launch.
-    pub derived: Option<PathBuf>,
-    /// One of [`enhancements`]. When it is `READY`, [`Self::derived`] is the
-    /// enhanced module rather than the template-save one — they are a chain,
-    /// not a choice, so there is only ever one file to serve.
-    pub enhancements: &'static str,
+#[derive(Default)]
+pub struct DerivedModules {
+    by_name: BTreeMap<&'static str, PathBuf>,
 }
 
-/// What the page is told about the module it is about to run.
-///
-/// Two facts with one audience. They are carried together because they are read
-/// together: the sentence the panel shows is decided by [`Self::template_save`]
-/// and how long it stays dismissed is decided by [`Self::build`], and a caller
-/// that had one without the other could show a notice it could not remember
-/// having shown.
+impl DerivedModules {
+    pub fn get(&self, request_path: &str) -> Option<&PathBuf> {
+        self.by_name.get(request_path)
+    }
+
+    fn insert(&mut self, runtime: Runtime, path: PathBuf) {
+        self.by_name.insert(runtime.wasm_name(), path);
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeModule {
+    build: Option<String>,
+    program_id: Option<u32>,
+    build_id: Option<u32>,
+    template_save: &'static str,
+    enhancements: &'static str,
+    enhancement_manifest: Option<serde_json::Value>,
+}
+
+/// Per-runtime launch facts injected before the page chooses JSPI or Asyncify.
 pub struct Module {
-    /// [`Prepared::client`], or `None` when the module could not be read at all
-    /// — in which case there is no build to name, and nothing to warn about
-    /// that a working game would recognise.
-    pub build: Option<String>,
-    /// `"ready"`, `"uncertified"` or `"failed"`; the three outcomes of
-    /// [`prepare`]. `web/settings-panel.js` turns each into a sentence, or into
-    /// silence.
-    pub template_save: &'static str,
-    /// One of [`enhancements`], carried for the same audience and for the same
-    /// reason: a player who turned a tool on and got the plain game back is owed
-    /// the sentence saying so.
-    pub enhancements: &'static str,
+    runtimes: BTreeMap<&'static str, RuntimeModule>,
 }
 
-/// The derived module for `base`, transforming only when the cache cannot prove
-/// it already holds exactly this output.
-///
-/// `enhance` is whether any optional enhancement is on. It is a parameter rather
-/// than a setting read in here because the decision belongs to the caller: the
-/// module is chosen once, before the page exists, and a launch that changed its
-/// mind halfway would be serving one module and describing another.
-pub fn prepare(base: &Path, cache_root: &Path, enhance: bool) -> Outcome<Prepared> {
-    let input = fs::read(base).map_err(|e| format!("template-save: {}: {e}", base.display()))?;
-    let input_hash = digest(&input);
-    let Some(build) = find_build(&input_hash) else {
-        // Nothing here can serve this input, and the entries are ~8 MB each.
-        let _ = fs::remove_dir_all(cache_root);
-        return Ok(Prepared {
-            client: input_hash,
-            derived: None,
-            enhancements: if enhance {
-                enhancements::UNCERTIFIED
-            } else {
-                enhancements::OFF
-            },
-        });
-    };
-
-    let dir = cache_root.join(&input_hash).join(TRANSFORM_ABI.to_string());
-    let derived = dir.join(DERIVED);
-    if !usable(&dir, build) {
-        let output = rewrite::rewrite(&input, build)?;
-
-        // Only after a successful transform: a failing one must leave whatever
-        // the last good build published exactly where it is.
-        let _ = fs::remove_dir_all(cache_root);
-        fs::create_dir_all(&dir).map_err(|e| format!("template-save: {}: {e}", dir.display()))?;
-        write_atomic(&derived, &output)?;
-        write_atomic(
-            &dir.join(STAMP),
-            serde_json::json!({
-                "inputSha256": input_hash,
-                "transformAbi": TRANSFORM_ABI,
-                "outputSha256": build.output_sha256,
-            })
-            .to_string()
-            .as_bytes(),
-        )?;
+impl Module {
+    pub fn runtimes_json(&self) -> String {
+        serde_json::to_string(&self.runtimes).unwrap_or_else(|_| "{}".to_owned())
     }
 
-    if !enhance {
-        return Ok(Prepared {
-            client: input_hash,
-            derived: Some(derived),
-            enhancements: enhancements::OFF,
-        });
-    }
-
-    // Past this point a fault is reported rather than returned. The module
-    // above is a complete, playable client; losing the game because a tool
-    // could not be installed would be the wrong trade by a wide margin, and
-    // what the player is owed is the sentence rather than the failure.
-    match enhanced(&dir, build) {
-        Ok(Some(path)) => Ok(Prepared {
-            client: input_hash,
-            derived: Some(path),
-            enhancements: enhancements::READY,
-        }),
-        Ok(None) => Ok(Prepared {
-            client: input_hash,
-            derived: Some(derived),
-            enhancements: enhancements::UNCERTIFIED,
-        }),
-        Err(reason) => {
-            note!("[gwnative] {reason}");
-            Ok(Prepared {
-                client: input_hash,
-                derived: Some(derived),
-                enhancements: enhancements::FAILED,
-            })
+    pub fn logs(&self) {
+        for (runtime, module) in &self.runtimes {
+            note!(
+                "[gwnative] {runtime}: template save {}, enhancements {}",
+                module.template_save,
+                module.enhancements
+            );
         }
     }
 }
 
-/// The enhanced module derived from `build`'s template-save output, or `None`
-/// when that output is not one the enhancement transform is certified against.
-fn enhanced(dir: &Path, build: &KnownBuild) -> Outcome<Option<PathBuf>> {
-    let Some(enhancement) = find_enhancement_build(build.output_sha256) else {
-        return Ok(None);
-    };
-    let enhanced_dir = dir
-        .join(ENHANCED)
-        .join(ENHANCEMENT_TRANSFORM_ABI.to_string());
-    let derived = enhanced_dir.join(DERIVED);
-    if stamped(&enhanced_dir, enhancement.sha256, enhancement.output_sha256) {
-        return Ok(Some(derived));
+pub struct Prepared {
+    pub derived: DerivedModules,
+    pub module: Module,
+}
+
+pub fn failed(enhance: bool) -> Prepared {
+    let mut runtimes = BTreeMap::new();
+    for runtime in [Runtime::Jspi, Runtime::Asyncify] {
+        runtimes.insert(
+            runtime.key(),
+            RuntimeModule {
+                build: None,
+                program_id: None,
+                build_id: None,
+                template_save: "failed",
+                enhancements: if enhance {
+                    enhancements::FAILED
+                } else {
+                    enhancements::OFF
+                },
+                enhancement_manifest: None,
+            },
+        );
+    }
+    Prepared {
+        derived: DerivedModules::default(),
+        module: Module { runtimes },
+    }
+}
+
+/// Prepare both official runtime modules against one verified certificate feed.
+///
+/// Downloaded certificates are refreshed after this function returns and take
+/// effect on the next launch. No network request is on the game boot path.
+pub fn prepare(
+    root: &Path,
+    derived_root: &Path,
+    certificate_cache: &Path,
+    enhance: bool,
+) -> Outcome<Prepared> {
+    let feed = certificate::load(certificate_cache)?;
+    certificate::spawn_refresh(certificate_cache.to_path_buf(), feed.sequence);
+
+    let mut derived = DerivedModules::default();
+    let mut runtimes = BTreeMap::new();
+    for runtime in [Runtime::Jspi, Runtime::Asyncify] {
+        let (path, module) = prepare_runtime(root, derived_root, &feed, runtime, enhance);
+        if let Some(path) = path {
+            derived.insert(runtime, path);
+        }
+        runtimes.insert(runtime.key(), module);
+    }
+    Ok(Prepared {
+        derived,
+        module: Module { runtimes },
+    })
+}
+
+/// Build an unsigned, fail-closed candidate from a new official artifact pair.
+///
+/// The most recent certificate supplies semantic function identities and the
+/// read-only layout as review input. Stub body hashes and both transform output
+/// hashes are recomputed. Passive enhancements stay disabled until live layout
+/// probes have independently certified the copied offsets.
+pub fn certificate_candidate(root: &Path, program_id: u32, build_id: u32) -> Outcome<String> {
+    let feed = certificate::bundled()?;
+    let prototype = feed
+        .families
+        .iter()
+        .max_by_key(|family| family.build_id)
+        .ok_or("certificate candidate: no prototype family")?;
+    let global_count = prototype
+        .layout
+        .shared_global_count
+        .ok_or("certificate candidate: prototype has no layout proof")?;
+
+    let mut runtimes = Vec::new();
+    let mut shared_proof: Option<rewrite::LayoutProof> = None;
+    for runtime in [Runtime::Jspi, Runtime::Asyncify] {
+        let prototype_runtime = prototype
+            .runtimes
+            .iter()
+            .find(|candidate| candidate.runtime == runtime)
+            .ok_or_else(|| {
+                format!(
+                    "certificate candidate: prototype has no {} runtime",
+                    runtime.key()
+                )
+            })?;
+        let wasm_path = root.join(runtime.wasm_name());
+        let glue_path = root.join(runtime.glue_name());
+        let wasm = fs::read(&wasm_path)
+            .map_err(|e| format!("certificate candidate: {}: {e}", wasm_path.display()))?;
+        let glue = fs::read(&glue_path)
+            .map_err(|e| format!("certificate candidate: {}: {e}", glue_path.display()))?;
+        let proof = rewrite::layout_proof(&wasm, global_count)?;
+        if let Some(shared) = &shared_proof {
+            if proof.data_sha256 != shared.data_sha256
+                || proof.element_sha256 != shared.element_sha256
+                || proof.shared_global_prefix_sha256 != shared.shared_global_prefix_sha256
+            {
+                return Err(format!(
+                    "certificate candidate: {} does not share the build-family layout",
+                    runtime.key()
+                ));
+            }
+        } else {
+            shared_proof = Some(proof);
+        }
+        let (certificate, _) = rewrite::recertify(&wasm, &glue, prototype_runtime)?;
+        runtimes.push(certificate);
     }
 
-    // Read back rather than carried down from the caller: this is reached on
-    // every launch that found the template-save entry already cached, and the
-    // alternative is re-deriving eight megabytes to have them in hand.
-    let input = fs::read(dir.join(DERIVED))
-        .map_err(|e| format!("enhancement: {}: {e}", dir.join(DERIVED).display()))?;
-    let output = enhancement::transform(&input, enhancement)?;
+    let proof = shared_proof.ok_or("certificate candidate: no runtime artifacts")?;
+    let mut layout = prototype.layout.clone();
+    layout.data_sha256 = Some(proof.data_sha256);
+    layout.element_sha256 = Some(proof.element_sha256);
+    layout.shared_global_prefix_sha256 = Some(proof.shared_global_prefix_sha256);
+    let family = certificate::BuildFamily {
+        program_id,
+        build_id,
+        layout,
+        runtimes,
+    };
+    serde_json::to_string_pretty(&family)
+        .map_err(|e| format!("certificate candidate: cannot encode JSON: {e}"))
+}
 
-    fs::create_dir_all(&enhanced_dir)
-        .map_err(|e| format!("enhancement: {}: {e}", enhanced_dir.display()))?;
-    write_atomic(&derived, &output)?;
+fn prepare_runtime(
+    root: &Path,
+    cache_root: &Path,
+    feed: &CertificateFeed,
+    runtime: Runtime,
+    enhance: bool,
+) -> (Option<PathBuf>, RuntimeModule) {
+    match prepare_runtime_inner(root, cache_root, feed, runtime, enhance) {
+        Ok(result) => result,
+        Err(reason) => {
+            note!("[gwnative] {}: {reason}", runtime.key());
+            (
+                None,
+                RuntimeModule {
+                    build: None,
+                    program_id: None,
+                    build_id: None,
+                    template_save: "failed",
+                    enhancements: if enhance {
+                        enhancements::FAILED
+                    } else {
+                        enhancements::OFF
+                    },
+                    enhancement_manifest: None,
+                },
+            )
+        }
+    }
+}
+
+fn prepare_runtime_inner(
+    root: &Path,
+    cache_root: &Path,
+    feed: &CertificateFeed,
+    runtime: Runtime,
+    enhance: bool,
+) -> Outcome<(Option<PathBuf>, RuntimeModule)> {
+    let wasm_path = root.join(runtime.wasm_name());
+    let glue_path = root.join(runtime.glue_name());
+    let input = fs::read(&wasm_path).map_err(|e| format!("{}: {e}", wasm_path.display()))?;
+    let glue = fs::read(&glue_path).map_err(|e| format!("{}: {e}", glue_path.display()))?;
+    let wasm_hash = digest(&input);
+    let glue_hash = digest(&glue);
+    let Some(selected) = feed.select(runtime, &wasm_hash, &glue_hash) else {
+        return Ok((
+            None,
+            RuntimeModule {
+                build: Some(wasm_hash),
+                program_id: None,
+                build_id: None,
+                template_save: "uncertified",
+                enhancements: if enhance {
+                    enhancements::UNCERTIFIED
+                } else {
+                    enhancements::OFF
+                },
+                enhancement_manifest: None,
+            },
+        ));
+    };
+
+    rewrite::verify_layout(&input, &selected.family.layout)?;
+    let derived = derive(cache_root, runtime, &input, &selected)?;
+    let enhancement_state = if !enhance {
+        enhancements::OFF
+    } else if selected.runtime.passive_enhancements {
+        enhancements::READY
+    } else {
+        enhancements::UNCERTIFIED
+    };
+    let manifest = (enhancement_state == enhancements::READY).then(|| {
+        selected
+            .family
+            .layout
+            .page_manifest(selected.family.program_id, selected.family.build_id)
+    });
+    Ok((
+        Some(derived),
+        RuntimeModule {
+            build: Some(wasm_hash),
+            program_id: Some(selected.family.program_id),
+            build_id: Some(selected.family.build_id),
+            template_save: "ready",
+            enhancements: enhancement_state,
+            enhancement_manifest: manifest,
+        },
+    ))
+}
+
+fn derive(
+    cache_root: &Path,
+    runtime: Runtime,
+    input: &[u8],
+    selected: &Selected<'_>,
+) -> Outcome<PathBuf> {
+    let certificate = selected.runtime;
+    let dir = cache_root
+        .join(runtime.key())
+        .join(&certificate.wasm_sha256)
+        .join(certificate::TRANSFORM_ABI.to_string());
+    let path = dir.join(runtime.wasm_name());
+    if stamped(&dir, &path, certificate) {
+        prune_derived(cache_root, runtime, certificate);
+        return Ok(path);
+    }
+
+    let output = rewrite::rewrite(input, certificate)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    write_atomic(&path, &output)?;
     write_atomic(
-        &enhanced_dir.join(STAMP),
+        &dir.join(STAMP),
         serde_json::json!({
-            "inputSha256": enhancement.sha256,
-            "transformAbi": ENHANCEMENT_TRANSFORM_ABI,
-            "outputSha256": enhancement.output_sha256,
+            "inputSha256": certificate.wasm_sha256,
+            "glueSha256": certificate.glue_sha256,
+            "transformAbi": certificate::TRANSFORM_ABI,
+            "outputSha256": certificate.template.output_sha256,
         })
         .to_string()
         .as_bytes(),
     )?;
-    Ok(Some(derived))
+    prune_derived(cache_root, runtime, certificate);
+    Ok(path)
 }
 
-/// Whether the entry in `dir` is provably the module this build certifies.
+/// Keep only the active artifact and transform ABI for each runtime.
 ///
-/// The stamp is not evidence on its own — anything that can write the cache can
-/// write a stamp next to it. What settles it is hashing the file and comparing
-/// against the constant compiled into this binary.
-fn usable(dir: &Path, build: &KnownBuild) -> bool {
-    stamped(dir, build.sha256, build.output_sha256)
+/// ArenaNet publishes often and the Asyncify output alone is about 28 MB. This
+/// cache is app-owned derived data, so retaining every historical pair would
+/// turn fast certificate updates into unbounded disk growth.
+fn prune_derived(
+    cache_root: &Path,
+    runtime: Runtime,
+    certificate: &certificate::RuntimeCertificate,
+) {
+    let runtime_root = cache_root.join(runtime.key());
+    prune_sibling_directories(&runtime_root, &certificate.wasm_sha256);
+    prune_sibling_directories(
+        &runtime_root.join(&certificate.wasm_sha256),
+        &certificate::TRANSFORM_ABI.to_string(),
+    );
 }
 
-/// Shared by both transforms. The ABI is not re-checked here because it is part
-/// of the path — an entry for a different ABI is a different directory, and one
-/// that claimed otherwise in its stamp would still have to hash correctly to be
-/// used at all.
-fn stamped(dir: &Path, input_sha256: &str, output_sha256: &str) -> bool {
+fn prune_sibling_directories(parent: &Path, keep: &str) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy() == keep
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            continue;
+        }
+        if let Err(error) = fs::remove_dir_all(entry.path()) {
+            note!(
+                "[gwnative] could not prune derived client {}: {error}",
+                entry.path().display()
+            );
+        }
+    }
+}
+
+fn stamped(dir: &Path, derived: &Path, certificate: &certificate::RuntimeCertificate) -> bool {
     let Ok(stamp) = fs::read(dir.join(STAMP)) else {
         return false;
     };
     let Ok(stamp) = serde_json::from_slice::<serde_json::Value>(&stamp) else {
         return false;
     };
-    if stamp["inputSha256"].as_str() != Some(input_sha256) {
+    if stamp["inputSha256"].as_str() != Some(certificate.wasm_sha256.as_str())
+        || stamp["glueSha256"].as_str() != Some(certificate.glue_sha256.as_str())
+        || stamp["transformAbi"].as_u64() != Some(u64::from(certificate::TRANSFORM_ABI))
+    {
         return false;
     }
-    fs::read(dir.join(DERIVED)).is_ok_and(|bytes| digest(&bytes) == output_sha256)
+    fs::read(derived).is_ok_and(|bytes| digest(&bytes) == certificate.template.output_sha256)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Outcome<()> {
     let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes)
-        .map_err(|e| format!("template-save: {}: {e}", temporary.display()))?;
-    fs::rename(&temporary, path).map_err(|e| format!("template-save: {}: {e}", path.display()))
+    fs::write(&temporary, bytes).map_err(|e| format!("{}: {e}", temporary.display()))?;
+    fs::rename(&temporary, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// `{ ensureDirectory: -70001, … }`, for injection into the page.
-///
-/// Built by the encoder rather than spelled out, like [`crate::layout::as_json`]
-/// and every other JSON body in this crate. The keys here are compile-time
-/// literals and the values are `i64` constants, so the braces were not wrong —
-/// but this string is injected into a `WKUserScript`, which is the last place
-/// worth keeping a second escaper that only happens to have nothing to escape.
 pub fn markers_json() -> String {
-    serde_json::Value::from(
-        ALL_BRIDGE_KINDS
-            .iter()
-            .map(|kind| {
-                (
-                    kind.key().to_owned(),
-                    serde_json::Value::from(kind.marker()),
-                )
-            })
-            .collect::<serde_json::Map<_, _>>(),
-    )
-    .to_string()
+    certificate::markers_json()
 }
 
 #[cfg(test)]
@@ -309,10 +414,159 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_markers_reach_the_page_as_an_object() {
+    fn markers_reach_the_page_as_an_object() {
         let json: serde_json::Value = serde_json::from_str(&markers_json()).unwrap();
         assert_eq!(json["ensureDirectory"], -70_001);
         assert_eq!(json["fileExists"], -70_005);
-        assert_eq!(json.as_object().unwrap().len(), ALL_BRIDGE_KINDS.len());
+        assert_eq!(json.as_object().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn companion_cannot_reenter_the_game() {
+        let mut imports = Vec::new();
+        let mut exports = Vec::new();
+        let mut globals = Vec::new();
+        let mut data_segments = 0;
+        let mut has_start = false;
+        for payload in wasmparser::Parser::new(0).parse_all(COMPANION_KERNEL) {
+            match payload.unwrap() {
+                wasmparser::Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import.unwrap();
+                        imports.push((import.module.to_owned(), import.name.to_owned()));
+                    }
+                }
+                wasmparser::Payload::ExportSection(reader) => {
+                    for export in reader {
+                        let export = export.unwrap();
+                        exports.push((export.name.to_owned(), export.kind, export.index));
+                    }
+                }
+                wasmparser::Payload::GlobalSection(reader) => {
+                    globals.extend(reader.into_iter().map(|global| global.unwrap().ty.mutable));
+                }
+                wasmparser::Payload::DataSection(reader) => {
+                    data_segments += reader.count();
+                }
+                wasmparser::Payload::StartSection { .. } => has_start = true,
+                _ => {}
+            }
+        }
+        assert_eq!(imports, [("env".to_owned(), "memory".to_owned())]);
+        assert!(!has_start, "instantiation must not run companion code");
+        assert_eq!(
+            data_segments, 0,
+            "instantiating the companion must not initialize the game's memory"
+        );
+        assert!(exports.iter().any(|(name, kind, _)| {
+            name == "companion_init" && *kind == wasmparser::ExternalKind::Func
+        }));
+        assert!(exports.iter().any(|(name, kind, _)| {
+            name == "companion_observe" && *kind == wasmparser::ExternalKind::Func
+        }));
+        let (_, _, stack_index) = exports
+            .iter()
+            .find(|(name, kind, _)| {
+                name == "__stack_pointer" && *kind == wasmparser::ExternalKind::Global
+            })
+            .expect("the page must be able to relocate the companion stack");
+        assert_eq!(globals.get(*stack_index as usize), Some(&true));
+        assert!(!exports.iter().any(|(name, _, _)| name.contains("tick")));
+    }
+
+    #[test]
+    fn derived_cache_retains_only_the_active_artifact_and_abi() {
+        let temporary = crate::scratch::TempDir::new("derived-prune");
+        let feed = certificate::bundled().unwrap();
+        let certificate = feed.families[0]
+            .runtimes
+            .iter()
+            .find(|candidate| candidate.runtime == Runtime::Jspi)
+            .unwrap();
+        let runtime_root = temporary.0.join(Runtime::Jspi.key());
+        let active = runtime_root
+            .join(&certificate.wasm_sha256)
+            .join(certificate::TRANSFORM_ABI.to_string());
+        let old_artifact = runtime_root.join("old-artifact").join("1");
+        let old_abi = runtime_root.join(&certificate.wasm_sha256).join("1");
+        for path in [&active, &old_artifact, &old_abi] {
+            fs::create_dir_all(path).unwrap();
+        }
+
+        prune_derived(&temporary.0, Runtime::Jspi, certificate);
+
+        assert!(active.is_dir());
+        assert!(!old_artifact.exists());
+        assert!(!old_abi.exists());
+    }
+
+    #[test]
+    fn external_official_pairs_produce_valid_candidates() {
+        let feed = match std::env::var("GWNATIVE_CERTIFY_FEED") {
+            Ok(path) => {
+                serde_json::from_slice::<CertificateFeed>(&fs::read(path).unwrap()).unwrap()
+            }
+            Err(_) => certificate::bundled().unwrap(),
+        };
+        for (runtime, wasm_variable, glue_variable) in [
+            (
+                Runtime::Jspi,
+                "GWNATIVE_CERTIFY_JSPI_WASM",
+                "GWNATIVE_CERTIFY_JSPI_GLUE",
+            ),
+            (
+                Runtime::Asyncify,
+                "GWNATIVE_CERTIFY_ASYNCIFY_WASM",
+                "GWNATIVE_CERTIFY_ASYNCIFY_GLUE",
+            ),
+        ] {
+            let (Ok(wasm_path), Ok(glue_path)) =
+                (std::env::var(wasm_variable), std::env::var(glue_variable))
+            else {
+                continue;
+            };
+            let wasm = fs::read(wasm_path).unwrap();
+            let glue = fs::read(glue_path).unwrap();
+            let selected = feed
+                .select(runtime, &digest(&wasm), &digest(&glue))
+                .expect("the exact official pair is in the certificate");
+            rewrite::verify_layout(&wasm, &selected.family.layout).unwrap();
+            let output = rewrite::candidate(&wasm, selected.runtime).unwrap();
+            eprintln!("{} candidate sha256 {}", runtime.key(), digest(&output));
+            if selected.runtime.template.output_sha256
+                != "0000000000000000000000000000000000000000000000000000000000000000"
+            {
+                assert_eq!(digest(&output), selected.runtime.template.output_sha256);
+            }
+        }
+    }
+
+    #[test]
+    fn external_runtime_pair_prepares_both_derived_modules() {
+        let Ok(root) = std::env::var("GWNATIVE_CERTIFY_ROOT") else {
+            return;
+        };
+        let temporary = crate::scratch::TempDir::new("dual-runtime-derive");
+        let prepared = prepare(
+            Path::new(&root),
+            &temporary.0.join("derived"),
+            &temporary.0.join("certificates"),
+            true,
+        )
+        .unwrap();
+        assert!(prepared.derived.get(Runtime::Jspi.wasm_name()).is_some());
+        assert!(
+            prepared
+                .derived
+                .get(Runtime::Asyncify.wasm_name())
+                .is_some()
+        );
+        let modules: serde_json::Value =
+            serde_json::from_str(&prepared.module.runtimes_json()).unwrap();
+        for runtime in ["jspi", "asyncify"] {
+            assert_eq!(modules[runtime]["templateSave"], "ready");
+            assert_eq!(modules[runtime]["enhancements"], "ready");
+            assert_eq!(modules[runtime]["enhancementManifest"]["buildId"], 38_797);
+        }
     }
 }

@@ -12,7 +12,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { announcement, templateSaveNotice } from './compatibility.js';
+import {
+  announcement,
+  enhancementNotice,
+  templateSaveNotice,
+} from './compatibility.js';
 
 // A plausible hash — the client build is a SHA-256 of the wasm this launch was
 // handed, and the shape matters because it is what the setting is keyed on.
@@ -21,17 +25,16 @@ const OTHER = 'b'.repeat(64);
 
 describe('compatibility', () => {
   // The state the host injects is the only way the page can know. These are the
-  // outcomes of `wasm::prepare` plus the untransformed Asyncify path. Anything
-  // else is a host and a page that have drifted, and saying
-  // nothing is the safe end of that: a
+  // outcomes of `wasm::prepare`. Anything else is a host and a page that have
+  // drifted, and saying nothing is the safe end of that: a
   // sentence about a missing feature that is not missing is worse than no
   // sentence at all.
   it('speaks up about build templates only when they are actually unavailable', () => {
     assert.equal(templateSaveNotice('ready'), null);
     assert.equal(templateSaveNotice(undefined), null);
     assert.equal(templateSaveNotice('something later'), null);
+    assert.equal(templateSaveNotice('asyncify'), null);
     assert.match(templateSaveNotice('uncertified'), /cannot be saved/);
-    assert.match(templateSaveNotice('asyncify'), /build-template saving/);
     assert.match(templateSaveNotice('failed'), /cannot be saved/);
   });
 
@@ -41,14 +44,14 @@ describe('compatibility', () => {
     for (const state of ['uncertified', 'failed']) {
       assert.match(templateSaveNotice(state), /Everything else works/);
     }
-    assert.match(templateSaveNotice('asyncify'), /game is playable/);
-    assert.match(templateSaveNotice('asyncify'), /optional enhancements are unavailable/);
   });
 
-  it('explains the runtime limitation without suggesting that STP replaces WKWebView', () => {
-    const sentence = templateSaveNotice('asyncify');
-    assert.match(sentence, /system WKWebView/);
-    assert.match(sentence, /Safari Technology Preview does not change WKWebView/);
+  it('separates a pending live layout review from template certification', () => {
+    assert.match(enhancementNotice('uncertified'), /read-only layout/);
+    assert.match(enhancementNotice('uncertified'), /build templates still work/);
+    assert.match(enhancementNotice('failed'), /Diagnostics/);
+    assert.equal(enhancementNotice('ready'), null);
+    assert.equal(enhancementNotice('off'), null);
   });
 
   it('interrupts a launch that met a client build this release does not patch', () => {
@@ -57,11 +60,24 @@ describe('compatibility', () => {
     assert.match(say.sentence, /cannot be saved/);
   });
 
-  it('interrupts once when this Mac has to use the Asyncify client', () => {
-    const say = announcement({ state: 'asyncify', build: BUILD, seenFor: null });
+  it('interrupts once when enabled tools await both live runtime checks', () => {
+    const say = announcement({
+      state: 'ready',
+      enhancements: 'uncertified',
+      build: BUILD,
+      seenFor: null,
+    });
     assert.equal(say.build, BUILD);
-    assert.match(say.sentence, /Asyncify compatibility client/);
-    assert.equal(announcement({ state: 'asyncify', build: BUILD, seenFor: BUILD }), null);
+    assert.match(say.sentence, /read-only layout/);
+    assert.equal(
+      announcement({
+        state: 'ready',
+        enhancements: 'uncertified',
+        build: BUILD,
+        seenFor: BUILD,
+      }),
+      null,
+    );
   });
 
   it('says nothing at all on a build it does patch', () => {

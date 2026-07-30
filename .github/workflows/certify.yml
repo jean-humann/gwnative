@@ -1,0 +1,106 @@
+name: Client certificate
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: ArenaNet build ID
+        required: true
+        type: number
+      publish:
+        description: Sign and open a certificate pull request
+        required: true
+        default: false
+        type: boolean
+      certify_passive_enhancements:
+        description: Both JSPI and Asyncify live login/map/cursor/target fixtures passed
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  candidate:
+    runs-on: macos-26
+    timeout-minutes: 45
+    # The publishing secret is scoped to this environment. The `publish`
+    # input still gates the only step that receives it.
+    environment: certificate-publishing
+    env:
+      GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
+      GWNATIVE_CERTIFICATE_BUILD_ID: ${{ inputs.build_id }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Fetch the official runtime pair
+        run: cargo run --locked --release -- sync
+
+      - name: Generate the fail-closed candidate
+        run: |
+          if [ "${{ inputs.publish }}" = true ] &&
+             [ "${{ inputs.certify_passive_enhancements }}" = true ]; then
+            scripts/client-certify --certify-passive-enhancements \
+              "${{ inputs.build_id }}" "$GWNATIVE_WEB_ROOT"
+          else
+            scripts/client-certify "${{ inputs.build_id }}" "$GWNATIVE_WEB_ROOT"
+          fi
+
+      - name: Verify both transforms against the official artifacts
+        env:
+          GWNATIVE_CERTIFY_JSPI_WASM: ${{ runner.temp }}/gwnative-client/Gw.jspi.wasm
+          GWNATIVE_CERTIFY_JSPI_GLUE: ${{ runner.temp }}/gwnative-client/Gw.jspi.js
+          GWNATIVE_CERTIFY_ASYNCIFY_WASM: ${{ runner.temp }}/gwnative-client/Gw.wasm
+          GWNATIVE_CERTIFY_ASYNCIFY_GLUE: ${{ runner.temp }}/gwnative-client/Gw.js
+          GWNATIVE_CERTIFY_FEED: ${{ github.workspace }}/certificates/builds.candidate.json
+        run: cargo test wasm::tests::external_official_pairs_produce_valid_candidates -- --nocapture
+
+      - name: Report the unsigned candidate
+        if: ${{ !inputs.publish }}
+        run: |
+          echo "### Unsigned certificate candidate" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$(shasum -a 256 certificates/builds.candidate.json | cut -d' ' -f1)\`" \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "Passive enhancements remain disabled pending both live runtime fixtures." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign the reviewed feed
+        if: ${{ inputs.publish }}
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          cp certificates/builds.candidate.json certificates/builds.json
+          scripts/certificate-sign --publish certificates/builds.json
+
+      - name: Open a certificate-only pull request
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="certificates/build-${{ inputs.build_id }}-${{ github.run_id }}"
+          git switch -c "$branch"
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add certificates/builds.json certificates/builds.json.sig
+          git commit -m "cert(client): add build ${{ inputs.build_id }}"
+          git push origin "$branch"
+          if [ "${{ inputs.certify_passive_enhancements }}" = true ]; then
+            passive="enabled after protected approval of both live runtime fixtures"
+          else
+            passive="disabled pending both live runtime fixtures"
+          fi
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "cert(client): support ArenaNet build ${{ inputs.build_id }}" \
+            --body "Generated from both official runtime artifacts. Static transforms and detached signature verified. Passive enhancements: $passive."
