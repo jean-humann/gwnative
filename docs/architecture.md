@@ -209,7 +209,8 @@ hook.
 
 The validated companion state is narrowed into the versioned v1 map, player,
 target, party, skillbar, effects, agent, quest, inventory, social, and
-completion schema. Large agent, quest, effect, bag, item, and friend pages
+completion, and camera schema. Large agent, quest, effect, bag, item, and
+friend pages
 remain fixed and bounded in the seqlock block rather than being copied onto the
 companion’s imported-memory stack. Inventory traversal retains only the owning
 pointer across the original tick, then rechecks bag arrays and every item
@@ -218,6 +219,10 @@ friend-list and guild-context owners, rechecks every numeric friend and
 guild/roster pointer, and never follows client-owned names, UUIDs, messages, or
 announcements. Completion traversal retains six bounded array descriptors and
 publishes at most 32 bitmap words per category; the page derives sorted map IDs.
+Camera collection reads one exact-build singleton, validates the stable GWCA
+field offsets and finite geometry, and publishes no controller pointer or
+transition target. The page derives current yaw and render FOV from the copied
+values, then Rust recomputes both before accepting the public state.
 The page publishes no faster than four times per second and Rust validates it
 again before making it available on token-gated loopback routes. There is no
 certified action endpoint. The overlay registry and Companion Tools consume the

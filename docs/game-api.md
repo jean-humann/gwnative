@@ -24,7 +24,8 @@ identity, current target position/range, bounded party roster, the player’s
 eight-slot skillbar and effects, a bounded map-agent page, and the quest log
 with mission objectives, plus bounded inventory and account-storage summaries.
 It also includes a privacy-minimised friend-presence page and numeric guild
-summary. Client-owned names, UUIDs, messages, and announcements are not read.
+summary, six completion bitmaps, and the current camera/render geometry.
+Client-owned names, UUIDs, messages, and announcements are not read.
 
 ## Loopback endpoints
 
@@ -365,6 +366,29 @@ The envelope is revisioned and timestamped:
       },
       "unlockedMaps": [55, 248],
       "vanquishedAreas": [56]
+    },
+    "camera": {
+      "lookAtAgentId": 4,
+      "mode": 2,
+      "modeName": "Follow",
+      "unlocked": false,
+      "yaw": 1.25,
+      "currentYaw": 2.3561945,
+      "pitch": 0.25,
+      "distance": 1000,
+      "maxDistance": 5000,
+      "position": {
+        "x": 110,
+        "y": -260,
+        "z": -50
+      },
+      "lookAt": {
+        "x": 100,
+        "y": -250,
+        "z": 3
+      },
+      "fieldOfView": 1.2,
+      "renderFieldOfView": 0.7790197
     }
   }
 }
@@ -469,6 +493,20 @@ unreadable or outside its certified bounds. Completion is character/account
 progress exposed only through the token-gated read API. There is no operation
 to unlock a map, mark a mission complete, enter an area, or change difficulty.
 
+The camera domain follows the stable read-only portion of GWCA `Camera` and
+Py4GW `PyCamera`/`PyRender`. `position` and `lookAt` are bounded world-space
+vectors. `yaw`, `pitch`, `distance`, `maxDistance`, and `fieldOfView` retain
+the client's numeric values. `currentYaw` is derived from the two vectors using
+GWCA's camera-facing convention. `renderFieldOfView` applies the current
+Guild Wars render transform to the raw camera FOV. All angles are radians.
+
+Mode `0` is `Default`, `2` is `Follow`, and `3` is `Unlocked`; other certified
+values through `9` are named `Unknown` instead of guessed. `unlocked` must
+exactly match mode `3`. The domain is omitted unless every scalar and vector is
+finite and within its certified bounds. Camera controller pointers,
+transition destinations, and render-device ownership remain private. There is
+no API operation to rotate, move, zoom, unlock, or otherwise mutate the camera.
+
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account
 identity, chat, encoded game text, or action surface.
@@ -500,8 +538,10 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - player buff/effect counts;
 - map-agent totals;
 - quest and mission-objective counts;
-- inventory, storage, and gold totals; and
-- friend presence and numeric guild summary; and
+- inventory, storage, and gold totals;
+- mission and map completion totals;
+- friend presence and numeric guild summary;
+- camera mode, distance, pitch, and render FOV; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact

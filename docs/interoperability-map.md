@@ -100,13 +100,13 @@ client, not an in-game automation API.
 | --- | --- | --- | --- |
 | Runtime and host services | JSPI host paths and both WASM contracts mapped | Official artifact, image, DNS, socket, login, and storage bridges implemented | Keep callback contract tests generation-pinned |
 | Player and target | GWCA Agent/Player; PyAgent/PyPlayer; native resolvers | Certified IDs, coordinates, target kind, distance, range, and bounded agent summaries | Add names only after encoded-string lifetime validation |
-| Map and instance | GWCA Map; PyMap; native map resolvers | Certified map ID, instance identity, 128-entry map-agent page, and six completion bitmaps expanded to sorted map IDs | Add camera and render state |
+| Map and instance | GWCA Map; PyMap; native map resolvers | Certified map ID, instance identity, 128-entry map-agent page, and six completion bitmaps expanded to sorted map IDs | Add encoded names only after lifetime validation |
 | Party and heroes | GWCA Party; PyParty; native party resolvers | Certified bounded roster, flags, IDs, summary widget, and agent-derived profession/health records | Join party members to agent summaries by ID |
 | Skills and effects | GWCA Skillbar/Effect; PySkill/PySkillbar/PyEffects | Certified player slots, adrenaline, recharge, event, disabled mask, cast count, and bounded buff/effect snapshots | Add effect expiry semantics only after live timing validation |
 | Items and inventory | GWCA Item; PyItem/PyInventory; item resolvers | Certified 22-bag/512-item page with location, model/type/value/quantity metadata, gold, storage panes, dye components, modifier counts, and interaction-derived flags | Encoded names and modifier words only after lifetime and size certification |
 | Quests | GWCA Quest; PyQuest; quest resolvers | Certified active ID, 64-entry quest page, state-bit derivatives, markers, and 32 mission objectives | Encoded quest/objective text only after decoder certification |
 | Chat, friends, and guild | GWCA Chat/FriendList/Guild; matching Python modules | Certified 128-entry numeric friend-presence page and privacy-minimised guild/rank/faction/roster/cape summary; no names, UUIDs, messages, or actions | Add no encoded text until lifetime/privacy validation; keep message actions closed |
-| Camera and rendering | GWCA Camera/Render; PyCamera/PyRender/PyWorldRender | Native cursor and local overlay composition | Read-only camera state; keep WebGL ownership isolated |
+| Camera and rendering | GWCA Camera/Render; PyCamera/PyRender/PyWorldRender | Certified bounded camera mode, target, vectors, distance, orientation, raw FOV, and derived render FOV; native cursor and local overlays | Keep controller pointers, writes, and WebGL ownership isolated |
 | UI and dialogs | GWCA UI; PyUIManager/PyDialog; UI resolvers | gwnative-owned panels and widgets only | Stable read-only frame identity before any interaction |
 | Merchant and trade | GWCA Merchant/Trade; matching Python modules | Not exposed | Read-only merchant inventory; trade actions remain closed |
 | Events and packets | GWCA Event/StoC; listener and packet modules | Diagnostics expose host milestones, not game packets | Typed, bounded events derived from certified state |
@@ -129,8 +129,9 @@ A mapped domain reaches the public API only when it has:
 5. an end-to-end observation proving that the client keeps rendering; and
 6. a separate policy decision for every state-changing operation.
 
-The next implementation sequence is camera/render state, then the remaining
-read-only domains with independently verified layouts.
+The next implementation sequence is stable read-only UI/dialog identity, then
+bounded merchant inventory and the remaining read-only domains with
+independently verified layouts.
 Native action bindings,
 packet injection, virtual input, and pathing automation are reference evidence
 only; they are not candidates for bulk exposure.
