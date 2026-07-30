@@ -84,6 +84,10 @@ describe('public game state', () => {
       player: Object.freeze({ gold: 0, items: Object.freeze([]) }),
       partner: Object.freeze({ gold: 0, items: Object.freeze([]) }),
     });
+    const ui = Object.freeze({
+      total: 1,
+      frames: Object.freeze([Object.freeze({ frameId: 0, frameHash: 7 })]),
+    });
     assert.deepEqual(
       publicState({
         status: 'ready',
@@ -97,6 +101,7 @@ describe('public game state', () => {
         completion,
         camera,
         trade,
+        ui,
       }),
       {
         status: 'ready',
@@ -110,6 +115,7 @@ describe('public game state', () => {
         completion,
         camera,
         trade,
+        ui,
       },
     );
   });

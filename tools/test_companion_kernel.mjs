@@ -53,8 +53,12 @@ const camera = 0x163000;
 const trade = 0x164000;
 const tradePlayerItems = 0x165000;
 const tradePartnerItems = 0x166000;
+const frameArray = 0x167000;
+const framePointers = 0x168000;
+const rootFrame = 0x169000;
+const childFrame = 0x16a000;
 const snapshot = 0x180000;
-const config = 0x18c000;
+const config = 0x1a0000;
 
 // Context and current-map invariants.
 u32(contextRoot, contexts);
@@ -244,7 +248,36 @@ u32(trade + 0x30, 1);
 u32(tradePartnerItems, 800);
 u32(tradePartnerItems + 4, 2);
 
-const layout = Array(182).fill(0);
+// Two validated UI frames. The child relation points at the root's embedded
+// relation object, exactly as the compiled GetFrameById/FrameRelation methods
+// do; no label or callback memory exists in the fixture.
+u32(frameArray, framePointers);
+u32(frameArray + 4, 2);
+u32(frameArray + 8, 2);
+u32(framePointers, rootFrame);
+u32(framePointers + 4, childFrame);
+u32(rootFrame + 0xbc, 0);
+u32(rootFrame + 0x128, 0);
+u32(rootFrame + 0x134, 0x1111);
+u32(rootFrame + 0x18, 3);
+u32(rootFrame + 0x20, 4);
+u32(rootFrame + 0x24, 5);
+u32(rootFrame + 0x18c, 0x4);
+u32(rootFrame + 0xd8, 9);
+f32(rootFrame + 0xdc, 10);
+f32(rootFrame + 0xe0, 100);
+f32(rootFrame + 0xe4, 200);
+f32(rootFrame + 0xe8, 20);
+u32(childFrame + 0xb8, 2);
+u32(childFrame + 0xbc, 1);
+u32(childFrame + 0x128, rootFrame + 0x128);
+u32(childFrame + 0x134, 0x2222);
+u32(childFrame + 0x18, 1);
+u32(childFrame + 0x20, 7);
+u32(childFrame + 0x24, 8);
+u32(childFrame + 0x18c, 0x204);
+
+const layout = Array(198).fill(0);
 Object.assign(layout, {
   0: contextRoot,
   1: agentArray,
@@ -394,6 +427,22 @@ Object.assign(layout, {
   179: 8,
   180: 0,
   181: 4,
+  182: frameArray,
+  183: 0x1c8,
+  184: 0x18,
+  185: 0x20,
+  186: 0x24,
+  187: 0xb8,
+  188: 0xbc,
+  189: 0xd8,
+  190: 0,
+  191: 4,
+  192: 8,
+  193: 0x0c,
+  194: 0x10,
+  195: 0x128,
+  196: 0x134,
+  197: 0x18c,
 });
 new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
@@ -403,7 +452,7 @@ const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
 });
 const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 728, 0, 0, 1 << 1),
+  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 792, 0, 0, 1 << 1),
   1,
 );
 tick(0);
@@ -470,6 +519,36 @@ assert.equal(state.trade.partner.gold, 3_333);
 assert.deepEqual(state.trade.partner.items, [
   { slot: 1, itemId: 800, quantity: 2 },
 ]);
+assert.equal(state.ui.total, 2);
+assert.equal(state.ui.createdTotal, 2);
+assert.equal(state.ui.visibleTotal, 1);
+assert.deepEqual(
+  state.ui.frames.map(
+    ({ frameId, parentId, childOffsetId, frameHash, locallyVisible }) => ({
+      frameId,
+      parentId,
+      childOffsetId,
+      frameHash,
+      locallyVisible,
+    }),
+  ),
+  [
+    {
+      frameId: 0,
+      parentId: null,
+      childOffsetId: 0,
+      frameHash: 0x1111,
+      locallyVisible: true,
+    },
+    {
+      frameId: 1,
+      parentId: 0,
+      childOffsetId: 2,
+      frameHash: 0x2222,
+      locallyVisible: false,
+    },
+  ],
+);
 
 u32(trade + 0x18, 17);
 u32(trade + 0x1c, 17);

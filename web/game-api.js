@@ -31,6 +31,7 @@ const PUBLIC_FIELDS = Object.freeze([
   'completion',
   'camera',
   'trade',
+  'ui',
 ]);
 
 export function publicState(state) {
