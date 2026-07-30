@@ -10,7 +10,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { progressLine, rate, remaining, watchSweep } from './launcher.js';
+import {
+  launchStrategy,
+  progressLine,
+  rate,
+  remaining,
+  watchSweep,
+} from './launcher.js';
 
 /** A window of samples `mb` megabytes apart, one per second. */
 const steady = (seconds, mbPerSecond, from = 0) =>
@@ -113,5 +119,14 @@ describe('background sweep watcher', () => {
     });
     assert.equal(outcome, 'play');
     assert.deepEqual(shown, [2]);
+  });
+});
+
+describe('launch strategy', () => {
+  it('uses Quick Start only for an unattended unconfigured profile', () => {
+    assert.equal(launchStrategy(null, true), 'quick');
+    assert.equal(launchStrategy(null, false), null);
+    assert.equal(launchStrategy('full', true), 'full');
+    assert.equal(launchStrategy('quick', true), 'quick');
   });
 });
