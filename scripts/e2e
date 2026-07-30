@@ -559,6 +559,7 @@ def main() -> int:
                 "effects",
                 "agents",
                 "quests",
+                "inventory",
             }:
                 raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)
@@ -777,6 +778,7 @@ def main() -> int:
             effects = state.get("effects")
             agents = state.get("agents")
             quests = state.get("quests")
+            inventory = state.get("inventory")
             if not isinstance(party, dict) or not party.get("players"):
                 raise Failure("certified party state did not include the player roster")
             skills = skillbar.get("skills") if isinstance(skillbar, dict) else None
@@ -875,15 +877,74 @@ def main() -> int:
                 != len(objectives)
             ):
                 raise Failure("certified quest state is incomplete")
+            bags = (
+                inventory.get("bags")
+                if isinstance(inventory, dict)
+                else None
+            )
+            items = (
+                inventory.get("items")
+                if isinstance(inventory, dict)
+                else None
+            )
+            item_locations = (
+                [(item.get("bagId"), item.get("slot")) for item in items]
+                if isinstance(items, list)
+                and all(isinstance(item, dict) for item in items)
+                else []
+            )
+            if (
+                inventory is None
+                or inventory.get("itemsTruncated") not in (True, False)
+                or not isinstance(inventory.get("total"), int)
+                or not 0 <= inventory.get("total") <= 1_024
+                or not isinstance(inventory.get("goldCharacter"), int)
+                or not isinstance(inventory.get("goldStorage"), int)
+                or not isinstance(inventory.get("storagePanesUnlocked"), int)
+                or not 0 <= inventory.get("storagePanesUnlocked") <= 14
+                or not isinstance(bags, list)
+                or not 1 <= len(bags) <= 22
+                or any(not isinstance(bag, dict) for bag in bags)
+                or any(not isinstance(bag.get("bagId"), int) for bag in bags)
+                or not isinstance(items, list)
+                or len(items) > 512
+                or any(not isinstance(item, dict) for item in items)
+                or any(
+                    not isinstance(item.get("itemId"), int)
+                    or not isinstance(item.get("bagId"), int)
+                    or not isinstance(item.get("slot"), int)
+                    for item in items
+                )
+                or inventory.get("total") < len(items)
+                or (
+                    inventory.get("itemsTruncated")
+                    and (
+                        len(items) != 512
+                        or inventory.get("total") <= len(items)
+                    )
+                )
+                or (
+                    not inventory.get("itemsTruncated")
+                    and inventory.get("total") != len(items)
+                )
+                or [bag.get("bagId") for bag in bags]
+                != sorted({bag.get("bagId") for bag in bags})
+                or 1 not in {bag.get("bagId") for bag in bags}
+                or len({item.get("itemId") for item in items}) != len(items)
+                or item_locations != sorted(set(item_locations))
+            ):
+                raise Failure("certified inventory state is incomplete")
             print(
-                "[e2e] party, skillbar, effects, agents, and quests API PASS "
+                "[e2e] party, skillbar, effects, agents, quests, and inventory API PASS "
                 f"(players={len(party.get('players', []))}, "
                 f"heroes={len(party.get('heroes', []))}, "
                 f"henchmen={len(party.get('henchmen', []))}, "
                 f"populated-skills={sum(skill.get('skillId', 0) > 0 for skill in skills)}, "
                 f"buffs={len(buffs)}, effects={len(active_effects)}, "
                 f"agents={len(map_agents)}/{agents.get('total')}, "
-                f"quests={len(quest_log)}, objectives={len(objectives)})"
+                f"quests={len(quest_log)}, objectives={len(objectives)}, "
+                f"items={len(items)}/{inventory.get('total')}, "
+                f"bags={len(bags)})"
             )
 
             before = position(ready)
