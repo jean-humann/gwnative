@@ -159,8 +159,8 @@ Wars client. The runner:
 7. sends only a finite set of named AppKit actions: activate, forward/backward,
    left/right, next target, interact, cancel, and skill 1; and
 8. when the installed client has a certified state layout, requires two stable
-   revisions, validates bounded party and eight-slot skillbar state, and
-   confirms bidirectional movement through newer revisions.
+   revisions, validates bounded party, eight-slot skillbar, and player-effects
+   state, and confirms bidirectional movement through newer revisions.
 
 ```sh
 scripts/e2e
@@ -182,6 +182,9 @@ the runner still receives only presence and authentication milestones.
 The control plane exists only under `GWNATIVE_E2E`, has no arbitrary JavaScript,
 coordinates, text-entry or credential action, and sleeps between events. It
 does not use screenshots, OCR, Accessibility scripting, or focus polling.
+The page's first-frame event reactivates the native test window and retains the
+existing occluded-boot frame rescue for exactly two more callbacks; readiness
+is reported only after both complete, before any gameplay action is accepted.
 Gameplay keys originate as bounded AppKit `NSEvent` pairs and enter WKWebView
 through its normal responder chain. Page JavaScript observes the action only to
 associate resulting socket traffic; it cannot synthesize the gameplay event.
