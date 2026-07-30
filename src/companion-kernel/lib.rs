@@ -38,7 +38,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 5;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 6;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -50,6 +50,7 @@ const FLAG_EFFECTS_VALID: u32 = 1 << 6;
 const FLAG_MAP_AGENTS_VALID: u32 = 1 << 7;
 const FLAG_QUESTS_VALID: u32 = 1 << 8;
 const FLAG_INVENTORY_VALID: u32 = 1 << 9;
+const FLAG_SOCIAL_VALID: u32 = 1 << 10;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -70,6 +71,10 @@ const MAX_INVENTORY_BAGS: usize = 22;
 const MAX_INVENTORY_ITEMS: usize = 512;
 const MAX_BAG_SLOTS: u32 = 256;
 const MAX_TOTAL_BAG_SLOTS: u32 = 1_024;
+const MAX_RAW_FRIENDS: u32 = 256;
+const MAX_FRIENDS: usize = 128;
+const MAX_GUILDS: u32 = 64;
+const MAX_GUILD_ROSTER: u32 = 100;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -210,6 +215,34 @@ struct Layout {
     item_equipped: u32,
     item_profession: u32,
     item_slot: u32,
+    friend_list_address: u32,
+    friend_list_friends: u32,
+    friend_list_number_friend: u32,
+    friend_list_number_ignore: u32,
+    friend_list_number_partner: u32,
+    friend_list_number_trade: u32,
+    friend_list_player_status: u32,
+    friend_type: u32,
+    friend_status: u32,
+    friend_id: u32,
+    friend_zone_id: u32,
+    game_guild_context: u32,
+    guild_context_player_index: u32,
+    guild_context_player_key: u32,
+    guild_context_player_rank: u32,
+    guild_context_guilds: u32,
+    guild_context_roster: u32,
+    guild_key: u32,
+    guild_index: u32,
+    guild_rank: u32,
+    guild_features: u32,
+    guild_rating: u32,
+    guild_faction: u32,
+    guild_faction_point: u32,
+    guild_qualifier_point: u32,
+    guild_cape: u32,
+    guild_player_stride: u32,
+    guild_player_name_pointer: u32,
     cursor_active_art: u32,
     cursor_software_model: u32,
     cursor_show_count: u32,
@@ -343,6 +376,34 @@ impl Layout {
         item_equipped: 0,
         item_profession: 0,
         item_slot: 0,
+        friend_list_address: 0,
+        friend_list_friends: 0,
+        friend_list_number_friend: 0,
+        friend_list_number_ignore: 0,
+        friend_list_number_partner: 0,
+        friend_list_number_trade: 0,
+        friend_list_player_status: 0,
+        friend_type: 0,
+        friend_status: 0,
+        friend_id: 0,
+        friend_zone_id: 0,
+        game_guild_context: 0,
+        guild_context_player_index: 0,
+        guild_context_player_key: 0,
+        guild_context_player_rank: 0,
+        guild_context_guilds: 0,
+        guild_context_roster: 0,
+        guild_key: 0,
+        guild_index: 0,
+        guild_rank: 0,
+        guild_features: 0,
+        guild_rating: 0,
+        guild_faction: 0,
+        guild_faction_point: 0,
+        guild_qualifier_point: 0,
+        guild_cape: 0,
+        guild_player_stride: 0,
+        guild_player_name_pointer: 0,
         cursor_active_art: 0,
         cursor_software_model: 0,
         cursor_show_count: 0,
@@ -483,6 +544,16 @@ struct InventoryItem {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct Friend {
+    slot: u32,
+    friend_type: u32,
+    status: u32,
+    friend_id: u32,
+    zone_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -539,6 +610,25 @@ struct Snapshot {
     inventory_item_total: u32,
     inventory_bags: [InventoryBag; MAX_INVENTORY_BAGS],
     inventory_items: [InventoryItem; MAX_INVENTORY_ITEMS],
+    social_flags: u32,
+    player_status: u32,
+    friend_count: u32,
+    friend_total: u32,
+    number_friends: u32,
+    number_ignores: u32,
+    number_partners: u32,
+    number_traders: u32,
+    guild_index: u32,
+    player_guild_rank: u32,
+    guild_rank: u32,
+    guild_features: u32,
+    guild_rating: u32,
+    guild_faction: u32,
+    guild_faction_point: u32,
+    guild_qualifier_point: u32,
+    guild_roster_total: u32,
+    guild_cape: [u32; 7],
+    friends: [Friend; MAX_FRIENDS],
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -559,8 +649,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 516] = [(); size_of::<Layout>()];
-const _: [(); 45284] = [(); size_of::<Snapshot>()];
+const _: [(); 628] = [(); size_of::<Layout>()];
+const _: [(); 47940] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 #[panic_handler]
@@ -770,6 +860,13 @@ const EMPTY_INVENTORY_ITEM: InventoryItem = InventoryItem {
     modifier_count: 0,
     dye_info: 0,
 };
+const EMPTY_FRIEND: Friend = Friend {
+    slot: 0,
+    friend_type: 0,
+    status: 0,
+    friend_id: 0,
+    zone_id: 0,
+};
 #[derive(Clone, Copy)]
 struct PartyState {
     id: u32,
@@ -895,6 +992,22 @@ impl InventorySource {
     const EMPTY: Self = Self { inventory: 0 };
 }
 
+// The social page contains pointer arrays just like inventory. Keep only the
+// owning objects across the tick and revalidate every record while publishing.
+// No string, UUID, announcement, or message pointer is ever followed.
+#[derive(Clone, Copy)]
+struct SocialSource {
+    friend_list: u32,
+    guild_context: u32,
+}
+
+impl SocialSource {
+    const EMPTY: Self = Self {
+        friend_list: 0,
+        guild_context: 0,
+    };
+}
+
 #[derive(Clone, Copy)]
 struct State {
     flags: u32,
@@ -910,6 +1023,7 @@ struct State {
     map_agents: MapAgentsSource,
     quests: QuestsSource,
     inventory: InventorySource,
+    social: SocialSource,
 }
 
 impl State {
@@ -934,6 +1048,7 @@ impl State {
             map_agents: MapAgentsSource::EMPTY,
             quests: QuestsSource::EMPTY,
             inventory: InventorySource::EMPTY,
+            social: SocialSource::EMPTY,
         }
     }
 }
@@ -1292,6 +1407,26 @@ unsafe fn collect_inventory(layout: Layout, game: u32) -> Option<InventorySource
         )?
     };
     Some(InventorySource { inventory })
+}
+
+unsafe fn collect_social(layout: Layout, game: u32) -> Option<SocialSource> {
+    let friend_bytes = layout.friend_list_player_status.checked_add(4)?;
+    if layout.friend_list_address == 0
+        || layout.friend_list_address & 3 != 0
+        || !contains(layout.friend_list_address, friend_bytes)
+    {
+        return None;
+    }
+    let guild_context = unsafe {
+        pointer(
+            offset(game, layout.game_guild_context)?,
+            layout.guild_context_roster.checked_add(16)?,
+        )?
+    };
+    Some(SocialSource {
+        friend_list: layout.friend_list_address,
+        guild_context,
+    })
 }
 
 unsafe fn collect_party(layout: Layout, game: u32, agent_count: u32) -> Option<PartyState> {
@@ -1775,6 +1910,10 @@ unsafe fn collect(layout: Layout) -> State {
         state.flags |= FLAG_INVENTORY_VALID;
         state.inventory = inventory;
     }
+    if let Some(social) = unsafe { collect_social(layout, game) } {
+        state.flags |= FLAG_SOCIAL_VALID;
+        state.social = social;
+    }
     state
 }
 
@@ -2024,6 +2163,321 @@ unsafe fn publish_inventory(
     valid
 }
 
+unsafe fn read_friend(layout: Layout, address: u32, slot: u32) -> Option<Friend> {
+    let required = layout.friend_zone_id.checked_add(4)?;
+    if address == 0 || address & 3 != 0 || !contains(address, required) {
+        return None;
+    }
+    let friend = Friend {
+        slot,
+        friend_type: unsafe { read_u32(offset(address, layout.friend_type)?)? },
+        status: unsafe { read_u32(offset(address, layout.friend_status)?)? },
+        friend_id: unsafe { read_u32(offset(address, layout.friend_id)?)? },
+        zone_id: unsafe { read_u32(offset(address, layout.friend_zone_id)?)? },
+    };
+    if friend.friend_type > 4
+        || friend.status > 4
+        || friend.friend_id > 1_000_000
+        || friend.zone_id > 2_000
+    {
+        return None;
+    }
+    Some(friend)
+}
+
+unsafe fn publish_social(
+    snapshot: *mut Snapshot,
+    layout: Layout,
+    source: SocialSource,
+) -> bool {
+    let friend_bytes = layout.friend_list_player_status.checked_add(4);
+    let guild_bytes = layout.guild_context_roster.checked_add(16);
+    let mut valid = source.friend_list != 0
+        && source.friend_list & 3 == 0
+        && friend_bytes.is_some_and(|bytes| contains(source.friend_list, bytes))
+        && source.guild_context != 0
+        && source.guild_context & 3 == 0
+        && guild_bytes.is_some_and(|bytes| contains(source.guild_context, bytes));
+    let mut social_flags = 0u32;
+    let mut player_status = 0u32;
+    let mut friend_count = 0usize;
+    let mut friend_total = 0u32;
+    let mut number_friends = 0u32;
+    let mut number_ignores = 0u32;
+    let mut number_partners = 0u32;
+    let mut number_traders = 0u32;
+    let mut guild_index = 0u32;
+    let mut player_guild_rank = 0u32;
+    let mut guild_rank = 0u32;
+    let mut guild_features = 0u32;
+    let mut guild_rating = 0u32;
+    let mut guild_faction = 0u32;
+    let mut guild_faction_point = 0u32;
+    let mut guild_qualifier_point = 0u32;
+    let mut guild_roster_total = 0u32;
+    let mut guild_cape = [0u32; 7];
+
+    if valid {
+        let status = offset(source.friend_list, layout.friend_list_player_status)
+            .and_then(|address| unsafe { read_u32(address) });
+        let friends = offset(source.friend_list, layout.friend_list_number_friend)
+            .and_then(|address| unsafe { read_u32(address) });
+        let ignores = offset(source.friend_list, layout.friend_list_number_ignore)
+            .and_then(|address| unsafe { read_u32(address) });
+        let partners = offset(source.friend_list, layout.friend_list_number_partner)
+            .and_then(|address| unsafe { read_u32(address) });
+        let traders = offset(source.friend_list, layout.friend_list_number_trade)
+            .and_then(|address| unsafe { read_u32(address) });
+        if let (Some(status), Some(friends), Some(ignores), Some(partners), Some(traders)) =
+            (status, friends, ignores, partners, traders)
+        {
+            player_status = status;
+            number_friends = friends;
+            number_ignores = ignores;
+            number_partners = partners;
+            number_traders = traders;
+            valid &= player_status <= 4
+                && number_friends <= MAX_RAW_FRIENDS
+                && number_ignores <= MAX_RAW_FRIENDS
+                && number_partners <= MAX_RAW_FRIENDS
+                && number_traders <= MAX_RAW_FRIENDS;
+        } else {
+            valid = false;
+        }
+    }
+
+    if valid {
+        let list = offset(source.friend_list, layout.friend_list_friends)
+            .and_then(|address| unsafe {
+                read_array(address, 4, MAX_RAW_FRIENDS, MAX_RAW_FRIENDS)
+            });
+        if let Some(list) = list {
+            let mut observed = [0u32; 5];
+            for slot in 0..list.size {
+                let Some(entry) = indexed(list.buffer, slot, 4) else {
+                    valid = false;
+                    break;
+                };
+                let Some(address) = (unsafe { read_u32(entry) }) else {
+                    valid = false;
+                    break;
+                };
+                if address == 0 {
+                    continue;
+                }
+                let Some(friend) = (unsafe { read_friend(layout, address, slot) }) else {
+                    valid = false;
+                    break;
+                };
+                observed[friend.friend_type as usize] += 1;
+                friend_total += 1;
+                if friend_count < MAX_FRIENDS {
+                    unsafe {
+                        write_volatile(
+                            &mut (*snapshot).friends[friend_count],
+                            friend,
+                        );
+                    }
+                    friend_count += 1;
+                }
+            }
+            valid &= observed[1] == number_friends
+                && observed[2] == number_ignores
+                && observed[3] == number_partners
+                && observed[4] == number_traders;
+        } else {
+            valid = false;
+        }
+    }
+
+    if valid {
+        let player_index = offset(source.guild_context, layout.guild_context_player_index)
+            .and_then(|address| unsafe { read_u32(address) });
+        let player_rank = offset(source.guild_context, layout.guild_context_player_rank)
+            .and_then(|address| unsafe { read_u32(address) });
+        if let (Some(index), Some(rank)) = (player_index, player_rank) {
+            guild_index = index;
+            player_guild_rank = rank;
+            valid &= guild_index < MAX_GUILDS;
+        } else {
+            valid = false;
+        }
+    }
+
+    if valid && guild_index != 0 {
+        let guilds = offset(source.guild_context, layout.guild_context_guilds)
+            .and_then(|address| unsafe { read_array(address, 4, MAX_GUILDS, 256) });
+        let guild_address = guilds.and_then(|guilds| {
+            (guild_index < guilds.size)
+                .then(|| indexed(guilds.buffer, guild_index, 4))
+                .flatten()
+                .and_then(|entry| unsafe { read_u32(entry) })
+        });
+        let guild_required = layout.guild_cape.checked_add(28);
+        let guild_address = guild_address.filter(|address| {
+            *address != 0
+                && *address & 3 == 0
+                && guild_required.is_some_and(|bytes| contains(*address, bytes))
+        });
+        if let Some(guild) = guild_address {
+            let mut context_key = [0u32; 4];
+            let mut record_key = [0u32; 4];
+            for index in 0..4u32 {
+                context_key[index as usize] = offset(
+                    source.guild_context,
+                    layout.guild_context_player_key.checked_add(index * 4).unwrap_or(0),
+                )
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or(0);
+                record_key[index as usize] = offset(
+                    guild,
+                    layout.guild_key.checked_add(index * 4).unwrap_or(0),
+                )
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or(0);
+            }
+            guild_rank = offset(guild, layout.guild_rank)
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or(0);
+            guild_features = offset(guild, layout.guild_features)
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or(0);
+            guild_rating = offset(guild, layout.guild_rating)
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or(0);
+            guild_faction = offset(guild, layout.guild_faction)
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or(u32::MAX);
+            guild_faction_point = offset(guild, layout.guild_faction_point)
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or(0);
+            guild_qualifier_point = offset(guild, layout.guild_qualifier_point)
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or(0);
+            let record_index = offset(guild, layout.guild_index)
+                .and_then(|address| unsafe { read_u32(address) });
+            valid &= context_key == record_key
+                && context_key.iter().any(|word| *word != 0)
+                && record_index == Some(guild_index)
+                && guild_faction <= 1;
+            for index in 0..7u32 {
+                guild_cape[index as usize] = offset(
+                    guild,
+                    layout.guild_cape.checked_add(index * 4).unwrap_or(0),
+                )
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or(0);
+            }
+        } else {
+            valid = false;
+        }
+
+        if valid {
+            let roster = offset(source.guild_context, layout.guild_context_roster)
+                .and_then(|address| unsafe {
+                    read_array(address, 4, MAX_GUILD_ROSTER, 256)
+                });
+            if let Some(roster) = roster {
+                valid &= layout.guild_player_stride >= 0x40
+                    && layout.guild_player_stride <= 0x400
+                    && layout.guild_player_stride & 3 == 0
+                    && layout.guild_player_name_pointer
+                        .checked_add(4)
+                        .is_some_and(|end| end <= layout.guild_player_stride);
+                for index in 0..roster.size {
+                    let value = indexed(roster.buffer, index, 4)
+                        .and_then(|entry| unsafe { read_u32(entry) });
+                    let Some(address) = value else {
+                        valid = false;
+                        break;
+                    };
+                    if address == 0 {
+                        continue;
+                    }
+                    if address & 3 != 0
+                        || !contains(address, layout.guild_player_stride)
+                    {
+                        valid = false;
+                        break;
+                    }
+                    guild_roster_total += 1;
+                }
+            } else {
+                valid = false;
+            }
+        }
+        if valid {
+            social_flags |= 1 << 1;
+        }
+    } else if valid {
+        // GuildContext keeps other fields alive across transitions. Index zero
+        // is the authoritative "no guild" signal, so publish no stale rank.
+        player_guild_rank = 0;
+    }
+
+    if valid && friend_total > friend_count as u32 {
+        social_flags |= 1;
+    }
+    if !valid {
+        social_flags = 0;
+        player_status = 0;
+        friend_count = 0;
+        friend_total = 0;
+        number_friends = 0;
+        number_ignores = 0;
+        number_partners = 0;
+        number_traders = 0;
+        guild_index = 0;
+        player_guild_rank = 0;
+        guild_rank = 0;
+        guild_features = 0;
+        guild_rating = 0;
+        guild_faction = 0;
+        guild_faction_point = 0;
+        guild_qualifier_point = 0;
+        guild_roster_total = 0;
+        guild_cape = [0; 7];
+    }
+    for index in friend_count..MAX_FRIENDS {
+        unsafe { write_volatile(&mut (*snapshot).friends[index], EMPTY_FRIEND) };
+    }
+    unsafe {
+        write_volatile(&mut (*snapshot).social_flags, social_flags);
+        write_volatile(&mut (*snapshot).player_status, player_status);
+        write_volatile(
+            &mut (*snapshot).friend_count,
+            if valid { friend_count as u32 } else { 0 },
+        );
+        write_volatile(&mut (*snapshot).friend_total, friend_total);
+        write_volatile(&mut (*snapshot).number_friends, number_friends);
+        write_volatile(&mut (*snapshot).number_ignores, number_ignores);
+        write_volatile(&mut (*snapshot).number_partners, number_partners);
+        write_volatile(&mut (*snapshot).number_traders, number_traders);
+        write_volatile(&mut (*snapshot).guild_index, guild_index);
+        write_volatile(&mut (*snapshot).player_guild_rank, player_guild_rank);
+        write_volatile(&mut (*snapshot).guild_rank, guild_rank);
+        write_volatile(&mut (*snapshot).guild_features, guild_features);
+        write_volatile(&mut (*snapshot).guild_rating, guild_rating);
+        write_volatile(&mut (*snapshot).guild_faction, guild_faction);
+        write_volatile(
+            &mut (*snapshot).guild_faction_point,
+            guild_faction_point,
+        );
+        write_volatile(
+            &mut (*snapshot).guild_qualifier_point,
+            guild_qualifier_point,
+        );
+        write_volatile(
+            &mut (*snapshot).guild_roster_total,
+            guild_roster_total,
+        );
+        for index in 0..7 {
+            write_volatile(&mut (*snapshot).guild_cape[index], guild_cape[index]);
+        }
+    }
+    valid
+}
+
 unsafe fn publish(runtime: &mut RuntimeState, mut state: State, layout: Layout) {
     let next = runtime.sequence.wrapping_add(2) & !1;
     let snapshot = runtime.snapshot_ptr as *mut Snapshot;
@@ -2159,6 +2613,9 @@ unsafe fn publish(runtime: &mut RuntimeState, mut state: State, layout: Layout) 
         }
         if !publish_inventory(snapshot, layout, state.inventory) {
             state.flags &= !FLAG_INVENTORY_VALID;
+        }
+        if !publish_social(snapshot, layout, state.social) {
+            state.flags &= !FLAG_SOCIAL_VALID;
         }
         write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).sequence, next);

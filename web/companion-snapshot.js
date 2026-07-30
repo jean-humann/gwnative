@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 5;
-export const COMPANION_SNAPSHOT_BYTES = 45_284;
+export const COMPANION_SNAPSHOT_ABI = 6;
+export const COMPANION_SNAPSHOT_BYTES = 47_940;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -46,6 +46,7 @@ const FLAGS = Object.freeze({
   agents: 1 << 7,
   quests: 1 << 8,
   inventory: 1 << 9,
+  social: 1 << 10,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -57,7 +58,8 @@ const KNOWN_FLAGS =
   | FLAGS.effects
   | FLAGS.agents
   | FLAGS.quests
-  | FLAGS.inventory;
+  | FLAGS.inventory
+  | FLAGS.social;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -81,6 +83,8 @@ const MAX_INVENTORY_BAGS = 22;
 const MAX_INVENTORY_ITEMS = 512;
 const MAX_INVENTORY_ITEM_ID = 1_000_000;
 const MAX_TOTAL_BAG_SLOTS = 1_024;
+const MAX_RAW_FRIENDS = 256;
+const MAX_FRIENDS = 128;
 const EFFECT_FLAGS = Object.freeze({
   buffsTruncated: 1 << 0,
   effectsTruncated: 1 << 1,
@@ -99,6 +103,27 @@ const KNOWN_QUEST_FLAGS =
 const INVENTORY_FLAGS = Object.freeze({
   itemsTruncated: 1 << 0,
 });
+const SOCIAL_FLAGS = Object.freeze({
+  friendsTruncated: 1 << 0,
+  guildPresent: 1 << 1,
+});
+const KNOWN_SOCIAL_FLAGS =
+  SOCIAL_FLAGS.friendsTruncated | SOCIAL_FLAGS.guildPresent;
+const FRIEND_TYPE_NAMES = Object.freeze([
+  'Unknown',
+  'Friend',
+  'Ignore',
+  'Partner',
+  'Trade',
+]);
+const FRIEND_STATUS_NAMES = Object.freeze([
+  'Offline',
+  'Online',
+  'DoNotDisturb',
+  'Away',
+  'Unknown',
+]);
+const GUILD_FACTION_NAMES = Object.freeze(['Kurzick', 'Luxon']);
 
 /** @param {number} value */
 function validCoordinate(value) {
@@ -799,6 +824,143 @@ function readInventory(view) {
   });
 }
 
+function readSocial(view) {
+  const flags = view.getUint32(45284, true);
+  const playerStatus = view.getUint32(45288, true);
+  const count = view.getUint32(45292, true);
+  const total = view.getUint32(45296, true);
+  const friends = view.getUint32(45300, true);
+  const ignores = view.getUint32(45304, true);
+  const partners = view.getUint32(45308, true);
+  const traders = view.getUint32(45312, true);
+  const friendsTruncated = (flags & SOCIAL_FLAGS.friendsTruncated) !== 0;
+  const guildPresent = (flags & SOCIAL_FLAGS.guildPresent) !== 0;
+  if (
+    (flags & ~KNOWN_SOCIAL_FLAGS) !== 0
+    || playerStatus >= FRIEND_STATUS_NAMES.length
+    || count > MAX_FRIENDS
+    || total < count
+    || total > MAX_RAW_FRIENDS
+    || friends > MAX_RAW_FRIENDS
+    || ignores > MAX_RAW_FRIENDS
+    || partners > MAX_RAW_FRIENDS
+    || traders > MAX_RAW_FRIENDS
+    || friends + ignores + partners + traders > total
+    || (
+      friendsTruncated
+        ? count !== MAX_FRIENDS || total <= count
+        : total !== count
+    )
+  ) {
+    return null;
+  }
+
+  let guild = null;
+  const guildIndex = view.getUint32(45316, true);
+  if (!guildPresent) {
+    if (guildIndex !== 0 || !wordsAreZero(view, 45320, 60)) return null;
+  } else {
+    const playerRank = view.getUint32(45320, true);
+    const rank = view.getUint32(45324, true);
+    const features = view.getUint32(45328, true);
+    const rating = view.getUint32(45332, true);
+    const faction = view.getUint32(45336, true);
+    const factionPoints = view.getUint32(45340, true);
+    const qualifierPoints = view.getUint32(45344, true);
+    const rosterTotal = view.getUint32(45348, true);
+    if (
+      guildIndex === 0
+      || guildIndex >= 64
+      || faction >= GUILD_FACTION_NAMES.length
+      || rosterTotal > 100
+    ) {
+      return null;
+    }
+    guild = Object.freeze({
+      index: guildIndex,
+      playerRank,
+      rank,
+      features,
+      rating,
+      faction,
+      factionName: GUILD_FACTION_NAMES[faction],
+      factionPoints,
+      qualifierPoints,
+      rosterTotal,
+      cape: Object.freeze({
+        backgroundColor: view.getUint32(45352, true),
+        detailColor: view.getUint32(45356, true),
+        emblemColor: view.getUint32(45360, true),
+        shape: view.getUint32(45364, true),
+        detail: view.getUint32(45368, true),
+        emblem: view.getUint32(45372, true),
+        trim: view.getUint32(45376, true),
+      }),
+    });
+  }
+
+  const entries = [];
+  const observed = [0, 0, 0, 0, 0];
+  let previousSlot = -1;
+  for (let index = 0; index < MAX_FRIENDS; index += 1) {
+    const offset = 45380 + index * 20;
+    if (index >= count) {
+      if (!wordsAreZero(view, offset, 20)) return null;
+      continue;
+    }
+    const slot = view.getUint32(offset, true);
+    const type = view.getUint32(offset + 4, true);
+    const status = view.getUint32(offset + 8, true);
+    const friendId = view.getUint32(offset + 12, true);
+    const zoneId = view.getUint32(offset + 16, true);
+    if (
+      slot <= previousSlot
+      || slot >= MAX_RAW_FRIENDS
+      || type >= FRIEND_TYPE_NAMES.length
+      || status >= FRIEND_STATUS_NAMES.length
+      || friendId > 1_000_000
+      || zoneId > 2_000
+    ) {
+      return null;
+    }
+    previousSlot = slot;
+    observed[type] += 1;
+    entries.push(Object.freeze({
+      slot,
+      type,
+      typeName: FRIEND_TYPE_NAMES[type],
+      status,
+      statusName: FRIEND_STATUS_NAMES[status],
+      friendId,
+      zoneId,
+      isOnline: status >= 1 && status <= 3,
+    }));
+  }
+  const declared = [total - friends - ignores - partners - traders, friends, ignores, partners, traders];
+  for (let type = 0; type < declared.length; type += 1) {
+    if (
+      observed[type] > declared[type]
+      || (!friendsTruncated && observed[type] !== declared[type])
+    ) {
+      return null;
+    }
+  }
+  return Object.freeze({
+    playerStatus,
+    playerStatusName: FRIEND_STATUS_NAMES[playerStatus],
+    friends: Object.freeze({
+      truncated: friendsTruncated,
+      total,
+      friends,
+      ignores,
+      partners,
+      traders,
+      entries: Object.freeze(entries),
+    }),
+    guild,
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -963,6 +1125,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const socialValid = (flags & FLAGS.social) !== 0;
+  const social = socialValid ? readSocial(view) : null;
+  if (
+    (socialValid && social === null)
+    || (!socialValid && !wordsAreZero(view, 45284, 2656))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -982,6 +1152,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(agents ? { agents } : {}),
     ...(quests ? { quests } : {}),
     ...(inventory ? { inventory } : {}),
+    ...(social ? { social } : {}),
   });
 }
 

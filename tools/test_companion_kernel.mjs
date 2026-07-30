@@ -40,14 +40,23 @@ const backpack = 0x156000;
 const backpackItems = 0x157000;
 const inventoryItem = 0x158000;
 const itemModifiers = 0x159000;
-const snapshot = 0x160000;
-const config = 0x164000;
+const friendList = 0x15a000;
+const friendPointers = 0x15b000;
+const friend = 0x15c000;
+const guildContext = 0x15d000;
+const guildPointers = 0x15e000;
+const guild = 0x15f000;
+const rosterPointers = 0x160000;
+const guildPlayer = 0x161000;
+const snapshot = 0x180000;
+const config = 0x18c000;
 
 // Context and current-map invariants.
 u32(contextRoot, contexts);
 u32(contexts + 6 * 4, game);
 u32(game + 0x44, character);
 u32(game + 0x2c, world);
+u32(game + 0x3c, guildContext);
 u32(game + 0x40, itemContext);
 u32(character + 0x198, 55);
 u32(character + 0x19c, 1);
@@ -145,7 +154,48 @@ u8(inventoryItem + 0x50, 0);
 u32(itemModifiers, 0x1234_5678);
 u32(itemModifiers + 4, 0x8765_4321);
 
-const layout = Array(129).fill(0);
+// One online friend and a numeric-only guild summary. Names, UUIDs, and
+// announcements are present in neither this fixture nor the public snapshot.
+u32(friendList, friendPointers);
+u32(friendList + 4, 1);
+u32(friendList + 8, 1);
+u32(friendList + 0x24, 1);
+u32(friendList + 0x28, 0);
+u32(friendList + 0x2c, 0);
+u32(friendList + 0x30, 0);
+u32(friendList + 0xa0, 1);
+u32(friendPointers, friend);
+u32(friend, 1);
+u32(friend + 4, 1);
+u32(friend + 0x40, 77);
+u32(friend + 0x44, 55);
+
+u32(guildContext + 0x60, 2);
+for (let index = 0; index < 4; index += 1) {
+  u32(guildContext + 0x64 + index * 4, index + 10);
+  u32(guild + index * 4, index + 10);
+}
+u32(guildContext + 0x2a0, 3);
+u32(guildContext + 0x2f8, guildPointers);
+u32(guildContext + 0x2fc, 4);
+u32(guildContext + 0x300, 3);
+u32(guildPointers + 8, guild);
+u32(guildContext + 0x358, rosterPointers);
+u32(guildContext + 0x35c, 1);
+u32(guildContext + 0x360, 1);
+u32(rosterPointers, guildPlayer);
+u32(guild + 0x24, 2);
+u32(guild + 0x28, 1);
+u32(guild + 0x2c, 9);
+u32(guild + 0x70, 1_200);
+u32(guild + 0x74, 0);
+u32(guild + 0x78, 1_000);
+u32(guild + 0x7c, 10);
+for (let index = 0; index < 7; index += 1) {
+  u32(guild + 0x90 + index * 4, index + 1);
+}
+
+const layout = Array(157).fill(0);
 Object.assign(layout, {
   0: contextRoot,
   1: agentArray,
@@ -242,6 +292,34 @@ Object.assign(layout, {
   114: 0x4e,
   115: 0x4f,
   116: 0x50,
+  117: friendList,
+  118: 0,
+  119: 0x24,
+  120: 0x28,
+  121: 0x2c,
+  122: 0x30,
+  123: 0xa0,
+  124: 0,
+  125: 4,
+  126: 0x40,
+  127: 0x44,
+  128: 0x3c,
+  129: 0x60,
+  130: 0x64,
+  131: 0x2a0,
+  132: 0x2f8,
+  133: 0x358,
+  134: 0,
+  135: 0x24,
+  136: 0x28,
+  137: 0x2c,
+  138: 0x70,
+  139: 0x74,
+  140: 0x78,
+  141: 0x7c,
+  142: 0x90,
+  143: 0x174,
+  144: 4,
 });
 new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
@@ -251,7 +329,7 @@ const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
 });
 const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 516, 0, 0, 1 << 1),
+  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 628, 0, 0, 1 << 1),
   1,
 );
 tick(0);
@@ -282,3 +360,19 @@ assert.equal(state.inventory.items[0].quantity, 5);
 assert.equal(state.inventory.items[0].modifierCount, 2);
 assert.equal(state.inventory.items[0].isStackable, true);
 assert.equal(state.inventory.items[0].isGold, true);
+assert.equal(state.social.playerStatusName, 'Online');
+assert.equal(state.social.friends.entries[0].typeName, 'Friend');
+assert.equal(state.social.friends.entries[0].friendId, 77);
+assert.equal(state.social.guild.index, 2);
+assert.equal(state.social.guild.factionName, 'Kurzick');
+assert.equal(state.social.guild.rosterTotal, 1);
+assert.equal(state.social.guild.cape.trim, 7);
+
+// Index zero is the authoritative no-guild state even when the context keeps
+// stale rank and roster fields alive across a transition.
+u32(guildContext + 0x60, 0);
+tick(0);
+const guildless = readCompanionSnapshot(memory.buffer, snapshot);
+assert.equal(guildless.status, 'ready');
+assert.equal(guildless.social.guild, null);
+assert.equal(guildless.social.friends.total, 1);
