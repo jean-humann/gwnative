@@ -41,7 +41,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 11;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 12;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -59,6 +59,7 @@ const FLAG_CAMERA_VALID: u32 = 1 << 12;
 const FLAG_TRADE_VALID: u32 = 1 << 13;
 const FLAG_UI_VALID: u32 = 1 << 14;
 const FLAG_MERCHANT_VALID: u32 = 1 << 15;
+const FLAG_PROGRESSION_VALID: u32 = 1 << 16;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -104,6 +105,11 @@ const UI_RECORD_POSITION_VALID: u32 = 1;
 const MAX_RAW_MERCHANT_ITEMS: u32 = 512;
 const MAX_MERCHANT_ITEMS: usize = 128;
 const MAX_MERCHANT_ITEM_ID: u32 = 1_000_000;
+const MAX_EXPERIENCE: u32 = 2_000_000_000;
+const MAX_FACTION_CURRENT: u32 = 100_000_000;
+const MAX_FACTION_TOTAL: u32 = 2_000_000_000;
+const MAX_SKILL_POINTS_CURRENT: u32 = 1_000_000;
+const MAX_SKILL_POINTS_TOTAL: u32 = 2_000_000_000;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -326,6 +332,35 @@ struct Layout {
     ui_frame_hash: u32,
     ui_frame_state: u32,
     world_merchant_items: u32,
+    world_hard_mode_unlocked: u32,
+    world_experience: u32,
+    world_experience_duplicate: u32,
+    world_kurzick_current: u32,
+    world_kurzick_current_duplicate: u32,
+    world_kurzick_total: u32,
+    world_kurzick_total_duplicate: u32,
+    world_kurzick_maximum: u32,
+    world_luxon_current: u32,
+    world_luxon_current_duplicate: u32,
+    world_luxon_total: u32,
+    world_luxon_total_duplicate: u32,
+    world_luxon_maximum: u32,
+    world_imperial_current: u32,
+    world_imperial_current_duplicate: u32,
+    world_imperial_total: u32,
+    world_imperial_total_duplicate: u32,
+    world_imperial_maximum: u32,
+    world_level: u32,
+    world_level_duplicate: u32,
+    world_balthazar_current: u32,
+    world_balthazar_current_duplicate: u32,
+    world_balthazar_total: u32,
+    world_balthazar_total_duplicate: u32,
+    world_balthazar_maximum: u32,
+    world_skill_points_current: u32,
+    world_skill_points_current_duplicate: u32,
+    world_skill_points_total: u32,
+    world_skill_points_total_duplicate: u32,
 }
 
 impl Layout {
@@ -529,6 +564,35 @@ impl Layout {
         ui_frame_hash: 0,
         ui_frame_state: 0,
         world_merchant_items: 0,
+        world_hard_mode_unlocked: 0,
+        world_experience: 0,
+        world_experience_duplicate: 0,
+        world_kurzick_current: 0,
+        world_kurzick_current_duplicate: 0,
+        world_kurzick_total: 0,
+        world_kurzick_total_duplicate: 0,
+        world_kurzick_maximum: 0,
+        world_luxon_current: 0,
+        world_luxon_current_duplicate: 0,
+        world_luxon_total: 0,
+        world_luxon_total_duplicate: 0,
+        world_luxon_maximum: 0,
+        world_imperial_current: 0,
+        world_imperial_current_duplicate: 0,
+        world_imperial_total: 0,
+        world_imperial_total_duplicate: 0,
+        world_imperial_maximum: 0,
+        world_level: 0,
+        world_level_duplicate: 0,
+        world_balthazar_current: 0,
+        world_balthazar_current_duplicate: 0,
+        world_balthazar_total: 0,
+        world_balthazar_total_duplicate: 0,
+        world_balthazar_maximum: 0,
+        world_skill_points_current: 0,
+        world_skill_points_current_duplicate: 0,
+        world_skill_points_total: 0,
+        world_skill_points_total_duplicate: 0,
     };
 }
 
@@ -776,6 +840,50 @@ struct MerchantState {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct FactionProgress {
+    current: u32,
+    total_earned: u32,
+    maximum: u32,
+}
+
+impl FactionProgress {
+    const EMPTY: Self = Self {
+        current: 0,
+        total_earned: 0,
+        maximum: 0,
+    };
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProgressionState {
+    hard_mode_unlocked: u32,
+    level: u32,
+    experience: u32,
+    kurzick: FactionProgress,
+    luxon: FactionProgress,
+    imperial: FactionProgress,
+    balthazar: FactionProgress,
+    current_skill_points: u32,
+    total_skill_points: u32,
+}
+
+impl ProgressionState {
+    const EMPTY: Self = Self {
+        hard_mode_unlocked: 0,
+        level: 0,
+        experience: 0,
+        kurzick: FactionProgress::EMPTY,
+        luxon: FactionProgress::EMPTY,
+        imperial: FactionProgress::EMPTY,
+        balthazar: FactionProgress::EMPTY,
+        current_skill_points: 0,
+        total_skill_points: 0,
+    };
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -857,6 +965,7 @@ struct Snapshot {
     trade: TradeState,
     ui: UiState,
     merchant: MerchantState,
+    progression: ProgressionState,
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -877,8 +986,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 796] = [(); size_of::<Layout>()];
-const _: [(); 56776] = [(); size_of::<Snapshot>()];
+const _: [(); 912] = [(); size_of::<Layout>()];
+const _: [(); 56844] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 static mut SNAPSHOT_PTR: u32 = 0;
@@ -1334,6 +1443,7 @@ struct State {
     trade: TradeSource,
     ui: UiSource,
     merchant: MerchantSource,
+    progression: ProgressionState,
 }
 
 impl State {
@@ -1364,6 +1474,7 @@ impl State {
             trade: TradeSource::EMPTY,
             ui: UiSource::EMPTY,
             merchant: MerchantSource::EMPTY,
+            progression: ProgressionState::EMPTY,
         }
     }
 }
@@ -1640,6 +1751,152 @@ unsafe fn collect_merchant(layout: Layout, game: u32) -> Option<MerchantSource> 
         )?
     };
     unsafe { valid_merchant_items(items) }.then_some(MerchantSource { items })
+}
+
+unsafe fn read_progress_pair(
+    world: u32,
+    primary_offset: u32,
+    duplicate_offset: u32,
+    maximum: u32,
+) -> Option<u32> {
+    let primary = unsafe { read_u32(offset(world, primary_offset)?)? };
+    let duplicate = unsafe { read_u32(offset(world, duplicate_offset)?)? };
+    (primary <= maximum && duplicate <= maximum).then_some(primary.max(duplicate))
+}
+
+unsafe fn read_faction_progress(
+    world: u32,
+    current_offset: u32,
+    current_duplicate_offset: u32,
+    total_offset: u32,
+    total_duplicate_offset: u32,
+    maximum_offset: u32,
+) -> Option<FactionProgress> {
+    let current = unsafe {
+        read_progress_pair(
+            world,
+            current_offset,
+            current_duplicate_offset,
+            MAX_FACTION_CURRENT,
+        )?
+    };
+    let total_earned = unsafe {
+        read_progress_pair(
+            world,
+            total_offset,
+            total_duplicate_offset,
+            MAX_FACTION_TOTAL,
+        )?
+    };
+    let maximum = unsafe { read_u32(offset(world, maximum_offset)?)? };
+    (maximum <= MAX_FACTION_CURRENT
+        && current <= maximum
+        && total_earned >= current)
+        .then_some(FactionProgress {
+            current,
+            total_earned,
+            maximum,
+        })
+}
+
+unsafe fn collect_progression(
+    layout: Layout,
+    game: u32,
+) -> Option<ProgressionState> {
+    let world = unsafe {
+        pointer(
+            offset(game, layout.game_world_context)?,
+            layout.world_imperial_maximum.checked_add(4)?,
+        )?
+    };
+    let hard_mode_unlocked =
+        unsafe { read_u32(offset(world, layout.world_hard_mode_unlocked)?)? };
+    let level = unsafe {
+        read_progress_pair(
+            world,
+            layout.world_level,
+            layout.world_level_duplicate,
+            20,
+        )?
+    };
+    let experience = unsafe {
+        read_progress_pair(
+            world,
+            layout.world_experience,
+            layout.world_experience_duplicate,
+            MAX_EXPERIENCE,
+        )?
+    };
+    let kurzick = unsafe {
+        read_faction_progress(
+            world,
+            layout.world_kurzick_current,
+            layout.world_kurzick_current_duplicate,
+            layout.world_kurzick_total,
+            layout.world_kurzick_total_duplicate,
+            layout.world_kurzick_maximum,
+        )?
+    };
+    let luxon = unsafe {
+        read_faction_progress(
+            world,
+            layout.world_luxon_current,
+            layout.world_luxon_current_duplicate,
+            layout.world_luxon_total,
+            layout.world_luxon_total_duplicate,
+            layout.world_luxon_maximum,
+        )?
+    };
+    let imperial = unsafe {
+        read_faction_progress(
+            world,
+            layout.world_imperial_current,
+            layout.world_imperial_current_duplicate,
+            layout.world_imperial_total,
+            layout.world_imperial_total_duplicate,
+            layout.world_imperial_maximum,
+        )?
+    };
+    let balthazar = unsafe {
+        read_faction_progress(
+            world,
+            layout.world_balthazar_current,
+            layout.world_balthazar_current_duplicate,
+            layout.world_balthazar_total,
+            layout.world_balthazar_total_duplicate,
+            layout.world_balthazar_maximum,
+        )?
+    };
+    let current_skill_points = unsafe {
+        read_progress_pair(
+            world,
+            layout.world_skill_points_current,
+            layout.world_skill_points_current_duplicate,
+            MAX_SKILL_POINTS_CURRENT,
+        )?
+    };
+    let total_skill_points = unsafe {
+        read_progress_pair(
+            world,
+            layout.world_skill_points_total,
+            layout.world_skill_points_total_duplicate,
+            MAX_SKILL_POINTS_TOTAL,
+        )?
+    };
+    (hard_mode_unlocked <= 1
+        && (1..=20).contains(&level)
+        && total_skill_points >= current_skill_points)
+        .then_some(ProgressionState {
+            hard_mode_unlocked,
+            level,
+            experience,
+            kurzick,
+            luxon,
+            imperial,
+            balthazar,
+            current_skill_points,
+            total_skill_points,
+        })
 }
 
 unsafe fn collect_camera(layout: Layout) -> Option<CameraState> {
@@ -2568,6 +2825,10 @@ unsafe fn collect(layout: Layout) -> State {
     if let Some(merchant) = unsafe { collect_merchant(layout, game) } {
         state.flags |= FLAG_MERCHANT_VALID;
         state.merchant = merchant;
+    }
+    if let Some(progression) = unsafe { collect_progression(layout, game) } {
+        state.flags |= FLAG_PROGRESSION_VALID;
+        state.progression = progression;
     }
     state
 }
@@ -3533,6 +3794,7 @@ unsafe fn publish(mut state: State, layout: Layout) {
         if !publish_merchant(snapshot, state.merchant) {
             state.flags &= !FLAG_MERCHANT_VALID;
         }
+        write_volatile(&mut (*snapshot).progression, state.progression);
         write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).sequence, next);
         SEQUENCE = next;

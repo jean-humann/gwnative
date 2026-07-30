@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 11;
-export const COMPANION_SNAPSHOT_BYTES = 56_776;
+export const COMPANION_SNAPSHOT_ABI = 12;
+export const COMPANION_SNAPSHOT_BYTES = 56_844;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -52,6 +52,7 @@ const FLAGS = Object.freeze({
   trade: 1 << 13,
   ui: 1 << 14,
   merchant: 1 << 15,
+  progression: 1 << 16,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -69,7 +70,8 @@ const KNOWN_FLAGS =
   | FLAGS.camera
   | FLAGS.trade
   | FLAGS.ui
-  | FLAGS.merchant;
+  | FLAGS.merchant
+  | FLAGS.progression;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -126,6 +128,11 @@ const UI_FRAME_HIDDEN = 0x200;
 const MAX_RAW_MERCHANT_ITEMS = 512;
 const MAX_MERCHANT_ITEMS = 128;
 const MAX_MERCHANT_ITEM_ID = 1_000_000;
+const MAX_EXPERIENCE = 2_000_000_000;
+const MAX_FACTION_CURRENT = 100_000_000;
+const MAX_FACTION_TOTAL = 2_000_000_000;
+const MAX_SKILL_POINTS_CURRENT = 1_000_000;
+const MAX_SKILL_POINTS_TOTAL = 2_000_000_000;
 const EFFECT_FLAGS = Object.freeze({
   buffsTruncated: 1 << 0,
   effectsTruncated: 1 << 1,
@@ -1353,6 +1360,59 @@ function readMerchant(view) {
   });
 }
 
+function readProgression(view) {
+  const base = 56776;
+  const hardModeUnlocked = view.getUint32(base, true);
+  const level = view.getUint32(base + 4, true);
+  const experience = view.getUint32(base + 8, true);
+  const readFaction = (offset) => {
+    const current = view.getUint32(offset, true);
+    const totalEarned = view.getUint32(offset + 4, true);
+    const maximum = view.getUint32(offset + 8, true);
+    if (
+      current > MAX_FACTION_CURRENT
+      || totalEarned > MAX_FACTION_TOTAL
+      || maximum > MAX_FACTION_CURRENT
+      || current > maximum
+      || totalEarned < current
+    ) {
+      return null;
+    }
+    return Object.freeze({ current, totalEarned, maximum });
+  };
+  const kurzick = readFaction(base + 12);
+  const luxon = readFaction(base + 24);
+  const imperial = readFaction(base + 36);
+  const balthazar = readFaction(base + 48);
+  const currentSkillPoints = view.getUint32(base + 60, true);
+  const totalSkillPoints = view.getUint32(base + 64, true);
+  if (
+    hardModeUnlocked > 1
+    || level < 1
+    || level > 20
+    || experience > MAX_EXPERIENCE
+    || kurzick === null
+    || luxon === null
+    || imperial === null
+    || balthazar === null
+    || currentSkillPoints > MAX_SKILL_POINTS_CURRENT
+    || totalSkillPoints > MAX_SKILL_POINTS_TOTAL
+    || currentSkillPoints > totalSkillPoints
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    hardModeUnlocked: hardModeUnlocked === 1,
+    level,
+    experience,
+    factions: Object.freeze({ kurzick, luxon, imperial, balthazar }),
+    skillPoints: Object.freeze({
+      current: currentSkillPoints,
+      totalEarned: totalSkillPoints,
+    }),
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -1565,6 +1625,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const progressionValid = (flags & FLAGS.progression) !== 0;
+  const progression = progressionValid ? readProgression(view) : null;
+  if (
+    (progressionValid && progression === null)
+    || (!progressionValid && !wordsAreZero(view, 56776, 68))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -1590,6 +1658,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(trade ? { trade } : {}),
     ...(ui ? { ui } : {}),
     ...(merchant ? { merchant } : {}),
+    ...(progression ? { progression } : {}),
   });
 }
 

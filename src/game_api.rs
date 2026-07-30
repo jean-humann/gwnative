@@ -433,6 +433,40 @@ pub struct Merchant {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FactionProgress {
+    pub current: u32,
+    pub total_earned: u32,
+    pub maximum: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillPointProgress {
+    pub current: u32,
+    pub total_earned: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Factions {
+    pub kurzick: FactionProgress,
+    pub luxon: FactionProgress,
+    pub imperial: FactionProgress,
+    pub balthazar: FactionProgress,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Progression {
+    pub hard_mode_unlocked: bool,
+    pub level: u32,
+    pub experience: u32,
+    pub factions: Factions,
+    pub skill_points: SkillPointProgress,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -489,6 +523,8 @@ pub struct State {
     pub ui: Option<Ui>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merchant: Option<Merchant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progression: Option<Progression>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -598,7 +634,7 @@ impl Hub {
                 "domains": [
                     "player", "map", "target", "party", "skillbar", "effects",
                     "agents", "quests", "inventory", "social", "completion", "camera",
-                    "trade", "ui", "merchant"
+                    "trade", "ui", "merchant", "progression"
                 ],
                 "available": self.state_json().is_some(),
             },
@@ -719,6 +755,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(merchant) = &state.merchant {
             validate_merchant(merchant)?;
         }
+        if let Some(progression) = &state.progression {
+            validate_progression(progression)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -744,6 +783,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.trade.is_some()
         || state.ui.is_some()
         || state.merchant.is_some()
+        || state.progression.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -1447,6 +1487,31 @@ fn validate_merchant(merchant: &Merchant) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_progression(progression: &Progression) -> Result<(), String> {
+    let factions = [
+        &progression.factions.kurzick,
+        &progression.factions.luxon,
+        &progression.factions.imperial,
+        &progression.factions.balthazar,
+    ];
+    if !(1..=20).contains(&progression.level)
+        || progression.experience > 2_000_000_000
+        || progression.skill_points.current > 1_000_000
+        || progression.skill_points.total_earned > 2_000_000_000
+        || progression.skill_points.current > progression.skill_points.total_earned
+        || factions.iter().any(|faction| {
+            faction.current > 100_000_000
+                || faction.total_earned > 2_000_000_000
+                || faction.maximum > 100_000_000
+                || faction.current > faction.maximum
+                || faction.total_earned < faction.current
+        })
+    {
+        return Err("character progression is outside its certified bounds".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1783,6 +1848,36 @@ mod tests {
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","merchant":{"truncated":false,"total":1,"itemIds":[0]}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","merchant":{"truncated":true,"total":129,"itemIds":[900]}}"#.as_slice(),
             br#"{"status":"waiting","merchant":{"truncated":false,"total":0,"itemIds":[]}}"#.as_slice(),
+        ] {
+            assert!(hub.publish(state).is_err());
+        }
+    }
+
+    #[test]
+    fn character_progression_is_bounded() {
+        let hub = Hub::default();
+        let valid = br#"{
+            "status":"ready","tickCount":1,"mapId":55,"instanceType":0,
+            "instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "progression":{
+                "hardModeUnlocked":true,"level":20,"experience":1337500,
+                "factions":{
+                    "kurzick":{"current":1000,"totalEarned":5000,"maximum":10000},
+                    "luxon":{"current":2000,"totalEarned":6000,"maximum":10000},
+                    "imperial":{"current":100,"totalEarned":1000,"maximum":15000},
+                    "balthazar":{"current":500,"totalEarned":2500,"maximum":10000}
+                },
+                "skillPoints":{"current":5,"totalEarned":125}
+            }
+        }"#;
+        hub.publish(valid).unwrap();
+
+        for state in [
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","progression":{"hardModeUnlocked":true,"level":21,"experience":0,"factions":{"kurzick":{"current":0,"totalEarned":0,"maximum":0},"luxon":{"current":0,"totalEarned":0,"maximum":0},"imperial":{"current":0,"totalEarned":0,"maximum":0},"balthazar":{"current":0,"totalEarned":0,"maximum":0}},"skillPoints":{"current":0,"totalEarned":0}}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","progression":{"hardModeUnlocked":false,"level":1,"experience":0,"factions":{"kurzick":{"current":2,"totalEarned":2,"maximum":1},"luxon":{"current":0,"totalEarned":0,"maximum":0},"imperial":{"current":0,"totalEarned":0,"maximum":0},"balthazar":{"current":0,"totalEarned":0,"maximum":0}},"skillPoints":{"current":0,"totalEarned":0}}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","progression":{"hardModeUnlocked":false,"level":1,"experience":0,"factions":{"kurzick":{"current":0,"totalEarned":0,"maximum":0},"luxon":{"current":0,"totalEarned":0,"maximum":0},"imperial":{"current":0,"totalEarned":0,"maximum":0},"balthazar":{"current":0,"totalEarned":0,"maximum":0}},"skillPoints":{"current":2,"totalEarned":1}}}"#.as_slice(),
+            br#"{"status":"waiting","progression":{"hardModeUnlocked":false,"level":1,"experience":0,"factions":{"kurzick":{"current":0,"totalEarned":0,"maximum":0},"luxon":{"current":0,"totalEarned":0,"maximum":0},"imperial":{"current":0,"totalEarned":0,"maximum":0},"balthazar":{"current":0,"totalEarned":0,"maximum":0}},"skillPoints":{"current":0,"totalEarned":0}}}"#.as_slice(),
         ] {
             assert!(hub.publish(state).is_err());
         }

@@ -618,6 +618,35 @@ pub(super) struct EnhancementLayout {
     pub ui_frame_state: u32,
     // Append-only ABI: keep every previously certified layout word stable.
     pub world_merchant_items: u32,
+    pub world_hard_mode_unlocked: u32,
+    pub world_experience: u32,
+    pub world_experience_duplicate: u32,
+    pub world_kurzick_current: u32,
+    pub world_kurzick_current_duplicate: u32,
+    pub world_kurzick_total: u32,
+    pub world_kurzick_total_duplicate: u32,
+    pub world_kurzick_maximum: u32,
+    pub world_luxon_current: u32,
+    pub world_luxon_current_duplicate: u32,
+    pub world_luxon_total: u32,
+    pub world_luxon_total_duplicate: u32,
+    pub world_luxon_maximum: u32,
+    pub world_imperial_current: u32,
+    pub world_imperial_current_duplicate: u32,
+    pub world_imperial_total: u32,
+    pub world_imperial_total_duplicate: u32,
+    pub world_imperial_maximum: u32,
+    pub world_level: u32,
+    pub world_level_duplicate: u32,
+    pub world_balthazar_current: u32,
+    pub world_balthazar_current_duplicate: u32,
+    pub world_balthazar_total: u32,
+    pub world_balthazar_total_duplicate: u32,
+    pub world_balthazar_maximum: u32,
+    pub world_skill_points_current: u32,
+    pub world_skill_points_current_duplicate: u32,
+    pub world_skill_points_total: u32,
+    pub world_skill_points_total_duplicate: u32,
 }
 
 impl EnhancementLayout {
@@ -824,13 +853,42 @@ impl EnhancementLayout {
             self.ui_frame_hash,
             self.ui_frame_state,
             self.world_merchant_items,
+            self.world_hard_mode_unlocked,
+            self.world_experience,
+            self.world_experience_duplicate,
+            self.world_kurzick_current,
+            self.world_kurzick_current_duplicate,
+            self.world_kurzick_total,
+            self.world_kurzick_total_duplicate,
+            self.world_kurzick_maximum,
+            self.world_luxon_current,
+            self.world_luxon_current_duplicate,
+            self.world_luxon_total,
+            self.world_luxon_total_duplicate,
+            self.world_luxon_maximum,
+            self.world_imperial_current,
+            self.world_imperial_current_duplicate,
+            self.world_imperial_total,
+            self.world_imperial_total_duplicate,
+            self.world_imperial_maximum,
+            self.world_level,
+            self.world_level_duplicate,
+            self.world_balthazar_current,
+            self.world_balthazar_current_duplicate,
+            self.world_balthazar_total,
+            self.world_balthazar_total_duplicate,
+            self.world_balthazar_maximum,
+            self.world_skill_points_current,
+            self.world_skill_points_current_duplicate,
+            self.world_skill_points_total,
+            self.world_skill_points_total_duplicate,
         ]
     }
 }
 
 /// Fields in [`EnhancementLayout`]. Named because the companion's own `Layout`
 /// is this many words long and the two have to agree.
-pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 199;
+pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 228;
 
 pub(super) struct EnhancementBuild {
     /// The *template-save* output, not ArenaNet's own module. That transform is
@@ -863,7 +921,7 @@ pub(super) struct EnhancementBuild {
 pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     EnhancementBuild {
         sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-        output_sha256: "23f40d5b71cdb79d26ae71369199f1df5717e1795146d074a9b2a56b68cabc18",
+        output_sha256: "d9922fa12dddd55d56269f3df1f2f53b821634bb4dca1f6c203b9939aed3609a",
         import_count: 219,
         program_id: 1,
         build_id: 38771,
@@ -1071,11 +1129,40 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             ui_frame_hash: 0x134,
             ui_frame_state: 0x18c,
             world_merchant_items: 0x24,
+            world_hard_mode_unlocked: 0x684,
+            world_experience: 0x740,
+            world_experience_duplicate: 0x744,
+            world_kurzick_current: 0x748,
+            world_kurzick_current_duplicate: 0x74c,
+            world_kurzick_total: 0x750,
+            world_kurzick_total_duplicate: 0x754,
+            world_kurzick_maximum: 0x7b8,
+            world_luxon_current: 0x758,
+            world_luxon_current_duplicate: 0x75c,
+            world_luxon_total: 0x760,
+            world_luxon_total_duplicate: 0x764,
+            world_luxon_maximum: 0x7bc,
+            world_imperial_current: 0x768,
+            world_imperial_current_duplicate: 0x76c,
+            world_imperial_total: 0x770,
+            world_imperial_total_duplicate: 0x774,
+            world_imperial_maximum: 0x7c4,
+            world_level: 0x788,
+            world_level_duplicate: 0x78c,
+            world_balthazar_current: 0x798,
+            world_balthazar_current_duplicate: 0x79c,
+            world_balthazar_total: 0x7a0,
+            world_balthazar_total_duplicate: 0x7a4,
+            world_balthazar_maximum: 0x7c0,
+            world_skill_points_current: 0x7a8,
+            world_skill_points_current_duplicate: 0x7ac,
+            world_skill_points_total: 0x7b0,
+            world_skill_points_total_duplicate: 0x7b4,
         },
     },
     EnhancementBuild {
         sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
-        output_sha256: "8e869a571a328bffada7e26259830d3fc49cad9c92aa1b0ea682f4804d718d4d",
+        output_sha256: "44eebb31287ad5c3534a85c2fe8f67bddb527a0c7754ddd5f353cb4f35d26758",
         import_count: 219,
         program_id: 1,
         build_id: 38790,
@@ -1283,11 +1370,40 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             ui_frame_hash: 0x134,
             ui_frame_state: 0x18c,
             world_merchant_items: 0x24,
+            world_hard_mode_unlocked: 0x684,
+            world_experience: 0x740,
+            world_experience_duplicate: 0x744,
+            world_kurzick_current: 0x748,
+            world_kurzick_current_duplicate: 0x74c,
+            world_kurzick_total: 0x750,
+            world_kurzick_total_duplicate: 0x754,
+            world_kurzick_maximum: 0x7b8,
+            world_luxon_current: 0x758,
+            world_luxon_current_duplicate: 0x75c,
+            world_luxon_total: 0x760,
+            world_luxon_total_duplicate: 0x764,
+            world_luxon_maximum: 0x7bc,
+            world_imperial_current: 0x768,
+            world_imperial_current_duplicate: 0x76c,
+            world_imperial_total: 0x770,
+            world_imperial_total_duplicate: 0x774,
+            world_imperial_maximum: 0x7c4,
+            world_level: 0x788,
+            world_level_duplicate: 0x78c,
+            world_balthazar_current: 0x798,
+            world_balthazar_current_duplicate: 0x79c,
+            world_balthazar_total: 0x7a0,
+            world_balthazar_total_duplicate: 0x7a4,
+            world_balthazar_maximum: 0x7c0,
+            world_skill_points_current: 0x7a8,
+            world_skill_points_current_duplicate: 0x7ac,
+            world_skill_points_total: 0x7b0,
+            world_skill_points_total_duplicate: 0x7b4,
         },
     },
     EnhancementBuild {
         sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
-        output_sha256: "4deae31f215e579fa7e2c86ec3565854330a3a2b95b36f14ce0bb5bf4986dfe2",
+        output_sha256: "043300e04f7d3250afacb078152b0f90a65cb3116ce2576bdae013de506089cf",
         import_count: 219,
         program_id: 1,
         build_id: 38795,
@@ -1495,6 +1611,35 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             ui_frame_hash: 0x134,
             ui_frame_state: 0x18c,
             world_merchant_items: 0x24,
+            world_hard_mode_unlocked: 0x684,
+            world_experience: 0x740,
+            world_experience_duplicate: 0x744,
+            world_kurzick_current: 0x748,
+            world_kurzick_current_duplicate: 0x74c,
+            world_kurzick_total: 0x750,
+            world_kurzick_total_duplicate: 0x754,
+            world_kurzick_maximum: 0x7b8,
+            world_luxon_current: 0x758,
+            world_luxon_current_duplicate: 0x75c,
+            world_luxon_total: 0x760,
+            world_luxon_total_duplicate: 0x764,
+            world_luxon_maximum: 0x7bc,
+            world_imperial_current: 0x768,
+            world_imperial_current_duplicate: 0x76c,
+            world_imperial_total: 0x770,
+            world_imperial_total_duplicate: 0x774,
+            world_imperial_maximum: 0x7c4,
+            world_level: 0x788,
+            world_level_duplicate: 0x78c,
+            world_balthazar_current: 0x798,
+            world_balthazar_current_duplicate: 0x79c,
+            world_balthazar_total: 0x7a0,
+            world_balthazar_total_duplicate: 0x7a4,
+            world_balthazar_maximum: 0x7c0,
+            world_skill_points_current: 0x7a8,
+            world_skill_points_current_duplicate: 0x7ac,
+            world_skill_points_total: 0x7b0,
+            world_skill_points_total_duplicate: 0x7b4,
         },
     },
 ];
@@ -1646,6 +1791,43 @@ mod tests {
         for build in ENHANCEMENT_BUILDS {
             assert_eq!(build.layout.game_world_context, 0x2c);
             assert_eq!(build.layout.world_merchant_items, 0x24);
+        }
+    }
+
+    #[test]
+    fn every_certified_build_uses_the_verified_progression_layout() {
+        for build in ENHANCEMENT_BUILDS {
+            let layout = &build.layout;
+            assert_eq!(layout.game_world_context, 0x2c);
+            assert_eq!(layout.world_hard_mode_unlocked, 0x684);
+            assert_eq!(layout.world_experience, 0x740);
+            assert_eq!(layout.world_experience_duplicate, 0x744);
+            assert_eq!(layout.world_kurzick_current, 0x748);
+            assert_eq!(layout.world_kurzick_current_duplicate, 0x74c);
+            assert_eq!(layout.world_kurzick_total, 0x750);
+            assert_eq!(layout.world_kurzick_total_duplicate, 0x754);
+            assert_eq!(layout.world_luxon_current, 0x758);
+            assert_eq!(layout.world_luxon_current_duplicate, 0x75c);
+            assert_eq!(layout.world_luxon_total, 0x760);
+            assert_eq!(layout.world_luxon_total_duplicate, 0x764);
+            assert_eq!(layout.world_imperial_current, 0x768);
+            assert_eq!(layout.world_imperial_current_duplicate, 0x76c);
+            assert_eq!(layout.world_imperial_total, 0x770);
+            assert_eq!(layout.world_imperial_total_duplicate, 0x774);
+            assert_eq!(layout.world_level, 0x788);
+            assert_eq!(layout.world_level_duplicate, 0x78c);
+            assert_eq!(layout.world_balthazar_current, 0x798);
+            assert_eq!(layout.world_balthazar_current_duplicate, 0x79c);
+            assert_eq!(layout.world_balthazar_total, 0x7a0);
+            assert_eq!(layout.world_balthazar_total_duplicate, 0x7a4);
+            assert_eq!(layout.world_skill_points_current, 0x7a8);
+            assert_eq!(layout.world_skill_points_current_duplicate, 0x7ac);
+            assert_eq!(layout.world_skill_points_total, 0x7b0);
+            assert_eq!(layout.world_skill_points_total_duplicate, 0x7b4);
+            assert_eq!(layout.world_kurzick_maximum, 0x7b8);
+            assert_eq!(layout.world_luxon_maximum, 0x7bc);
+            assert_eq!(layout.world_balthazar_maximum, 0x7c0);
+            assert_eq!(layout.world_imperial_maximum, 0x7c4);
         }
     }
 }

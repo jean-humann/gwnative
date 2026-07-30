@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 11;
+const SNAPSHOT_ABI = 12;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -47,6 +47,7 @@ const FLAG_CAMERA = 1 << 12;
 const FLAG_TRADE = 1 << 13;
 const FLAG_UI = 1 << 14;
 const FLAG_MERCHANT = 1 << 15;
+const FLAG_PROGRESSION = 1 << 16;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -125,7 +126,8 @@ function domainSnapshot() {
       | FLAG_CAMERA
       | FLAG_TRADE
       | FLAG_UI
-      | FLAG_MERCHANT,
+      | FLAG_MERCHANT
+      | FLAG_PROGRESSION,
   });
   const view = new DataView(buffer);
   view.setUint32(64, 3, true);
@@ -307,6 +309,23 @@ function domainSnapshot() {
   view.setUint32(56260, 2, true);
   view.setUint32(56264, 900, true);
   view.setUint32(56268, 901, true);
+  view.setUint32(56776, 1, true);
+  view.setUint32(56780, 20, true);
+  view.setUint32(56784, 1_337_500, true);
+  view.setUint32(56788, 1_000, true);
+  view.setUint32(56792, 5_000, true);
+  view.setUint32(56796, 10_000, true);
+  view.setUint32(56800, 2_000, true);
+  view.setUint32(56804, 6_000, true);
+  view.setUint32(56808, 10_000, true);
+  view.setUint32(56812, 100, true);
+  view.setUint32(56816, 1_000, true);
+  view.setUint32(56820, 15_000, true);
+  view.setUint32(56824, 500, true);
+  view.setUint32(56828, 2_500, true);
+  view.setUint32(56832, 10_000, true);
+  view.setUint32(56836, 5, true);
+  view.setUint32(56840, 125, true);
   return buffer;
 }
 
@@ -593,6 +612,18 @@ describe('companion snapshot', () => {
       total: 2,
       itemIds: [900, 901],
     });
+    assert.deepEqual(state.progression, {
+      hardModeUnlocked: true,
+      level: 20,
+      experience: 1_337_500,
+      factions: {
+        kurzick: { current: 1_000, totalEarned: 5_000, maximum: 10_000 },
+        luxon: { current: 2_000, totalEarned: 6_000, maximum: 10_000 },
+        imperial: { current: 100, totalEarned: 1_000, maximum: 15_000 },
+        balthazar: { current: 500, totalEarned: 2_500, maximum: 10_000 },
+      },
+      skillPoints: { current: 5, totalEarned: 125 },
+    });
     assert.ok(Object.isFrozen(state.party.players));
     assert.ok(Object.isFrozen(state.skillbar.skills));
     assert.ok(Object.isFrozen(state.effects.effects));
@@ -613,6 +644,10 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state.ui));
     assert.ok(Object.isFrozen(state.merchant.itemIds));
     assert.ok(Object.isFrozen(state.merchant));
+    assert.ok(Object.isFrozen(state.progression.factions.kurzick));
+    assert.ok(Object.isFrozen(state.progression.factions));
+    assert.ok(Object.isFrozen(state.progression.skillPoints));
+    assert.ok(Object.isFrozen(state.progression));
   });
 
   it('accepts a complete bounded inventory page with an explicit remainder', () => {
@@ -889,6 +924,23 @@ describe('companion snapshot', () => {
       true,
     );
     assert.equal(readCompanionSnapshot(absentMerchant, 0).reason, 'corrupt');
+
+    const overCapFaction = domainSnapshot();
+    new DataView(overCapFaction).setUint32(56788, 10_001, true);
+    assert.equal(readCompanionSnapshot(overCapFaction, 0).reason, 'corrupt');
+
+    const reversedSkillPoints = domainSnapshot();
+    new DataView(reversedSkillPoints).setUint32(56836, 126, true);
+    assert.equal(readCompanionSnapshot(reversedSkillPoints, 0).reason, 'corrupt');
+
+    const absentProgression = domainSnapshot();
+    const absentProgressionView = new DataView(absentProgression);
+    absentProgressionView.setUint32(
+      12,
+      absentProgressionView.getUint32(12, true) & ~FLAG_PROGRESSION,
+      true,
+    );
+    assert.equal(readCompanionSnapshot(absentProgression, 0).reason, 'corrupt');
   });
 
   // The seqlock, which is the whole reason this can be read on the animation
@@ -908,7 +960,7 @@ describe('companion snapshot', () => {
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
       // A flag this build has no name for is either a newer companion or not a
       // companion at all.
-      { flags: FLAG_READY | FLAG_PLAYER | (1 << 16) },
+      { flags: FLAG_READY | FLAG_PLAYER | (1 << 17) },
     ]) {
       assert.equal(read(overrides).reason, 'snapshot', JSON.stringify(overrides));
     }
