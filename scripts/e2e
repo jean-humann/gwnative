@@ -596,6 +596,7 @@ def main() -> int:
                 "social",
                 "completion",
                 "camera",
+                "trade",
             }:
                 raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)
@@ -829,6 +830,7 @@ def main() -> int:
             social = state.get("social")
             completion = state.get("completion")
             camera = state.get("camera")
+            trade = state.get("trade")
             if not isinstance(party, dict) or not party.get("players"):
                 raise Failure("certified party state did not include the player roster")
             skills = skillbar.get("skills") if isinstance(skillbar, dict) else None
@@ -1166,6 +1168,71 @@ def main() -> int:
                 )
             ):
                 raise Failure("certified camera state is incomplete")
+            trade_flags = trade.get("flags") if isinstance(trade, dict) else None
+            trade_player = trade.get("player") if isinstance(trade, dict) else None
+            trade_partner = trade.get("partner") if isinstance(trade, dict) else None
+            expected_trade_status = (
+                "Accepted"
+                if isinstance(trade_flags, int) and trade_flags & 4
+                else "OfferSent"
+                if isinstance(trade_flags, int) and trade_flags & 2
+                else "Initiated"
+                if isinstance(trade_flags, int) and trade_flags & 1
+                else "Closed"
+            )
+            if (
+                not isinstance(trade, dict)
+                or not isinstance(trade_flags, int)
+                or trade_flags & ~7
+                or trade.get("statusName") != expected_trade_status
+                or trade.get("open") != (trade_flags != 0)
+                or trade.get("initiated") != bool(trade_flags & 1)
+                or trade.get("offerSent") != bool(trade_flags & 2)
+                or trade.get("accepted") != bool(trade_flags & 4)
+                or not all(
+                    isinstance(participant, dict)
+                    and isinstance(participant.get("gold"), int)
+                    and 0 <= participant.get("gold") <= 100_000
+                    and participant.get("itemsTruncated") in (True, False)
+                    and isinstance(participant.get("items"), list)
+                    and len(participant.get("items")) <= 16
+                    and (
+                        not participant.get("itemsTruncated")
+                        or len(participant.get("items")) == 16
+                    )
+                    and [
+                        item.get("slot") for item in participant.get("items")
+                    ]
+                    == list(range(1, len(participant.get("items")) + 1))
+                    and len(
+                        {
+                            item.get("itemId")
+                            for item in participant.get("items")
+                            if isinstance(item, dict)
+                        }
+                    )
+                    == len(participant.get("items"))
+                    and all(
+                        isinstance(item, dict)
+                        and isinstance(item.get("itemId"), int)
+                        and 1 <= item.get("itemId") <= 1_000_000
+                        and isinstance(item.get("quantity"), int)
+                        and 1 <= item.get("quantity") <= 250
+                        for item in participant.get("items")
+                    )
+                    for participant in (trade_player, trade_partner)
+                )
+                or (
+                    trade_flags == 0
+                    and any(
+                        participant.get("gold") != 0
+                        or participant.get("itemsTruncated")
+                        or participant.get("items")
+                        for participant in (trade_player, trade_partner)
+                    )
+                )
+            ):
+                raise Failure("certified trade state is incomplete")
             print(
                 "[e2e] bounded game-state API PASS "
                 f"(players={len(party.get('players', []))}, "
@@ -1180,7 +1247,8 @@ def main() -> int:
                 f"contacts={len(friend_entries)}/{friend_page.get('total')}, "
                 f"guild={'yes' if guild else 'no'}, "
                 f"unlocked-maps={len(completion_pages[4])}, "
-                f"camera={camera.get('modeName')})"
+                f"camera={camera.get('modeName')}, "
+                f"trade={trade.get('statusName')})"
             )
 
             before = position(ready)
