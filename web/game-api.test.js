@@ -88,6 +88,11 @@ describe('public game state', () => {
       total: 1,
       frames: Object.freeze([Object.freeze({ frameId: 0, frameHash: 7 })]),
     });
+    const merchant = Object.freeze({
+      truncated: false,
+      total: 2,
+      itemIds: Object.freeze([900, 901]),
+    });
     assert.deepEqual(
       publicState({
         status: 'ready',
@@ -102,6 +107,7 @@ describe('public game state', () => {
         camera,
         trade,
         ui,
+        merchant,
       }),
       {
         status: 'ready',
@@ -116,6 +122,7 @@ describe('public game state', () => {
         camera,
         trade,
         ui,
+        merchant,
       },
     );
   });

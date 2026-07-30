@@ -38,7 +38,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 10;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 11;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -55,6 +55,7 @@ const FLAG_COMPLETION_VALID: u32 = 1 << 11;
 const FLAG_CAMERA_VALID: u32 = 1 << 12;
 const FLAG_TRADE_VALID: u32 = 1 << 13;
 const FLAG_UI_VALID: u32 = 1 << 14;
+const FLAG_MERCHANT_VALID: u32 = 1 << 15;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -97,6 +98,9 @@ const UI_FRAME_DESTROYING: u32 = 0x8;
 const UI_FRAME_DISABLED: u32 = 0x10;
 const UI_FRAME_HIDDEN: u32 = 0x200;
 const UI_RECORD_POSITION_VALID: u32 = 1;
+const MAX_RAW_MERCHANT_ITEMS: u32 = 512;
+const MAX_MERCHANT_ITEMS: usize = 128;
+const MAX_MERCHANT_ITEM_ID: u32 = 1_000_000;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -318,6 +322,7 @@ struct Layout {
     ui_frame_parent_relation: u32,
     ui_frame_hash: u32,
     ui_frame_state: u32,
+    world_merchant_items: u32,
 }
 
 impl Layout {
@@ -520,6 +525,7 @@ impl Layout {
         ui_frame_parent_relation: 0,
         ui_frame_hash: 0,
         ui_frame_state: 0,
+        world_merchant_items: 0,
     };
 }
 
@@ -758,6 +764,15 @@ struct UiState {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct MerchantState {
+    page_flags: u32,
+    item_count: u32,
+    item_total: u32,
+    item_ids: [u32; MAX_MERCHANT_ITEMS],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -838,6 +853,7 @@ struct Snapshot {
     camera: CameraState,
     trade: TradeState,
     ui: UiState,
+    merchant: MerchantState,
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -858,8 +874,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 792] = [(); size_of::<Layout>()];
-const _: [(); 56252] = [(); size_of::<Snapshot>()];
+const _: [(); 796] = [(); size_of::<Layout>()];
+const _: [(); 56776] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 #[panic_handler]
@@ -1273,6 +1289,20 @@ impl UiSource {
     };
 }
 
+// WorldContext owns a transient numeric item-ID array used by merchant UI.
+// Retain only its descriptor; prices, quotes, names, transaction state, and
+// the merchant window lifecycle are intentionally outside this contract.
+#[derive(Clone, Copy)]
+struct MerchantSource {
+    items: ArrayView,
+}
+
+impl MerchantSource {
+    const EMPTY: Self = Self {
+        items: ArrayView::EMPTY,
+    };
+}
+
 #[derive(Clone, Copy)]
 struct State {
     flags: u32,
@@ -1293,6 +1323,7 @@ struct State {
     camera: CameraState,
     trade: TradeSource,
     ui: UiSource,
+    merchant: MerchantSource,
 }
 
 impl State {
@@ -1322,6 +1353,7 @@ impl State {
             camera: CameraState::EMPTY,
             trade: TradeSource::EMPTY,
             ui: UiSource::EMPTY,
+            merchant: MerchantSource::EMPTY,
         }
     }
 }
@@ -1557,6 +1589,47 @@ unsafe fn collect_completion(layout: Layout, game: u32) -> Option<CompletionSour
         };
     }
     Some(CompletionSource { arrays })
+}
+
+unsafe fn valid_merchant_items(items: ArrayView) -> bool {
+    if items.size > MAX_RAW_MERCHANT_ITEMS
+        || (items.size != 0
+            && (items.buffer == 0
+                || items.buffer & 3 != 0
+                || checked_mul(items.size, 4)
+                    .is_none_or(|bytes| !contains(items.buffer, bytes))))
+    {
+        return false;
+    }
+    for index in 0..items.size {
+        let Some(item_id) = indexed(items.buffer, index, 4)
+            .and_then(|address| unsafe { read_u32(address) })
+        else {
+            return false;
+        };
+        if item_id == 0 || item_id > MAX_MERCHANT_ITEM_ID {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn collect_merchant(layout: Layout, game: u32) -> Option<MerchantSource> {
+    let world = unsafe {
+        pointer(
+            offset(game, layout.game_world_context)?,
+            layout.world_merchant_items.checked_add(16)?,
+        )?
+    };
+    let items = unsafe {
+        read_array(
+            offset(world, layout.world_merchant_items)?,
+            4,
+            MAX_RAW_MERCHANT_ITEMS,
+            4_096,
+        )?
+    };
+    unsafe { valid_merchant_items(items) }.then_some(MerchantSource { items })
 }
 
 unsafe fn collect_camera(layout: Layout) -> Option<CameraState> {
@@ -2482,6 +2555,10 @@ unsafe fn collect(layout: Layout) -> State {
         state.flags |= FLAG_UI_VALID;
         state.ui = ui;
     }
+    if let Some(merchant) = unsafe { collect_merchant(layout, game) } {
+        state.flags |= FLAG_MERCHANT_VALID;
+        state.merchant = merchant;
+    }
     state
 }
 
@@ -3258,6 +3335,42 @@ unsafe fn publish_ui(
     valid
 }
 
+unsafe fn publish_merchant(
+    snapshot: *mut Snapshot,
+    source: MerchantSource,
+) -> bool {
+    let valid = unsafe { valid_merchant_items(source.items) };
+    let count = if valid {
+        source.items.size.min(MAX_MERCHANT_ITEMS as u32)
+    } else {
+        0
+    };
+    for index in 0..MAX_MERCHANT_ITEMS {
+        let item_id = if index < count as usize {
+            indexed(source.items.buffer, index as u32, 4)
+                .and_then(|address| unsafe { read_u32(address) })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        unsafe {
+            write_volatile(&mut (*snapshot).merchant.item_ids[index], item_id);
+        }
+    }
+    unsafe {
+        write_volatile(
+            &mut (*snapshot).merchant.page_flags,
+            u32::from(valid && source.items.size > MAX_MERCHANT_ITEMS as u32),
+        );
+        write_volatile(&mut (*snapshot).merchant.item_count, count);
+        write_volatile(
+            &mut (*snapshot).merchant.item_total,
+            if valid { source.items.size } else { 0 },
+        );
+    }
+    valid
+}
+
 unsafe fn publish(runtime: &mut RuntimeState, mut state: State, layout: Layout) {
     let next = runtime.sequence.wrapping_add(2) & !1;
     let snapshot = runtime.snapshot_ptr as *mut Snapshot;
@@ -3406,6 +3519,9 @@ unsafe fn publish(runtime: &mut RuntimeState, mut state: State, layout: Layout) 
         }
         if !publish_ui(snapshot, layout, state.ui) {
             state.flags &= !FLAG_UI_VALID;
+        }
+        if !publish_merchant(snapshot, state.merchant) {
+            state.flags &= !FLAG_MERCHANT_VALID;
         }
         write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).sequence, next);

@@ -425,6 +425,14 @@ pub struct Ui {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Merchant {
+    pub truncated: bool,
+    pub total: u32,
+    pub item_ids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -479,6 +487,8 @@ pub struct State {
     pub trade: Option<Trade>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<Ui>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merchant: Option<Merchant>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -588,7 +598,7 @@ impl Hub {
                 "domains": [
                     "player", "map", "target", "party", "skillbar", "effects",
                     "agents", "quests", "inventory", "social", "completion", "camera",
-                    "trade", "ui"
+                    "trade", "ui", "merchant"
                 ],
                 "available": self.state_json().is_some(),
             },
@@ -706,6 +716,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(ui) = &state.ui {
             validate_ui(ui)?;
         }
+        if let Some(merchant) = &state.merchant {
+            validate_merchant(merchant)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -730,6 +743,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.camera.is_some()
         || state.trade.is_some()
         || state.ui.is_some()
+        || state.merchant.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -1414,6 +1428,25 @@ fn validate_ui(ui: &Ui) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_merchant(merchant: &Merchant) -> Result<(), String> {
+    if merchant.item_ids.len() > 128
+        || merchant.total > 512
+        || merchant.total < merchant.item_ids.len() as u32
+        || merchant
+            .item_ids
+            .iter()
+            .any(|item_id| !(1..=1_000_000).contains(item_id))
+        || if merchant.truncated {
+            merchant.item_ids.len() != 128 || merchant.total <= 128
+        } else {
+            merchant.total != merchant.item_ids.len() as u32
+        }
+    {
+        return Err("merchant item page is outside its certified bounds".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1563,6 +1596,9 @@ mod tests {
                     "gold":3333,"itemsTruncated":false,
                     "items":[{"slot":1,"itemId":800,"quantity":2}]
                 }
+            },
+            "merchant":{
+                "truncated":false,"total":2,"itemIds":[900,901]
             }
         }"#;
         hub.publish(state).unwrap();
@@ -1594,6 +1630,7 @@ mod tests {
         );
         assert_eq!(value["state"]["trade"]["statusName"], "OfferSent");
         assert_eq!(value["state"]["trade"]["player"]["items"][1]["itemId"], 701);
+        assert_eq!(value["state"]["merchant"]["itemIds"][1], 901);
     }
 
     #[test]
@@ -1725,6 +1762,27 @@ mod tests {
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","ui":{"truncated":false,"total":1,"createdTotal":1,"visibleTotal":1,"frames":[{"frameId":1,"parentId":null,"childOffsetId":0,"frameHash":1,"visibilityFlags":0,"type":0,"templateType":0,"state":4,"created":false,"destroying":false,"disabled":false,"hidden":false,"locallyVisible":true,"positionValid":false,"positionFlags":0,"position":{"left":0,"bottom":0,"right":0,"top":0}}]}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","ui":{"truncated":false,"total":1,"createdTotal":1,"visibleTotal":1,"frames":[{"frameId":1,"parentId":null,"childOffsetId":0,"frameHash":1,"visibilityFlags":0,"type":0,"templateType":0,"state":4,"created":true,"destroying":false,"disabled":false,"hidden":false,"locallyVisible":true,"positionValid":false,"positionFlags":1,"position":{"left":0,"bottom":0,"right":0,"top":0}}]}}"#.as_slice(),
             br#"{"status":"waiting","ui":{"truncated":false,"total":0,"createdTotal":0,"visibleTotal":0,"frames":[]}}"#.as_slice(),
+        ] {
+            assert!(hub.publish(state).is_err());
+        }
+    }
+
+    #[test]
+    fn merchant_item_state_is_bounded() {
+        let hub = Hub::default();
+        let valid = br#"{
+            "status":"ready","tickCount":1,"mapId":55,"instanceType":0,
+            "instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "merchant":{"truncated":false,"total":2,"itemIds":[900,901]}
+        }"#;
+        hub.publish(valid).unwrap();
+
+        for state in [
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","merchant":{"truncated":false,"total":1,"itemIds":[900,901]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","merchant":{"truncated":false,"total":1,"itemIds":[0]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","merchant":{"truncated":true,"total":129,"itemIds":[900]}}"#.as_slice(),
+            br#"{"status":"waiting","merchant":{"truncated":false,"total":0,"itemIds":[]}}"#.as_slice(),
         ] {
             assert!(hub.publish(state).is_err());
         }

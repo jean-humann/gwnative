@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 10;
-export const COMPANION_SNAPSHOT_BYTES = 56_252;
+export const COMPANION_SNAPSHOT_ABI = 11;
+export const COMPANION_SNAPSHOT_BYTES = 56_776;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -51,6 +51,7 @@ const FLAGS = Object.freeze({
   camera: 1 << 12,
   trade: 1 << 13,
   ui: 1 << 14,
+  merchant: 1 << 15,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -67,7 +68,8 @@ const KNOWN_FLAGS =
   | FLAGS.completion
   | FLAGS.camera
   | FLAGS.trade
-  | FLAGS.ui;
+  | FLAGS.ui
+  | FLAGS.merchant;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -121,6 +123,9 @@ const UI_FRAME_CREATED = 0x4;
 const UI_FRAME_DESTROYING = 0x8;
 const UI_FRAME_DISABLED = 0x10;
 const UI_FRAME_HIDDEN = 0x200;
+const MAX_RAW_MERCHANT_ITEMS = 512;
+const MAX_MERCHANT_ITEMS = 128;
+const MAX_MERCHANT_ITEM_ID = 1_000_000;
 const EFFECT_FLAGS = Object.freeze({
   buffsTruncated: 1 << 0,
   effectsTruncated: 1 << 1,
@@ -1314,6 +1319,40 @@ function readUi(view) {
   });
 }
 
+function readMerchant(view) {
+  const base = 56252;
+  const pageFlags = view.getUint32(base, true);
+  const count = view.getUint32(base + 4, true);
+  const total = view.getUint32(base + 8, true);
+  const truncated = (pageFlags & 1) !== 0;
+  if (
+    (pageFlags & ~1) !== 0
+    || count > MAX_MERCHANT_ITEMS
+    || total > MAX_RAW_MERCHANT_ITEMS
+    || total < count
+    || (truncated
+      ? count !== MAX_MERCHANT_ITEMS || total <= MAX_MERCHANT_ITEMS
+      : total !== count)
+  ) {
+    return null;
+  }
+  const itemIds = [];
+  for (let index = 0; index < MAX_MERCHANT_ITEMS; index += 1) {
+    const itemId = view.getUint32(base + 12 + index * 4, true);
+    if (index >= count) {
+      if (itemId !== 0) return null;
+      continue;
+    }
+    if (itemId === 0 || itemId > MAX_MERCHANT_ITEM_ID) return null;
+    itemIds.push(itemId);
+  }
+  return Object.freeze({
+    truncated,
+    total,
+    itemIds: Object.freeze(itemIds),
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -1518,6 +1557,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const merchantValid = (flags & FLAGS.merchant) !== 0;
+  const merchant = merchantValid ? readMerchant(view) : null;
+  if (
+    (merchantValid && merchant === null)
+    || (!merchantValid && !wordsAreZero(view, 56252, 524))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -1542,6 +1589,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(camera ? { camera } : {}),
     ...(trade ? { trade } : {}),
     ...(ui ? { ui } : {}),
+    ...(merchant ? { merchant } : {}),
   });
 }
 

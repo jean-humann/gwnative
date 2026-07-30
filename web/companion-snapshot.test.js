@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 10;
+const SNAPSHOT_ABI = 11;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -46,6 +46,7 @@ const FLAG_COMPLETION = 1 << 11;
 const FLAG_CAMERA = 1 << 12;
 const FLAG_TRADE = 1 << 13;
 const FLAG_UI = 1 << 14;
+const FLAG_MERCHANT = 1 << 15;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -123,7 +124,8 @@ function domainSnapshot() {
       | FLAG_COMPLETION
       | FLAG_CAMERA
       | FLAG_TRADE
-      | FLAG_UI,
+      | FLAG_UI
+      | FLAG_MERCHANT,
   });
   const view = new DataView(buffer);
   view.setUint32(64, 3, true);
@@ -301,6 +303,10 @@ function domainSnapshot() {
   view.setUint32(49164, 7, true);
   view.setUint32(49168, 8, true);
   view.setUint32(49172, 0x204, true);
+  view.setUint32(56256, 2, true);
+  view.setUint32(56260, 2, true);
+  view.setUint32(56264, 900, true);
+  view.setUint32(56268, 901, true);
   return buffer;
 }
 
@@ -582,6 +588,11 @@ describe('companion snapshot', () => {
         position: { left: 0, bottom: 0, right: 0, top: 0 },
       },
     ]);
+    assert.deepEqual(state.merchant, {
+      truncated: false,
+      total: 2,
+      itemIds: [900, 901],
+    });
     assert.ok(Object.isFrozen(state.party.players));
     assert.ok(Object.isFrozen(state.skillbar.skills));
     assert.ok(Object.isFrozen(state.effects.effects));
@@ -600,6 +611,8 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state.ui.frames));
     assert.ok(Object.isFrozen(state.ui.frames[0].position));
     assert.ok(Object.isFrozen(state.ui));
+    assert.ok(Object.isFrozen(state.merchant.itemIds));
+    assert.ok(Object.isFrozen(state.merchant));
   });
 
   it('accepts a complete bounded inventory page with an explicit remainder', () => {
@@ -855,6 +868,27 @@ describe('companion snapshot', () => {
       true,
     );
     assert.equal(readCompanionSnapshot(absentUi, 0).reason, 'corrupt');
+
+    const invalidMerchantItem = domainSnapshot();
+    new DataView(invalidMerchantItem).setUint32(56264, 0, true);
+    assert.equal(readCompanionSnapshot(invalidMerchantItem, 0).reason, 'corrupt');
+
+    const badMerchantTruncation = domainSnapshot();
+    new DataView(badMerchantTruncation).setUint32(56252, 1, true);
+    assert.equal(readCompanionSnapshot(badMerchantTruncation, 0).reason, 'corrupt');
+
+    const unusedMerchantItem = domainSnapshot();
+    new DataView(unusedMerchantItem).setUint32(56272, 902, true);
+    assert.equal(readCompanionSnapshot(unusedMerchantItem, 0).reason, 'corrupt');
+
+    const absentMerchant = domainSnapshot();
+    const absentMerchantView = new DataView(absentMerchant);
+    absentMerchantView.setUint32(
+      12,
+      absentMerchantView.getUint32(12, true) & ~FLAG_MERCHANT,
+      true,
+    );
+    assert.equal(readCompanionSnapshot(absentMerchant, 0).reason, 'corrupt');
   });
 
   // The seqlock, which is the whole reason this can be read on the animation
@@ -874,7 +908,7 @@ describe('companion snapshot', () => {
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
       // A flag this build has no name for is either a newer companion or not a
       // companion at all.
-      { flags: FLAG_READY | FLAG_PLAYER | (1 << 15) },
+      { flags: FLAG_READY | FLAG_PLAYER | (1 << 16) },
     ]) {
       assert.equal(read(overrides).reason, 'snapshot', JSON.stringify(overrides));
     }
