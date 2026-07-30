@@ -251,6 +251,11 @@ export function installE2EBridge({
     return response.json();
   };
 
+  const characterSelection = createCharacterSelectionMilestone({
+    afterFrame: window.requestAnimationFrame.bind(window),
+    report: () => report('character-selection-ready'),
+  });
+
   const pump = async () => {
     while (!stopped) {
       try {
@@ -326,6 +331,7 @@ export function installE2EBridge({
   const gameState = (event) => {
     if (!gameReadyReported && event.detail?.status === 'ready') {
       gameReadyReported = true;
+      characterSelection.gameReady();
       void report('game-ready').catch(() => {});
     }
   };
@@ -343,7 +349,10 @@ export function installE2EBridge({
     log(`[e2e] bridge: ${cleanMessage(error instanceof Error ? error.message : error)}`);
   });
 
-  const traffic = (direction, socketId, bytes) => {
+  const traffic = (direction, socketId, bytes, role = 'other') => {
+    if (direction === 'receive' && role === 'authentication') {
+      characterSelection.receive();
+    }
     if (
       trafficAction <= 0
       || !['send', 'receive'].includes(direction)
@@ -373,7 +382,59 @@ export function installE2EBridge({
 
   void pump();
 
-  return Object.freeze({ report, traffic, socketCreated, connection, stop });
+  return Object.freeze({
+    report,
+    traffic,
+    socketCreated,
+    connection,
+    authenticationCommitted: characterSelection.authenticationCommitted,
+    stop,
+  });
+}
+
+/**
+ * Turn the authenticated network transition into a selector-ready milestone.
+ *
+ * The WebGate token response precedes the Auth socket's character-list
+ * response. Each receive restarts a short run of client frames; completing it
+ * proves the response stream has gone quiet and the canvas had frames in which
+ * to consume it. A ready game cancels the milestone for clients that enter a
+ * character without presenting the selector.
+ */
+export function createCharacterSelectionMilestone({
+  afterFrame,
+  report,
+  settleFrames = 12,
+}) {
+  let authenticated = false;
+  let finished = false;
+  let receiveGeneration = 0;
+
+  const settle = (generation, frames) => {
+    afterFrame(() => {
+      if (finished || generation !== receiveGeneration) return;
+      if (frames > 1) {
+        settle(generation, frames - 1);
+        return;
+      }
+      finished = true;
+      void Promise.resolve().then(report).catch(() => {});
+    });
+  };
+
+  return Object.freeze({
+    authenticationCommitted() {
+      authenticated = true;
+    },
+    receive() {
+      if (!authenticated || finished) return;
+      receiveGeneration += 1;
+      settle(receiveGeneration, settleFrames);
+    },
+    gameReady() {
+      finished = true;
+    },
+  });
 }
 
 const setValue = (field, value) => {
@@ -431,6 +492,8 @@ export async function runAppE2E({
       ['session-timer', 'Session timer'],
       ['target-details', 'Target details'],
       ['performance', 'Performance'],
+      ['party-roster', 'Party roster'],
+      ['player-skillbar', 'Player skillbar'],
     ]);
     for (const widget of widgets) {
       const id = widget.dataset.widget;
@@ -503,6 +566,8 @@ export async function runAppE2E({
           ['session-timer', 'Session timer'],
           ['target-details', 'Target details'],
           ['performance', 'Performance'],
+          ['party-roster', 'Party roster'],
+          ['player-skillbar', 'Player skillbar'],
         ]).get(id);
         if (label && !widget.hidden !== wanted) buttonNamed(surface, label).click();
       }

@@ -414,12 +414,23 @@ def terminate(process: subprocess.Popen[str]) -> None:
 
 
 def main() -> int:
+    # Keep long interactive runs observable even when stdout is redirected.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument(
         "--fps",
         type=int,
         help="exercise the optional client frame-rate ceiling",
+    )
+    parser.add_argument(
+        "--character",
+        help=(
+            "pass the selected character through the official client argument "
+            "contract for deterministic character selection"
+        ),
     )
     parser.add_argument(
         "--no-gameplay",
@@ -464,6 +475,15 @@ def main() -> int:
         environment["GWNATIVE_E2E"] = "1"
         environment["GWNATIVE_PRINT_TOKEN"] = "1"
         environment["GWNATIVE_WEB_ROOT"] = str(web_root)
+        # WKWebView suspends its animation-frame-driven client when macOS puts
+        # the display to sleep. Mark the machine active before launch, then
+        # hold display/system idle sleep only for this app process.
+        subprocess.run(
+            ["caffeinate", "-u", "-t", "1"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         command = [
             str(ROOT / "scripts/signed-run"),
             str(ROOT / "target/debug/gwnative"),
@@ -471,6 +491,8 @@ def main() -> int:
             "-autologin",
             "-windowed",
         ]
+        if args.character:
+            command.extend(["-character", args.character])
         if args.fps is not None:
             if args.fps <= 0:
                 raise Failure("--fps must be a positive integer")
@@ -483,6 +505,11 @@ def main() -> int:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+        )
+        inhibitor = subprocess.Popen(
+            ["caffeinate", "-dims", "-w", str(process.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         launch_events: queue.Queue[tuple[str, str]] = queue.Queue()
         reader = threading.Thread(
@@ -522,6 +549,9 @@ def main() -> int:
                 raise Failure("the public game API unexpectedly advertises a write action")
             if game_description.get("transport", {}).get("longPoll") is not True:
                 raise Failure("the game-state API does not advertise long polling")
+            domains = set(game_description.get("state", {}).get("domains", []))
+            if domains != {"player", "map", "target", "party", "skillbar"}:
+                raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)
 
             stream = EventStream(origin, token)
@@ -529,17 +559,38 @@ def main() -> int:
                 {
                     "bridge-ready",
                     "client-capabilities",
-                    "credentials-offered",
                     "first-frame",
                     "login-ready",
                     "startup-complete",
                 },
                 args.timeout,
             )
-            credentials = milestones["credentials-offered"].get("detail", {})
-            if credentials != {"accountSet": True, "passwordSet": True}:
-                raise Failure("the app did not offer a complete Keychain login to the client")
-            print("[e2e] signed launch, Keychain, and first frame PASS")
+            credential_status_event = stream.wait_optional("credential-status", 1)
+            if credential_status_event is None:
+                raise Failure("the host did not report profile credential status")
+            credential_status = credential_status_event.get("detail", {}).get(
+                "status"
+            )
+            credentials_event = stream.wait_optional("credentials-offered", 1)
+            credentials_ready = credentials_event is not None
+            if credentials_ready:
+                credentials = credentials_event.get("detail", {})
+                if credentials != {"accountSet": True, "passwordSet": True}:
+                    raise Failure(
+                        "the app did not offer a complete Keychain login to the client"
+                    )
+                print("[e2e] signed launch, Keychain, and first frame PASS")
+            elif credential_status == "unavailable":
+                print("[e2e] signed launch and first frame PASS; no Keychain login is stored")
+            elif credential_status == "available":
+                print(
+                    "[e2e] signed launch and first frame PASS; the Keychain login "
+                    "was not requested by the client"
+                )
+            elif credential_status == "error":
+                raise Failure("the app could not inspect the profile Keychain login")
+            else:
+                raise Failure(f"unexpected credential status: {credential_status}")
             print("[e2e] token gates and event-driven API contracts PASS")
 
             if args.no_gameplay:
@@ -549,75 +600,108 @@ def main() -> int:
                 print("[e2e] PASS (gameplay skipped)")
                 return 0
 
-            # Enter activates the focused game control. Do not send another one
-            # until the client commits the authenticated account and presents
-            # character selection. While Connecting owns the default control,
-            # a timer-driven second Enter cancels the login under test.
-            first = submit_action(origin, token, "activate")
-            activation = stream.wait_for_action(first, 5)
-            detail = activation.get("detail", {})
-            prepared = stream.wait_for_action_event(first, "action-prepared", 1)
-            observed = stream.wait_for_action_event(first, "native-key-observed", 1)
-            released = stream.wait_for_action_event(first, "native-key-released", 1)
-            print(
-                "[e2e] login activation "
-                f"{(prepared or {}).get('detail', {}).get('target', 'unknown')} -> "
-                f"{detail.get('target', 'unknown')} "
-                f"({(observed or {}).get('detail', {}).get('code', 'unobserved')}, "
-                f"keyCode={(observed or {}).get('detail', {}).get('keyCode', 'unknown')}, "
-                f"key-up={'observed' if released else 'missing'})"
-            )
-            traffic = stream.wait_for_action_traffic(
-                first,
-                8,
-                direction="send",
-            )
-            login_response = stream.wait_optional("login-response", 30)
-            if traffic is None and login_response is None:
-                # A trusted Enter can arrive on the first frame before the
-                # painted login control owns it. No WebGate request and no
-                # socket send prove that Connecting never began, so one retry
-                # cannot hit its Cancel button.
-                print("[e2e] login produced no network work; retrying activation once")
+            traffic = None
+            login_response = None
+            login_committed = None
+            character_selection_ready = None
+            if not credentials_ready:
+                print(
+                    "[e2e] enter the account password, enable Remember Password, "
+                    "and choose Log In; waiting for authentication and 2FA"
+                )
+                login_committed = stream.wait_optional(
+                    "login-committed",
+                    args.auth_timeout,
+                )
+                login_response = stream.wait_optional("login-response", 1)
+            else:
+                # Enter activates the focused game control. Do not send another
+                # one until the client commits the authenticated account and
+                # presents character selection. While Connecting owns the
+                # default control, a timer-driven second Enter cancels login.
                 first = submit_action(origin, token, "activate")
-                stream.wait_for_action(first, 5)
+                activation = stream.wait_for_action(first, 5)
+                detail = activation.get("detail", {})
+                prepared = stream.wait_for_action_event(first, "action-prepared", 1)
+                observed = stream.wait_for_action_event(first, "native-key-observed", 1)
+                released = stream.wait_for_action_event(first, "native-key-released", 1)
+                print(
+                    "[e2e] login activation "
+                    f"{(prepared or {}).get('detail', {}).get('target', 'unknown')} -> "
+                    f"{detail.get('target', 'unknown')} "
+                    f"({(observed or {}).get('detail', {}).get('code', 'unobserved')}, "
+                    f"keyCode={(observed or {}).get('detail', {}).get('keyCode', 'unknown')}, "
+                    f"key-up={'observed' if released else 'missing'})"
+                )
                 traffic = stream.wait_for_action_traffic(
                     first,
                     8,
                     direction="send",
                 )
                 login_response = stream.wait_optional("login-response", 30)
-            login_committed = None
-            if traffic is not None or login_response is not None:
-                print(
-                    "[e2e] login network work started; waiting for authentication, "
-                    "2FA, and character selection"
-                )
-                login_committed = stream.wait_optional(
-                    "login-committed",
-                    args.auth_timeout,
-                )
+                if traffic is None and login_response is None:
+                    # A trusted Enter can arrive on the first frame before the
+                    # painted login control owns it. No WebGate request and no
+                    # socket send prove that Connecting never began, so one
+                    # retry cannot hit its Cancel button.
+                    print("[e2e] login produced no network work; retrying activation once")
+                    first = submit_action(origin, token, "activate")
+                    stream.wait_for_action(first, 5)
+                    traffic = stream.wait_for_action_traffic(
+                        first,
+                        8,
+                        direction="send",
+                    )
+                    login_response = stream.wait_optional("login-response", 30)
+                if traffic is not None or login_response is not None:
+                    print(
+                        "[e2e] login network work started; waiting for authentication, "
+                        "2FA, and character selection"
+                    )
+                    login_committed = stream.wait_optional(
+                        "login-committed",
+                        args.auth_timeout,
+                    )
 
             capabilities = milestones["client-capabilities"].get("detail", {})
             ready = game_state_after(origin, token, 0, 0)
             state = (ready or {}).get("state", {})
             game_connection = None
             if login_committed is not None and state.get("status") != "ready":
-                print("[e2e] authentication committed; activating the selected character")
-                character = submit_action(origin, token, "activate")
-                stream.wait_for_action(character, 5)
-                game_connection = stream.wait_for_action_connection(
-                    character,
-                    30,
+                character_selection_ready = stream.wait_optional(
+                    "character-selection-ready",
+                    60,
                 )
-                current = game_state_after(origin, token, 0, 0)
-                revision = int((current or {}).get("revision", 0))
-                ready = wait_for_ready_state(
-                    origin,
-                    token,
-                    revision,
-                    120,
-                )
+                if character_selection_ready is not None:
+                    print(
+                        "[e2e] authentication committed and character selection "
+                        "settled; activating the selected character"
+                    )
+                    character = submit_action(origin, token, "activate")
+                    stream.wait_for_action(character, 5)
+                    game_connection = stream.wait_for_action_connection(
+                        character,
+                        30,
+                    )
+                    if game_connection is None:
+                        print(
+                            "[e2e] character activation opened no connection; "
+                            "retrying once"
+                        )
+                        character = submit_action(origin, token, "activate")
+                        stream.wait_for_action(character, 5)
+                        game_connection = stream.wait_for_action_connection(
+                            character,
+                            30,
+                        )
+                    current = game_state_after(origin, token, 0, 0)
+                    revision = int((current or {}).get("revision", 0))
+                    ready = wait_for_ready_state(
+                        origin,
+                        token,
+                        revision,
+                        120,
+                    )
 
             if ready is not None:
                 state = ready.get("state", {})
@@ -651,12 +735,21 @@ def main() -> int:
                             f"agents={detail.get('agentDeltas', [])} "
                             f"common={detail.get('commonDeltas', [])}"
                         )
-                if traffic:
-                    print("[e2e] activation produced client socket send traffic")
-                else:
-                    print("[e2e] activation reached the canvas; no post-action socket traffic observed")
+                if credentials_ready:
+                    if traffic:
+                        print("[e2e] activation produced client socket send traffic")
+                    else:
+                        print(
+                            "[e2e] activation reached the canvas; "
+                            "no post-action socket traffic observed"
+                        )
                 if login_committed is None:
                     print("[e2e] the client never committed the authenticated account")
+                elif character_selection_ready is None:
+                    print(
+                        "[e2e] authenticated socket traffic never settled at "
+                        "character selection; Play was not sent"
+                    )
                 elif game_connection is None:
                     print("[e2e] character activation opened no attributable game connection")
                 state = (ready or {}).get("state", {})
@@ -668,6 +761,39 @@ def main() -> int:
                 )
                 print("[e2e] INCONCLUSIVE (gameplay telemetry unavailable)")
                 return 2
+
+            state = ready["state"]
+            party = state.get("party")
+            skillbar = state.get("skillbar")
+            if not isinstance(party, dict) or not party.get("players"):
+                raise Failure("certified party state did not include the player roster")
+            skills = skillbar.get("skills") if isinstance(skillbar, dict) else None
+            if (
+                skillbar is None
+                or skillbar.get("agentId") != state.get("playerId")
+                or not isinstance(skills, list)
+                or len(skills) != 8
+                or [skill.get("slot") for skill in skills] != list(range(1, 9))
+                or not isinstance(skillbar.get("disabledMask"), int)
+                or skillbar.get("disabledMask") & ~0xFF
+                or not isinstance(skillbar.get("castCount"), int)
+                or not 0 <= skillbar.get("castCount") <= 64
+                or skillbar.get("casting") != (skillbar.get("castCount") != 0)
+                or any(
+                    skill.get("disabled")
+                    != bool(skillbar.get("disabledMask") & (1 << index))
+                    for index, skill in enumerate(skills)
+                )
+                or not any(skill.get("skillId", 0) > 0 for skill in skills)
+            ):
+                raise Failure("certified player skillbar state is incomplete")
+            print(
+                "[e2e] party and skillbar API PASS "
+                f"(players={len(party.get('players', []))}, "
+                f"heroes={len(party.get('heroes', []))}, "
+                f"henchmen={len(party.get('henchmen', []))}, "
+                f"populated-skills={sum(skill.get('skillId', 0) > 0 for skill in skills)})"
+            )
 
             before = position(ready)
             revision = int(ready["revision"])
@@ -712,11 +838,19 @@ def main() -> int:
             return 0
         finally:
             terminate(process)
+            try:
+                inhibitor.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                inhibitor.terminate()
+                inhibitor.wait(timeout=2)
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("[e2e] interrupted", file=sys.stderr)
+        raise SystemExit(130)
     except (Failure, subprocess.CalledProcessError) as error:
         print(f"[e2e] FAIL: {error}", file=sys.stderr)
         raise SystemExit(1)

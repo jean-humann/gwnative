@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
   buttonNamed,
+  createCharacterSelectionMilestone,
   executeE2EAction,
   installE2EBridge,
   prepareNativeE2EAction,
@@ -29,6 +30,48 @@ class MemoryStorage {
 }
 
 describe('end-to-end helpers', () => {
+  it('reports character selection only after authenticated traffic settles', async () => {
+    const frames = [];
+    let reports = 0;
+    const milestone = createCharacterSelectionMilestone({
+      afterFrame: (callback) => frames.push(callback),
+      report: async () => {
+        reports += 1;
+      },
+      settleFrames: 2,
+    });
+
+    milestone.receive();
+    assert.equal(frames.length, 0);
+    milestone.authenticationCommitted();
+    milestone.receive();
+    frames.shift()();
+    milestone.receive();
+    frames.shift()();
+    assert.equal(reports, 0);
+    frames.shift()();
+    frames.shift()();
+    await Promise.resolve();
+    assert.equal(reports, 1);
+  });
+
+  it('cancels character selection when certified gameplay is already ready', () => {
+    const frames = [];
+    let reports = 0;
+    const milestone = createCharacterSelectionMilestone({
+      afterFrame: (callback) => frames.push(callback),
+      report: () => {
+        reports += 1;
+      },
+      settleFrames: 1,
+    });
+    milestone.authenticationCommitted();
+    milestone.receive();
+    milestone.gameReady();
+    frames.shift()();
+    assert.equal(reports, 0);
+  });
+
   it('finds controls by exact normalized text', () => {
     const save = { textContent: ' Save ' };
     const restart = { textContent: 'Save and restart' };
