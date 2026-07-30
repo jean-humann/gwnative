@@ -34,6 +34,58 @@ const words = () => {
     85: 0x0c,
     86: 0,
     87: 8,
+    88: 0x5cc,
+    89: 0x5dc,
+    90: 0x5ec,
+    91: 0x5fc,
+    92: 0x60c,
+    93: 0x83c,
+    94: 0x40,
+    95: 0xf8,
+    96: 0,
+    97: 0x60,
+    98: 0x90,
+    99: 0x94,
+    100: 0,
+    101: 4,
+    102: 0x0c,
+    103: 0x10,
+    104: 0x18,
+    105: 0,
+    106: 4,
+    107: 0x0c,
+    108: 0x10,
+    109: 0x14,
+    111: 0x1c,
+    112: 0x20,
+    116: 0x2c,
+    118: 0x4a,
+    119: 0x4c,
+    120: 0x4e,
+    121: 0x4f,
+    122: 0x50,
+    123: 0xa000,
+    124: 0,
+    125: 0x24,
+    126: 0x28,
+    127: 0x2c,
+    128: 0x30,
+    129: 0xa0,
+    130: 0,
+    131: 4,
+    132: 0x40,
+    133: 0x44,
+    134: 0x3c,
+    135: 0x60,
+    136: 0x64,
+    137: 0x2a0,
+    138: 0x2f8,
+    139: 0x358,
+    140: 0,
+    141: 0x24,
+    145: 0x74,
+    148: 0x90,
+    149: 0x174,
   });
   return layout;
 };
@@ -49,6 +101,10 @@ function fixture(delta) {
   const world = 0x6000;
   const quests = 0x7000;
   const objectives = 0x8000;
+  const itemContext = 0x9000;
+  const inventory = 0x9100;
+  const backpack = 0x9200;
+  const guildContext = 0xb000;
   view.setUint32(0x1000 + delta, contexts, true);
   view.setUint32(contexts + 6 * 4, game, true);
   view.setUint32(game + 0x44, character, true);
@@ -84,6 +140,26 @@ function fixture(delta) {
   view.setUint32(world + 0x56c, 1, true);
   view.setUint32(objectives, 7, true);
   view.setUint32(objectives + 8, 2, true);
+  for (const [index, offset] of [0x5cc, 0x5dc, 0x5ec, 0x5fc, 0x60c, 0x83c].entries()) {
+    const completion = 0x8100 + index * 0x40;
+    view.setUint32(world + offset, completion, true);
+    view.setUint32(world + offset + 4, 1, true);
+    view.setUint32(world + offset + 8, 1, true);
+  }
+  view.setUint32(game + 0x40, itemContext, true);
+  view.setUint32(itemContext + 0xf8, inventory, true);
+  view.setUint32(inventory + 4, backpack, true);
+  view.setUint32(inventory + 0x60, 4, true);
+  view.setUint32(inventory + 0x90, 1_234, true);
+  view.setUint32(inventory + 0x94, 50_000, true);
+  view.setUint32(backpack, 1, true);
+  view.setUint32(backpack + 4, 0, true);
+  view.setUint32(backpack + 0x0c, 0, true);
+  view.setUint32(backpack + 0x10, 0, true);
+  view.setUint32(0xa000 + 0xa0, 1, true);
+  view.setUint32(game + 0x3c, guildContext, true);
+  view.setUint32(guildContext + 0x60, 0, true);
+  view.setUint32(guildContext + 0x2a0, 0, true);
   return buffer;
 }
 
@@ -107,10 +183,96 @@ describe('bounded layout probe', () => {
         activeQuestPresent: true,
         objectiveRecordsValid: true,
       },
+      inventory: {
+        itemContextAvailable: true,
+        inventoryAvailable: true,
+        scalarFieldsValid: true,
+        storagePanesUnlocked: 4,
+        bagPointerCount: 1,
+        backpackPresent: true,
+        bagInvalidId: 0,
+        bagInvalidMask: 0,
+        itemCount: 0,
+        itemInvalidBagId: 0,
+        itemInvalidSlot: 0xffff_ffff,
+        itemInvalidMask: 0,
+        inventoryRecordsValid: true,
+      },
+      social: {
+        friendListAvailable: true,
+        friendHeaderValid: true,
+        playerStatus: 1,
+        friendCapacity: 0,
+        friendSlotCount: 0,
+        friendEntryCount: 0,
+        friendInvalidSlot: 0xffff_ffff,
+        friendInvalidMask: 0,
+        friendCountMismatchMask: 0,
+        friendRecordsValid: true,
+        guildContextAvailable: true,
+        guildIndex: 0,
+        guildRecordPresent: false,
+        guildRosterCapacity: 0,
+        guildRosterCount: 0,
+        guildInvalidMask: 0,
+        guildRecordsValid: true,
+        socialRecordsValid: true,
+      },
+      completion: {
+        worldAvailable: true,
+        capacities: [1, 1, 1, 1, 1, 1],
+        sizes: [1, 1, 1, 1, 1, 1],
+        invalidMasks: [0, 0, 0, 0, 0, 0],
+        completionRecordsValid: true,
+      },
     });
+  });
+
+  it('reports bounded inventory validation masks without exposing contents', () => {
+    const buffer = fixture(0);
+    const view = new DataView(buffer);
+    view.setUint32(0x9200 + 4, 9, true);
+    const result = probeLayout(buffer, words(), 0);
+    assert.equal(result.inventory.bagInvalidId, 1);
+    assert.equal(result.inventory.bagInvalidMask, 2);
+    assert.equal(result.inventory.inventoryRecordsValid, false);
+    assert.equal('address' in result.inventory, false);
   });
 
   it('rejects unbounded scans', () => {
     assert.throws(() => probeLayout(new ArrayBuffer(8), words(), 8192), /bounds/);
+  });
+
+  it('reports bounded social validation masks without exposing identities', () => {
+    const buffer = fixture(0);
+    const view = new DataView(buffer);
+    const friends = 0xa200;
+    const entry = 0xa300;
+    view.setUint32(0xa000, friends, true);
+    view.setUint32(0xa004, 1, true);
+    view.setUint32(0xa008, 1, true);
+    view.setUint32(0xa024, 1, true);
+    view.setUint32(friends, entry, true);
+    view.setUint32(entry, 1, true);
+    view.setUint32(entry + 4, 5, true);
+    view.setUint32(entry + 0x40, 0xffff_ffff, true);
+    view.setUint32(entry + 0x44, 0xffff_ffff, true);
+    const social = probeLayout(buffer, words(), 0).social;
+    assert.equal(social.friendInvalidSlot, 0);
+    assert.equal(social.friendInvalidMask, 1 << 2);
+    assert.equal(social.socialRecordsValid, false);
+    assert.equal('friendId' in social, false);
+    assert.equal('address' in social, false);
+  });
+
+  it('reports only completion descriptors, never bitmap contents', () => {
+    const buffer = fixture(0);
+    const view = new DataView(buffer);
+    view.setUint32(0x6000 + 0x5cc + 4, 1_025, true);
+    const completion = probeLayout(buffer, words(), 0).completion;
+    assert.deepEqual(completion.invalidMasks, [8, 0, 0, 0, 0, 0]);
+    assert.equal(completion.completionRecordsValid, false);
+    assert.equal('words' in completion, false);
+    assert.equal('buffer' in completion, false);
   });
 });
