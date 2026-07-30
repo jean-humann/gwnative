@@ -173,6 +173,7 @@ const FRIEND_STATUS_NAMES = Object.freeze([
   'Unknown',
 ]);
 const GUILD_FACTION_NAMES = Object.freeze(['Kurzick', 'Luxon']);
+const guildFactionName = (faction) => GUILD_FACTION_NAMES[faction] ?? 'Unknown';
 
 /** @param {number} value */
 function validCoordinate(value) {
@@ -736,7 +737,6 @@ function readInventory(view) {
       bagId <= previousBagId
       || bagId > MAX_INVENTORY_BAGS
       || expectedBagType(bagId) !== bagType
-      || containerItem > MAX_INVENTORY_ITEM_ID
       || capacity > 256
       || bagItemCount > capacity
     ) {
@@ -814,7 +814,7 @@ function readInventory(view) {
       || quantity === 0
       || quantity > 0xffff
       || equipped > 1
-      || (profession > 10 && profession !== 0xff)
+      || profession > 0xff
       || (metadataFlags & ~0x3) !== 0
       || modifierCount > 64
       || dyeInfo > 0xff_ffff
@@ -931,7 +931,6 @@ function readSocial(view) {
     if (
       guildIndex === 0
       || guildIndex >= 64
-      || faction >= GUILD_FACTION_NAMES.length
       || rosterTotal > 100
     ) {
       return null;
@@ -943,7 +942,7 @@ function readSocial(view) {
       features,
       rating,
       faction,
-      factionName: GUILD_FACTION_NAMES[faction],
+      factionName: guildFactionName(faction),
       factionPoints,
       qualifierPoints,
       rosterTotal,
@@ -978,8 +977,6 @@ function readSocial(view) {
       || slot >= MAX_RAW_FRIENDS
       || type >= FRIEND_TYPE_NAMES.length
       || status >= FRIEND_STATUS_NAMES.length
-      || friendId > 1_000_000
-      || zoneId > 2_000
     ) {
       return null;
     }

@@ -89,6 +89,7 @@ const MAX_FRIENDS: usize = 128;
 const MAX_GUILDS: u32 = 64;
 const MAX_GUILD_ROSTER: u32 = 100;
 const MAX_COMPLETION_WORDS: u32 = 32;
+const MAX_COMPLETION_CAPACITY: u32 = 1_024;
 const MAX_RAW_TRADE_ITEMS: u32 = 32;
 const MAX_TRADE_ITEMS: usize = 16;
 const MAX_TRADE_GOLD: u32 = 100_000;
@@ -1716,7 +1717,7 @@ unsafe fn collect_completion(layout: Layout, game: u32) -> Option<CompletionSour
                 offset(world, *field)?,
                 4,
                 MAX_COMPLETION_WORDS,
-                MAX_COMPLETION_WORDS,
+                MAX_COMPLETION_CAPACITY,
             )?
         };
     }
@@ -2201,7 +2202,6 @@ unsafe fn read_inventory_bag(
     };
     if expected_bag_type(bag_id) != Some(bag_type)
         || index != bag_id - 1
-        || container_item > 1_000_000
         || item_count > items.size
     {
         return None;
@@ -2246,8 +2246,11 @@ unsafe fn read_inventory_item(
     let item_formula =
         unsafe { read_u16(offset(address, layout.item_formula)?)? } as u32;
     let material_salvageable =
-        unsafe { read_u8(offset(address, layout.item_material_salvageable)?)? }
-            as u32;
+        u32::from(
+            unsafe {
+                read_u8(offset(address, layout.item_material_salvageable)?)?
+            } != 0,
+        );
     let quantity =
         unsafe { read_u16(offset(address, layout.item_quantity)?)? } as u32;
     let equipped =
@@ -2267,8 +2270,6 @@ unsafe fn read_inventory_item(
         || model_id == 0
         || quantity == 0
         || equipped > 1
-        || (profession > 10 && profession != 0xff)
-        || material_salvageable > 1
         || modifier_count > 64
         || (modifier_count > 0
             && (modifiers & 3 != 0 || !contains(modifiers, modifier_bytes)))
@@ -3102,11 +3103,7 @@ unsafe fn read_friend(layout: Layout, address: u32, slot: u32) -> Option<Friend>
         friend_id: unsafe { read_u32(offset(address, layout.friend_id)?)? },
         zone_id: unsafe { read_u32(offset(address, layout.friend_zone_id)?)? },
     };
-    if friend.friend_type > 4
-        || friend.status > 4
-        || friend.friend_id > 1_000_000
-        || friend.zone_id > 2_000
-    {
+    if friend.friend_type > 4 || friend.status > 4 {
         return None;
     }
     Some(friend)
@@ -3285,8 +3282,7 @@ unsafe fn publish_social(
                 .and_then(|address| unsafe { read_u32(address) });
             valid &= context_key == record_key
                 && context_key.iter().any(|word| *word != 0)
-                && record_index == Some(guild_index)
-                && guild_faction <= 1;
+                && record_index == Some(guild_index);
             for index in 0..7u32 {
                 guild_cape[index as usize] = offset(
                     guild,

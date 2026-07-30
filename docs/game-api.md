@@ -293,9 +293,9 @@ The envelope is revisioned and timestamped:
           "itemFormula": 0,
           "quantity": 5,
           "equipped": false,
-          "profession": 255,
+          "profession": 254,
           "customized": true,
-          "materialSalvageable": false,
+          "materialSalvageable": true,
           "modifierCount": 2,
           "dyeTint": 7,
           "dye1": 2,
@@ -530,7 +530,8 @@ bag among the 22 defined bag IDs and at most 512 occupied slots, ordered by
 all readable bags; `itemsTruncated` distinguishes a complete page from the
 512-record cap. Bag type, index, capacity, occupied count, and every item
 back-reference are rechecked before publication. The sum of bag `itemCount`
-values must equal `total`.
+values must equal `total`. `containerItem` preserves GWCA's full `uint32_t`
+value; it is metadata only and is never followed as a memory address.
 
 Item records retain numeric identity, agent, model/file, type, value,
 interaction, formula, quantity, profession, customization, material, dye, and
@@ -538,23 +539,29 @@ modifier-count fields. The boolean stackable, inscribable, identified,
 tradable, usable, upgrade, inscription, rarity, inventory, and storage fields
 are exact derivatives of the same interaction and bag words and are checked
 again by Rust. Encoded item names, customization text, modifier words, and
-merchant prices are not read in this ABI. Inventory is sensitive account state:
+merchant prices are not read in this ABI. `profession` preserves the client's
+full byte, including non-enum sentinel values. Inventory is sensitive account
+state:
 the loopback token is mandatory, the page publishes no faster than four times
 per second, and the domain has no move/use/equip/salvage/gold action.
 
 The social domain follows the GWCA/Py4GW `FriendList`, `Friend`, `GuildContext`,
 `Guild`, and `GuildPlayer` read layouts. It publishes the player's numeric
 presence, at most 128 of 256 bounded contacts, exact category totals, contact
-type/status, an opaque numeric friend ID, and last zone ID. `isOnline` is true
-only for Online, Do Not Disturb, and Away. `truncated` distinguishes a complete
-list from the 128-record page.
+type/status, an opaque numeric friend ID, and last zone ID. Friend IDs and zone
+IDs preserve the client's full unsigned words, including offline and
+transition sentinels; they are metadata and are never interpreted as memory
+addresses. `isOnline` is true only for Online, Do Not Disturb, and Away.
+`truncated` distinguishes a complete list from the 128-record page.
 
 `guild` is `null` when the client reports player guild index zero. Otherwise it
 contains the numeric guild index, player/guild ranks, features, rating,
 faction/points, qualifier points, bounded non-null roster count, and seven
 numeric cape fields. The guild record must match both the context key and
-index before publication. The key itself is used only for validation and is
-never exposed. Friend aliases, character names, UUIDs, guild names/tags,
+index before publication. Faction preserves the full GWCA word: `0` is named
+`Kurzick`, `1` is named `Luxon`, and other client sentinel values are named
+`Unknown`. The key itself is used only for validation and is never exposed.
+Friend aliases, character names, UUIDs, guild names/tags,
 member names, announcements, history, chat, and every social write action are
 excluded. This is sensitive account-derived state and remains token-gated.
 
@@ -562,10 +569,11 @@ The completion domain follows the six bounded `WorldContext` bitmaps used by
 GWCA, GWToolbox++, and Py4GW: normal-mode mission completion and bonus,
 hard-mode mission completion and bonus, unlocked maps, and vanquished areas.
 Each source array is independently validated at no more than 32 words. The
-page expands set bit index `n` into numeric map ID `n`, then publishes each
-category as a strictly increasing, duplicate-free array of at most 1,024 IDs.
-The raw bitmap storage, capacity, and client pointers never cross the public
-boundary.
+client allocation capacity is validated separately and may exceed its current
+size; only the bounded `size` words are read. The page expands set bit index
+`n` into numeric map ID `n`, then publishes each category as a strictly
+increasing, duplicate-free array of at most 1,024 IDs. The raw bitmap storage,
+capacity, and client pointers never cross the public boundary.
 
 Normal and hard-mode bonuses remain separate because Guild Wars interprets
 mission tiers differently across campaigns; collapsing them would lose the
