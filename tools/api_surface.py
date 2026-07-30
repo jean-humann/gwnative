@@ -35,6 +35,8 @@ RUST_FIELD = re.compile(r"^\s*pub\s+([a-zA-Z_]\w*)\s*:", re.MULTILINE)
 VERSION = re.compile(r'#define\s+GWCA_VERSION\s+"([^"]+)"')
 CERTIFIED_DOMAIN_FIELDS = {
     "agent": "agents",
+    "camera": "camera",
+    "completion": "completion",
     "effects": "effects",
     "friend_list": "social",
     "guild": "social",
@@ -45,6 +47,7 @@ CERTIFIED_DOMAIN_FIELDS = {
     "quest": "quests",
     "skillbar": "skillbar",
     "target": "target_valid",
+    "trade": "trade",
 }
 
 

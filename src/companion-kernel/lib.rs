@@ -41,7 +41,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 8;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 9;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -56,6 +56,7 @@ const FLAG_INVENTORY_VALID: u32 = 1 << 9;
 const FLAG_SOCIAL_VALID: u32 = 1 << 10;
 const FLAG_COMPLETION_VALID: u32 = 1 << 11;
 const FLAG_CAMERA_VALID: u32 = 1 << 12;
+const FLAG_TRADE_VALID: u32 = 1 << 13;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -81,6 +82,16 @@ const MAX_FRIENDS: usize = 128;
 const MAX_GUILDS: u32 = 64;
 const MAX_GUILD_ROSTER: u32 = 100;
 const MAX_COMPLETION_WORDS: u32 = 32;
+const MAX_RAW_TRADE_ITEMS: u32 = 32;
+const MAX_TRADE_ITEMS: usize = 16;
+const MAX_TRADE_GOLD: u32 = 100_000;
+const MAX_TRADE_ITEM_ID: u32 = 1_000_000;
+const MAX_TRADE_QUANTITY: u32 = 250;
+const TRADE_INITIATED: u32 = 1;
+const TRADE_OFFER_SENT: u32 = 2;
+const TRADE_ACCEPTED: u32 = 4;
+const KNOWN_TRADE_FLAGS: u32 =
+    TRADE_INITIATED | TRADE_OFFER_SENT | TRADE_ACCEPTED;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
@@ -277,6 +288,15 @@ struct Layout {
     camera_look_at_target: u32,
     camera_field_of_view: u32,
     camera_mode: u32,
+    game_trade_context: u32,
+    trade_flags: u32,
+    trade_player_gold: u32,
+    trade_player_items: u32,
+    trade_partner_gold: u32,
+    trade_partner_items: u32,
+    trade_item_stride: u32,
+    trade_item_id: u32,
+    trade_item_quantity: u32,
 }
 
 impl Layout {
@@ -454,6 +474,15 @@ impl Layout {
         camera_look_at_target: 0,
         camera_field_of_view: 0,
         camera_mode: 0,
+        game_trade_context: 0,
+        trade_flags: 0,
+        trade_player_gold: 0,
+        trade_player_items: 0,
+        trade_partner_gold: 0,
+        trade_partner_items: 0,
+        trade_item_stride: 0,
+        trade_item_id: 0,
+        trade_item_quantity: 0,
     };
 }
 
@@ -620,6 +649,31 @@ impl CameraState {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct TradeItem {
+    item_id: u32,
+    quantity: u32,
+}
+
+const EMPTY_TRADE_ITEM: TradeItem = TradeItem {
+    item_id: 0,
+    quantity: 0,
+};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TradeState {
+    flags: u32,
+    player_gold: u32,
+    partner_gold: u32,
+    player_count: u32,
+    partner_count: u32,
+    page_flags: u32,
+    player_items: [TradeItem; MAX_TRADE_ITEMS],
+    partner_items: [TradeItem; MAX_TRADE_ITEMS],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -698,6 +752,7 @@ struct Snapshot {
     completion_counts: [u32; 6],
     completion_words: [[u32; MAX_COMPLETION_WORDS as usize]; 6],
     camera: CameraState,
+    trade: TradeState,
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -718,8 +773,8 @@ struct CursorSnapshot {
     pixels: [u32; 1024],
 }
 
-const _: [(); 692] = [(); size_of::<Layout>()];
-const _: [(); 48784] = [(); size_of::<Snapshot>()];
+const _: [(); 728] = [(); size_of::<Layout>()];
+const _: [(); 49064] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 static mut SNAPSHOT_PTR: u32 = 0;
@@ -1102,6 +1157,29 @@ impl CompletionSource {
     };
 }
 
+// The trade window owns two GWArray descriptors. Retain only their bounded
+// spans and scalar offer state; publish revalidates every item before it
+// crosses the seqlock boundary. Closed trades deliberately discard stale
+// gold and item slots that the client may leave behind.
+#[derive(Clone, Copy)]
+struct TradeSource {
+    flags: u32,
+    player_gold: u32,
+    partner_gold: u32,
+    player_items: ArrayView,
+    partner_items: ArrayView,
+}
+
+impl TradeSource {
+    const EMPTY: Self = Self {
+        flags: 0,
+        player_gold: 0,
+        partner_gold: 0,
+        player_items: ArrayView::EMPTY,
+        partner_items: ArrayView::EMPTY,
+    };
+}
+
 #[derive(Clone, Copy)]
 struct State {
     flags: u32,
@@ -1120,6 +1198,7 @@ struct State {
     social: SocialSource,
     completion: CompletionSource,
     camera: CameraState,
+    trade: TradeSource,
 }
 
 impl State {
@@ -1147,6 +1226,7 @@ impl State {
             social: SocialSource::EMPTY,
             completion: CompletionSource::EMPTY,
             camera: CameraState::EMPTY,
+            trade: TradeSource::EMPTY,
         }
     }
 }
@@ -1441,6 +1521,103 @@ unsafe fn collect_camera(layout: Layout) -> Option<CameraState> {
         position,
         look_at,
         field_of_view,
+    })
+}
+
+unsafe fn read_trade_item(
+    layout: Layout,
+    array: ArrayView,
+    index: u32,
+) -> Option<TradeItem> {
+    let entry = indexed(array.buffer, index, layout.trade_item_stride)?;
+    let item = TradeItem {
+        item_id: unsafe { read_u32(offset(entry, layout.trade_item_id)?)? },
+        quantity: unsafe { read_u32(offset(entry, layout.trade_item_quantity)?)? },
+    };
+    if item.item_id == 0
+        || item.item_id > MAX_TRADE_ITEM_ID
+        || item.quantity == 0
+        || item.quantity > MAX_TRADE_QUANTITY
+    {
+        return None;
+    }
+    Some(item)
+}
+
+unsafe fn validate_trade_array(layout: Layout, array: ArrayView) -> bool {
+    if array.size > MAX_RAW_TRADE_ITEMS
+        || (array.size != 0
+            && (array.buffer == 0
+                || array.buffer & 3 != 0
+                || checked_mul(array.size, layout.trade_item_stride)
+                    .is_none_or(|bytes| !contains(array.buffer, bytes))))
+    {
+        return false;
+    }
+    for index in 0..array.size {
+        let Some(item) = (unsafe { read_trade_item(layout, array, index) }) else {
+            return false;
+        };
+        for previous in 0..index {
+            if unsafe { read_trade_item(layout, array, previous) }
+                .is_none_or(|value| value.item_id == item.item_id)
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+unsafe fn collect_trade(layout: Layout, game: u32) -> Option<TradeSource> {
+    let trade = unsafe {
+        pointer(
+            offset(game, layout.game_trade_context)?,
+            layout.trade_partner_items.checked_add(16)?,
+        )?
+    };
+    let flags = unsafe { read_u32(offset(trade, layout.trade_flags)?)? };
+    if flags & !KNOWN_TRADE_FLAGS != 0 {
+        return None;
+    }
+    if flags == 0 {
+        return Some(TradeSource::EMPTY);
+    }
+
+    let player_gold =
+        unsafe { read_u32(offset(trade, layout.trade_player_gold)?)? };
+    let partner_gold =
+        unsafe { read_u32(offset(trade, layout.trade_partner_gold)?)? };
+    if player_gold > MAX_TRADE_GOLD || partner_gold > MAX_TRADE_GOLD {
+        return None;
+    }
+    let player_items = unsafe {
+        read_array(
+            offset(trade, layout.trade_player_items)?,
+            layout.trade_item_stride,
+            MAX_RAW_TRADE_ITEMS,
+            256,
+        )?
+    };
+    let partner_items = unsafe {
+        read_array(
+            offset(trade, layout.trade_partner_items)?,
+            layout.trade_item_stride,
+            MAX_RAW_TRADE_ITEMS,
+            256,
+        )?
+    };
+    if !unsafe { validate_trade_array(layout, player_items) }
+        || !unsafe { validate_trade_array(layout, partner_items) }
+    {
+        return None;
+    }
+    Some(TradeSource {
+        flags,
+        player_gold,
+        partner_gold,
+        player_items,
+        partner_items,
     })
 }
 
@@ -2113,6 +2290,10 @@ unsafe fn collect(layout: Layout) -> State {
         state.flags |= FLAG_CAMERA_VALID;
         state.camera = camera;
     }
+    if let Some(trade) = unsafe { collect_trade(layout, game) } {
+        state.flags |= FLAG_TRADE_VALID;
+        state.trade = trade;
+    }
     state
 }
 
@@ -2733,6 +2914,85 @@ unsafe fn publish_completion(
     valid
 }
 
+unsafe fn publish_trade(
+    snapshot: *mut Snapshot,
+    layout: Layout,
+    source: TradeSource,
+) -> bool {
+    let mut valid = source.flags & !KNOWN_TRADE_FLAGS == 0;
+    if source.flags == 0 {
+        valid &= source.player_gold == 0
+            && source.partner_gold == 0
+            && source.player_items.size == 0
+            && source.partner_items.size == 0;
+    } else {
+        valid &= source.player_gold <= MAX_TRADE_GOLD
+            && source.partner_gold <= MAX_TRADE_GOLD
+            && unsafe { validate_trade_array(layout, source.player_items) }
+            && unsafe { validate_trade_array(layout, source.partner_items) };
+    }
+
+    let player_count = if valid {
+        source.player_items.size.min(MAX_TRADE_ITEMS as u32)
+    } else {
+        0
+    };
+    let partner_count = if valid {
+        source.partner_items.size.min(MAX_TRADE_ITEMS as u32)
+    } else {
+        0
+    };
+    let page_flags = if valid {
+        u32::from(source.player_items.size > MAX_TRADE_ITEMS as u32)
+            | (u32::from(source.partner_items.size > MAX_TRADE_ITEMS as u32) << 1)
+    } else {
+        0
+    };
+    unsafe {
+        write_volatile(
+            &mut (*snapshot).trade.flags,
+            if valid { source.flags } else { 0 },
+        );
+        write_volatile(
+            &mut (*snapshot).trade.player_gold,
+            if valid { source.player_gold } else { 0 },
+        );
+        write_volatile(
+            &mut (*snapshot).trade.partner_gold,
+            if valid { source.partner_gold } else { 0 },
+        );
+        write_volatile(&mut (*snapshot).trade.player_count, player_count);
+        write_volatile(&mut (*snapshot).trade.partner_count, partner_count);
+        write_volatile(&mut (*snapshot).trade.page_flags, page_flags);
+    }
+    for index in 0..MAX_TRADE_ITEMS {
+        let player_item = if index < player_count as usize {
+            unsafe {
+                read_trade_item(layout, source.player_items, index as u32)
+                    .unwrap_or(EMPTY_TRADE_ITEM)
+            }
+        } else {
+            EMPTY_TRADE_ITEM
+        };
+        let partner_item = if index < partner_count as usize {
+            unsafe {
+                read_trade_item(layout, source.partner_items, index as u32)
+                    .unwrap_or(EMPTY_TRADE_ITEM)
+            }
+        } else {
+            EMPTY_TRADE_ITEM
+        };
+        unsafe {
+            write_volatile(&mut (*snapshot).trade.player_items[index], player_item);
+            write_volatile(
+                &mut (*snapshot).trade.partner_items[index],
+                partner_item,
+            );
+        }
+    }
+    valid
+}
+
 unsafe fn publish(mut state: State, layout: Layout) {
     let next = unsafe { SEQUENCE }.wrapping_add(2) & !1;
     let snapshot = unsafe { SNAPSHOT_PTR as *mut Snapshot };
@@ -2876,6 +3136,9 @@ unsafe fn publish(mut state: State, layout: Layout) {
             state.flags &= !FLAG_COMPLETION_VALID;
         }
         write_volatile(&mut (*snapshot).camera, state.camera);
+        if !publish_trade(snapshot, layout, state.trade) {
+            state.flags &= !FLAG_TRADE_VALID;
+        }
         write_volatile(&mut (*snapshot).flags, state.flags);
         write_volatile(&mut (*snapshot).sequence, next);
         SEQUENCE = next;

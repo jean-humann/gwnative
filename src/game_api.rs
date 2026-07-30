@@ -355,6 +355,35 @@ pub struct Camera {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TradeItem {
+    pub slot: u32,
+    pub item_id: u32,
+    pub quantity: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TradeParticipant {
+    pub gold: u32,
+    pub items_truncated: bool,
+    pub items: Vec<TradeItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Trade {
+    pub flags: u32,
+    pub status_name: String,
+    pub open: bool,
+    pub initiated: bool,
+    pub offer_sent: bool,
+    pub accepted: bool,
+    pub player: TradeParticipant,
+    pub partner: TradeParticipant,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct State {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -405,6 +434,8 @@ pub struct State {
     pub completion: Option<Completion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<Camera>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trade: Option<Trade>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -513,7 +544,8 @@ impl Hub {
             "state": {
                 "domains": [
                     "player", "map", "target", "party", "skillbar", "effects",
-                    "agents", "quests", "inventory", "social", "completion", "camera"
+                    "agents", "quests", "inventory", "social", "completion", "camera",
+                    "trade"
                 ],
                 "available": self.state_json().is_some(),
             },
@@ -625,6 +657,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(camera) = &state.camera {
             validate_camera(camera)?;
         }
+        if let Some(trade) = &state.trade {
+            validate_trade(trade)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -647,6 +682,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.social.is_some()
         || state.completion.is_some()
         || state.camera.is_some()
+        || state.trade.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -1211,6 +1247,62 @@ fn validate_camera(camera: &Camera) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_trade_participant(participant: &TradeParticipant) -> bool {
+    if participant.gold > 100_000
+        || participant.items.len() > 16
+        || (participant.items_truncated && participant.items.len() != 16)
+    {
+        return false;
+    }
+    let mut item_ids = std::collections::HashSet::with_capacity(participant.items.len());
+    participant.items.iter().enumerate().all(|(index, item)| {
+        item.slot == index as u32 + 1
+            && (1..=1_000_000).contains(&item.item_id)
+            && (1..=250).contains(&item.quantity)
+            && item_ids.insert(item.item_id)
+    })
+}
+
+fn validate_trade(trade: &Trade) -> Result<(), String> {
+    const INITIATED: u32 = 1;
+    const OFFER_SENT: u32 = 2;
+    const ACCEPTED: u32 = 4;
+    if trade.flags & !(INITIATED | OFFER_SENT | ACCEPTED) != 0 {
+        return Err("trade status has unknown flags".into());
+    }
+    let initiated = trade.flags & INITIATED != 0;
+    let offer_sent = trade.flags & OFFER_SENT != 0;
+    let accepted = trade.flags & ACCEPTED != 0;
+    let open = trade.flags != 0;
+    let status_name = if accepted {
+        "Accepted"
+    } else if offer_sent {
+        "OfferSent"
+    } else if initiated {
+        "Initiated"
+    } else {
+        "Closed"
+    };
+    if trade.initiated != initiated
+        || trade.offer_sent != offer_sent
+        || trade.accepted != accepted
+        || trade.open != open
+        || trade.status_name != status_name
+        || !validate_trade_participant(&trade.player)
+        || !validate_trade_participant(&trade.partner)
+        || (!open
+            && (trade.player.gold != 0
+                || trade.partner.gold != 0
+                || trade.player.items_truncated
+                || trade.partner.items_truncated
+                || !trade.player.items.is_empty()
+                || !trade.partner.items.is_empty()))
+    {
+        return Err("trade state is outside its certified bounds".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1345,6 +1437,21 @@ mod tests {
                 "position":{"x":110,"y":-260,"z":-50},
                 "lookAt":{"x":100,"y":-250,"z":3},
                 "fieldOfView":1.2,"renderFieldOfView":0.77901974
+            },
+            "trade":{
+                "flags":3,"statusName":"OfferSent","open":true,
+                "initiated":true,"offerSent":true,"accepted":false,
+                "player":{
+                    "gold":2222,"itemsTruncated":false,
+                    "items":[
+                        {"slot":1,"itemId":700,"quantity":5},
+                        {"slot":2,"itemId":701,"quantity":1}
+                    ]
+                },
+                "partner":{
+                    "gold":3333,"itemsTruncated":false,
+                    "items":[{"slot":1,"itemId":800,"quantity":2}]
+                }
             }
         }"#;
         hub.publish(state).unwrap();
@@ -1374,6 +1481,8 @@ mod tests {
             value["state"]["camera"]["position"]["z"].as_f64(),
             Some(-50.0),
         );
+        assert_eq!(value["state"]["trade"]["statusName"], "OfferSent");
+        assert_eq!(value["state"]["trade"]["player"]["items"][1]["itemId"], 701);
     }
 
     #[test]
@@ -1422,6 +1531,46 @@ mod tests {
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","camera":{"lookAtAgentId":2,"mode":10,"modeName":"Unknown","unlocked":false,"yaw":1.25,"currentYaw":2.3561945,"pitch":0.25,"distance":1000,"maxDistance":5000,"position":{"x":110,"y":-260,"z":-50},"lookAt":{"x":100,"y":-250,"z":3},"fieldOfView":1.2,"renderFieldOfView":0.77901974}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","camera":{"lookAtAgentId":2,"mode":2,"modeName":"Follow","unlocked":false,"yaw":1.25,"currentYaw":0,"pitch":0.25,"distance":1000,"maxDistance":5000,"position":{"x":110,"y":-260,"z":-50},"lookAt":{"x":100,"y":-250,"z":3},"fieldOfView":1.2,"renderFieldOfView":0.77901974}}"#.as_slice(),
             br#"{"status":"waiting","camera":{"lookAtAgentId":0,"mode":0,"modeName":"Default","unlocked":false,"yaw":0,"currentYaw":0,"pitch":0,"distance":0,"maxDistance":0,"position":{"x":0,"y":0,"z":0},"lookAt":{"x":0,"y":0,"z":0},"fieldOfView":1,"renderFieldOfView":1}}"#.as_slice(),
+        ] {
+            assert!(hub.publish(state).is_err());
+        }
+    }
+
+    #[test]
+    fn trade_state_is_derived_and_bounded() {
+        let hub = Hub::default();
+        let valid = br#"{
+            "status":"ready","tickCount":1,"mapId":55,"instanceType":0,
+            "instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "trade":{
+                "flags":3,"statusName":"OfferSent","open":true,
+                "initiated":true,"offerSent":true,"accepted":false,
+                "player":{"gold":100000,"itemsTruncated":false,"items":[{"slot":1,"itemId":7,"quantity":250}]},
+                "partner":{"gold":0,"itemsTruncated":false,"items":[]}
+            }
+        }"#;
+        hub.publish(valid).unwrap();
+
+        let closed = br#"{
+            "status":"ready","tickCount":2,"mapId":55,"instanceType":0,
+            "instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "trade":{
+                "flags":0,"statusName":"Closed","open":false,
+                "initiated":false,"offerSent":false,"accepted":false,
+                "player":{"gold":0,"itemsTruncated":false,"items":[]},
+                "partner":{"gold":0,"itemsTruncated":false,"items":[]}
+            }
+        }"#;
+        hub.publish(closed).unwrap();
+
+        for state in [
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","trade":{"flags":3,"statusName":"Initiated","open":true,"initiated":true,"offerSent":true,"accepted":false,"player":{"gold":0,"itemsTruncated":false,"items":[]},"partner":{"gold":0,"itemsTruncated":false,"items":[]}}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","trade":{"flags":1,"statusName":"Initiated","open":true,"initiated":true,"offerSent":false,"accepted":false,"player":{"gold":0,"itemsTruncated":false,"items":[{"slot":1,"itemId":7,"quantity":1},{"slot":2,"itemId":7,"quantity":2}]},"partner":{"gold":0,"itemsTruncated":false,"items":[]}}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","trade":{"flags":0,"statusName":"Closed","open":false,"initiated":false,"offerSent":false,"accepted":false,"player":{"gold":1,"itemsTruncated":false,"items":[]},"partner":{"gold":0,"itemsTruncated":false,"items":[]}}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","trade":{"flags":1,"statusName":"Initiated","open":true,"initiated":true,"offerSent":false,"accepted":false,"player":{"gold":0,"itemsTruncated":true,"items":[{"slot":1,"itemId":7,"quantity":1}]},"partner":{"gold":0,"itemsTruncated":false,"items":[]}}}"#.as_slice(),
+            br#"{"status":"waiting","trade":{"flags":0,"statusName":"Closed","open":false,"initiated":false,"offerSent":false,"accepted":false,"player":{"gold":0,"itemsTruncated":false,"items":[]},"partner":{"gold":0,"itemsTruncated":false,"items":[]}}}"#.as_slice(),
         ] {
             assert!(hub.publish(state).is_err());
         }

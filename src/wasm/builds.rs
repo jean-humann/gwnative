@@ -583,6 +583,19 @@ pub(super) struct EnhancementLayout {
     pub camera_look_at_target: u32,
     pub camera_field_of_view: u32,
     pub camera_mode: u32,
+    /// `GameContext::trade` is the same +0x58 pointer in GWCA, Py4GW Native,
+    /// and the compiled accessor (function 3975) in every certified client.
+    /// The remaining values describe the fixed 0x38 `TradeContext`; only
+    /// bounded offer summaries cross the companion boundary.
+    pub game_trade_context: u32,
+    pub trade_flags: u32,
+    pub trade_player_gold: u32,
+    pub trade_player_items: u32,
+    pub trade_partner_gold: u32,
+    pub trade_partner_items: u32,
+    pub trade_item_stride: u32,
+    pub trade_item_id: u32,
+    pub trade_item_quantity: u32,
 }
 
 impl EnhancementLayout {
@@ -763,13 +776,22 @@ impl EnhancementLayout {
             self.camera_look_at_target,
             self.camera_field_of_view,
             self.camera_mode,
+            self.game_trade_context,
+            self.trade_flags,
+            self.trade_player_gold,
+            self.trade_player_items,
+            self.trade_partner_gold,
+            self.trade_partner_items,
+            self.trade_item_stride,
+            self.trade_item_id,
+            self.trade_item_quantity,
         ]
     }
 }
 
 /// Fields in [`EnhancementLayout`]. Named because the companion's own `Layout`
 /// is this many words long and the two have to agree.
-pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 173;
+pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 182;
 
 pub(super) struct EnhancementBuild {
     /// The *template-save* output, not ArenaNet's own module. That transform is
@@ -802,7 +824,7 @@ pub(super) struct EnhancementBuild {
 pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     EnhancementBuild {
         sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-        output_sha256: "b3c063d8337544ceed5fdb7c584441b589f9e9a72d5c1460d880cdbaa5f96307",
+        output_sha256: "3796f53d783ed74367cff1830c5637a4860f1b518af30b9fe347e3f064097a54",
         import_count: 219,
         program_id: 1,
         build_id: 38771,
@@ -984,11 +1006,20 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             camera_look_at_target: 0xa8,
             camera_field_of_view: 0xc0,
             camera_mode: 0x11c,
+            game_trade_context: 0x58,
+            trade_flags: 0x00,
+            trade_player_gold: 0x10,
+            trade_player_items: 0x14,
+            trade_partner_gold: 0x24,
+            trade_partner_items: 0x28,
+            trade_item_stride: 0x08,
+            trade_item_id: 0x00,
+            trade_item_quantity: 0x04,
         },
     },
     EnhancementBuild {
         sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
-        output_sha256: "d6f5ca38073d12dbdb5289fa9e522adaab83b4efc1f93297a74a305552668b1f",
+        output_sha256: "0996c3c4f081ac4a8286c2f64436ded0ab33c75f2771b7d9ce4b7ab6e2041c9a",
         import_count: 219,
         program_id: 1,
         build_id: 38790,
@@ -1170,11 +1201,20 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             camera_look_at_target: 0xa8,
             camera_field_of_view: 0xc0,
             camera_mode: 0x11c,
+            game_trade_context: 0x58,
+            trade_flags: 0x00,
+            trade_player_gold: 0x10,
+            trade_player_items: 0x14,
+            trade_partner_gold: 0x24,
+            trade_partner_items: 0x28,
+            trade_item_stride: 0x08,
+            trade_item_id: 0x00,
+            trade_item_quantity: 0x04,
         },
     },
     EnhancementBuild {
         sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
-        output_sha256: "0a1d85520f38563e605557150969e3937d40a6e03033ec765a8a9cda91103e1e",
+        output_sha256: "46d9fad9d7a8180e8d484744e54d7a57990c543d994bd74938cf3c8e0528fbc5",
         import_count: 219,
         program_id: 1,
         build_id: 38795,
@@ -1356,6 +1396,15 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             camera_look_at_target: 0xa8,
             camera_field_of_view: 0xc0,
             camera_mode: 0x11c,
+            game_trade_context: 0x58,
+            trade_flags: 0x00,
+            trade_player_gold: 0x10,
+            trade_player_items: 0x14,
+            trade_partner_gold: 0x24,
+            trade_partner_items: 0x28,
+            trade_item_stride: 0x08,
+            trade_item_id: 0x00,
+            trade_item_quantity: 0x04,
         },
     },
 ];
@@ -1461,6 +1510,21 @@ mod tests {
             assert_eq!(build.layout.camera_look_at_target, 0xa8);
             assert_eq!(build.layout.camera_field_of_view, 0xc0);
             assert_eq!(build.layout.camera_mode, 0x11c);
+        }
+    }
+
+    #[test]
+    fn every_certified_build_uses_the_verified_trade_layout() {
+        for build in ENHANCEMENT_BUILDS {
+            assert_eq!(build.layout.game_trade_context, 0x58);
+            assert_eq!(build.layout.trade_flags, 0x00);
+            assert_eq!(build.layout.trade_player_gold, 0x10);
+            assert_eq!(build.layout.trade_player_items, 0x14);
+            assert_eq!(build.layout.trade_partner_gold, 0x24);
+            assert_eq!(build.layout.trade_partner_items, 0x28);
+            assert_eq!(build.layout.trade_item_stride, 0x08);
+            assert_eq!(build.layout.trade_item_id, 0x00);
+            assert_eq!(build.layout.trade_item_quantity, 0x04);
         }
     }
 }

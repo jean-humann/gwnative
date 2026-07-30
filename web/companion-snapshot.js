@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 8;
-export const COMPANION_SNAPSHOT_BYTES = 48_784;
+export const COMPANION_SNAPSHOT_ABI = 9;
+export const COMPANION_SNAPSHOT_BYTES = 49_064;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -49,6 +49,7 @@ const FLAGS = Object.freeze({
   social: 1 << 10,
   completion: 1 << 11,
   camera: 1 << 12,
+  trade: 1 << 13,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -63,7 +64,8 @@ const KNOWN_FLAGS =
   | FLAGS.inventory
   | FLAGS.social
   | FLAGS.completion
-  | FLAGS.camera;
+  | FLAGS.camera
+  | FLAGS.trade;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -90,6 +92,25 @@ const MAX_TOTAL_BAG_SLOTS = 1_024;
 const MAX_RAW_FRIENDS = 256;
 const MAX_FRIENDS = 128;
 const MAX_COMPLETION_WORDS = 32;
+const MAX_TRADE_ITEMS = 16;
+const MAX_TRADE_ITEM_ID = 1_000_000;
+const MAX_TRADE_QUANTITY = 250;
+const TRADE_STATUS_FLAGS = Object.freeze({
+  initiated: 1 << 0,
+  offerSent: 1 << 1,
+  accepted: 1 << 2,
+});
+const KNOWN_TRADE_STATUS_FLAGS =
+  TRADE_STATUS_FLAGS.initiated
+  | TRADE_STATUS_FLAGS.offerSent
+  | TRADE_STATUS_FLAGS.accepted;
+const TRADE_PAGE_FLAGS = Object.freeze({
+  playerItemsTruncated: 1 << 0,
+  partnerItemsTruncated: 1 << 1,
+});
+const KNOWN_TRADE_PAGE_FLAGS =
+  TRADE_PAGE_FLAGS.playerItemsTruncated
+  | TRADE_PAGE_FLAGS.partnerItemsTruncated;
 const EFFECT_FLAGS = Object.freeze({
   buffsTruncated: 1 << 0,
   effectsTruncated: 1 << 1,
@@ -1077,6 +1098,100 @@ function readCamera(view) {
   });
 }
 
+function readTradeItems(view, base, count) {
+  const items = [];
+  const seen = new Set();
+  for (let index = 0; index < MAX_TRADE_ITEMS; index += 1) {
+    const offset = base + index * 8;
+    const itemId = view.getUint32(offset, true);
+    const quantity = view.getUint32(offset + 4, true);
+    if (index >= count) {
+      if (itemId !== 0 || quantity !== 0) return null;
+      continue;
+    }
+    if (
+      itemId === 0
+      || itemId > MAX_TRADE_ITEM_ID
+      || quantity === 0
+      || quantity > MAX_TRADE_QUANTITY
+      || seen.has(itemId)
+    ) {
+      return null;
+    }
+    seen.add(itemId);
+    items.push(Object.freeze({ slot: index + 1, itemId, quantity }));
+  }
+  return Object.freeze(items);
+}
+
+function readTrade(view) {
+  const flags = view.getUint32(48784, true);
+  const playerGold = view.getUint32(48788, true);
+  const partnerGold = view.getUint32(48792, true);
+  const playerCount = view.getUint32(48796, true);
+  const partnerCount = view.getUint32(48800, true);
+  const pageFlags = view.getUint32(48804, true);
+  if (
+    (flags & ~KNOWN_TRADE_STATUS_FLAGS) !== 0
+    || playerGold > 100_000
+    || partnerGold > 100_000
+    || playerCount > MAX_TRADE_ITEMS
+    || partnerCount > MAX_TRADE_ITEMS
+    || (pageFlags & ~KNOWN_TRADE_PAGE_FLAGS) !== 0
+    || ((pageFlags & TRADE_PAGE_FLAGS.playerItemsTruncated) !== 0
+      && playerCount !== MAX_TRADE_ITEMS)
+    || ((pageFlags & TRADE_PAGE_FLAGS.partnerItemsTruncated) !== 0
+      && partnerCount !== MAX_TRADE_ITEMS)
+  ) {
+    return null;
+  }
+  const playerItems = readTradeItems(view, 48808, playerCount);
+  const partnerItems = readTradeItems(view, 48936, partnerCount);
+  if (playerItems === null || partnerItems === null) return null;
+  const open = flags !== 0;
+  if (
+    !open
+    && (
+      playerGold !== 0
+      || partnerGold !== 0
+      || playerCount !== 0
+      || partnerCount !== 0
+      || pageFlags !== 0
+    )
+  ) {
+    return null;
+  }
+  const initiated = (flags & TRADE_STATUS_FLAGS.initiated) !== 0;
+  const offerSent = (flags & TRADE_STATUS_FLAGS.offerSent) !== 0;
+  const accepted = (flags & TRADE_STATUS_FLAGS.accepted) !== 0;
+  return Object.freeze({
+    flags,
+    statusName: accepted
+      ? 'Accepted'
+      : offerSent
+        ? 'OfferSent'
+        : initiated
+          ? 'Initiated'
+          : 'Closed',
+    open,
+    initiated,
+    offerSent,
+    accepted,
+    player: Object.freeze({
+      gold: playerGold,
+      itemsTruncated:
+        (pageFlags & TRADE_PAGE_FLAGS.playerItemsTruncated) !== 0,
+      items: playerItems,
+    }),
+    partner: Object.freeze({
+      gold: partnerGold,
+      itemsTruncated:
+        (pageFlags & TRADE_PAGE_FLAGS.partnerItemsTruncated) !== 0,
+      items: partnerItems,
+    }),
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -1265,6 +1380,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const tradeValid = (flags & FLAGS.trade) !== 0;
+  const trade = tradeValid ? readTrade(view) : null;
+  if (
+    (tradeValid && trade === null)
+    || (!tradeValid && !wordsAreZero(view, 48784, 280))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -1287,6 +1410,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(social ? { social } : {}),
     ...(completion ? { completion } : {}),
     ...(camera ? { camera } : {}),
+    ...(trade ? { trade } : {}),
   });
 }
 

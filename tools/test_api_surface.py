@@ -34,6 +34,9 @@ class ApiSurfaceTests(unittest.TestCase):
                 "    pub quests: Option<Quests>,\n"
                 "    pub inventory: Option<Inventory>,\n"
                 "    pub social: Option<Social>,\n"
+                "    pub completion: Option<Completion>,\n"
+                "    pub camera: Option<Camera>,\n"
+                "    pub trade: Option<Trade>,\n"
                 "}\n"
             )
             (wasm / "builds.rs").write_text(
@@ -47,6 +50,8 @@ class ApiSurfaceTests(unittest.TestCase):
             report["certifiedDomains"],
             [
                 "agent",
+                "camera",
+                "completion",
                 "effects",
                 "friend_list",
                 "guild",
@@ -57,6 +62,7 @@ class ApiSurfaceTests(unittest.TestCase):
                 "quest",
                 "skillbar",
                 "target",
+                "trade",
             ],
         )
 
