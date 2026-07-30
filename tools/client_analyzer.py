@@ -489,10 +489,23 @@ def diff_reports(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any
     new = after["wasm"]
     old_bodies = old["functionBodyHashes"]
     new_bodies = new["functionBodyHashes"]
+    old_imported_functions = old["importCounts"].get("function", 0)
+    new_imported_functions = new["importCounts"].get("function", 0)
     old_counts = Counter(old_bodies)
     new_counts = Counter(new_bodies)
     shared_bodies = sum((old_counts & new_counts).values())
     same_index = sum(left == right for left, right in zip(old_bodies, new_bodies))
+    changed_same_index = [
+        {
+            "definedIndex": index,
+            "beforeFunctionIndex": old_imported_functions + index,
+            "afterFunctionIndex": new_imported_functions + index,
+            "beforeSha256": left,
+            "afterSha256": right,
+        }
+        for index, (left, right) in enumerate(zip(old_bodies, new_bodies))
+        if left != right
+    ]
     old_unique = {
         value: index
         for index, value in enumerate(old_bodies)
@@ -538,6 +551,7 @@ def diff_reports(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any
                 "after": len(new_bodies),
                 "sharedExact": shared_bodies,
                 "sameIndexExact": same_index,
+                "changedSameIndex": changed_same_index,
                 "dominantUniqueBodyShift": dominant_shift,
             },
             "sections": section_changes,
@@ -773,7 +787,8 @@ def diff_main(argv: list[str] | None = None) -> int:
     summary = (
         f"Functions: {bodies['before']} -> {bodies['after']}; "
         f"{bodies['sharedExact']} exact bodies shared, "
-        f"{bodies['sameIndexExact']} unchanged at the same index{shift_text}"
+        f"{bodies['sameIndexExact']} unchanged and "
+        f"{len(bodies['changedSameIndex'])} changed at the same index{shift_text}"
     )
     _write(report, args.json, summary)
     return 0

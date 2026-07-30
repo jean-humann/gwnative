@@ -100,9 +100,11 @@ class ClientAnalyzerTests(unittest.TestCase):
             two = b"\x00\x41\x02\x0b"
             before.write_bytes(module([one, two]))
             after.write_bytes(module([b"\x00\x0b", one, two]))
+            before_report = inspect_wasm(before)
+            after_report = inspect_wasm(after)
             report = diff_reports(
-                {"wasm": inspect_wasm(before)},
-                {"wasm": inspect_wasm(after)},
+                {"wasm": before_report},
+                {"wasm": after_report},
             )
         bodies = report["wasm"]["functionBodies"]
         self.assertEqual(bodies["sharedExact"], 2)
@@ -110,6 +112,42 @@ class ClientAnalyzerTests(unittest.TestCase):
             bodies["dominantUniqueBodyShift"],
             {"delta": 1, "matchingFunctions": 2},
         )
+        self.assertEqual(
+            bodies["changedSameIndex"],
+            [
+                {
+                    "definedIndex": 0,
+                    "beforeFunctionIndex": 1,
+                    "afterFunctionIndex": 1,
+                    "beforeSha256": before_report["functionBodyHashes"][0],
+                    "afterSha256": after_report["functionBodyHashes"][0],
+                },
+                {
+                    "definedIndex": 1,
+                    "beforeFunctionIndex": 2,
+                    "afterFunctionIndex": 2,
+                    "beforeSha256": before_report["functionBodyHashes"][1],
+                    "afterSha256": after_report["functionBodyHashes"][1],
+                },
+            ],
+        )
+
+    def test_reports_absolute_indices_for_same_index_body_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before = root / "before.wasm"
+            after = root / "after.wasm"
+            before.write_bytes(module([b"\x00\x41\x01\x0b"]))
+            after.write_bytes(module([b"\x00\x41\x02\x0b"]))
+            report = diff_reports(
+                {"wasm": inspect_wasm(before)},
+                {"wasm": inspect_wasm(after)},
+            )
+        [changed] = report["wasm"]["functionBodies"]["changedSameIndex"]
+        self.assertEqual(changed["definedIndex"], 0)
+        self.assertEqual(changed["beforeFunctionIndex"], 1)
+        self.assertEqual(changed["afterFunctionIndex"], 1)
+        self.assertNotEqual(changed["beforeSha256"], changed["afterSha256"])
 
     def test_extracts_only_module_contract_names_from_jspi(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
