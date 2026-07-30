@@ -10,6 +10,7 @@ from tools.client_analyzer import (
     diff_reports,
     inspect_jspi,
     inspect_wasm,
+    locate_wasm_string,
     sha256_file,
 )
 
@@ -22,6 +23,28 @@ def uleb(value: int) -> bytes:
         result.append(byte | (0x80 if value else 0))
         if not value:
             return bytes(result)
+
+
+def sleb(value: int) -> bytes:
+    result = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        done = (value == 0 and byte & 0x40 == 0) or (
+            value == -1 and byte & 0x40 != 0
+        )
+        result.append(byte if done else byte | 0x80)
+        if done:
+            return bytes(result)
+
+
+def sleb5(value: int) -> bytes:
+    result = bytearray()
+    for _ in range(4):
+        result.append((value & 0x7F) | 0x80)
+        value >>= 7
+    result.append(value & 0x7F)
+    return bytes(result)
 
 
 def vector(values: list[bytes]) -> bytes:
@@ -159,6 +182,45 @@ pub(super) fn find_enhancement_build() {{}}
         self.assertTrue(report["certified"])
         self.assertEqual(report["enhancement"]["buildId"], 9)
         self.assertTrue(report["checks"]["enhancedOutput"]["matches"])
+
+    def test_locates_data_strings_without_returning_client_contents(self) -> None:
+        address = 0x1002
+        candidate = 0x5000
+        body = (
+            b"\x00"
+            + b"\x41"
+            + sleb5(address)
+            + b"\x1a\x41"
+            + sleb(candidate)
+            + b"\x1a\x0b"
+        )
+        data = b"xxknown assertionyy"
+        data_segment = (
+            uleb(1)
+            + uleb(0)
+            + b"\x41"
+            + sleb(0x1000)
+            + b"\x0b"
+            + uleb(len(data))
+            + data
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "client.wasm"
+            path.write_bytes(module([body]) + section(11, data_segment))
+            report = locate_wasm_string(path, b"known assertion")
+        self.assertEqual(report["memoryAddresses"], [address])
+        self.assertEqual(
+            report["references"],
+            [{
+                "address": address,
+                "referencedAddress": address,
+                "addressDelta": 0,
+                "functionIndex": 1,
+                "rawReferenceCount": 1,
+                "nearbyI32Constants": [address, candidate],
+            }],
+        )
+        self.assertNotIn("known assertion", json.dumps(report))
 
 
 if __name__ == "__main__":

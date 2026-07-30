@@ -23,6 +23,7 @@ python3 -m py_compile \
 	scripts/client-certify \
 	scripts/client-diff \
 	scripts/client-inspect \
+	scripts/client-locate \
 	scripts/e2e \
 	tools/client_analyzer.py \
 	tools/api_surface.py \

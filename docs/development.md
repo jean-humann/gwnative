@@ -212,6 +212,7 @@ scripts/client-inspect /path/to/Gw.jspi.wasm --jspi /path/to/Gw.jspi.js
 scripts/client-diff /path/to/old.wasm /path/to/new.wasm \
   --before-jspi /path/to/old.js --after-jspi /path/to/new.js
 scripts/client-certify /path/to/Gw.jspi.wasm
+scripts/client-locate /path/to/Gw.jspi.wasm 'known assertion' --json
 ```
 
 Add `--json` to any command for a stable, versioned report. `client-inspect`
@@ -220,6 +221,14 @@ lists section sizes, imports, exports, exact function-body hashes, and reference
 the dominant function-index shift, export retargeting separately from contract
 changes, and nested JSPI path additions/removals. Neither command prints
 function bodies, data segments, or client source.
+
+`client-locate` maps user-supplied text to active linear-memory addresses,
+raw `i32.const` references, and bounded nearby integer constants. It reports
+only addresses, function indices, counts, and the artifact hash—not the client
+bytes around them. The results are discovery evidence, not a disassembler or
+certification: a candidate still needs cross-build structure invariants, a
+bounded runtime fixture, and live validation before it enters a companion
+layout.
 
 `client-certify` reads the fail-closed registry in `src/wasm/builds.rs`. It can
 also verify locally produced stages without writing them into the checkout:

@@ -80,6 +80,19 @@ class Reader:
             shift += 7
         raise AnalysisError("WebAssembly integer is too large")
 
+    def sleb(self, maximum_bytes: int = 10) -> int:
+        value = 0
+        shift = 0
+        for _ in range(maximum_bytes):
+            byte = self.byte()
+            value |= (byte & 0x7F) << shift
+            shift += 7
+            if byte & 0x80 == 0:
+                if byte & 0x40:
+                    value |= -(1 << shift)
+                return value
+        raise AnalysisError("WebAssembly signed integer is too large")
+
     def name(self) -> str:
         raw = self.take(self.uleb(5))
         try:
@@ -178,6 +191,175 @@ def _code(payload: bytes) -> list[str]:
     if reader.remaining():
         raise AnalysisError("trailing bytes in WebAssembly code section")
     return hashes
+
+
+def _code_bodies(payload: bytes) -> list[bytes]:
+    reader = Reader(payload)
+    bodies = [
+        reader.take(reader.uleb(5))
+        for _ in range(reader.uleb(5))
+    ]
+    if reader.remaining():
+        raise AnalysisError("trailing bytes in WebAssembly code section")
+    return bodies
+
+
+def _constant_expression(reader: Reader) -> int | None:
+    opcode = reader.byte()
+    if opcode == 0x41:
+        value = reader.sleb(5)
+    elif opcode == 0x23:
+        reader.uleb(5)
+        value = None
+    else:
+        raise AnalysisError(
+            f"unsupported WebAssembly data offset expression 0x{opcode:02x}"
+        )
+    if reader.byte() != 0x0B:
+        raise AnalysisError("WebAssembly data offset expression is not closed")
+    return value
+
+
+def _data_segments(payload: bytes) -> list[tuple[int, bytes]]:
+    reader = Reader(payload)
+    segments: list[tuple[int, bytes]] = []
+    for _ in range(reader.uleb(5)):
+        mode = reader.uleb(5)
+        if mode == 0:
+            offset = _constant_expression(reader)
+        elif mode == 1:
+            offset = None
+        elif mode == 2:
+            memory = reader.uleb(5)
+            if memory != 0:
+                raise AnalysisError(
+                    "client data segment targets an unexpected memory"
+                )
+            offset = _constant_expression(reader)
+        else:
+            raise AnalysisError(
+                f"unsupported WebAssembly data segment mode {mode}"
+            )
+        contents = reader.take(reader.uleb(5))
+        if offset is not None:
+            if offset < 0:
+                raise AnalysisError("client data segment has a negative offset")
+            segments.append((offset, contents))
+    if reader.remaining():
+        raise AnalysisError("trailing bytes in WebAssembly data section")
+    return segments
+
+
+def _i32_constants(body: bytes) -> list[tuple[int, int]]:
+    constants = []
+    for offset, opcode in enumerate(body):
+        if opcode != 0x41:
+            continue
+        try:
+            value = Reader(body, offset + 1).sleb(5)
+        except AnalysisError:
+            continue
+        if value >= 0:
+            constants.append((offset, value))
+    return constants
+
+
+def _nearby_i32_constants(
+    constants: list[tuple[int, int]],
+    target: int,
+    radius: int,
+) -> list[int]:
+    references = [offset for offset, value in constants if value == target]
+    return sorted({
+        value
+        for offset, value in constants
+        if any(abs(offset - reference) <= radius for reference in references)
+    })
+
+
+def locate_wasm_string(
+    path: Path,
+    needle: bytes,
+    *,
+    radius: int = 128,
+) -> dict[str, Any]:
+    """Locate a data string and raw exact references without exposing bodies.
+
+    The nearby constants are discovery evidence, not certified offsets: this
+    deliberately small scanner does not claim to disassemble arbitrary
+    instructions. A candidate still needs structure invariants, an exact build
+    hash, and a runtime fixture before it can enter the companion layout.
+    """
+
+    if not needle or len(needle) > 256 or b"\0" in needle:
+        raise AnalysisError("search text must contain 1 to 256 non-NUL bytes")
+    if not 0 <= radius <= 512:
+        raise AnalysisError("reference radius must be between 0 and 512 bytes")
+
+    data = path.read_bytes()
+    if len(data) < 8 or data[:4] != b"\0asm":
+        raise AnalysisError(f"{path} is not a WebAssembly module")
+    reader = Reader(data, 8)
+    imported_functions = 0
+    bodies: list[bytes] = []
+    segments: list[tuple[int, bytes]] = []
+    while reader.remaining():
+        section_id = reader.byte()
+        payload = reader.take(reader.uleb(5))
+        if section_id == 2:
+            _, counts = _imports(payload)
+            imported_functions = counts["function"]
+        elif section_id == 10:
+            bodies = _code_bodies(payload)
+        elif section_id == 11:
+            segments = _data_segments(payload)
+
+    addresses = set()
+    for base, contents in segments:
+        cursor = 0
+        while (match := contents.find(needle, cursor)) >= 0:
+            addresses.add(base + match)
+            cursor = match + 1
+
+    # Compilers may address a nearby string-table base and add a small offset,
+    # so look within the same bounded radius as well as at the exact byte. This
+    # remains a raw discovery report: every entry records its delta instead of
+    # pretending the nearby constant is an exact semantic reference.
+    body_constants = [_i32_constants(body) for body in bodies]
+    reference_counts: Counter[tuple[int, int, int]] = Counter()
+    for body_index, constants in enumerate(body_constants):
+        for _, constant in constants:
+            for address in addresses:
+                if abs(constant - address) <= radius:
+                    reference_counts[(address, constant, body_index)] += 1
+
+    references = []
+    for (address, referenced, body_index), count in sorted(
+        reference_counts.items()
+    ):
+        references.append(
+            {
+                "address": address,
+                "referencedAddress": referenced,
+                "addressDelta": referenced - address,
+                "functionIndex": imported_functions + body_index,
+                "rawReferenceCount": count,
+                "nearbyI32Constants": _nearby_i32_constants(
+                    body_constants[body_index], referenced, radius
+                ),
+            }
+        )
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "source": {
+            "path": str(path),
+            "sha256": sha256_bytes(data),
+        },
+        "queryBytes": len(needle),
+        "radiusBytes": radius,
+        "memoryAddresses": sorted(addresses),
+        "references": references,
+    }
 
 
 def inspect_wasm(path: Path) -> dict[str, Any]:
@@ -635,3 +817,32 @@ def certify_main(argv: list[str] | None = None) -> int:
             summary += f"\n{name}: {'PASS' if check['matches'] else 'FAIL'}"
     _write(report, args.json, summary)
     return 0 if passed else 2
+
+
+def locate_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Locate a known string and its raw exact i32.const references "
+            "without emitting client code or data"
+        )
+    )
+    parser.add_argument("wasm", type=Path)
+    parser.add_argument("text")
+    parser.add_argument("--radius", type=int, default=128)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        report = locate_wasm_string(
+            args.wasm,
+            args.text.encode("utf-8"),
+            radius=args.radius,
+        )
+    except (OSError, UnicodeError, AnalysisError) as error:
+        parser.error(str(error))
+    summary = (
+        f"{len(report['memoryAddresses'])} memory address(es), "
+        f"{len(report['references'])} raw exact reference(s) in "
+        f"{report['source']['sha256']}"
+    )
+    _write(report, args.json, summary)
+    return 0 if report["memoryAddresses"] else 2
