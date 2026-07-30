@@ -75,6 +75,10 @@ fn main() {
         ),
         Err(e) => panic!("could not run {}: {e}", Path::new(&rustc).display()),
     }
+    println!(
+        "cargo::rustc-env=GWNATIVE_COMPANION_KERNEL={}",
+        out.display()
+    );
 }
 
 /// Link the updater framework, weakly, and say where to find it at run time.
