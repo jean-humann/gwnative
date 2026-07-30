@@ -380,6 +380,101 @@ pub(super) const BUILDS: &[KnownBuild] = &[
             },
         ],
     },
+    KnownBuild {
+        sha256: "3229678d3fd7d2f0e309530086a614d97f02e7eeb3ca12650ababfd2eb360817",
+        // Build 38797 changes only functions 477, 5009, and 17491 from 38795.
+        // The bridge stubs and all thirteen call-site bodies are byte-identical
+        // at the same indices, so their independently checked anchors remain
+        // exact rather than being inferred from a nearby build.
+        output_sha256: "9ee332604a9b2adbdfa1a8ab217f4fd1dac58b01a2443e037bc5bd11f279d094",
+        import_count: 219,
+        carrier_import: 207,
+        bridges: &[
+            StubBridge {
+                kind: BridgeKind::EnsureDirectory,
+                stub_function: 185,
+                stub_body: Some(&[0x00, 0x41, 0x02, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9541,
+                        body_offset: 171,
+                    },
+                    CallSite {
+                        local_function: 11528,
+                        body_offset: 142,
+                    },
+                    CallSite {
+                        local_function: 12217,
+                        body_offset: 127,
+                    },
+                ],
+            },
+            StubBridge {
+                kind: BridgeKind::FindFiles,
+                stub_function: 186,
+                stub_body: Some(&[0x00, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9530,
+                        body_offset: 157,
+                    },
+                    CallSite {
+                        local_function: 9531,
+                        body_offset: 157,
+                    },
+                    CallSite {
+                        local_function: 11528,
+                        body_offset: 210,
+                    },
+                    CallSite {
+                        local_function: 12217,
+                        body_offset: 419,
+                    },
+                ],
+            },
+            StubBridge {
+                kind: BridgeKind::FileBaseName,
+                stub_function: 197,
+                stub_body: Some(&[0x00, 0x41, 0x00, 0x0b]),
+                call_sites: &[
+                    CallSite {
+                        local_function: 9530,
+                        body_offset: 276,
+                    },
+                    CallSite {
+                        local_function: 9531,
+                        body_offset: 278,
+                    },
+                ],
+            },
+            StubBridge {
+                kind: BridgeKind::DeleteFile,
+                stub_function: 333,
+                stub_body: Some(&[
+                    0x00, //
+                    0x41, 0xca, 0x87, 0xc5, 0x80, 0x00, //
+                    0x41, 0xa3, 0xbb, 0xc3, 0x80, 0x00, //
+                    0x41, 0xc8, 0x06, //
+                    0x10, 0xc2, 0x82, 0x80, 0x80, 0x00, //
+                    0x00, //
+                    0x0b,
+                ]),
+                call_sites: &[CallSite {
+                    local_function: 459,
+                    body_offset: 201,
+                }],
+            },
+            StubBridge {
+                kind: BridgeKind::FileExists,
+                stub_function: 552,
+                stub_body: None,
+                call_sites: &[CallSite {
+                    local_function: 9541,
+                    body_offset: 201,
+                }],
+            },
+        ],
+    },
 ];
 
 pub(super) fn find_build(sha256: &str) -> Option<&'static KnownBuild> {
@@ -915,7 +1010,11 @@ pub(super) struct EnhancementBuild {
     /// The table slot the dispatcher borrows to reach the companion. Emscripten
     /// reserves slot 0 for the null function pointer and never fills it.
     pub table_slot: u32,
-    pub layout: EnhancementLayout,
+    /// Returns the exact memory layout certified for this build. A function
+    /// pointer lets a data-identical client revision deliberately reuse the
+    /// preceding layout without copying 228 words and inviting transcription
+    /// drift; the registry tests still exercise every resolved build.
+    pub layout: fn() -> &'static EnhancementLayout,
 }
 
 pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
@@ -929,7 +1028,7 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
         hook_params: &[0x7f],
         hook_results: &[],
         table_slot: 0,
-        layout: EnhancementLayout {
+        layout: || &EnhancementLayout {
             context_root: 0x5a_0e20,
             agent_array: 0x5a_4d98,
             manual_target_agent_id: 0x5a_388c,
@@ -1170,7 +1269,7 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
         hook_params: &[0x7f],
         hook_results: &[],
         table_slot: 0,
-        layout: EnhancementLayout {
+        layout: || &EnhancementLayout {
             context_root: 0x5a_0f10,
             agent_array: 0x5a_4e88,
             manual_target_agent_id: 0x5a_397c,
@@ -1411,7 +1510,7 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
         hook_params: &[0x7f],
         hook_results: &[],
         table_slot: 0,
-        layout: EnhancementLayout {
+        layout: || &EnhancementLayout {
             context_root: 0x5a_0ee0,
             agent_array: 0x5a_4e58,
             manual_target_agent_id: 0x5a_394c,
@@ -1642,6 +1741,21 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             world_skill_points_total_duplicate: 0x7b4,
         },
     },
+    EnhancementBuild {
+        sha256: "9ee332604a9b2adbdfa1a8ab217f4fd1dac58b01a2443e037bc5bd11f279d094",
+        output_sha256: "936e62cef5d84accfb7072cbceec99cfb26696cad201f7b4854d8309baf68238",
+        import_count: 219,
+        program_id: 1,
+        build_id: 38797,
+        hook_function: 446,
+        hook_params: &[0x7f],
+        hook_results: &[],
+        table_slot: 0,
+        // The source data section is byte-identical to 38795, and the only
+        // changed functions (477, 5009, and 17491) are outside every context,
+        // global, call-site, stub, and main-loop anchor used by the companion.
+        layout: || (ENHANCEMENT_BUILDS[2].layout)(),
+    },
 ];
 
 pub(super) fn find_enhancement_build(sha256: &str) -> Option<&'static EnhancementBuild> {
@@ -1713,7 +1827,7 @@ mod tests {
                 build.hook_function >= build.import_count,
                 "hook is imported"
             );
-            assert_eq!(build.layout.words().len(), ENHANCEMENT_LAYOUT_WORDS);
+            assert_eq!((build.layout)().words().len(), ENHANCEMENT_LAYOUT_WORDS);
         }
         assert!(find_enhancement_build("not a hash").is_none());
         assert!(find_enhancement_build(ENHANCEMENT_BUILDS[0].sha256).is_some());
@@ -1722,82 +1836,87 @@ mod tests {
     #[test]
     fn every_certified_build_uses_the_verified_completion_layout() {
         for build in ENHANCEMENT_BUILDS {
-            assert_eq!(build.layout.world_missions_completed, 0x5cc);
-            assert_eq!(build.layout.world_missions_bonus, 0x5dc);
-            assert_eq!(build.layout.world_missions_completed_hm, 0x5ec);
-            assert_eq!(build.layout.world_missions_bonus_hm, 0x5fc);
-            assert_eq!(build.layout.world_unlocked_map, 0x60c);
-            assert_eq!(build.layout.world_vanquished_areas, 0x83c);
+            let layout = (build.layout)();
+            assert_eq!(layout.world_missions_completed, 0x5cc);
+            assert_eq!(layout.world_missions_bonus, 0x5dc);
+            assert_eq!(layout.world_missions_completed_hm, 0x5ec);
+            assert_eq!(layout.world_missions_bonus_hm, 0x5fc);
+            assert_eq!(layout.world_unlocked_map, 0x60c);
+            assert_eq!(layout.world_vanquished_areas, 0x83c);
         }
     }
 
     #[test]
     fn every_certified_build_uses_the_verified_camera_layout() {
-        let addresses = [0x5a_b904, 0x5a_b9f4, 0x5a_b9c4];
+        let addresses = [0x5a_b904, 0x5a_b9f4, 0x5a_b9c4, 0x5a_b9c4];
         for (build, address) in ENHANCEMENT_BUILDS.iter().zip(addresses) {
-            assert_eq!(build.layout.camera_address, address);
-            assert_eq!(build.layout.camera_look_at_agent_id, 0x00);
-            assert_eq!(build.layout.camera_max_distance, 0x10);
-            assert_eq!(build.layout.camera_yaw, 0x18);
-            assert_eq!(build.layout.camera_pitch, 0x1c);
-            assert_eq!(build.layout.camera_distance, 0x20);
-            assert_eq!(build.layout.camera_position, 0x78);
-            assert_eq!(build.layout.camera_look_at_target, 0xa8);
-            assert_eq!(build.layout.camera_field_of_view, 0xc0);
-            assert_eq!(build.layout.camera_mode, 0x11c);
+            let layout = (build.layout)();
+            assert_eq!(layout.camera_address, address);
+            assert_eq!(layout.camera_look_at_agent_id, 0x00);
+            assert_eq!(layout.camera_max_distance, 0x10);
+            assert_eq!(layout.camera_yaw, 0x18);
+            assert_eq!(layout.camera_pitch, 0x1c);
+            assert_eq!(layout.camera_distance, 0x20);
+            assert_eq!(layout.camera_position, 0x78);
+            assert_eq!(layout.camera_look_at_target, 0xa8);
+            assert_eq!(layout.camera_field_of_view, 0xc0);
+            assert_eq!(layout.camera_mode, 0x11c);
         }
     }
 
     #[test]
     fn every_certified_build_uses_the_verified_trade_layout() {
         for build in ENHANCEMENT_BUILDS {
-            assert_eq!(build.layout.game_trade_context, 0x58);
-            assert_eq!(build.layout.trade_flags, 0x00);
-            assert_eq!(build.layout.trade_player_gold, 0x10);
-            assert_eq!(build.layout.trade_player_items, 0x14);
-            assert_eq!(build.layout.trade_partner_gold, 0x24);
-            assert_eq!(build.layout.trade_partner_items, 0x28);
-            assert_eq!(build.layout.trade_item_stride, 0x08);
-            assert_eq!(build.layout.trade_item_id, 0x00);
-            assert_eq!(build.layout.trade_item_quantity, 0x04);
+            let layout = (build.layout)();
+            assert_eq!(layout.game_trade_context, 0x58);
+            assert_eq!(layout.trade_flags, 0x00);
+            assert_eq!(layout.trade_player_gold, 0x10);
+            assert_eq!(layout.trade_player_items, 0x14);
+            assert_eq!(layout.trade_partner_gold, 0x24);
+            assert_eq!(layout.trade_partner_items, 0x28);
+            assert_eq!(layout.trade_item_stride, 0x08);
+            assert_eq!(layout.trade_item_id, 0x00);
+            assert_eq!(layout.trade_item_quantity, 0x04);
         }
     }
 
     #[test]
     fn every_certified_build_uses_the_verified_ui_frame_layout() {
-        let arrays = [0x5a_1f8c, 0x5a_207c, 0x5a_204c];
+        let arrays = [0x5a_1f8c, 0x5a_207c, 0x5a_204c, 0x5a_204c];
         for (build, array) in ENHANCEMENT_BUILDS.iter().zip(arrays) {
-            assert_eq!(build.layout.ui_frame_array, array);
-            assert_eq!(build.layout.ui_frame_size, 0x1c8);
-            assert_eq!(build.layout.ui_frame_visibility_flags, 0x18);
-            assert_eq!(build.layout.ui_frame_type, 0x20);
-            assert_eq!(build.layout.ui_frame_template_type, 0x24);
-            assert_eq!(build.layout.ui_frame_child_offset_id, 0xb8);
-            assert_eq!(build.layout.ui_frame_id, 0xbc);
-            assert_eq!(build.layout.ui_frame_position, 0xd8);
-            assert_eq!(build.layout.ui_position_flags, 0x00);
-            assert_eq!(build.layout.ui_position_left, 0x04);
-            assert_eq!(build.layout.ui_position_bottom, 0x08);
-            assert_eq!(build.layout.ui_position_right, 0x0c);
-            assert_eq!(build.layout.ui_position_top, 0x10);
-            assert_eq!(build.layout.ui_frame_parent_relation, 0x128);
-            assert_eq!(build.layout.ui_frame_hash, 0x134);
-            assert_eq!(build.layout.ui_frame_state, 0x18c);
+            let layout = (build.layout)();
+            assert_eq!(layout.ui_frame_array, array);
+            assert_eq!(layout.ui_frame_size, 0x1c8);
+            assert_eq!(layout.ui_frame_visibility_flags, 0x18);
+            assert_eq!(layout.ui_frame_type, 0x20);
+            assert_eq!(layout.ui_frame_template_type, 0x24);
+            assert_eq!(layout.ui_frame_child_offset_id, 0xb8);
+            assert_eq!(layout.ui_frame_id, 0xbc);
+            assert_eq!(layout.ui_frame_position, 0xd8);
+            assert_eq!(layout.ui_position_flags, 0x00);
+            assert_eq!(layout.ui_position_left, 0x04);
+            assert_eq!(layout.ui_position_bottom, 0x08);
+            assert_eq!(layout.ui_position_right, 0x0c);
+            assert_eq!(layout.ui_position_top, 0x10);
+            assert_eq!(layout.ui_frame_parent_relation, 0x128);
+            assert_eq!(layout.ui_frame_hash, 0x134);
+            assert_eq!(layout.ui_frame_state, 0x18c);
         }
     }
 
     #[test]
     fn every_certified_build_uses_the_verified_merchant_layout() {
         for build in ENHANCEMENT_BUILDS {
-            assert_eq!(build.layout.game_world_context, 0x2c);
-            assert_eq!(build.layout.world_merchant_items, 0x24);
+            let layout = (build.layout)();
+            assert_eq!(layout.game_world_context, 0x2c);
+            assert_eq!(layout.world_merchant_items, 0x24);
         }
     }
 
     #[test]
     fn every_certified_build_uses_the_verified_progression_layout() {
         for build in ENHANCEMENT_BUILDS {
-            let layout = &build.layout;
+            let layout = (build.layout)();
             assert_eq!(layout.game_world_context, 0x2c);
             assert_eq!(layout.world_hard_mode_unlocked, 0x684);
             assert_eq!(layout.world_experience, 0x740);

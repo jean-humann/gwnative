@@ -141,7 +141,7 @@ fn dispatcher(
 /// value here is an integer, so there is nothing to escape and nothing an
 /// encoder would do differently.
 fn manifest_section(build: &EnhancementBuild) -> Section {
-    let words = build.layout.words();
+    let words = (build.layout)().words();
     let layout_words = words
         .iter()
         .map(u32::to_string)
