@@ -7,9 +7,33 @@
 // `error` control messages, which report the outcome of a dial that necessarily
 // happens after the WebSocket handshake has already succeeded.
 
+const AUTH_HOST = /^auth\d*\.arenanetworks\.com$/i;
+
+export function createNetworkRegistry() {
+  const namesByAddress = new Map();
+  return Object.freeze({
+    resolved(name, address) {
+      if (typeof name !== 'string' || typeof address !== 'string') return;
+      const normalized = name.replace(/\.$/, '').toLowerCase();
+      const names = namesByAddress.get(address) ?? new Set();
+      names.add(normalized);
+      namesByAddress.set(address, names);
+    },
+    role(destination) {
+      if (typeof destination !== 'string') return 'other';
+      const separator = destination.lastIndexOf(':');
+      const address = separator > 0 ? destination.slice(0, separator) : destination;
+      const names = namesByAddress.get(address);
+      return names && [...names].some((name) => AUTH_HOST.test(name))
+        ? 'authentication'
+        : 'other';
+    },
+  });
+}
+
 /** Resolve a hostname to an IPv4 dotted quad, which is the shape the client
  *  expects back — it hands the result straight to connect(). */
-export function createDns({ log }) {
+export function createDns({ log, registry = createNetworkRegistry() }) {
   return {
     async resolve(name) {
       const response = await fetch(`__dns?name=${encodeURIComponent(name)}`, {
@@ -17,6 +41,7 @@ export function createDns({ log }) {
       });
       const body = (await response.text()).trim();
       if (!response.ok) throw new Error(`dns ${name}: ${body}`);
+      registry.resolved(name, body);
       log('dns', name, '->', body);
       return body;
     },
@@ -26,12 +51,13 @@ export function createDns({ log }) {
 /**
  * @param {{ log(...values: unknown[]): void }} options
  */
-export function createSockets({ log }) {
+export function createSockets({ log, registry = createNetworkRegistry() }) {
   let nextId = 1;
 
   function connect(destination) {
     const id = nextId++;
-    window.gwE2E?.socketCreated(id);
+    const role = registry.role(destination);
+    window.gwE2E?.socketCreated(id, role);
     const trace = (...values) => log(`[socket ${id}] ${destination}`, ...values);
     trace('connect');
 
@@ -64,7 +90,7 @@ export function createSockets({ log }) {
         // reuses the moment this returns — and growing the heap would detach it
         // outright. Compact it before it can be queued or sent.
         const bytes = data.slice();
-        window.gwE2E?.traffic('send', id, bytes.byteLength);
+        window.gwE2E?.traffic('send', id, bytes.byteLength, role);
         if (open) ws.send(bytes);
         else queued.push(bytes);
       },
@@ -100,7 +126,7 @@ export function createSockets({ log }) {
         }
         return;
       }
-      window.gwE2E?.traffic('receive', id, event.data.byteLength);
+      window.gwE2E?.traffic('receive', id, event.data.byteLength, role);
       socket.onmessage?.(new Uint8Array(event.data));
     };
 
