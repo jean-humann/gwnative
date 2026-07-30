@@ -100,6 +100,7 @@ client, not an in-game automation API.
 | --- | --- | --- | --- |
 | Runtime and host services | JSPI host paths and both WASM contracts mapped | Official artifact, image, DNS, socket, login, and storage bridges implemented | Keep callback contract tests generation-pinned |
 | Player and target | GWCA Agent/Player; PyAgent/PyPlayer; native resolvers | Certified IDs, coordinates, target kind, distance, range, and bounded agent summaries | Add names only after encoded-string lifetime validation |
+| Character progression | GWCA WorldContext; PyPlayer; matching Native binding | Certified hard-mode availability, level, experience, Kurzick/Luxon/Imperial/Balthazar current-earned-cap counters, and skill points with both duplicate copies bounded | Add title/rank semantics only from independently verified tier data |
 | Map and instance | GWCA Map; PyMap; native map resolvers | Certified map ID, instance identity, 128-entry map-agent page, and six completion bitmaps expanded to sorted map IDs | Add encoded names only after lifetime validation |
 | Party and heroes | GWCA Party; PyParty; native party resolvers | Certified bounded roster, flags, IDs, summary widget, and agent-derived profession/health records | Join party members to agent summaries by ID |
 | Skills and effects | GWCA Skillbar/Effect; PySkill/PySkillbar/PyEffects | Certified player slots, adrenaline, recharge, event, disabled mask, cast count, and bounded buff/effect snapshots | Add effect expiry semantics only after live timing validation |

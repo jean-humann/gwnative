@@ -29,7 +29,9 @@ bounded read-only trade-offer summary. A capped UI inventory exposes numeric
 frame identity, state bits, parent identity, and local geometry without
 following client-owned labels or callbacks. The numeric merchant item array is
 available as a separately bounded page without implying that a merchant window
-is open.
+is open. Character progression adds level, experience, hard-mode availability,
+four bounded faction counters, and skill-point totals from independently
+verified scalar fields.
 Client-owned names, UUIDs, messages, and announcements are not read.
 
 ## Loopback endpoints
@@ -453,6 +455,18 @@ The envelope is revisioned and timestamped:
       "truncated": false,
       "total": 2,
       "itemIds": [900, 901]
+    },
+    "progression": {
+      "hardModeUnlocked": true,
+      "level": 20,
+      "experience": 1337500,
+      "factions": {
+        "kurzick": { "current": 1000, "totalEarned": 5000, "maximum": 10000 },
+        "luxon": { "current": 2000, "totalEarned": 6000, "maximum": 10000 },
+        "imperial": { "current": 100, "totalEarned": 1000, "maximum": 15000 },
+        "balthazar": { "current": 500, "totalEarned": 2500, "maximum": 10000 }
+      },
+      "skillPoints": { "current": 5, "totalEarned": 125 }
     }
   }
 }
@@ -625,6 +639,27 @@ The API therefore exposes no `open`, merchant identity, item names, stock,
 prices, quotes, currencies, buy/sell state, or transaction action. Consumers
 must treat it only as the latest validated client-side merchant item-ID array.
 
+The progression domain follows scalar `WorldContext` fields independently
+mapped by GWCA and Py4GW Reforged Native. It exposes:
+
+- `hardModeUnlocked`, which is distinct from the party's current `hardMode`
+  flag;
+- `level` from 1 through 20 and bounded cumulative `experience`;
+- Kurzick, Luxon, Imperial, and Balthazar `current`, `totalEarned`, and
+  `maximum` counters; and
+- current and total-earned skill points.
+
+The client stores duplicate copies of level, experience, current/earned
+faction, and skill-point counters. Both copies must be inside the certified
+bounds before the companion selects the higher value, matching the rule used
+by the independently reviewed Py4GW binding. Current faction cannot exceed its
+maximum or total-earned value; current skill points cannot exceed total earned.
+
+This domain does not derive title names, ranks, tier thresholds, reputation
+rewards, morale, equipment status, or progression actions. The values are a
+coherent live client reading, not a promise about server persistence or an
+account-wide scope beyond the field semantics above.
+
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account
 identity, chat, encoded game text, or action surface.
@@ -662,7 +697,9 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - camera mode, distance, pitch, and render FOV;
 - trade status, item counts, and gold for both sides;
 - validated UI-frame totals and local visibility;
-- bounded merchant item-ID totals; and
+- bounded merchant item-ID totals;
+- level, experience, hard-mode availability, faction, and skill-point
+  progression; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact
