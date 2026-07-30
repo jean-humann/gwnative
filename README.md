@@ -72,7 +72,7 @@ gwnative is playable. It:
   running ArenaNet's original JSPI or Asyncify module;
 - recognises the official Guild Wars command line and isolates named profiles;
 - validates explicitly selected `.gwmod` sessions before loading them;
-- exposes a versioned read-only player/map/target API and movable companion
+- exposes a versioned, bounded read-only game-state API and movable companion
   widgets;
 - offers an optional native game cursor and target-distance readout;
 - records structured diagnostics and can produce a redacted problem report;

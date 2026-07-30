@@ -109,8 +109,8 @@ Open **View → Companion Tools…** or press **⌘⇧T** for profile-local comp
 tools:
 
 - movable clock, session timer, target/range, frame-rate, party, skillbar,
-  player-effects, map-agent, quest, inventory, completion, and friend/guild
-  widgets;
+  player-effects, map-agent, quest, inventory, completion, friend/guild, and
+  camera/render widgets;
 - overlay layout editing, also toggled with **⌘⇧O**;
 - an opaque-code build and team library with validated JSON import/export; and
 - the current compatibility status of researched feature families.
@@ -122,11 +122,13 @@ has no certified write action.
 Party, hero, player-skillbar, buff, effect, map-agent, quest-log, mission
 objective, inventory-bag, item, gold, account-storage, friend-presence, numeric
 guild-summary, normal/hard mission, bonus, unlocked-map, and vanquish reads are
-available on recognised client builds. Encoded item, friend, character, guild,
-and member names; UUIDs; messages; and announcements are not exposed. The
-widgets cannot change inventory, social, or completion state. Chat and texture
-features remain labelled as requiring another certified layout or further
-research. Unattended gameplay automation is blocked. See
+available on recognised client builds, together with bounded camera mode,
+position/look-at geometry, distance, orientation, and field-of-view state.
+Encoded item, friend, character, guild, and member names; UUIDs; messages; and
+announcements are not exposed. The widgets cannot change inventory, social,
+completion, or camera state. Chat and texture features remain labelled as
+requiring another certified layout or further research. Unattended gameplay
+automation is blocked. See
 [Feature compatibility](feature-compatibility.md) and
 [Game API and overlays](game-api.md).
 
