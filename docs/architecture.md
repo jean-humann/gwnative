@@ -258,11 +258,14 @@ feed, fast ArenaNet patch workflow, signing boundary and operator runbook are
 detailed in [Client build certification](certification.md).
 
 The validated companion state is narrowed into the versioned v1 map, player,
-target, party, skillbar, effects, agent, quest, and inventory schema. Large
-agent, quest, effect, bag, and item pages remain fixed and bounded in the
+target, party, skillbar, effects, agent, quest, inventory, and social schema.
+Large agent, quest, effect, bag, item, and friend pages remain fixed and bounded in the
 seqlock block rather than being copied onto the companion’s imported-memory
 stack. Inventory traversal retains only the owning pointer across the original
 tick, then rechecks bag arrays and every item back-reference while publishing.
+Social traversal likewise retains only the friend-list and guild-context
+owners, rechecks every numeric friend and guild/roster pointer, and never
+follows client-owned names, UUIDs, messages, or announcements.
 The page publishes no faster than four times per second and Rust validates it
 again before making it available on token-gated loopback routes. There is no
 certified action endpoint. The overlay registry and Companion Tools consume the
