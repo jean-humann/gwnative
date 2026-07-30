@@ -22,14 +22,16 @@ Offsets, hooks, rendering, and policy boundaries therefore differ.
 | Guild Wars CLI recognition | Available | Every documented switch parsed; native translations or explicit notices |
 | Isolated launch profiles | Available | Per-profile mutable state, Keychain identity, origin, overlays, and build library |
 | Explicit `.gwmod` sessions | Available | Compatible format, host-side ZIP/graph validation, double hash validation, ordered runtime |
-| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target state |
+| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar state |
 | Overlay framework | Available | Profile-local movable widgets and exact-context hotkeys |
 | Clock, session timer, FPS | Available | Built-in Companion Tools widgets |
 | Target distance/range | Available on certified builds | Bounds-checked companion snapshot |
 | Build-template client repair | Available on certified builds | Save/list/rename/delete transform; unknown builds fall back |
 | Build/team library | Available | Profile-local opaque-code library with validated import/export |
 | Game cursor | Available on certified builds | Game bitmap rendered as native pointer |
-| Party, heroes, effects | Needs certified layout | No guessed pointers or partial UI |
+| Party and heroes | Available on certified builds | Bounded roster, flags, identifiers, and summary widget |
+| Player skillbar | Available on certified builds | Eight ordered read-only slots, disabled mask, cast count, recharge, adrenaline, and event fields |
+| Effects and buffs | Needs certified layout | No guessed pointers or partial UI |
 | Map agents, quests, completion | Needs certified layout | Map identity exists; agent/quest structures do not |
 | Inventory and account storage | Needs certified layout | No certified item/bag/storage schema |
 | Chat, party search, trade | Needs certified layout and policy | No chat write or packet injection surface |
@@ -61,13 +63,12 @@ returns 409 until a specific operation passes certification.
 
 The dependency order for further parity is:
 
-1. certify party and skillbar read layouts;
-2. add versioned party/skill state without actions;
-3. build party/build inspection widgets on that schema;
-4. certify map-agent and quest read layouts;
-5. add inventory schemas with strict privacy and size bounds;
-6. research WebGL-native texture replacement without patching unknown modules;
-7. consider narrowly named, user-triggered actions one at a time.
+1. certify effect and buff read layouts;
+2. certify map-agent and quest read layouts;
+3. add inventory schemas with strict privacy and size bounds;
+4. add guild/friend presence without chat content;
+5. research WebGL-native texture replacement without patching unknown modules;
+6. consider narrowly named, user-triggered actions one at a time.
 
 Large upstream windows should not be ported as one monolith. Each slice needs
 its own schema, fixtures, compatibility fallback, and Conventional Commit.

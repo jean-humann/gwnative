@@ -153,9 +153,14 @@ Wars client. The runner:
    and the build library by semantic DOM name;
 4. verifies the token boundary and both versioned API descriptions;
 5. waits for launch milestones over a bounded long-poll channel;
-6. sends only the finite **activate** and **move-forward** test actions; and
-7. when the installed client has a certified state layout, confirms movement
-   through a newer game-state revision.
+6. waits for a successful account-token response, then for authenticated
+   socket receive traffic to settle across a bounded run of client frames,
+   before activating the selected character;
+7. sends only a finite set of named AppKit actions: activate, forward/backward,
+   left/right, next target, interact, cancel, and skill 1; and
+8. when the installed client has a certified state layout, requires two stable
+   revisions, validates bounded party and eight-slot skillbar state, and
+   confirms bidirectional movement through newer revisions.
 
 ```sh
 scripts/e2e
@@ -177,6 +182,13 @@ the runner still receives only presence and authentication milestones.
 The control plane exists only under `GWNATIVE_E2E`, has no arbitrary JavaScript,
 coordinates, text-entry or credential action, and sleeps between events. It
 does not use screenshots, OCR, Accessibility scripting, or focus polling.
+Gameplay keys originate as bounded AppKit `NSEvent` pairs and enter WKWebView
+through its normal responder chain. Page JavaScript observes the action only to
+associate resulting socket traffic; it cannot synthesize the gameplay event.
+The disposable client copy is pinned with `--no-update` for the whole run so a
+background artifact refresh cannot change the build between certification and
+input. A process-scoped `caffeinate` assertion prevents macOS idle sleep from
+suspending WKWebView’s animation-frame-driven client during the run.
 
 The page restores the two profile-local `localStorage` values it touches
 byte-for-byte before the runner stops the process. The test intentionally uses

@@ -18,8 +18,9 @@ states. No guessed offset is read.
    second.
 5. Rust validates the schema, finite ranges, and target consistency again.
 
-The resulting state covers only the numeric player agent and position,
-map/instance identity, and current target position/range.
+The resulting state covers the numeric player agent and position, map/instance
+identity, current target position/range, bounded party roster, and the player’s
+eight-slot skillbar.
 
 ## Loopback endpoints
 
@@ -62,7 +63,108 @@ The envelope is revisioned and timestamped:
     "playerId": 4,
     "playerX": 1.5,
     "playerY": 2.5,
-    "targetValid": false
+    "targetValid": false,
+    "targetKind": "None",
+    "rangeName": "None",
+    "party": {
+      "id": 3,
+      "hardMode": false,
+      "defeated": false,
+      "leader": true,
+      "alliesTruncated": false,
+      "players": [
+        {
+          "loginNumber": 42,
+          "calledTargetId": 0,
+          "state": 3,
+          "connected": true,
+          "ticked": true
+        }
+      ],
+      "heroes": [],
+      "henchmen": [],
+      "allies": []
+    },
+    "skillbar": {
+      "agentId": 4,
+      "disabledMask": 0,
+      "castCount": 0,
+      "casting": false,
+      "skills": [
+        {
+          "slot": 1,
+          "adrenalineA": 0,
+          "adrenalineB": 0,
+          "recharge": 0,
+          "skillId": 100,
+          "event": 0,
+          "disabled": false
+        },
+        {
+          "slot": 2,
+          "adrenalineA": 0,
+          "adrenalineB": 0,
+          "recharge": 0,
+          "skillId": 101,
+          "event": 0,
+          "disabled": false
+        },
+        {
+          "slot": 3,
+          "adrenalineA": 0,
+          "adrenalineB": 0,
+          "recharge": 0,
+          "skillId": 102,
+          "event": 0,
+          "disabled": false
+        },
+        {
+          "slot": 4,
+          "adrenalineA": 0,
+          "adrenalineB": 0,
+          "recharge": 0,
+          "skillId": 103,
+          "event": 0,
+          "disabled": false
+        },
+        {
+          "slot": 5,
+          "adrenalineA": 0,
+          "adrenalineB": 0,
+          "recharge": 0,
+          "skillId": 104,
+          "event": 0,
+          "disabled": false
+        },
+        {
+          "slot": 6,
+          "adrenalineA": 0,
+          "adrenalineB": 0,
+          "recharge": 0,
+          "skillId": 105,
+          "event": 0,
+          "disabled": false
+        },
+        {
+          "slot": 7,
+          "adrenalineA": 0,
+          "adrenalineB": 0,
+          "recharge": 0,
+          "skillId": 106,
+          "event": 0,
+          "disabled": false
+        },
+        {
+          "slot": 8,
+          "adrenalineA": 0,
+          "adrenalineB": 0,
+          "recharge": 0,
+          "skillId": 107,
+          "event": 0,
+          "disabled": false
+        }
+      ]
+    }
   }
 }
 ```
@@ -71,9 +173,24 @@ When `targetValid` is true, target ID, coordinates, and distance must all be
 present. When false, all are absent. Coordinates and distances must be finite
 and bounded. Text fields are length- and control-character-checked.
 
+Party state is optional when its exact layout is unavailable. When present it
+contains 1–12 player records and at most 12 combined player, hero, and henchman
+records, plus at most 32 other allied agent IDs. Every hero owner must be one
+of the published player login numbers. `alliesTruncated` says that the client
+held more allied IDs than the snapshot publishes. The numeric login number is
+the client’s transient party identifier, not an account name.
+
+Skillbar state is optional under the same certification rule. When present it
+belongs to `playerId` and contains exactly eight ordered slots. `recharge` and
+`event` retain the client/GWCA numeric fields; they are not wall-clock
+timestamps. Empty slots have `skillId: 0`. The API exposes no operation to use
+a skill or load a build. `disabledMask` preserves the client’s eight-slot mask,
+each slot carries the corresponding derived `disabled` value, and `castCount`
+is the bounded size of the client’s current cast queue.
+
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account data,
-inventory, chat, party, quest, or action surface.
+inventory, chat, quest, or action surface.
 
 Long polling sleeps in the native server until the page publishes a newer
 revision. A consumer can therefore follow live state without a timer repeatedly
@@ -96,7 +213,9 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - clock;
 - session timer;
 - current target and range;
-- measured frame rate; and
+- measured frame rate;
+- party roster summary;
+- player skillbar IDs; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact

@@ -108,7 +108,8 @@ saving on the next launch without an application update.
 Open **View → Companion Tools…** or press **⌘⇧T** for profile-local companion
 tools:
 
-- movable clock, session timer, target/range, and frame-rate widgets;
+- movable clock, session timer, target/range, frame-rate, party, and skillbar
+  widgets;
 - overlay layout editing, also toggled with **⌘⇧O**;
 - an opaque-code build and team library with validated JSON import/export; and
 - the current compatibility status of researched feature families.
@@ -117,10 +118,12 @@ Widget layout and the library follow the selected profile. Build codes are
 stored and organised but never applied to the game: the current versioned API
 has no certified write action.
 
-Party, hero, inventory, quest, chat, and texture features are labelled as
-requiring a certified client layout or further research. Unattended gameplay
-automation is blocked. See [Feature compatibility](feature-compatibility.md)
-and [Game API and overlays](game-api.md).
+Party, hero, and player-skillbar reads are available on recognised client
+builds. Effects, inventory, quest, chat, and texture features remain labelled
+as requiring another certified layout or further research. Unattended gameplay
+automation is blocked. See
+[Feature compatibility](feature-compatibility.md) and
+[Game API and overlays](game-api.md).
 
 ## Profiles, command line, and mods
 
@@ -264,7 +267,10 @@ Keychain access is tied to the application's signing identity. Moving the same
 signed app does not matter, but changing the bundle identifier or signing
 certificate does. gwnative suppresses the macOS account-password prompt and
 falls back to the game's normal sign-in form. Signing in once recreates the
-item for the current identity.
+item for the current identity when **Remember Password** is enabled. That
+checkbox also controls whether Guild Wars asks gwnative for the Keychain login
+on later launches. Invocation-only `-email` and `-password` values neither
+overwrite nor erase a different login already stored for the selected profile.
 
 Development builds without a stable signing certificate can appear as a new
 application after every rebuild. See the
