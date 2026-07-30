@@ -146,7 +146,8 @@ copy rules, release profile, or embedded resources.
 Wars client. The runner:
 
 1. builds and signs gwnative with the normal development identity;
-2. lets the app—not the runner—read the default profile's saved login from
+2. lets the app—not the runner—inspect the selected profile's saved-login
+   availability and, when Guild Wars requests it, read that login from
    Keychain;
 3. exercises Settings, the User Guide, Companion Tools, widgets, layout mode,
    and the build library by semantic DOM name;
@@ -158,11 +159,21 @@ Wars client. The runner:
 
 ```sh
 scripts/e2e
+scripts/e2e --character "Character Name"
+scripts/e2e --profile codex-e2e
 scripts/e2e --no-gameplay
 ```
 
 The session token is captured and redacted. Credential values never leave the
-application: the event channel reports only whether both fields were offered.
+application: the event channel reports only profile availability and whether
+both fields were offered. Guild Wars does not call its secure-storage bridge
+when **Remember Password** is disabled. In that state the runner waits for
+manual sign-in instead of injecting text or clicking coordinates; enable
+**Remember Password** during that sign-in to restore the profile Keychain item.
+`--character` passes only the official selection hint and never hardcodes a
+player name into the test.
+`--profile` selects an existing isolated profile and its own Keychain item;
+the runner still receives only presence and authentication milestones.
 The control plane exists only under `GWNATIVE_E2E`, has no arbitrary JavaScript,
 coordinates, text-entry or credential action, and sleeps between events. It
 does not use screenshots, OCR, Accessibility scripting, or focus polling.

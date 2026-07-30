@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
 
 
@@ -125,6 +126,35 @@ class GameStateTests(unittest.TestCase):
         finally:
             RUNNER.game_state_after = original
         self.assertEqual(ready["revision"], 3)
+
+
+class ProfileTests(unittest.TestCase):
+    def test_default_profile_uses_the_legacy_web_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            self.assertEqual(
+                RUNNER.profile_web_root(None, base),
+                base / "web",
+            )
+            self.assertEqual(
+                RUNNER.profile_web_root("default", base),
+                base / "web",
+            )
+
+    def test_named_profile_must_be_safe_and_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            profile = base / "profiles" / "codex-e2e"
+            profile.mkdir(parents=True)
+            (profile / "profile.json").touch()
+            self.assertEqual(
+                RUNNER.profile_web_root("codex-e2e", base),
+                profile / "web",
+            )
+            with self.assertRaises(RUNNER.Failure):
+                RUNNER.profile_web_root("../default", base)
+            with self.assertRaises(RUNNER.Failure):
+                RUNNER.profile_web_root("missing", base)
 
 
 if __name__ == "__main__":
