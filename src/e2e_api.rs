@@ -424,6 +424,7 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
                     "contextDeltas",
                     "agentDeltas",
                     "commonDeltas",
+                    "quest",
                 ],
             )?;
             match object.get("radiusBytes").and_then(Value::as_u64) {
@@ -432,6 +433,45 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             }
             for name in ["contextDeltas", "agentDeltas", "commonDeltas"] {
                 signed_delta_array_field(object, name)?;
+            }
+            let quest = object
+                .get("quest")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "layout probe quest detail must be an object".to_owned())?;
+            exact_keys(
+                quest,
+                &[
+                    "worldAvailable",
+                    "activeQuestId",
+                    "questCapacity",
+                    "questCount",
+                    "questInvalidIndex",
+                    "questInvalidMask",
+                    "objectiveCapacity",
+                    "objectiveCount",
+                    "questRecordsValid",
+                    "activeQuestPresent",
+                    "objectiveRecordsValid",
+                ],
+            )?;
+            for name in [
+                "worldAvailable",
+                "questRecordsValid",
+                "activeQuestPresent",
+                "objectiveRecordsValid",
+            ] {
+                bool_field(quest, name)?;
+            }
+            for name in [
+                "activeQuestId",
+                "questCapacity",
+                "questCount",
+                "questInvalidIndex",
+                "questInvalidMask",
+                "objectiveCapacity",
+                "objectiveCount",
+            ] {
+                u32_field(quest, name)?;
             }
             Ok(())
         }
@@ -710,7 +750,7 @@ mod tests {
         );
         assert!(
             hub.publish_event(
-                br#"{"kind":"layout-probe","detail":{"radiusBytes":2048,"contextDeltas":[-48],"agentDeltas":[-48],"commonDeltas":[-48]}}"#,
+                br#"{"kind":"layout-probe","detail":{"radiusBytes":2048,"contextDeltas":[-48],"agentDeltas":[-48],"commonDeltas":[-48],"quest":{"worldAvailable":true,"activeQuestId":0,"questCapacity":0,"questCount":0,"questInvalidIndex":4294967295,"questInvalidMask":0,"objectiveCapacity":0,"objectiveCount":0,"questRecordsValid":true,"activeQuestPresent":true,"objectiveRecordsValid":true}}}"#,
             )
             .is_ok()
         );

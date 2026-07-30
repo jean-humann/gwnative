@@ -7,6 +7,21 @@
 const WORD = 4;
 const MAX_RADIUS = 4096;
 const MAX_CANDIDATES = 16;
+const QUEST_LAYOUT = Object.freeze({
+  gameWorldContext: 26,
+  activeQuest: 76,
+  questLog: 77,
+  questStride: 78,
+  questId: 79,
+  questLogState: 80,
+  questMapFrom: 81,
+  questMarker: 82,
+  questMapTo: 83,
+  missionObjectives: 84,
+  objectiveStride: 85,
+  objectiveId: 86,
+  objectiveType: 87,
+});
 
 const finitePosition = (value) =>
   Number.isFinite(value) && Math.abs(value) <= 1_000_000;
@@ -62,7 +77,7 @@ function contextAt(read, layout, delta) {
   ) {
     return null;
   }
-  return playerNumber;
+  return { game, playerNumber };
 }
 
 function agentArrayAt(read, layout, delta, playerNumber) {
@@ -107,6 +122,141 @@ function agentArrayAt(read, layout, delta, playerNumber) {
   return false;
 }
 
+const emptyQuestProbe = () => ({
+  worldAvailable: false,
+  activeQuestId: 0,
+  questCapacity: 0,
+  questCount: 0,
+  questInvalidIndex: 0xffff_ffff,
+  questInvalidMask: 0,
+  objectiveCapacity: 0,
+  objectiveCount: 0,
+  questRecordsValid: false,
+  activeQuestPresent: false,
+  objectiveRecordsValid: false,
+});
+
+function arrayDescriptor(read, address, stride, maximumSize, maximumCapacity) {
+  const buffer = read.u32(address);
+  const capacity = read.u32(address + 4);
+  const size = read.u32(address + 8);
+  const headerValid = (
+    buffer !== null
+    && capacity !== null
+    && size !== null
+    && stride > 0
+    && size <= capacity
+    && size <= maximumSize
+    && capacity <= maximumCapacity
+  );
+  const storageValid = headerValid && (
+    size === 0
+    || (buffer % WORD === 0 && read.contains(buffer, size * stride))
+  );
+  return {
+    buffer: buffer ?? 0,
+    capacity: capacity ?? 0,
+    size: size ?? 0,
+    valid: storageValid,
+  };
+}
+
+function questProbeAt(read, layout, game) {
+  const q = QUEST_LAYOUT;
+  const world = read.pointer(
+    game + layout[q.gameWorldContext],
+    layout[q.missionObjectives] + 16,
+  );
+  if (world === null) return emptyQuestProbe();
+
+  const activeQuestId = read.u32(world + layout[q.activeQuest]) ?? 0;
+  const quests = arrayDescriptor(
+    read,
+    world + layout[q.questLog],
+    layout[q.questStride],
+    256,
+    1024,
+  );
+  const objectives = arrayDescriptor(
+    read,
+    world + layout[q.missionObjectives],
+    layout[q.objectiveStride],
+    128,
+    512,
+  );
+
+  let questRecordsValid = quests.valid && activeQuestId <= 100_000;
+  let activeQuestPresent = activeQuestId === 0;
+  let questInvalidIndex = 0xffff_ffff;
+  let questInvalidMask = 0;
+  const questIds = new Set();
+  if (questRecordsValid) {
+    for (let index = 0; index < quests.size; index += 1) {
+      const entry = quests.buffer + index * layout[q.questStride];
+      const marker = entry + layout[q.questMarker];
+      const questId = read.u32(entry + layout[q.questId]);
+      const mapFrom = read.u32(entry + layout[q.questMapFrom]);
+      const markerX = read.f32(marker);
+      const markerY = read.f32(marker + 4);
+      const markerPlane = read.u32(marker + 8);
+      const mapTo = read.u32(entry + layout[q.questMapTo]);
+      const invalidMask = (
+        Number(questId === null || questId === 0 || questId > 100_000)
+        | (Number(questId !== null && questIds.has(questId)) << 1)
+        | (Number(read.u32(entry + layout[q.questLogState]) === null) << 2)
+        | (Number(mapFrom === null || mapFrom > 2_000) << 3)
+        | (Number(markerX === null || !finitePosition(markerX)) << 4)
+        | (Number(markerY === null || !finitePosition(markerY)) << 5)
+        | (Number(markerPlane === null || markerPlane > 100_000) << 6)
+        | (Number(mapTo === null || mapTo > 2_000) << 7)
+      );
+      if (invalidMask !== 0) {
+        questRecordsValid = false;
+        questInvalidIndex = index;
+        questInvalidMask = invalidMask;
+        break;
+      }
+      questIds.add(questId);
+      activeQuestPresent ||= questId === activeQuestId;
+    }
+  }
+
+  let objectiveRecordsValid = objectives.valid;
+  const objectiveIds = new Set();
+  if (objectiveRecordsValid) {
+    for (let index = 0; index < objectives.size; index += 1) {
+      const entry = objectives.buffer + index * layout[q.objectiveStride];
+      const objectiveId = read.u32(entry + layout[q.objectiveId]);
+      const objectiveType = read.u32(entry + layout[q.objectiveType]);
+      if (
+        objectiveId === null
+        || objectiveId === 0
+        || objectiveIds.has(objectiveId)
+        || objectiveType === null
+        || objectiveType > 100_000
+      ) {
+        objectiveRecordsValid = false;
+        break;
+      }
+      objectiveIds.add(objectiveId);
+    }
+  }
+
+  return {
+    worldAvailable: true,
+    activeQuestId,
+    questCapacity: quests.capacity,
+    questCount: quests.size,
+    questInvalidIndex,
+    questInvalidMask,
+    objectiveCapacity: objectives.capacity,
+    objectiveCount: objectives.size,
+    questRecordsValid,
+    activeQuestPresent,
+    objectiveRecordsValid,
+  };
+}
+
 /**
  * @param {ArrayBuffer} buffer
  * @param {number[]} layoutWords
@@ -128,9 +278,9 @@ export function probeLayout(buffer, layoutWords, radiusBytes = 2048) {
   const read = reader(buffer);
   const contexts = [];
   for (let delta = -radiusBytes; delta <= radiusBytes; delta += WORD) {
-    const playerNumber = contextAt(read, layoutWords, delta);
-    if (playerNumber !== null) {
-      contexts.push({ delta, playerNumber });
+    const context = contextAt(read, layoutWords, delta);
+    if (context !== null) {
+      contexts.push({ delta, ...context });
       if (contexts.length >= MAX_CANDIDATES) break;
     }
   }
@@ -146,10 +296,16 @@ export function probeLayout(buffer, layoutWords, radiusBytes = 2048) {
   const contextDeltas = contexts.map(({ delta }) => delta);
   const agentDeltas = [...agents].sort((left, right) => left - right);
   const commonDeltas = contextDeltas.filter((delta) => agents.has(delta));
+  const commonContext = contexts.find(({ delta }) => agents.has(delta));
   return Object.freeze({
     radiusBytes,
     contextDeltas: Object.freeze(contextDeltas),
     agentDeltas: Object.freeze(agentDeltas),
     commonDeltas: Object.freeze(commonDeltas),
+    quest: Object.freeze(
+      commonContext
+        ? questProbeAt(read, layoutWords, commonContext.game)
+        : emptyQuestProbe(),
+    ),
   });
 }
