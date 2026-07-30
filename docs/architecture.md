@@ -46,29 +46,38 @@ launcher, settings UI, and metrics.
 
 `src/main.rs` orders launch phases by dependency:
 
-1. Parse no command, `sync`, `serve`, help, or version before opening anything.
-2. Acquire the per-support-directory single-instance lock.
-3. Check whether the current code-signing identity can use the Keychain item.
-4. Select a writable web root.
-5. Load a pending patch offer when one exists, otherwise load the active
+1. Parse the command, native options, and Guild Wars compatibility switches
+   before opening anything.
+2. Select or create the profile and validate any explicit mod session.
+3. Acquire the profile lock and, for a primary launch, the global instance
+   lock.
+4. Check whether the current code-signing identity can use the profile's
+   Keychain item.
+5. Select a writable profile web root.
+6. Load a pending patch offer when one exists, otherwise load the active
    manifest. Explicit sync fetches a fresh pending offer.
-6. Recover a failed optional transform or unproven official generation, verify
-   installed artifacts, and promote missing or newer artifacts with their
-   matching manifest. After promotion, revalidate the manifest in the
-   background for the next launch.
-7. Open the game-image chunk store, consume a pending clear request, replay the
-   boot prefetch list, and start cursor-based readahead.
-8. Start diagnostics and load settings.
-9. Prepare certified WebAssembly transforms when available.
-10. Start the loopback origin and inject its session token, current keyboard
+7. For launches and client syncs, recover a failed optional transform or
+   previously attempted unproven client, verify installed artifacts, and
+   promote missing or newer artifacts with their matching manifest. Game-data
+   repair does not alter the client.
+8. Acquire a shared cache lease, exclusively consume a pending clear request
+   when no profile is using the cache, open the chunk store, replay the boot
+   prefetch list, and start cursor-based readahead.
+9. Complete a requested local-image import, or verify and fill a requested full
+   image or repair operation.
+10. Start diagnostics and load profile settings.
+11. Prepare certified WebAssembly transforms when available.
+12. Start the loopback origin and inject its session token, current keyboard
     layout, settings, update capabilities, and module state at document start.
-11. Create the WKWebView, window, menu, native event bridges, renderer recovery,
+13. Create the WKWebView, window, menu, native event bridges, renderer recovery,
     and application lifecycle delegate.
-12. Mark the client generation proven and seal the boot chunk list when the
+14. Mark the client generation proven and seal the boot chunk list when the
     page reports its first frame.
 
-The `sync` command exits after artifact installation. The `serve` command stops
-after step 10 and prints `<address> <session-token>` on stdout.
+The `sync` command exits after artifact installation unless full-image work was
+also requested. `repair` verifies and fills game-image chunks without changing
+the client. Both exit before a window is created. The `serve` command stops
+after the loopback starts and prints `<address> <session-token>` on stdout.
 
 ## Loopback origin and trust model
 
@@ -181,6 +190,8 @@ Core invariants:
 - cached bytes are hashed on first use in a session;
 - a corrupt file is unlinked and fetched again;
 - concurrent readers of the same missing hash share one fetch;
+- every open profile holds a shared cache lease, and clearing requires the
+  exclusive lease;
 - at most 48 network fetches run concurrently;
 - speculative boot, readahead, and full-download work shares a 32-permit subset
   so demand reads always have capacity;

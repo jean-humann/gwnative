@@ -73,7 +73,9 @@ gwnative --profile second --new-instance
 
 `--new-instance` without a non-default `--profile` is refused. The
 profile-specific lock is never bypassed, so two live processes cannot write the
-same settings, IndexedDB origin, window state, and credential identity.
+same settings, IndexedDB origin, window state, and credential identity. Each
+process also holds a shared lease on the common chunk cache. A pending clear is
+deferred until every profile has released that lease.
 
 ## Removal
 

@@ -126,6 +126,8 @@ the macOS login Keychain, and WebKit page data uses the roots described below.
 | Path | Contents |
 | --- | --- |
 | `chunks/` | Content-addressed game-image chunks |
+| `chunks.lock` | Cross-profile lease preventing live cache deletion |
+| `mods/` | Shared opt-in `.gwmod` bundles |
 | `web/` | Writable copy of the web shell plus downloaded client artifacts |
 | `derived/` | Certified transformed WebAssembly modules |
 | `certificates/` | Verified signed compatibility-feed updates |
@@ -137,8 +139,13 @@ the macOS login Keychain, and WebKit page data uses the roots described below.
 | `generations/` | Installed-client hashes, proof state, rollback copy, and refusals |
 | `gwnative.lock` | Single-instance lock |
 
+Named profiles place the mutable rows above under `profiles/<id>/`. The
+`chunks/` cache and `mods/` directory remain shared. The exact storage map is
+in [Profiles](profiles.md).
+
 `chunks.clear` appears temporarily when clearing the chunk cache has been
-scheduled for the next launch.
+scheduled. The next launch clears it only when no other profile process is
+using it; otherwise the request remains for a later launch.
 
 The packaged application stores WebKit page data under
 `~/Library/WebKit/com.gwnative.app`. A development `cargo run` build uses
@@ -147,8 +154,8 @@ WebKit derives them from the bundle identifier or process name. IndexedDB in
 these roots holds the client's local files, including templates and chat logs.
 
 **Settings → Clear Game Data…** schedules deletion of the chunk cache for the
-next launch, before any background reader opens it. The game re-fetches what it
-needs. This does not delete characters or other account state.
+next launch on which no profile is using it. The game re-fetches what it needs.
+This does not delete characters or other account state.
 
 The failed-boot action **Reset game data…** is different: it deletes the
 current origin's IndexedDB data while retaining downloaded chunks. Use it only

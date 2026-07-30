@@ -351,7 +351,6 @@ impl Store {
             .iter()
             .any(|disabled| disabled.runtime == runtime && disabled.build == build)
     }
-
     /// Record the runtime that is about to execute.
     ///
     /// Called immediately before the page appends ArenaNet's glue. A launch

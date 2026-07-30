@@ -18,7 +18,7 @@ pub enum Command {
     Run,
     /// Download and verify the current client, then exit.
     Sync,
-    /// Verify the installed client and cached game data, then exit.
+    /// Verify and refill cached game data without changing the client.
     Repair,
     /// Serve the loopback origin without an AppKit window.
     Serve,

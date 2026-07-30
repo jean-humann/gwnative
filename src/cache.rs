@@ -17,7 +17,11 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use crate::instance;
 
 /// Distinguishes the temp files of one process from each other; the pid
 /// distinguishes them from another instance's.
@@ -292,6 +296,49 @@ fn clear_marker(cache_dir: &Path) -> PathBuf {
     cache_dir.with_extension("clear")
 }
 
+fn lock_path(cache_dir: &Path) -> PathBuf {
+    cache_dir.with_extension("lock")
+}
+
+/// A process's claim to use the shared chunk cache.
+///
+/// Clones hold the same kernel lock. This lets background cache work outlive a
+/// `ChunkStore` without opening a window in which another process can delete
+/// the directory underneath it.
+#[derive(Clone)]
+pub struct Lease(#[allow(dead_code)] Arc<instance::Instance>);
+
+/// Safely consume a pending clear request, then share the cache with peers.
+///
+/// Every open store holds a shared lock. A clear takes the exclusive form, so
+/// it can only delete after every profile process has stopped using the cache.
+/// If another profile is still open, this launch joins it and leaves the marker
+/// for the first later launch that can take the exclusive lock.
+pub fn prepare(cache_dir: &Path) -> std::io::Result<Lease> {
+    let lock = lock_path(cache_dir);
+    if clear_marker(cache_dir).exists() {
+        match instance::acquire(&lock, Duration::ZERO) {
+            Ok(exclusive) => {
+                take_clear_request(cache_dir);
+                return exclusive
+                    .downgrade()
+                    .map(|held| Lease(Arc::new(held)))
+                    .map_err(std::io::Error::other);
+            }
+            Err(_) => note!(
+                "[chunks] cache clear deferred while another profile is using {}",
+                cache_dir.display()
+            ),
+        }
+    }
+
+    // Normally immediate: shared users coexist. Patience only covers the short
+    // interval in which another launch is deleting the directory exclusively.
+    instance::acquire_shared(&lock, Duration::from_secs(30))
+        .map(|held| Lease(Arc::new(held)))
+        .map_err(std::io::Error::other)
+}
+
 /// Ask the next launch to start from an empty cache.
 ///
 /// The caller relaunches; nothing here does. Failing to write the marker is
@@ -392,6 +439,31 @@ mod tests {
         request_clear(&cache).unwrap();
         assert!(take_clear_request(&cache));
         assert!(!cache.exists());
+    }
+
+    #[test]
+    fn a_clear_waits_until_every_profile_releases_the_shared_cache() {
+        let temp = TempDir::new("clear-shared");
+        let cache = temp.0.join("chunks");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("kept-while-live"), b"data").unwrap();
+
+        let first = prepare(&cache).expect("first profile opens the cache");
+        request_clear(&cache).unwrap();
+        let second = prepare(&cache).expect("a second profile may still share it");
+
+        assert!(cache.exists(), "an active profile keeps the cache intact");
+        assert!(
+            clear_marker(&cache).exists(),
+            "the deferred request must survive"
+        );
+
+        drop(first);
+        drop(second);
+        let after = prepare(&cache).expect("the next profile performs the clear");
+        assert!(!cache.exists());
+        assert!(!clear_marker(&cache).exists());
+        drop(after);
     }
 
     #[test]
