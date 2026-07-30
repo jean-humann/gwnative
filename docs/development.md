@@ -29,6 +29,14 @@ artifacts are downloaded there before the window opens.
 `build.rs` compiles `src/companion-kernel/lib.rs` directly for
 `wasm32-unknown-unknown` and embeds the result. It is intentionally not a second
 Cargo crate: the host transform and companion ABI are built together.
+The raw `--import-memory` output is never served. wasm-ld still assumes a fresh
+memory for its fixed stack, data, and BSS addresses, so `build.rs` links PIC and
+runs the exact-shape transform in `src/companion_relocate.rs`. The resulting
+module imports its stack, memory, and data bases and carries a bounded
+`companion_manifest`; the page backs all three with one client-allocated
+workspace. If a compiler or linker update changes the globals, exports, data
+segments, or BSS initializer, the build fails rather than emitting a module
+that could overwrite game memory.
 
 ## Commands
 
@@ -239,6 +247,18 @@ bytes around them. The results are discovery evidence, not a disassembler or
 certification: a candidate still needs cross-build structure invariants, a
 bounded runtime fixture, and live validation before it enters a companion
 layout.
+
+The dialog observer's gateway certification is recorded per exact artifact:
+build 38771 uses function 6839, while 38790, 38795, and 38797 use function
+6842. Each is verified as `(i32, i32, i32) -> ()` from the typed body/button
+wrappers rather than selected from a nearby string alone. All four modules have
+a 4,683-entry function table whose slots 1–4,682 are populated; slot 0 is the
+only certified empty entry. The transform therefore routes both the tick and
+post-UI observer through one existing four-`i32` function type (type 14) with
+an explicit dispatch kind. It never overwrites slot 1 or guesses another
+vacancy. The real compiled-kernel fixture covers body, button, selection,
+follow-up-context, map-change, and close behavior, while each source/output
+module hash remains pinned independently.
 
 `client-certify` reads the fail-closed registry in `src/wasm/builds.rs`. It can
 also verify locally produced stages without writing them into the checkout:

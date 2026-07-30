@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
   FEATURES,
+  formatDialogSummary,
   formatDuration,
   formatMerchantSummary,
   formatProgressionSummary,
@@ -36,6 +37,7 @@ describe('companion tools', () => {
     assert.equal(FEATURES.find((feature) => feature.id === 'camera').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'trade').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'ui').status, 'available');
+    assert.equal(FEATURES.find((feature) => feature.id === 'dialog').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'merchant').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'progression').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'skill-unlocks').status, 'available');
@@ -60,6 +62,31 @@ describe('companion tools', () => {
         truncated: true,
       }),
       '90/150 locally visible · 180 frames · first 128',
+    );
+  });
+
+  it('summarises numeric dialog identity without inventing text or actions', () => {
+    assert.equal(formatDialogSummary(null), 'Unavailable for this client build');
+    assert.equal(
+      formatDialogSummary({
+        active: false,
+        lastSelectedDialogId: 0x800001,
+      }),
+      'Closed · last selected #8388609',
+    );
+    assert.equal(
+      formatDialogSummary({
+        active: true,
+        bodyObserved: true,
+        bodyType: 2,
+        agentId: 91,
+        buttonsTruncated: false,
+        buttonTotal: 2,
+        buttons: [{}, {}],
+        contextInferred: true,
+        contextDialogId: 0x800001,
+      }),
+      'Open · body type 2 · agent #91 · 2 buttons · context #8388609',
     );
   });
 

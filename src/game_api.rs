@@ -426,6 +426,30 @@ pub struct Ui {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DialogButton {
+    pub dialog_id: u32,
+    pub icon_id: u32,
+    pub skill_id: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Dialog {
+    pub active: bool,
+    pub body_observed: bool,
+    pub context_inferred: bool,
+    pub event_sequence: u32,
+    pub body_type: Option<u32>,
+    pub agent_id: Option<u32>,
+    pub context_dialog_id: Option<u32>,
+    pub last_selected_dialog_id: Option<u32>,
+    pub buttons_truncated: bool,
+    pub button_total: u32,
+    pub buttons: Vec<DialogButton>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Merchant {
     pub truncated: bool,
     pub total: u32,
@@ -538,6 +562,8 @@ pub struct State {
     pub progression: Option<Progression>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_unlocks: Option<SkillUnlocks>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialog: Option<Dialog>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -647,7 +673,7 @@ impl Hub {
                 "domains": [
                     "player", "map", "target", "party", "skillbar", "effects",
                     "agents", "quests", "inventory", "social", "completion", "camera",
-                    "trade", "ui", "merchant", "progression", "skillUnlocks"
+                    "trade", "ui", "dialog", "merchant", "progression", "skillUnlocks"
                 ],
                 "available": self.state_json().is_some(),
             },
@@ -774,6 +800,9 @@ fn validate(state: &State) -> Result<(), String> {
         if let Some(skill_unlocks) = &state.skill_unlocks {
             validate_skill_unlocks(skill_unlocks)?;
         }
+        if let Some(dialog) = &state.dialog {
+            validate_dialog(dialog)?;
+        }
     } else if state.map_id.is_some()
         || state.instance_type.is_some()
         || state.instance_name.is_some()
@@ -801,6 +830,7 @@ fn validate(state: &State) -> Result<(), String> {
         || state.merchant.is_some()
         || state.progression.is_some()
         || state.skill_unlocks.is_some()
+        || state.dialog.is_some()
     {
         return Err("non-ready game state carries live game data".into());
     }
@@ -1563,6 +1593,52 @@ fn validate_skill_unlocks(skill_unlocks: &SkillUnlocks) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_dialog(dialog: &Dialog) -> Result<(), String> {
+    const MAX_SKILL_ID: u32 = 108 * 32 - 1;
+    if dialog.buttons.len() > 64
+        || dialog.button_total > 256
+        || dialog.button_total < dialog.buttons.len() as u32
+        || dialog
+            .agent_id
+            .is_some_and(|agent_id| agent_id > MAX_AGENT_ID)
+        || dialog
+            .context_dialog_id
+            .is_some_and(|dialog_id| dialog_id == 0)
+        || dialog
+            .last_selected_dialog_id
+            .is_some_and(|dialog_id| dialog_id == 0)
+        || (dialog.context_inferred != (dialog.context_dialog_id.is_some() && dialog.body_observed))
+        || (dialog.body_observed != (dialog.body_type.is_some() && dialog.agent_id.is_some()))
+        || (!dialog.body_observed && dialog.context_dialog_id.is_some())
+        || (!dialog.active
+            && (dialog.body_observed
+                || dialog.context_inferred
+                || dialog.buttons_truncated
+                || dialog.button_total != 0
+                || !dialog.buttons.is_empty()))
+        || if dialog.buttons_truncated {
+            dialog.buttons.len() != 64 || dialog.button_total <= 64
+        } else {
+            dialog.button_total != dialog.buttons.len() as u32
+        }
+    {
+        return Err("dialog identity is outside its certified bounds".into());
+    }
+
+    let mut ids = std::collections::HashSet::with_capacity(dialog.buttons.len());
+    if dialog.buttons.iter().any(|button| {
+        button.dialog_id == 0
+            || button.icon_id > u8::MAX as u32
+            || button
+                .skill_id
+                .is_some_and(|skill_id| skill_id > MAX_SKILL_ID)
+            || !ids.insert(button.dialog_id)
+    }) {
+        return Err("dialog button identity is outside its certified bounds".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1957,6 +2033,50 @@ mod tests {
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","skillUnlocks":{"learnableTruncated":false,"learnableTotal":0,"learnableSkillIds":[],"characterLearnedSkillIds":[100,3],"accountUnlockedSkillIds":[]}}"#.as_slice(),
             br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","skillUnlocks":{"learnableTruncated":false,"learnableTotal":0,"learnableSkillIds":[],"characterLearnedSkillIds":[],"accountUnlockedSkillIds":[3456]}}"#.as_slice(),
             br#"{"status":"waiting","skillUnlocks":{"learnableTruncated":false,"learnableTotal":0,"learnableSkillIds":[],"characterLearnedSkillIds":[],"accountUnlockedSkillIds":[]}}"#.as_slice(),
+        ] {
+            assert!(hub.publish(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn dialog_identity_is_event_bounded_and_read_only() {
+        let hub = Hub::default();
+        let active = br#"{
+            "status":"ready","tickCount":1,"mapId":55,"instanceType":0,
+            "instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "dialog":{
+                "active":true,"bodyObserved":true,"contextInferred":true,
+                "eventSequence":7,"bodyType":2,"agentId":9,
+                "contextDialogId":8388609,"lastSelectedDialogId":8388609,
+                "buttonsTruncated":false,"buttonTotal":2,
+                "buttons":[
+                    {"dialogId":8388610,"iconId":4,"skillId":null},
+                    {"dialogId":8388611,"iconId":5,"skillId":111}
+                ]
+            }
+        }"#;
+        hub.publish(active).unwrap();
+
+        let closed = br#"{
+            "status":"ready","tickCount":2,"mapId":55,"instanceType":0,
+            "instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,
+            "targetValid":false,"targetKind":"None","rangeName":"None",
+            "dialog":{
+                "active":false,"bodyObserved":false,"contextInferred":false,
+                "eventSequence":7,"bodyType":null,"agentId":null,
+                "contextDialogId":null,"lastSelectedDialogId":8388609,
+                "buttonsTruncated":false,"buttonTotal":0,"buttons":[]
+            }
+        }"#;
+        hub.publish(closed).unwrap();
+
+        for invalid in [
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","dialog":{"active":false,"bodyObserved":true,"contextInferred":false,"eventSequence":1,"bodyType":2,"agentId":9,"contextDialogId":null,"lastSelectedDialogId":null,"buttonsTruncated":false,"buttonTotal":0,"buttons":[]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","dialog":{"active":true,"bodyObserved":false,"contextInferred":true,"eventSequence":1,"bodyType":null,"agentId":null,"contextDialogId":1,"lastSelectedDialogId":null,"buttonsTruncated":false,"buttonTotal":0,"buttons":[]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","dialog":{"active":true,"bodyObserved":true,"contextInferred":false,"eventSequence":1,"bodyType":2,"agentId":9,"contextDialogId":null,"lastSelectedDialogId":null,"buttonsTruncated":false,"buttonTotal":2,"buttons":[{"dialogId":1,"iconId":0,"skillId":null},{"dialogId":1,"iconId":0,"skillId":null}]}}"#.as_slice(),
+            br#"{"status":"ready","tickCount":1,"mapId":55,"instanceType":0,"instanceName":"Outpost","playerId":2,"playerX":0,"playerY":0,"targetValid":false,"targetKind":"None","rangeName":"None","dialog":{"active":true,"bodyObserved":false,"contextInferred":false,"eventSequence":1,"bodyType":null,"agentId":null,"contextDialogId":null,"lastSelectedDialogId":null,"buttonsTruncated":false,"buttonTotal":1,"buttons":[{"dialogId":1,"iconId":256,"skillId":null}]}}"#.as_slice(),
+            br#"{"status":"waiting","dialog":{"active":false,"bodyObserved":false,"contextInferred":false,"eventSequence":0,"bodyType":null,"agentId":null,"contextDialogId":null,"lastSelectedDialogId":null,"buttonsTruncated":false,"buttonTotal":0,"buttons":[]}}"#.as_slice(),
         ] {
             assert!(hub.publish(invalid).is_err());
         }

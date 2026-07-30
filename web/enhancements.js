@@ -17,8 +17,8 @@
 //      they live in the memory the companion will be instantiated over.
 //   3. Instantiate the companion over that same memory, and let it check the
 //      ABI before it is trusted with anything.
-//   4. Put its tick in the table slot, and only then set the global that makes
-//      the dispatcher call it.
+//   4. Put its shared tick/UI dispatcher in the table slot, and only then set
+//      the global that makes the transformed gateways call it.
 //
 // Nothing between steps 1 and 4 can leave the game worse off: the hook global
 // stays at zero, which is the untouched client to the byte, and every failure
@@ -31,13 +31,17 @@ import {
   COMPANION_CURSOR_BYTES,
   COMPANION_SNAPSHOT_BYTES,
 } from './companion-snapshot.js';
-import { decodeEnhancementManifest } from './enhancement-manifest.js';
+import {
+  decodeCompanionManifest,
+  decodeEnhancementManifest,
+} from './enhancement-manifest.js';
 import { probeLayout } from './layout-probe.js';
 import * as diagnostics from './diagnostics.js';
 
 /** Must match `FEATURE_*` in `src/companion-kernel/lib.rs`. */
 const FEATURE_NATIVE_CURSOR = 1 << 0;
 const FEATURE_TARGET_READOUT = 1 << 1;
+const FEATURE_DIALOG_EVENTS = 1 << 2;
 
 /** How many render-cost samples to keep for `window.gwCompanionRuntime`. */
 const SAMPLE_WINDOW = 240;
@@ -109,9 +113,11 @@ function observeSnapshots(runtime, cursor, readout, observeState) {
  */
 export async function installEnhancements(instance, module, selection) {
   const observeState = selection.targetReadout || selection.stateApi === true;
+  const observeDialogs = selection.stateApi === true;
   const featureFlags =
     (selection.nativeCursor ? FEATURE_NATIVE_CURSOR : 0)
-    | (observeState ? FEATURE_TARGET_READOUT : 0);
+    | (observeState ? FEATURE_TARGET_READOUT : 0)
+    | (observeDialogs ? FEATURE_DIALOG_EVENTS : 0);
   if (featureFlags === 0) return null;
 
   const manifest = decodeEnhancementManifest(module);
@@ -158,10 +164,20 @@ export async function installEnhancements(instance, module, selection) {
   let snapshotPointer = 0;
   let configPointer = 0;
   let cursorPointer = 0;
+  let kernelWorkspacePointer = 0;
   let stopObserver = () => {};
   let disposeCursor = () => {};
   let disposeReadout = () => {};
+  let companionDispatch = null;
   try {
+    const response = await fetch('companion-kernel.wasm');
+    if (!response.ok) throw new Error('the companion module is unavailable');
+    const kernelModule = await WebAssembly.compile(await response.arrayBuffer());
+    const kernelManifest = decodeCompanionManifest(kernelModule);
+    if (!kernelManifest) {
+      throw new Error('the companion module has no safe relocation contract');
+    }
+
     // The client's own allocator, so these are inside the memory the companion
     // is about to be instantiated over. Nothing the page allocates for itself
     // would be visible from there at all.
@@ -172,10 +188,12 @@ export async function installEnhancements(instance, module, selection) {
     if (selection.nativeCursor) {
       cursorPointer = Number(exports.malloc(COMPANION_CURSOR_BYTES));
     }
+    kernelWorkspacePointer = Number(exports.malloc(kernelManifest.workspaceBytes));
     if (
       !configPointer
       || (observeState && !snapshotPointer)
       || (selection.nativeCursor && !cursorPointer)
+      || !kernelWorkspacePointer
     ) {
       throw new Error('the client would not allocate the companion regions');
     }
@@ -184,23 +202,41 @@ export async function installEnhancements(instance, module, selection) {
       configPointer,
       manifest.layoutWords.length,
     ).set(manifest.layoutWords);
-
-    const response = await fetch('companion-kernel.wasm');
-    if (!response.ok) throw new Error('the companion module is unavailable');
-    const kernel = await WebAssembly.instantiate(await response.arrayBuffer(), {
-      // The whole trick: `env.memory` is an import, so the companion is
-      // instantiated over the game's heap rather than one of its own.
-      env: { memory: exports.memory },
+    // The block contains the companion's linker stack, static data and BSS.
+    // malloc owns the span; clearing it before instantiation gives BSS the
+    // zero-initialisation wasm-ld normally assumes it gets from a new memory.
+    new Uint8Array(
+      exports.memory.buffer,
+      kernelWorkspacePointer,
+      kernelManifest.workspaceBytes,
+    ).fill(0);
+    const kernel = await WebAssembly.instantiate(kernelModule, {
+      env: {
+        memory: exports.memory,
+        __stack_pointer: new WebAssembly.Global(
+          { value: 'i32', mutable: true },
+          kernelWorkspacePointer + kernelManifest.stackBytes,
+        ),
+        __memory_base: new WebAssembly.Global(
+          { value: 'i32', mutable: false },
+          kernelWorkspacePointer,
+        ),
+        __data_base: new WebAssembly.Global(
+          { value: 'i32', mutable: false },
+          kernelWorkspacePointer + kernelManifest.dataOffset,
+        ),
+      },
       game: { enhancement_tick_original: exports.enhancement_tick_original },
     });
-    const kernelInit = kernel.instance.exports.companion_init;
+    const kernelInit = kernel.exports.companion_init;
     // `companion_init` re-checks every region against the memory size it can
     // see and answers 1 only if it accepted all of them, so this is the
     // companion's own veto rather than a formality.
     if (
       typeof kernelInit !== 'function'
       || kernelInit.length !== 7
-      || typeof kernel.instance.exports.companion_tick !== 'function'
+      || typeof kernel.exports.companion_dispatch !== 'function'
+      || kernel.exports.companion_dispatch.length !== 4
       || kernelInit(
         snapshotPointer,
         observeState ? COMPANION_SNAPSHOT_BYTES : 0,
@@ -230,7 +266,8 @@ export async function installEnhancements(instance, module, selection) {
     const readout = selection.targetReadout ? createTargetReadout(document.body) : null;
     if (readout) disposeReadout = readout.dispose;
 
-    table.set(manifest.tableSlot, kernel.instance.exports.companion_tick);
+    companionDispatch = kernel.exports.companion_dispatch;
+    table.set(manifest.tableSlot, companionDispatch);
     const runtime = {
       status: 'installed',
       buildId: manifest.buildId,
@@ -238,6 +275,7 @@ export async function installEnhancements(instance, module, selection) {
       memory: exports.memory,
       snapshotPointer,
       configPointer,
+      kernelWorkspaceBytes: kernelManifest.workspaceBytes,
       tableSlot: manifest.tableSlot,
       hertz: 0,
       lastRenderUs: 0,
@@ -281,12 +319,13 @@ export async function installEnhancements(instance, module, selection) {
       stopObserver();
       disposeCursor();
       disposeReadout();
-      if (table.get(manifest.tableSlot) === kernel.instance.exports.companion_tick) {
+      if (table.get(manifest.tableSlot) === companionDispatch) {
         table.set(manifest.tableSlot, null);
       }
       if (cursorPointer) free(cursorPointer);
       free(configPointer);
       if (snapshotPointer) free(snapshotPointer);
+      free(kernelWorkspacePointer);
       window.gwCompanionRuntime = null;
     };
     window.addEventListener('pagehide', teardown, { once: true });
@@ -300,9 +339,13 @@ export async function installEnhancements(instance, module, selection) {
     stopObserver();
     disposeCursor();
     disposeReadout();
+    if (table.get(manifest.tableSlot) === companionDispatch) {
+      table.set(manifest.tableSlot, null);
+    }
     if (cursorPointer) free(cursorPointer);
     if (configPointer) free(configPointer);
     if (snapshotPointer) free(snapshotPointer);
+    if (kernelWorkspacePointer) free(kernelWorkspacePointer);
     window.gwCompanionState = Object.freeze({
       status: 'error',
       reason: error instanceof Error ? error.message : String(error),

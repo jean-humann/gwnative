@@ -36,6 +36,7 @@ class ApiSurfaceTests(unittest.TestCase):
                 "    pub social: Option<Social>,\n"
                 "    pub completion: Option<Completion>,\n"
                 "    pub camera: Option<Camera>,\n"
+                "    pub dialog: Option<Dialog>,\n"
                 "    pub trade: Option<Trade>,\n"
                 "    pub ui: Option<Ui>,\n"
                 "    pub merchant: Option<Merchant>,\n"
@@ -56,6 +57,7 @@ class ApiSurfaceTests(unittest.TestCase):
                 "agent",
                 "camera",
                 "completion",
+                "dialog",
                 "effects",
                 "friend_list",
                 "guild",

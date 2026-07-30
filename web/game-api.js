@@ -32,6 +32,7 @@ const PUBLIC_FIELDS = Object.freeze([
   'camera',
   'trade',
   'ui',
+  'dialog',
   'merchant',
   'progression',
   'skillUnlocks',

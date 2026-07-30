@@ -411,6 +411,7 @@ GAMEPLAY_DOMAINS = (
     "camera",
     "trade",
     "ui",
+    "dialog",
     "merchant",
     "progression",
     "skillUnlocks",
@@ -658,6 +659,7 @@ def main() -> int:
                 "camera",
                 "trade",
                 "ui",
+                "dialog",
                 "merchant",
                 "progression",
                 "skillUnlocks",
@@ -891,6 +893,7 @@ def main() -> int:
             camera = state.get("camera")
             trade = state.get("trade")
             ui_state = state.get("ui")
+            dialog = state.get("dialog")
             merchant = state.get("merchant")
             progression = state.get("progression")
             skill_unlocks = state.get("skillUnlocks")
@@ -1571,6 +1574,113 @@ def main() -> int:
                 )
             ):
                 raise Failure("certified UI frame state is incomplete")
+            dialog_buttons = (
+                dialog.get("buttons") if isinstance(dialog, dict) else None
+            )
+            dialog_total = (
+                dialog.get("buttonTotal") if isinstance(dialog, dict) else None
+            )
+            dialog_ids = (
+                [button.get("dialogId") for button in dialog_buttons]
+                if isinstance(dialog_buttons, list)
+                and all(isinstance(button, dict) for button in dialog_buttons)
+                else []
+            )
+            body_observed = (
+                dialog.get("bodyObserved")
+                if isinstance(dialog, dict)
+                else None
+            )
+            context_inferred = (
+                dialog.get("contextInferred")
+                if isinstance(dialog, dict)
+                else None
+            )
+            if (
+                not isinstance(dialog, dict)
+                or not isinstance(dialog.get("active"), bool)
+                or not isinstance(body_observed, bool)
+                or not isinstance(context_inferred, bool)
+                or not isinstance(dialog.get("eventSequence"), int)
+                or not 0 <= dialog.get("eventSequence") <= 0xffff_ffff
+                or not isinstance(dialog.get("buttonsTruncated"), bool)
+                or not isinstance(dialog_total, int)
+                or not 0 <= dialog_total <= 256
+                or not isinstance(dialog_buttons, list)
+                or len(dialog_buttons) > 64
+                or dialog_total < len(dialog_buttons)
+                or len(dialog_ids) != len(set(dialog_ids))
+                or any(
+                    not isinstance(button.get("dialogId"), int)
+                    or not 1 <= button.get("dialogId") <= 0xffff_ffff
+                    or not isinstance(button.get("iconId"), int)
+                    or not 0 <= button.get("iconId") <= 0xff
+                    or (
+                        button.get("skillId") is not None
+                        and (
+                            not isinstance(button.get("skillId"), int)
+                            or not 0 <= button.get("skillId") < 3_456
+                        )
+                    )
+                    for button in dialog_buttons
+                )
+                or (
+                    dialog.get("buttonsTruncated")
+                    and (len(dialog_buttons) != 64 or dialog_total <= 64)
+                )
+                or (
+                    not dialog.get("buttonsTruncated")
+                    and dialog_total != len(dialog_buttons)
+                )
+                or (
+                    body_observed
+                    != (
+                        isinstance(dialog.get("bodyType"), int)
+                        and 0 <= dialog.get("bodyType") <= 0xffff_ffff
+                        and isinstance(dialog.get("agentId"), int)
+                        and 0 <= dialog.get("agentId") <= 4_095
+                    )
+                )
+                or (
+                    not body_observed
+                    and (
+                        dialog.get("bodyType") is not None
+                        or dialog.get("agentId") is not None
+                    )
+                )
+                or (
+                    context_inferred
+                    != (
+                        body_observed
+                        and isinstance(dialog.get("contextDialogId"), int)
+                        and 1 <= dialog.get("contextDialogId") <= 0xffff_ffff
+                    )
+                )
+                or (
+                    not context_inferred
+                    and dialog.get("contextDialogId") is not None
+                )
+                or (
+                    dialog.get("lastSelectedDialogId") is not None
+                    and (
+                        not isinstance(dialog.get("lastSelectedDialogId"), int)
+                        or not 1
+                        <= dialog.get("lastSelectedDialogId")
+                        <= 0xffff_ffff
+                    )
+                )
+                or (
+                    not dialog.get("active")
+                    and (
+                        body_observed
+                        or context_inferred
+                        or dialog.get("buttonsTruncated")
+                        or dialog_total != 0
+                        or dialog_buttons
+                    )
+                )
+            ):
+                raise Failure("certified NPC dialog identity is incomplete")
             merchant_items = (
                 merchant.get("itemIds") if isinstance(merchant, dict) else None
             )
@@ -1724,6 +1834,8 @@ def main() -> int:
                 f"camera={camera.get('modeName')}, "
                 f"trade={trade.get('statusName')}, "
                 f"ui-frames={len(ui_frames)}/{ui_total}, "
+                f"dialog={'open' if dialog.get('active') else 'closed'}"
+                f"/{len(dialog_buttons)} buttons, "
                 f"merchant-items={len(merchant_items)}/{merchant_total}, "
                 f"level={progression.get('level')}, "
                 f"experience={progression.get('experience')}, "

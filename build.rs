@@ -8,12 +8,14 @@
 //! flags below do not, and a second manifest would give `cargo test` a crate it
 //! cannot link. One `rustc` call is the whole build.
 //!
-//! `--import-memory` is what makes it a companion rather than a program: the
-//! linker leaves `env.memory` unresolved so the page can instantiate it over
-//! the *client's* memory, which is the only reason any of it can see game
-//! state. `panic=abort` and `-C opt-level=s` keep it small and free of the
-//! unwinder; `--strip-all` drops the name section, which is a third of the
-//! output and of no use to anything that reads this module.
+//! `--import-memory` lets the companion see the client's memory, but is not
+//! sufficient on its own: wasm-ld still places its stack, data and BSS at fixed
+//! low addresses as though the imported memory were new. The PIC link plus
+//! `companion_relocate` turns those bases into imports backed by one block from
+//! the client's allocator. That build-time transform refuses any linker shape
+//! it has not certified. `panic=abort` and `-C opt-level=s` keep the module
+//! small and free of the unwinder; `--strip-all` drops the name section, which
+//! is of no use to anything that reads this module.
 //!
 //! The result is `include_bytes!`d by [`crate::server`] rather than written
 //! into `web/`, so the kernel a build serves is always the one that build
@@ -24,6 +26,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[path = "src/companion_relocate.rs"]
+mod companion_relocate;
 
 /// Where the source lives, relative to the package root.
 const KERNEL: &str = "src/companion-kernel/lib.rs";
@@ -40,12 +45,14 @@ const TARGET: &str = "wasm32-unknown-unknown";
 
 fn main() {
     println!("cargo::rerun-if-changed={KERNEL}");
+    println!("cargo::rerun-if-changed=src/companion_relocate.rs");
     println!("cargo::rerun-if-changed=build.rs");
 
     sparkle();
 
-    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"))
-        .join("companion-kernel.wasm");
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let raw = out_dir.join("companion-kernel.raw.wasm");
+    let out = out_dir.join("companion-kernel.wasm");
     // `RUSTC` rather than a bare `rustc`, so the compiler that builds the
     // companion is the one Cargo is already using — a `cargo +nightly` run
     // would otherwise silently mix two toolchains.
@@ -57,10 +64,14 @@ fn main() {
         .args(["--crate-type", "cdylib"])
         .args(["-C", "opt-level=s"])
         .args(["-C", "panic=abort"])
+        .args(["-C", "relocation-model=pic"])
         .args(["-C", "link-arg=--import-memory"])
+        .args(["-C", "link-arg=--experimental-pic"])
+        .args(["-C", "link-arg=--export=__data_end"])
+        .args(["-C", "link-arg=--export=__heap_base"])
         .args(["-C", "link-arg=--strip-all"])
         .arg("-o")
-        .arg(&out)
+        .arg(&raw)
         .status();
 
     match status {
@@ -71,6 +82,11 @@ fn main() {
         ),
         Err(e) => panic!("could not run {}: {e}", Path::new(&rustc).display()),
     }
+    let bytes =
+        std::fs::read(&raw).unwrap_or_else(|e| panic!("could not read {}: {e}", raw.display()));
+    let relocated = companion_relocate::relocate(&bytes).unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(&out, relocated)
+        .unwrap_or_else(|e| panic!("could not write {}: {e}", out.display()));
     println!(
         "cargo::rustc-env=GWNATIVE_COMPANION_KERNEL={}",
         out.display()

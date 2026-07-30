@@ -88,6 +88,11 @@ describe('public game state', () => {
       total: 1,
       frames: Object.freeze([Object.freeze({ frameId: 0, frameHash: 7 })]),
     });
+    const dialog = Object.freeze({
+      active: false,
+      bodyObserved: false,
+      buttons: Object.freeze([]),
+    });
     const merchant = Object.freeze({
       truncated: false,
       total: 2,
@@ -126,6 +131,7 @@ describe('public game state', () => {
         camera,
         trade,
         ui,
+        dialog,
         merchant,
         progression,
         skillUnlocks,
@@ -143,6 +149,7 @@ describe('public game state', () => {
         camera,
         trade,
         ui,
+        dialog,
         merchant,
         progression,
         skillUnlocks,

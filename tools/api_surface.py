@@ -37,6 +37,7 @@ CERTIFIED_DOMAIN_FIELDS = {
     "agent": "agents",
     "camera": "camera",
     "completion": "completion",
+    "dialog": "dialog",
     "effects": "effects",
     "friend_list": "social",
     "guild": "social",

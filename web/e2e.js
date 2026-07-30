@@ -503,6 +503,10 @@ export async function runAppE2E({
       ['camera', 'Camera and render state'],
       ['trade', 'Trade offer'],
       ['ui-frames', 'UI frame inventory'],
+      ['npc-dialog', 'NPC dialog identity'],
+      ['merchant-items', 'Merchant item IDs'],
+      ['character-progression', 'Character progression'],
+      ['skill-unlocks', 'Character skill unlocks'],
     ]);
     for (const widget of widgets) {
       const id = widget.dataset.widget;
@@ -586,6 +590,10 @@ export async function runAppE2E({
           ['camera', 'Camera and render state'],
           ['trade', 'Trade offer'],
           ['ui-frames', 'UI frame inventory'],
+          ['npc-dialog', 'NPC dialog identity'],
+          ['merchant-items', 'Merchant item IDs'],
+          ['character-progression', 'Character progression'],
+          ['skill-unlocks', 'Character skill unlocks'],
         ]).get(id);
         if (label && !widget.hidden !== wanted) buttonNamed(surface, label).click();
       }

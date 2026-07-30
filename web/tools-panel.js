@@ -21,6 +21,7 @@ export const FEATURES = Object.freeze([
   { id: 'camera', group: 'Game state', name: 'Camera and render state', status: 'available' },
   { id: 'trade', group: 'Game state', name: 'Trade offer', status: 'available' },
   { id: 'ui', group: 'Game state', name: 'UI frame inventory', status: 'available' },
+  { id: 'dialog', group: 'Game state', name: 'NPC dialog identity', status: 'available' },
   { id: 'merchant', group: 'Game state', name: 'Merchant item IDs', status: 'available' },
   { id: 'progression', group: 'Game state', name: 'Character progression', status: 'available' },
   { id: 'skill-unlocks', group: 'Game state', name: 'Character skill unlocks', status: 'available' },
@@ -59,6 +60,25 @@ export function formatUiSummary(ui) {
   const truncated = ui.truncated ? ' · first 128' : '';
   return `${ui.visibleTotal}/${ui.createdTotal} locally visible · `
     + `${ui.total} frames${truncated}`;
+}
+
+export function formatDialogSummary(dialog) {
+  if (!dialog) return 'Unavailable for this client build';
+  if (!dialog.active) {
+    return dialog.lastSelectedDialogId === null
+      ? 'Closed · no observed selection'
+      : `Closed · last selected #${dialog.lastSelectedDialogId}`;
+  }
+  const body = dialog.bodyObserved
+    ? `body type ${dialog.bodyType} · agent #${dialog.agentId}`
+    : 'body pending';
+  const buttons = dialog.buttonsTruncated
+    ? `${dialog.buttons.length}/${dialog.buttonTotal} buttons`
+    : `${dialog.buttonTotal} button${dialog.buttonTotal === 1 ? '' : 's'}`;
+  const context = dialog.contextInferred
+    ? ` · context #${dialog.contextDialogId}`
+    : '';
+  return `Open · ${body} · ${buttons}${context}`;
 }
 
 export function formatMerchantSummary(merchant) {
@@ -306,10 +326,20 @@ function installWidgets(overlays) {
       setText(body, formatUiSummary(state.ui));
     },
   });
+  const dialog = overlays.register({
+    id: 'npc-dialog',
+    title: 'NPC dialog identity',
+    position: { x: 16, y: 856 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      setText(body, formatDialogSummary(state.dialog));
+    },
+  });
   const merchant = overlays.register({
     id: 'merchant-items',
     title: 'Merchant item IDs',
-    position: { x: 16, y: 856 },
+    position: { x: 16, y: 912 },
     visible: false,
     render: (body, state) => {
       if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
@@ -319,7 +349,7 @@ function installWidgets(overlays) {
   const progression = overlays.register({
     id: 'character-progression',
     title: 'Character progression',
-    position: { x: 16, y: 912 },
+    position: { x: 16, y: 968 },
     visible: false,
     render: (body, state) => {
       if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
@@ -329,7 +359,7 @@ function installWidgets(overlays) {
   const skillUnlocks = overlays.register({
     id: 'skill-unlocks',
     title: 'Character skill unlocks',
-    position: { x: 16, y: 968 },
+    position: { x: 16, y: 1024 },
     visible: false,
     render: (body, state) => {
       if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
@@ -371,6 +401,7 @@ function installWidgets(overlays) {
     if (camera.isVisible()) camera.update(event.detail);
     if (trade.isVisible()) trade.update(event.detail);
     if (ui.isVisible()) ui.update(event.detail);
+    if (dialog.isVisible()) dialog.update(event.detail);
     if (merchant.isVisible()) merchant.update(event.detail);
     if (progression.isVisible()) progression.update(event.detail);
     if (skillUnlocks.isVisible()) skillUnlocks.update(event.detail);
@@ -392,6 +423,7 @@ function installWidgets(overlays) {
     camera,
     trade,
     ui,
+    dialog,
     merchant,
     progression,
     skillUnlocks,
@@ -491,6 +523,7 @@ export function installToolsPanel({
     ['Camera and render state', widgets.camera],
     ['Trade offer', widgets.trade],
     ['UI frame inventory', widgets.ui],
+    ['NPC dialog identity', widgets.dialog],
     ['Merchant item IDs', widgets.merchant],
     ['Character progression', widgets.progression],
     ['Character skill unlocks', widgets.skillUnlocks],

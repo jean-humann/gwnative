@@ -16,6 +16,9 @@ mod cache;
 mod chunks;
 mod cli;
 mod commands;
+#[cfg(test)]
+#[allow(dead_code)]
+mod companion_relocate;
 mod diagnostics;
 mod disk;
 mod dock;

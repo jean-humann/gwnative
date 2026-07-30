@@ -15,6 +15,14 @@
 //! that slot is now the tick — free to call the exported clone itself, which is
 //! how the game still runs.
 //!
+//! Dialog identity needs one more exact-build hook because its typed body and
+//! button payloads exist only while the client's UI-message gateway is being
+//! called. That gateway is cloned too. Its dispatcher always calls the clone
+//! first, then optionally forwards the event to the same companion function as
+//! the tick. A fourth dispatch word distinguishes the two paths. This matters
+//! because slot 0 is the certified modules' *only* empty table slot: sharing it
+//! keeps the observer possible without overwriting the game.
+//!
 //! The offset by one is what makes slot 0 usable. Emscripten reserves it for
 //! the null function pointer and leaves it empty, so it is the one slot nothing
 //! can collide with; a global that meant "slot 0" at zero could not also mean
@@ -37,13 +45,16 @@ use super::{Outcome, digest};
 /// Bumped whenever a derived module stops being interchangeable with one an
 /// older build published. Shared with the companion, which refuses a manifest
 /// it does not recognise rather than reading the wrong words out of it.
-pub(super) const ENHANCEMENT_TRANSFORM_ABI: u32 = 15;
+pub(super) const ENHANCEMENT_TRANSFORM_ABI: u32 = 16;
 
-/// The mutable global the dispatcher reads: zero for the untouched game, or one
-/// past the table slot holding the tick.
+/// The mutable global both dispatchers read: zero for the untouched game, or
+/// one past the table slot holding the companion's shared dispatcher.
 const HOOK_EXPORT: &str = "enhancement_hook_slot";
 /// The clone of the main loop, so an installed tick can still run the game.
 const ORIGINAL_EXPORT: &str = "enhancement_tick_original";
+/// First argument passed through the shared companion dispatcher.
+const DISPATCH_TICK: i64 = 0;
+const DISPATCH_UI_MESSAGE: i64 = 1;
 /// Where the layout below travels. A custom section rather than a file beside
 /// the module because the two must not be separable: a manifest describing one
 /// build next to the module of another is a companion reading whatever happens
@@ -54,8 +65,8 @@ const MANIFEST_SECTION: &str = "enhancement_manifest";
 /// block beside it. Named here because they are the manifest's own words and
 /// the companion's `Snapshot`/`CursorSnapshot` at once — see
 /// `web/companion-snapshot.js`, which reads both back.
-const SNAPSHOT_ABI: u32 = 14;
-const SNAPSHOT_BYTES: u32 = 59_776;
+const SNAPSHOT_ABI: u32 = 15;
+const SNAPSHOT_BYTES: u32 = 60_576;
 const CURSOR_SNAPSHOT_ABI: u32 = 1;
 const CURSOR_SNAPSHOT_BYTES: u32 = 4160;
 
@@ -86,20 +97,68 @@ fn fault(message: impl std::fmt::Display) -> String {
 /// if
 ///   local.get 0 … ; call $original ; return
 /// end
-/// local.get 0 …
+/// i32.const 0               ;; tick dispatch
+/// local.get 0
+/// i32.const 0
+/// i32.const 0
 /// global.get $hook
 /// i32.const 1
 /// i32.sub                   ;; the slot itself
-/// call_indirect (type $tick)
+/// call_indirect (type $companion_dispatch)
 /// ```
 ///
-/// The arguments are pushed twice rather than once before the branch because
-/// the `if` has no result type: a value left on the stack across it would not
-/// validate. Costing a few bytes to keep the block empty-typed is cheaper than
-/// the block type that would otherwise have to describe the whole signature.
-fn dispatcher(
+/// The exact client tick has one `i32` parameter. The indirect side deliberately
+/// uses the client's existing four-`i32` type so it can share slot 0 with the
+/// UI observer without an ambiguous sentinel inside the game's message ID.
+fn tick_dispatcher(dispatch_type: u32, original_index: u32, hook_global: u32) -> Vec<u8> {
+    let global_get = |body: &mut Vec<u8>| {
+        body.push(0x23);
+        body.extend_from_slice(&uleb(u64::from(hook_global)));
+    };
+
+    let mut body = uleb(0); // no locals
+    global_get(&mut body);
+    body.extend_from_slice(&[0x45, 0x04, 0x40]); // i32.eqz; if (void)
+    body.extend_from_slice(&[0x20, 0x00]); // local.get 0
+    body.push(0x10); // call
+    body.extend_from_slice(&uleb(u64::from(original_index)));
+    body.extend_from_slice(&[0x0f, 0x0b]); // return; end
+
+    body.push(0x41); // i32.const
+    body.extend_from_slice(&sleb(DISPATCH_TICK));
+    body.extend_from_slice(&[0x20, 0x00]); // local.get 0
+    body.extend_from_slice(&[0x41, 0x00, 0x41, 0x00]); // two zero payloads
+    global_get(&mut body);
+    body.push(0x41); // i32.const
+    body.extend_from_slice(&sleb(1));
+    body.extend_from_slice(&[0x6b, 0x11]); // i32.sub; call_indirect
+    body.extend_from_slice(&uleb(u64::from(dispatch_type)));
+    body.extend_from_slice(&uleb(0)); // table 0
+    body.push(0x0b); // end
+    body
+}
+
+/// The body that replaces the exact-build UI-message gateway.
+///
+/// Unlike [`tick_dispatcher`], this one never delegates ownership of the original
+/// call. It completes the game's gateway first and only then invokes the
+/// observer when installed:
+///
+/// ```wat
+/// local.get 0 … ; call $original
+/// global.get $hook
+/// if
+///   i32.const 1
+///   local.get 0 …
+///   global.get $hook
+///   i32.const 1
+///   i32.sub
+///   call_indirect (type $companion_dispatch)
+/// end
+/// ```
+fn post_dispatch_observer(
     param_count: usize,
-    type_index: u32,
+    dispatch_type: u32,
     original_index: u32,
     hook_global: u32,
 ) -> Vec<u8> {
@@ -115,21 +174,21 @@ fn dispatcher(
     };
 
     let mut body = uleb(0); // no locals
-    global_get(&mut body);
-    body.extend_from_slice(&[0x45, 0x04, 0x40]); // i32.eqz; if (void)
     push_args(&mut body);
     body.push(0x10); // call
     body.extend_from_slice(&uleb(u64::from(original_index)));
-    body.extend_from_slice(&[0x0f, 0x0b]); // return; end
-
+    global_get(&mut body);
+    body.extend_from_slice(&[0x04, 0x40]); // if (void)
+    body.push(0x41); // i32.const
+    body.extend_from_slice(&sleb(DISPATCH_UI_MESSAGE));
     push_args(&mut body);
     global_get(&mut body);
     body.push(0x41); // i32.const
     body.extend_from_slice(&sleb(1));
     body.extend_from_slice(&[0x6b, 0x11]); // i32.sub; call_indirect
-    body.extend_from_slice(&uleb(u64::from(type_index)));
+    body.extend_from_slice(&uleb(u64::from(dispatch_type)));
     body.extend_from_slice(&uleb(0)); // table 0
-    body.push(0x0b); // end
+    body.extend_from_slice(&[0x0b, 0x0b]); // end if; end function
     body
 }
 
@@ -151,7 +210,8 @@ fn manifest_section(build: &EnhancementBuild) -> Section {
         concat!(
             r#"{{"transformAbi":{},"snapshotAbi":{},"snapshotBytes":{},"#,
             r#""cursorSnapshotAbi":{},"cursorSnapshotBytes":{},"configBytes":{},"#,
-            r#""programId":{},"buildId":{},"tableSlot":{},"layoutWords":[{}]}}"#,
+            r#""programId":{},"buildId":{},"tableSlot":{},"#,
+            r#""layoutWords":[{}]}}"#,
         ),
         ENHANCEMENT_TRANSFORM_ABI,
         SNAPSHOT_ABI,
@@ -214,34 +274,80 @@ pub(super) fn transform(input: &[u8], build: &EnhancementBuild) -> Outcome<Vec<u
             show(build.hook_results),
         )));
     }
+    let ui_local_index = build
+        .ui_message_function
+        .checked_sub(build.import_count)
+        .filter(|index| (*index as usize) < bodies.len())
+        .ok_or_else(|| fault("the UI-message function is out of range"))?
+        as usize;
+    if ui_local_index == local_index {
+        return Err(fault("the tick and UI-message hooks are the same function"));
+    }
+    let ui_type_index = function_types[ui_local_index];
+    let ui_type = types
+        .get(ui_type_index as usize)
+        .ok_or_else(|| fault("the UI-message hook references an unknown type"))?;
+    if ui_type.params != [0x7f, 0x7f, 0x7f] || !ui_type.results.is_empty() {
+        return Err(fault(format!(
+            "the UI-message signature is ({}) -> ({}), expected \
+             (i32,i32,i32) -> ()",
+            ui_type
+                .params
+                .iter()
+                .map(|byte| value_type_name(*byte))
+                .collect::<Vec<_>>()
+                .join(","),
+            ui_type
+                .results
+                .iter()
+                .map(|byte| value_type_name(*byte))
+                .collect::<Vec<_>>()
+                .join(","),
+        )));
+    }
+    let dispatch_type = types
+        .get(build.dispatch_type as usize)
+        .ok_or_else(|| fault("the shared dispatch hook references an unknown type"))?;
+    if dispatch_type.params != [0x7f, 0x7f, 0x7f, 0x7f] || !dispatch_type.results.is_empty() {
+        return Err(fault(
+            "the shared dispatch signature is not (i32,i32,i32,i32) -> ()",
+        ));
+    }
 
     // The slot has to exist and be empty. A dispatcher pointed at a slot the
     // game itself fills would call one of its functions with the main loop's
     // argument the moment the global was set.
     let table = parse_table(section_by_id(&sections, 4)?)?;
+    let occupied = occupied_table_slots(section_by_id(&sections, 9)?)?;
     if build.table_slot >= table.min || table.max.is_some_and(|max| build.table_slot >= max) {
-        return Err(fault("the hook table slot is outside the table limits"));
+        return Err(fault(
+            "the shared hook table slot is outside the table limits",
+        ));
     }
-    if occupied_table_slots(section_by_id(&sections, 9)?)?.contains(&build.table_slot) {
+    if occupied.contains(&build.table_slot) {
         return Err(fault(format!(
-            "table slot {} is already occupied",
-            build.table_slot
+            "the shared hook table slot {} is already occupied",
+            build.table_slot,
         )));
     }
 
     let (global_count, global_entries) = vector_payload(section_by_id(&sections, 6)?)?;
     let (export_count, export_entries) = vector_payload(section_by_id(&sections, 7)?)?;
     let original_index = build.import_count + bodies.len() as u32;
+    let ui_original_index = original_index + 1;
     let hook_global = global_count;
 
     let mut next_types = function_types;
     next_types.push(type_index);
+    next_types.push(ui_type_index);
     let mut next_bodies = bodies;
     next_bodies.push(next_bodies[local_index].clone());
-    next_bodies[local_index] = dispatcher(
-        hook_type.params.len(),
-        type_index,
-        original_index,
+    next_bodies.push(next_bodies[ui_local_index].clone());
+    next_bodies[local_index] = tick_dispatcher(build.dispatch_type, original_index, hook_global);
+    next_bodies[ui_local_index] = post_dispatch_observer(
+        ui_type.params.len(),
+        build.dispatch_type,
+        ui_original_index,
         hook_global,
     );
 
@@ -308,7 +414,7 @@ mod tests {
     /// byte by byte rather than only through the pinned hash.
     #[test]
     fn the_dispatcher_falls_straight_through_when_nothing_is_installed() {
-        let body = dispatcher(1, 11, 12_345, 7);
+        let body = tick_dispatcher(11, 12_345, 7);
         assert_eq!(body[0], 0x00, "the dispatcher declares locals");
         assert_eq!(*body.last().unwrap(), 0x0b, "the dispatcher does not end");
 
@@ -323,7 +429,8 @@ mod tests {
         assert_eq!(
             tail,
             &[
-                0x20, 0x00, 0x23, 0x07, 0x41, 0x01, 0x6b, 0x11, 0x0b, 0x00, 0x0b
+                0x41, 0x00, 0x20, 0x00, 0x41, 0x00, 0x41, 0x00, 0x23, 0x07, 0x41, 0x01, 0x6b, 0x11,
+                0x0b, 0x00, 0x0b
             ]
         );
     }
@@ -364,8 +471,9 @@ mod tests {
         for _ in 0..count {
             let (module, tail) = name(rest);
             let (field, tail) = name(tail);
-            // kind byte, then a descriptor whose length depends on it. Only
-            // memories and functions appear here, and both are short.
+            // Kind byte, then a descriptor whose length depends on it. The
+            // relocation transform adds three i32 globals after wasm-ld's
+            // memory and function imports.
             let (kind, tail) = tail.split_first().expect("an import has a kind");
             let mut cursor = 0;
             let skip = match kind {
@@ -382,6 +490,12 @@ mod tests {
                         read_uleb(tail, &mut cursor).expect("a maximum");
                     }
                     cursor
+                }
+                // An i32 global is its value type and mutability byte.
+                0x03 if tail.get(..2) == Some(&[0x7f, 0x01])
+                    || tail.get(..2) == Some(&[0x7f, 0x00]) =>
+                {
+                    2
                 }
                 other => panic!("the kernel imported an unexpected kind {other:#04x}"),
             };
@@ -400,6 +514,12 @@ mod tests {
             "the kernel does not call the clone this transform exports as \
              {ORIGINAL_EXPORT}: {imported:?}",
         );
+        for field in ["__stack_pointer", "__memory_base", "__data_base"] {
+            assert!(
+                imported.iter().any(|(m, f)| m == "env" && f == field),
+                "the kernel has no relocated {field} import: {imported:?}",
+            );
+        }
 
         let exports = section_by_id(&sections, 7).expect("the kernel exports");
         let (count, mut rest) = vector_payload(exports).expect("the export vector parses");
@@ -411,7 +531,7 @@ mod tests {
             exported.push(field);
             rest = &tail[cursor..];
         }
-        for wanted in ["companion_init", "companion_tick"] {
+        for wanted in ["companion_init", "companion_dispatch"] {
             assert!(
                 exported.iter().any(|name| name == wanted),
                 "the page installs {wanted}, which the kernel does not export: {exported:?}",
@@ -419,19 +539,34 @@ mod tests {
         }
     }
 
-    /// A loop with no arguments still has to be dispatched correctly, and the
-    /// only thing that varies with the parameter count is how many `local.get`s
-    /// each side of the branch pushes.
     #[test]
-    fn the_dispatcher_forwards_exactly_as_many_arguments_as_the_loop_takes() {
-        for params in [0usize, 1, 3] {
-            let body = dispatcher(params, 0, 1, 0);
-            assert_eq!(
-                body.iter().filter(|byte| **byte == 0x20).count(),
-                params * 2,
-                "{params} arguments are not pushed on both paths",
-            );
-        }
+    fn the_tick_dispatch_uses_an_explicit_kind_and_four_arguments() {
+        let body = tick_dispatcher(14, 1, 0);
+        let indirect = [
+            0x41, 0x00, // dispatch kind: tick
+            0x20, 0x00, // the original tick context
+            0x41, 0x00, // unused
+            0x41, 0x00, // unused
+            0x23, 0x00, 0x41, 0x01, 0x6b, // table slot
+            0x11, 0x0e, 0x00, // call_indirect type 14, table 0
+            0x0b,
+        ];
+        assert!(body.ends_with(&indirect));
+    }
+
+    #[test]
+    fn the_ui_observer_runs_only_after_the_original_gateway() {
+        let body = post_dispatch_observer(3, 5, 6_842, 8);
+        assert_eq!(body[0], 0x00, "the observer declares locals");
+        assert_eq!(*body.last().unwrap(), 0x0b, "the observer does not end");
+
+        let mut expected = vec![0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x10];
+        expected.extend_from_slice(&uleb(6_842));
+        expected.extend_from_slice(&[
+            0x23, 0x08, 0x04, 0x40, 0x41, 0x01, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x23, 0x08,
+            0x41, 0x01, 0x6b, 0x11, 0x05, 0x00, 0x0b, 0x0b,
+        ]);
+        assert_eq!(&body[1..], expected);
     }
 
     /// The manifest is the companion's only description of the build it is
@@ -447,10 +582,12 @@ mod tests {
             .strip_prefix(&format!("\u{14}{MANIFEST_SECTION}",))
             .expect("the section does not start with its own name");
         assert!(
-            json.starts_with(r#"{"transformAbi":15,"snapshotAbi":14,"snapshotBytes":59776,"#),
+            json.starts_with(r#"{"transformAbi":16,"snapshotAbi":15,"snapshotBytes":60576,"#),
             "the key order changed, and with it the module's hash: {json}",
         );
-        assert!(json.contains(r#""configBytes":928,"programId":1,"buildId":38771,"tableSlot":0,"#));
+        assert!(
+            json.contains(r#""configBytes":928,"programId":1,"buildId":38771,"tableSlot":0,"#,)
+        );
         assert!(json.contains(r#""layoutWords":[5901856,5918104,5912716,5912712,6,"#));
 
         // Still valid JSON, and still the 232 words the companion expects.
@@ -500,8 +637,8 @@ mod tests {
         };
         let output = transform(&input, build).expect("the certified build transforms");
         assert_eq!(digest(&output), build.output_sha256);
-        // One cloned body, one global, two exports and the manifest. Nothing is
-        // removed, and the dispatcher is shorter than the body it replaces.
+        // Two cloned bodies, one global, two exports and the manifest.
+        // Nothing is removed, and both dispatchers retain exact signatures.
         assert!(output.len() > input.len());
     }
 }

@@ -1015,9 +1015,19 @@ pub(super) struct EnhancementBuild {
     /// rewritten into something that calls it wrong.
     pub hook_params: &'static [u8],
     pub hook_results: &'static [u8],
-    /// The table slot the dispatcher borrows to reach the companion. Emscripten
-    /// reserves slot 0 for the null function pointer and never fills it.
+    /// The high-level UI message gateway. Dialog body/button wrappers in each
+    /// certified module call this exact `(message_id, wparam, lparam)` entry.
+    /// The enhancement transform keeps the original call first and adds a
+    /// passive companion observer afterward; it never replaces UI handling.
+    pub ui_message_function: u32,
+    /// The one table slot both transformed gateways borrow to reach the
+    /// companion's typed dispatcher. Emscripten reserves slot 0 for the null
+    /// function pointer and never fills it.
     pub table_slot: u32,
+    /// The existing `(i32, i32, i32, i32) -> ()` type used by the shared
+    /// dispatcher. The first word distinguishes a game tick from an observed
+    /// UI message, so the module needs no second empty table slot.
+    pub dispatch_type: u32,
     /// Returns the exact memory layout certified for this build. A function
     /// pointer lets a data-identical client revision deliberately reuse the
     /// preceding layout without copying 232 words and inviting transcription
@@ -1028,14 +1038,16 @@ pub(super) struct EnhancementBuild {
 pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     EnhancementBuild {
         sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-        output_sha256: "0457351b37f73ddda4e34ccd54d9271a3425199013a850c5bf06bf0c4db8ec77",
+        output_sha256: "6ca299c82688ac265a692e7bc3f6188a22ff5eaba8aabc45114d53da0861f69e",
         import_count: 219,
         program_id: 1,
         build_id: 38771,
         hook_function: 446,
         hook_params: &[0x7f],
         hook_results: &[],
+        ui_message_function: 6839,
         table_slot: 0,
+        dispatch_type: 14,
         layout: || &EnhancementLayout {
             context_root: 0x5a_0e20,
             agent_array: 0x5a_4d98,
@@ -1273,14 +1285,16 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     },
     EnhancementBuild {
         sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
-        output_sha256: "0e78fef6a2487818345549e6aac9ac86b4dd39af5744f7b29fb3ce67299a46df",
+        output_sha256: "396f01af69f68295c521ec76a71e360b11afaf6f1b59435b88dc4007de9ee972",
         import_count: 219,
         program_id: 1,
         build_id: 38790,
         hook_function: 446,
         hook_params: &[0x7f],
         hook_results: &[],
+        ui_message_function: 6842,
         table_slot: 0,
+        dispatch_type: 14,
         layout: || &EnhancementLayout {
             context_root: 0x5a_0f10,
             agent_array: 0x5a_4e88,
@@ -1518,14 +1532,16 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     },
     EnhancementBuild {
         sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
-        output_sha256: "1664c2e19c0fd41eaf3162581755b2de3bcb2c9c772370a5be04b155fbaf6e34",
+        output_sha256: "5a4d82c5d1f2435f0cb9c99611071ab355d87d3f6f911eae61aaef3cabdcfc9e",
         import_count: 219,
         program_id: 1,
         build_id: 38795,
         hook_function: 446,
         hook_params: &[0x7f],
         hook_results: &[],
+        ui_message_function: 6842,
         table_slot: 0,
+        dispatch_type: 14,
         layout: || &EnhancementLayout {
             context_root: 0x5a_0ee0,
             agent_array: 0x5a_4e58,
@@ -1763,14 +1779,16 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     },
     EnhancementBuild {
         sha256: "9ee332604a9b2adbdfa1a8ab217f4fd1dac58b01a2443e037bc5bd11f279d094",
-        output_sha256: "b96cb0ef41cd0384499d4427e5eb5b088d11bf8117bbdd4a01745bbcb1003196",
+        output_sha256: "6fb84c0c2b1ffaaca34e9545df06145ed13cd1ee17110ccb873bec3610cb59d8",
         import_count: 219,
         program_id: 1,
         build_id: 38797,
         hook_function: 446,
         hook_params: &[0x7f],
         hook_results: &[],
+        ui_message_function: 6842,
         table_slot: 0,
+        dispatch_type: 14,
         // The source data section is byte-identical to 38795, and the only
         // changed functions (477, 5009, and 17491) are outside every context,
         // global, call-site, stub, and main-loop anchor used by the companion.

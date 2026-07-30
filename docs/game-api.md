@@ -454,6 +454,22 @@ The envelope is revisioned and timestamped:
         }
       ]
     },
+    "dialog": {
+      "active": true,
+      "bodyObserved": true,
+      "contextInferred": true,
+      "eventSequence": 14,
+      "bodyType": 2,
+      "agentId": 91,
+      "contextDialogId": 8388609,
+      "lastSelectedDialogId": 8388609,
+      "buttonsTruncated": false,
+      "buttonTotal": 2,
+      "buttons": [
+        { "dialogId": 8388610, "iconId": 4, "skillId": null },
+        { "dialogId": 8388611, "iconId": 5, "skillId": 111 }
+      ]
+    },
     "merchant": {
       "truncated": false,
       "total": 2,
@@ -641,11 +657,33 @@ destroyed, and does not carry its own hidden bit; it does not claim that every
 ancestor is visible. `positionValid: false` carries a zero rectangle when the
 client's local geometry is transient or non-finite.
 
-Frame labels, encoded strings, callback tables, tooltips, relation lists,
-dialog bodies/buttons, and UI message handlers are excluded. The actions
-endpoint exposes no click, focus, visibility, frame-message, or dialog action.
-This keeps the UI inventory useful for diagnostics and future certification
-without turning it into an interaction surface.
+Frame labels, encoded strings, callback tables, tooltips, relation lists, and
+generic UI message handlers are excluded. The actions endpoint exposes no
+click, focus, visibility, frame-message, or dialog action. This keeps the UI
+inventory useful for diagnostics and future certification without turning it
+into an interaction surface.
+
+The dialog domain is a separate passive observer over the exact-build,
+three-scalar UI-message gateway. The transformed client completes its original
+handler first and only then forwards one of four recognised body, button, or
+selection messages to the companion. The companion never blocks, replaces, or
+sends UI traffic. It bounds every event payload before reading numeric fields
+and never follows the client-owned encoded message pointer.
+
+`active` is independently gated by the visible NPC Dialog root frame. An open
+dialog can publish one numeric `bodyType`, its `agentId`, and at most 64 of 256
+unique buttons. Each button contains only `dialogId`, the byte-sized `iconId`,
+and a nullable numeric `skillId`; null represents the client's explicit
+no-skill sentinel. `buttonTotal` and `buttonsTruncated` distinguish the capped
+page. `eventSequence` changes when an accepted event changes observed state.
+
+After a selection, a subsequent body for the same agent can carry the selected
+ID as `contextDialogId`; `contextInferred` makes that event-order inference
+explicit rather than presenting it as a client pointer. `lastSelectedDialogId`
+is retained after close for diagnostics, while body, context, and buttons are
+cleared as soon as the root frame is inactive. Dialog text, button text,
+encoded strings, callbacks, generic frame messages, and every select/send
+action remain unavailable.
 
 The merchant domain follows the numeric `WorldContext::merch_items` array at
 the independently mapped `WorldContext + 0x24` field used by GWCA and Py4GW

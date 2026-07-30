@@ -26,7 +26,7 @@ The names-only, reproducible comparison is in the
 | Guild Wars CLI recognition | Available | Every documented switch parsed; native translations or explicit notices |
 | Isolated launch profiles | Available | Per-profile mutable state, Keychain identity, origin, overlays, and build library |
 | Explicit `.gwmod` sessions | Available | Compatible format, host-side ZIP/graph validation, double hash validation, ordered runtime |
-| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory/social/completion/camera/trade/UI/merchant/progression/skill-unlock state |
+| Versioned game API | Foundation available | Token-gated v1 read-only map/player/target/party/skillbar/effects/agents/quests/inventory/social/completion/camera/trade/UI/dialog/merchant/progression/skill-unlock state |
 | Overlay framework | Available | Profile-local movable widgets and exact-context hotkeys |
 | Clock, session timer, FPS | Available | Built-in Companion Tools widgets |
 | Target distance/range | Available on certified builds | Bounds-checked companion snapshot |
@@ -44,6 +44,7 @@ The names-only, reproducible comparison is in the
 | Camera and render state | Available on certified builds | Bounded camera mode, agent target, position/look-at vectors, distance, yaw/pitch, raw FOV, and derived render FOV |
 | Trade offer | Available on certified builds | Bounded local status flags, both gold offers, and two 16-item read-only pages with explicit truncation and stale-close normalisation |
 | UI frame inventory | Available on certified builds | 128-frame read-only page with exact array identity, parent back-references, state-bit derivatives, local geometry, full totals, and explicit truncation |
+| NPC dialog identity | Available on certified builds | Passive typed-event observation of numeric body type, agent, up to 64-of-256 button identities/icons/skill IDs, inferred follow-up context, and last selection; no text or action |
 | Merchant item IDs | Available on certified builds | Ordered 128-of-512 numeric WorldContext item-ID page; no window-open, catalog, price, quote, identity, or action claim |
 | Character progression | Available on certified builds | Hard-mode availability, level, experience, four bounded current/earned/maximum faction counters, and current/earned skill points |
 | Character skill availability | Available on certified builds | Separate bounded trainer-visible IDs, character-learned bitmap, and account-unlocked bitmap; no unlock or activation action |
@@ -76,9 +77,9 @@ returns 409 until a specific operation passes certification.
 
 The dependency order for further parity is:
 
-1. certify bounded dialog identity from read-only state or observed typed events;
-2. research WebGL-native texture replacement without patching unknown modules;
-3. certify merchant identity and quote semantics from an independent typed source; and
+1. certify merchant identity and quote semantics from an independent typed source;
+2. certify encoded-text lifetime and decoding before exposing named game state;
+3. research WebGL-native texture replacement without patching unknown modules; and
 4. consider narrowly named, user-triggered actions one at a time.
 
 Large upstream windows should not be ported as one monolith. Each slice needs

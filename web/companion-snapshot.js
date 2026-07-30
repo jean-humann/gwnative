@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 14;
-export const COMPANION_SNAPSHOT_BYTES = 59_776;
+export const COMPANION_SNAPSHOT_ABI = 15;
+export const COMPANION_SNAPSHOT_BYTES = 60_576;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -54,6 +54,7 @@ const FLAGS = Object.freeze({
   merchant: 1 << 15,
   progression: 1 << 16,
   skillUnlocks: 1 << 17,
+  dialog: 1 << 18,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -73,7 +74,8 @@ const KNOWN_FLAGS =
   | FLAGS.ui
   | FLAGS.merchant
   | FLAGS.progression
-  | FLAGS.skillUnlocks;
+  | FLAGS.skillUnlocks
+  | FLAGS.dialog;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -140,6 +142,20 @@ const MAX_SKILL_BITMAP_WORDS = 108;
 const MAX_SKILL_ID = MAX_SKILL_BITMAP_WORDS * 32 - 1;
 const MAX_LEARNABLE_SKILLS = 512;
 const MAX_RAW_LEARNABLE_SKILLS = MAX_SKILL_ID + 1;
+const MAX_DIALOG_BUTTONS = 64;
+const MAX_RAW_DIALOG_BUTTONS = 256;
+const NO_DIALOG_SKILL = 0x0fff_ffff;
+const DIALOG_FLAGS = Object.freeze({
+  active: 1 << 0,
+  bodyObserved: 1 << 1,
+  contextInferred: 1 << 2,
+  buttonsTruncated: 1 << 3,
+});
+const KNOWN_DIALOG_FLAGS =
+  DIALOG_FLAGS.active
+  | DIALOG_FLAGS.bodyObserved
+  | DIALOG_FLAGS.contextInferred
+  | DIALOG_FLAGS.buttonsTruncated;
 const EFFECT_FLAGS = Object.freeze({
   buffsTruncated: 1 << 0,
   effectsTruncated: 1 << 1,
@@ -1494,6 +1510,90 @@ function readSkillUnlocks(view) {
   });
 }
 
+function readDialog(view) {
+  const base = 59_776;
+  const flags = view.getUint32(base, true);
+  const eventSequence = view.getUint32(base + 4, true);
+  const rawBodyType = view.getUint32(base + 8, true);
+  const rawAgentId = view.getUint32(base + 12, true);
+  const rawContextDialogId = view.getUint32(base + 16, true);
+  const rawLastSelectedDialogId = view.getUint32(base + 20, true);
+  const buttonCount = view.getUint32(base + 24, true);
+  const buttonTotal = view.getUint32(base + 28, true);
+  const active = (flags & DIALOG_FLAGS.active) !== 0;
+  const bodyObserved = (flags & DIALOG_FLAGS.bodyObserved) !== 0;
+  const contextInferred = (flags & DIALOG_FLAGS.contextInferred) !== 0;
+  const buttonsTruncated =
+    (flags & DIALOG_FLAGS.buttonsTruncated) !== 0;
+  if (
+    (flags & ~KNOWN_DIALOG_FLAGS) !== 0
+    || buttonCount > MAX_DIALOG_BUTTONS
+    || buttonTotal < buttonCount
+    || buttonTotal > MAX_RAW_DIALOG_BUTTONS
+    || rawAgentId > MAX_AGENT_ID
+    || (contextInferred
+      && (!bodyObserved || rawContextDialogId === 0))
+    || (!contextInferred && rawContextDialogId !== 0)
+    || (!bodyObserved
+      && (rawBodyType !== 0
+        || rawAgentId !== 0
+        || rawContextDialogId !== 0))
+    || (!active
+      && (bodyObserved
+        || contextInferred
+        || buttonsTruncated
+        || buttonCount !== 0
+        || buttonTotal !== 0))
+    || (buttonsTruncated
+      ? buttonCount !== MAX_DIALOG_BUTTONS
+        || buttonTotal <= buttonCount
+      : buttonTotal !== buttonCount)
+  ) {
+    return null;
+  }
+
+  const buttons = [];
+  const dialogIds = new Set();
+  for (let index = 0; index < MAX_DIALOG_BUTTONS; index += 1) {
+    const offset = base + 32 + index * 12;
+    if (index >= buttonCount) {
+      if (!wordsAreZero(view, offset, 12)) return null;
+      continue;
+    }
+    const dialogId = view.getUint32(offset, true);
+    const iconId = view.getUint32(offset + 4, true);
+    const skillId = view.getUint32(offset + 8, true);
+    if (
+      dialogId === 0
+      || dialogIds.has(dialogId)
+      || iconId > 0xff
+      || (skillId > MAX_SKILL_ID && skillId !== NO_DIALOG_SKILL)
+    ) {
+      return null;
+    }
+    dialogIds.add(dialogId);
+    buttons.push(Object.freeze({
+      dialogId,
+      iconId,
+      skillId: skillId === NO_DIALOG_SKILL ? null : skillId,
+    }));
+  }
+  return Object.freeze({
+    active,
+    bodyObserved,
+    contextInferred,
+    eventSequence,
+    bodyType: bodyObserved ? rawBodyType : null,
+    agentId: bodyObserved ? rawAgentId : null,
+    contextDialogId: contextInferred ? rawContextDialogId : null,
+    lastSelectedDialogId:
+      rawLastSelectedDialogId === 0 ? null : rawLastSelectedDialogId,
+    buttonsTruncated,
+    buttonTotal,
+    buttons: Object.freeze(buttons),
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -1722,6 +1822,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const dialogValid = (flags & FLAGS.dialog) !== 0;
+  const dialog = dialogValid ? readDialog(view) : null;
+  if (
+    (dialogValid && dialog === null)
+    || (!dialogValid && !wordsAreZero(view, 59776, 800))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -1749,6 +1857,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(merchant ? { merchant } : {}),
     ...(progression ? { progression } : {}),
     ...(skillUnlocks ? { skillUnlocks } : {}),
+    ...(dialog ? { dialog } : {}),
   });
 }
 

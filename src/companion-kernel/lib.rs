@@ -4,18 +4,19 @@
 //! It is built by `build.rs`, not by Cargo — no `Cargo.toml`, no dependencies,
 //! `no_std`, and a bare `rustc` invocation with `--import-memory` so the linker
 //! leaves `env.memory` to be supplied at instantiation. That memory is the
-//! game's own. Everything below reads it and nothing writes to it except the
-//! two regions the host allocated from the game's allocator and passed to
-//! [`companion_init`].
+//! game's own. The build-time relocation step moves this module's linker stack,
+//! static data and BSS into a dedicated block from the game's allocator.
+//! Everything below reads the client and writes only that private workspace
+//! plus the snapshot and cursor regions passed to [`companion_init`].
 //!
 //! Why a separate module rather than code in the host: what it needs is a read
 //! of game state *at a consistent point in the frame*, and the only such point
 //! is inside the main loop. The host is on the other side of an event loop and
 //! sees memory at arbitrary moments, halfway through the update that moves
 //! every agent. So `crate::wasm::enhancement` clones the client's main loop and
-//! points its export at a dispatcher, the page installs [`companion_tick`] in
-//! the table slot that dispatcher calls, and this module calls the original
-//! loop first and then reads what it just finished writing.
+//! points its export at a dispatcher, the page installs [`companion_dispatch`]
+//! in the table slot both transformed gateways call, and tick dispatch calls
+//! the original loop first before reading what it just finished writing.
 //!
 //! Nothing here can trap. A trap inside the main loop takes the client with it,
 //! so every read is bounds-checked against the current memory size and every
@@ -41,7 +42,7 @@ use core::ptr::{read_volatile, write_volatile};
 const SNAPSHOT_BYTES: u32 = size_of::<Snapshot>() as u32;
 const CONFIG_BYTES: u32 = size_of::<Layout>() as u32;
 const MAGIC: u32 = 0x4254_5747;
-const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 14;
+const ABI_AND_SIZE: u32 = (SNAPSHOT_BYTES << 16) | 15;
 
 const FLAG_READY: u32 = 1 << 0;
 const FLAG_PLAYER_VALID: u32 = 1 << 1;
@@ -61,6 +62,7 @@ const FLAG_UI_VALID: u32 = 1 << 14;
 const FLAG_MERCHANT_VALID: u32 = 1 << 15;
 const FLAG_PROGRESSION_VALID: u32 = 1 << 16;
 const FLAG_SKILL_UNLOCKS_VALID: u32 = 1 << 17;
+const FLAG_DIALOG_VALID: u32 = 1 << 18;
 
 const MAX_PARTY_PLAYERS: usize = 12;
 const MAX_PARTY_HEROES: usize = 12;
@@ -125,10 +127,35 @@ const MAX_LEARNABLE_SKILLS: u32 = 512;
 const MAX_RAW_LEARNABLE_SKILLS: u32 = MAX_SKILL_ID + 1;
 const MAX_SKILL_ARRAY_CAPACITY: u32 = 4_096;
 const SKILL_UNLOCK_LEARNABLE_TRUNCATED: u32 = 1;
+const MAX_DIALOG_BUTTONS: usize = 64;
+const MAX_RAW_DIALOG_BUTTONS: u32 = 256;
+const MAX_DIALOG_OVERFLOW_BUTTONS: usize =
+    MAX_RAW_DIALOG_BUTTONS as usize - MAX_DIALOG_BUTTONS;
+const DIALOG_ACTIVE: u32 = 1 << 0;
+const DIALOG_BODY_OBSERVED: u32 = 1 << 1;
+const DIALOG_CONTEXT_INFERRED: u32 = 1 << 2;
+const DIALOG_BUTTONS_TRUNCATED: u32 = 1 << 3;
+const KNOWN_DIALOG_FLAGS: u32 = DIALOG_ACTIVE
+    | DIALOG_BODY_OBSERVED
+    | DIALOG_CONTEXT_INFERRED
+    | DIALOG_BUTTONS_TRUNCATED;
+// "NPC Dialog", the same stable root-frame hash used by Py4GW's
+// `IsDialogActive`. It gates event state so a stale callback cannot claim that
+// a closed dialog is still visible.
+const NPC_DIALOG_FRAME_HASH: u32 = 3_856_160_816;
+const UI_MESSAGE_DIALOG_BUTTON: u32 = 0x1000_00a3;
+const UI_MESSAGE_DIALOG_BODY: u32 = 0x1000_00a6;
+const UI_MESSAGE_SEND_AGENT_DIALOG: u32 = 0x3000_0014;
+const UI_MESSAGE_SEND_GADGET_DIALOG: u32 = 0x3000_0015;
+const NO_DIALOG_SKILL: u32 = 0x0fff_ffff;
+const DISPATCH_TICK: u32 = 0;
+const DISPATCH_UI_MESSAGE: u32 = 1;
 
 const FEATURE_NATIVE_CURSOR: u32 = 1 << 0;
 const FEATURE_TARGET_READOUT: u32 = 1 << 1;
-const KNOWN_FEATURES: u32 = FEATURE_NATIVE_CURSOR | FEATURE_TARGET_READOUT;
+const FEATURE_DIALOG_EVENTS: u32 = 1 << 2;
+const KNOWN_FEATURES: u32 =
+    FEATURE_NATIVE_CURSOR | FEATURE_TARGET_READOUT | FEATURE_DIALOG_EVENTS;
 
 const CURSOR_BYTES: u32 = size_of::<CursorSnapshot>() as u32;
 const CURSOR_MAGIC: u32 = 0x4354_5747;
@@ -933,6 +960,48 @@ impl SkillUnlockState {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct DialogButton {
+    dialog_id: u32,
+    icon_id: u32,
+    skill_id: u32,
+}
+
+const EMPTY_DIALOG_BUTTON: DialogButton = DialogButton {
+    dialog_id: 0,
+    icon_id: 0,
+    skill_id: 0,
+};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DialogState {
+    flags: u32,
+    event_sequence: u32,
+    body_type: u32,
+    agent_id: u32,
+    context_dialog_id: u32,
+    last_selected_dialog_id: u32,
+    button_count: u32,
+    button_total: u32,
+    buttons: [DialogButton; MAX_DIALOG_BUTTONS],
+}
+
+impl DialogState {
+    const EMPTY: Self = Self {
+        flags: 0,
+        event_sequence: 0,
+        body_type: 0,
+        agent_id: 0,
+        context_dialog_id: 0,
+        last_selected_dialog_id: 0,
+        button_count: 0,
+        button_total: 0,
+        buttons: [EMPTY_DIALOG_BUTTON; MAX_DIALOG_BUTTONS],
+    };
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Snapshot {
     magic: u32,
     abi_and_size: u32,
@@ -1016,6 +1085,7 @@ struct Snapshot {
     merchant: MerchantState,
     progression: ProgressionState,
     skill_unlocks: SkillUnlockState,
+    dialog: DialogState,
 }
 
 // Separate bounded region: the cursor bitmap is far too large to live in the
@@ -1037,7 +1107,7 @@ struct CursorSnapshot {
 }
 
 const _: [(); 928] = [(); size_of::<Layout>()];
-const _: [(); 59776] = [(); size_of::<Snapshot>()];
+const _: [(); 60576] = [(); size_of::<Snapshot>()];
 const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 static mut SNAPSHOT_PTR: u32 = 0;
@@ -1050,6 +1120,12 @@ static mut CURSOR_PTR: u32 = 0;
 static mut CURSOR_SEQUENCE: u32 = 0;
 static mut CURSOR_GENERATION: u32 = 0;
 static mut CURSOR_PUBLISHED: CursorPublished = CursorPublished::EMPTY;
+static mut DIALOG_STATE: DialogState = DialogState::EMPTY;
+static mut DIALOG_OVERFLOW_BUTTON_IDS: [u32; MAX_DIALOG_OVERFLOW_BUTTONS] =
+    [0; MAX_DIALOG_OVERFLOW_BUTTONS];
+static mut DIALOG_PENDING_CONTEXT_ID: u32 = 0;
+static mut DIALOG_PENDING_AGENT_ID: u32 = 0;
+static mut DIALOG_MAP_ID: u32 = 0;
 
 #[link(wasm_import_module = "game")]
 extern "C" {
@@ -1119,6 +1195,200 @@ unsafe fn read_f32(address: u32) -> Option<f32> {
 unsafe fn pointer(address: u32, required_bytes: u32) -> Option<u32> {
     let value = unsafe { read_u32(address)? };
     (value & 3 == 0 && contains(value, required_bytes)).then_some(value)
+}
+
+unsafe fn reset_dialog_active() {
+    let previous = unsafe { read_volatile(&raw const DIALOG_STATE) };
+    let next = DialogState {
+        event_sequence: previous.event_sequence,
+        last_selected_dialog_id: previous.last_selected_dialog_id,
+        ..DialogState::EMPTY
+    };
+    unsafe {
+        write_volatile(&raw mut DIALOG_STATE, next);
+        clear_dialog_overflow();
+        DIALOG_PENDING_CONTEXT_ID = 0;
+        DIALOG_PENDING_AGENT_ID = 0;
+    }
+}
+
+unsafe fn reset_dialog_all() {
+    unsafe {
+        write_volatile(&raw mut DIALOG_STATE, DialogState::EMPTY);
+        clear_dialog_overflow();
+        DIALOG_PENDING_CONTEXT_ID = 0;
+        DIALOG_PENDING_AGENT_ID = 0;
+        DIALOG_MAP_ID = 0;
+    }
+}
+
+unsafe fn clear_dialog_overflow() {
+    let ids = (&raw mut DIALOG_OVERFLOW_BUTTON_IDS).cast::<u32>();
+    for index in 0..MAX_DIALOG_OVERFLOW_BUTTONS {
+        unsafe { write_volatile(ids.add(index), 0) };
+    }
+}
+
+unsafe fn dialog_overflow_id(index: usize) -> u32 {
+    let ids = (&raw const DIALOG_OVERFLOW_BUTTON_IDS).cast::<u32>();
+    unsafe { read_volatile(ids.add(index)) }
+}
+
+unsafe fn set_dialog_overflow_id(index: usize, dialog_id: u32) {
+    let ids = (&raw mut DIALOG_OVERFLOW_BUTTON_IDS).cast::<u32>();
+    unsafe { write_volatile(ids.add(index), dialog_id) };
+}
+
+unsafe fn dialog_event_map_id() -> Option<u32> {
+    let layout = unsafe { read_volatile(&raw const LAYOUT) };
+    let contexts = unsafe { pointer(layout.context_root, 28)? };
+    let game_slot = indexed(contexts, layout.game_context_slot, 4)?;
+    let game = unsafe { pointer(game_slot, 0x50)? };
+    let character = offset(game, layout.character_context)
+        .and_then(|address| unsafe { pointer(address, 0x2b0) })?;
+    let map_id =
+        offset(character, layout.current_map_id).and_then(|at| unsafe {
+            read_u32(at)
+        })?;
+    (1..=2_000).contains(&map_id).then_some(map_id)
+}
+
+unsafe fn observe_dialog_body(payload: u32) {
+    if payload & 3 != 0 || !contains(payload, 12) {
+        return;
+    }
+    let Some(body_type) = (unsafe { read_u32(payload) }) else {
+        return;
+    };
+    let Some(agent_id) = offset(payload, 4).and_then(|at| unsafe { read_u32(at) })
+    else {
+        return;
+    };
+    if agent_id > 4_095 {
+        return;
+    }
+
+    let previous = unsafe { read_volatile(&raw const DIALOG_STATE) };
+    let same_agent = unsafe {
+        DIALOG_PENDING_AGENT_ID == 0 || DIALOG_PENDING_AGENT_ID == agent_id
+    };
+    let context_dialog_id = unsafe {
+        if DIALOG_PENDING_CONTEXT_ID != 0 && same_agent {
+            DIALOG_PENDING_CONTEXT_ID
+        } else {
+            0
+        }
+    };
+    let mut next = DialogState {
+        flags: DIALOG_BODY_OBSERVED,
+        event_sequence: previous.event_sequence.wrapping_add(1),
+        body_type,
+        agent_id,
+        context_dialog_id,
+        last_selected_dialog_id: previous.last_selected_dialog_id,
+        ..DialogState::EMPTY
+    };
+    if context_dialog_id != 0 {
+        next.flags |= DIALOG_CONTEXT_INFERRED;
+    }
+    unsafe {
+        clear_dialog_overflow();
+        write_volatile(&raw mut DIALOG_STATE, next);
+        DIALOG_PENDING_CONTEXT_ID = 0;
+        DIALOG_PENDING_AGENT_ID = 0;
+    }
+}
+
+fn valid_dialog_skill(skill_id: u32) -> bool {
+    skill_id <= MAX_SKILL_ID || skill_id == NO_DIALOG_SKILL
+}
+
+unsafe fn observe_dialog_button(payload: u32) {
+    if payload & 3 != 0 || !contains(payload, 16) {
+        return;
+    }
+    let Some(icon_id) = (unsafe { read_u32(payload) }) else {
+        return;
+    };
+    let Some(dialog_id) =
+        offset(payload, 8).and_then(|at| unsafe { read_u32(at) })
+    else {
+        return;
+    };
+    let Some(skill_id) =
+        offset(payload, 12).and_then(|at| unsafe { read_u32(at) })
+    else {
+        return;
+    };
+    if icon_id > u8::MAX as u32
+        || dialog_id == 0
+        || !valid_dialog_skill(skill_id)
+    {
+        return;
+    }
+
+    let mut state = unsafe { read_volatile(&raw const DIALOG_STATE) };
+    let count = state.button_count.min(MAX_DIALOG_BUTTONS as u32) as usize;
+    for index in 0..count {
+        if state.buttons[index].dialog_id == dialog_id {
+            state.buttons[index] = DialogButton {
+                dialog_id,
+                icon_id,
+                skill_id,
+            };
+            state.event_sequence = state.event_sequence.wrapping_add(1);
+            unsafe { write_volatile(&raw mut DIALOG_STATE, state) };
+            return;
+        }
+    }
+
+    if count < MAX_DIALOG_BUTTONS {
+        state.buttons[count] = DialogButton {
+            dialog_id,
+            icon_id,
+            skill_id,
+        };
+        state.button_count = state.button_count.saturating_add(1);
+        state.button_total = state.button_total.saturating_add(1);
+    } else {
+        state.flags |= DIALOG_BUTTONS_TRUNCATED;
+        let overflow_count = state
+            .button_total
+            .saturating_sub(MAX_DIALOG_BUTTONS as u32)
+            .min(MAX_DIALOG_OVERFLOW_BUTTONS as u32)
+            as usize;
+        for index in 0..overflow_count {
+            if unsafe { dialog_overflow_id(index) } == dialog_id {
+                state.event_sequence = state.event_sequence.wrapping_add(1);
+                unsafe { write_volatile(&raw mut DIALOG_STATE, state) };
+                return;
+            }
+        }
+        if overflow_count < MAX_DIALOG_OVERFLOW_BUTTONS {
+            unsafe { set_dialog_overflow_id(overflow_count, dialog_id) };
+            state.button_total = state.button_total.saturating_add(1);
+        }
+    }
+    state.event_sequence = state.event_sequence.wrapping_add(1);
+    unsafe { write_volatile(&raw mut DIALOG_STATE, state) };
+}
+
+unsafe fn observe_dialog_selection(dialog_id: u32) {
+    if dialog_id == 0 {
+        return;
+    }
+    let mut state = unsafe { read_volatile(&raw const DIALOG_STATE) };
+    state.last_selected_dialog_id = dialog_id;
+    state.event_sequence = state.event_sequence.wrapping_add(1);
+    unsafe {
+        DIALOG_PENDING_CONTEXT_ID = dialog_id;
+        DIALOG_PENDING_AGENT_ID = if state.flags & DIALOG_BODY_OBSERVED != 0 {
+            state.agent_id
+        } else {
+            0
+        };
+        write_volatile(&raw mut DIALOG_STATE, state);
+    }
 }
 
 fn finite_position(value: f32) -> bool {
@@ -3772,7 +4042,7 @@ unsafe fn publish_ui(
     snapshot: *mut Snapshot,
     layout: Layout,
     source: UiSource,
-) -> bool {
+) -> UiPublishResult {
     let frames = source.frames;
     let mut valid = frames.size <= MAX_RAW_UI_FRAMES
         && (frames.size == 0
@@ -3784,6 +4054,7 @@ unsafe fn publish_ui(
     let mut frame_total = 0u32;
     let mut created_total = 0u32;
     let mut visible_total = 0u32;
+    let mut npc_dialog_active = false;
 
     if valid {
         for frame_id in 0..frames.size {
@@ -3809,6 +4080,13 @@ unsafe fn publish_ui(
                     & (UI_FRAME_CREATED | UI_FRAME_DESTROYING | UI_FRAME_HIDDEN)
                     == UI_FRAME_CREATED,
             );
+            if frame.frame_hash == NPC_DIALOG_FRAME_HASH
+                && frame.frame_state
+                    & (UI_FRAME_CREATED | UI_FRAME_DESTROYING | UI_FRAME_HIDDEN)
+                    == UI_FRAME_CREATED
+            {
+                npc_dialog_active = true;
+            }
             if frame_count < MAX_UI_FRAMES {
                 unsafe {
                     write_volatile(&mut (*snapshot).ui.frames[frame_count], frame);
@@ -3823,6 +4101,7 @@ unsafe fn publish_ui(
         frame_total = 0;
         created_total = 0;
         visible_total = 0;
+        npc_dialog_active = false;
     }
     for index in frame_count..MAX_UI_FRAMES {
         unsafe {
@@ -3842,7 +4121,76 @@ unsafe fn publish_ui(
         write_volatile(&mut (*snapshot).ui.created_total, created_total);
         write_volatile(&mut (*snapshot).ui.visible_total, visible_total);
     }
-    valid
+    UiPublishResult {
+        valid,
+        npc_dialog_active,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UiPublishResult {
+    valid: bool,
+    npc_dialog_active: bool,
+}
+
+unsafe fn publish_dialog(snapshot: *mut Snapshot, active: bool) -> bool {
+    if !active {
+        unsafe { reset_dialog_active() };
+    }
+    let mut state = unsafe { read_volatile(&raw const DIALOG_STATE) };
+    if active {
+        state.flags |= DIALOG_ACTIVE;
+    }
+
+    let count = state.button_count as usize;
+    let mut valid = state.flags & !KNOWN_DIALOG_FLAGS == 0
+        && count <= MAX_DIALOG_BUTTONS
+        && state.button_total >= state.button_count
+        && state.button_total <= MAX_RAW_DIALOG_BUTTONS
+        && state.agent_id <= 4_095
+        && (state.flags & DIALOG_CONTEXT_INFERRED == 0
+            || (state.flags & DIALOG_BODY_OBSERVED != 0
+                && state.context_dialog_id != 0))
+        && (state.flags & DIALOG_BODY_OBSERVED != 0
+            || (state.body_type == 0
+                && state.agent_id == 0
+                && state.context_dialog_id == 0))
+        && if state.flags & DIALOG_BUTTONS_TRUNCATED != 0 {
+            count == MAX_DIALOG_BUTTONS
+                && state.button_total > state.button_count
+        } else {
+            state.button_total == state.button_count
+        };
+    for index in 0..count {
+        let button = state.buttons[index];
+        valid &= button.dialog_id != 0
+            && button.icon_id <= u8::MAX as u32
+            && valid_dialog_skill(button.skill_id);
+        for previous in 0..index {
+            valid &= state.buttons[previous].dialog_id != button.dialog_id;
+        }
+    }
+    if !valid {
+        unsafe {
+            reset_dialog_all();
+            write_volatile(&mut (*snapshot).dialog, DialogState::EMPTY);
+        }
+        return false;
+    }
+    for index in count..MAX_DIALOG_BUTTONS {
+        valid &= state.buttons[index].dialog_id == 0
+            && state.buttons[index].icon_id == 0
+            && state.buttons[index].skill_id == 0;
+    }
+    if !valid {
+        unsafe {
+            reset_dialog_all();
+            write_volatile(&mut (*snapshot).dialog, DialogState::EMPTY);
+        }
+        return false;
+    }
+    unsafe { write_volatile(&mut (*snapshot).dialog, state) };
+    true
 }
 
 unsafe fn publish_merchant(
@@ -4027,8 +4375,21 @@ unsafe fn publish(mut state: State, layout: Layout) {
         if !publish_trade(snapshot, layout, state.trade) {
             state.flags &= !FLAG_TRADE_VALID;
         }
-        if !publish_ui(snapshot, layout, state.ui) {
+        let ui_result = publish_ui(snapshot, layout, state.ui);
+        if !ui_result.valid {
             state.flags &= !FLAG_UI_VALID;
+        }
+        if FEATURES & FEATURE_DIALOG_EVENTS != 0
+            && state.flags & FLAG_UI_VALID != 0
+            && publish_dialog(snapshot, ui_result.npc_dialog_active)
+        {
+            state.flags |= FLAG_DIALOG_VALID;
+        } else {
+            state.flags &= !FLAG_DIALOG_VALID;
+            write_volatile(&mut (*snapshot).dialog, DialogState::EMPTY);
+            if FEATURES & FEATURE_DIALOG_EVENTS != 0 {
+                reset_dialog_all();
+            }
         }
         if !publish_merchant(snapshot, state.merchant) {
             state.flags &= !FLAG_MERCHANT_VALID;
@@ -4235,6 +4596,8 @@ pub unsafe extern "C" fn companion_init(
 ) -> u32 {
     if features == 0
         || features & !KNOWN_FEATURES != 0
+        || (features & FEATURE_DIALOG_EVENTS != 0
+            && features & FEATURE_TARGET_READOUT == 0)
         || config_size != CONFIG_BYTES
         || config_ptr & 3 != 0
         || !contains(config_ptr, config_size)
@@ -4264,6 +4627,7 @@ pub unsafe extern "C" fn companion_init(
         CURSOR_SEQUENCE = 0;
         CURSOR_GENERATION = 0;
         CURSOR_PUBLISHED = CursorPublished::EMPTY;
+        reset_dialog_all();
         if features & FEATURE_TARGET_READOUT != 0 {
             publish(State::empty(), LAYOUT);
         }
@@ -4275,8 +4639,35 @@ pub unsafe extern "C" fn companion_init(
     1
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn companion_tick(context: u32) {
+/// Observe one typed UI message after the certified client gateway has
+/// completed. The exact-build transform forwards the gateway's three scalar
+/// arguments unchanged; only the four dialog message IDs below are accepted.
+/// Every pointer is bounded before being read, no text pointer is followed,
+/// and this function never sends or blocks a game message.
+unsafe fn companion_ui_message(message_id: u32, wparam: u32, _lparam: u32) {
+    unsafe {
+        if !INITIALIZED || FEATURES & FEATURE_DIALOG_EVENTS == 0 {
+            return;
+        }
+        let Some(map_id) = dialog_event_map_id() else {
+            return;
+        };
+        if DIALOG_MAP_ID != 0 && DIALOG_MAP_ID != map_id {
+            reset_dialog_all();
+        }
+        DIALOG_MAP_ID = map_id;
+        match message_id {
+            UI_MESSAGE_DIALOG_BODY => observe_dialog_body(wparam),
+            UI_MESSAGE_DIALOG_BUTTON => observe_dialog_button(wparam),
+            UI_MESSAGE_SEND_AGENT_DIALOG | UI_MESSAGE_SEND_GADGET_DIALOG => {
+                observe_dialog_selection(wparam);
+            }
+            _ => {}
+        }
+    }
+}
+
+unsafe fn companion_tick(context: u32) {
     unsafe {
         tick_original(context);
         if !INITIALIZED {
@@ -4284,10 +4675,38 @@ pub unsafe extern "C" fn companion_tick(context: u32) {
         }
         if FEATURES & FEATURE_TARGET_READOUT != 0 {
             TICK_COUNT = TICK_COUNT.wrapping_add(1);
-            publish(collect(LAYOUT), LAYOUT);
+            let state = collect(LAYOUT);
+            if state.flags & FLAG_LOADING != 0 {
+                reset_dialog_all();
+            } else if state.flags & FLAG_READY != 0 {
+                if DIALOG_MAP_ID != 0 && DIALOG_MAP_ID != state.map_id {
+                    reset_dialog_all();
+                }
+                DIALOG_MAP_ID = state.map_id;
+            }
+            publish(state, LAYOUT);
         }
         if FEATURES & FEATURE_NATIVE_CURSOR != 0 {
             tick_cursor(LAYOUT);
+        }
+    }
+}
+
+/// The single typed entry installed in the client's only empty function-table
+/// slot. The exact-build transform supplies a separate kind word, so a game
+/// UI-message ID can never be mistaken for a tick. Unknown kinds are inert.
+#[no_mangle]
+pub unsafe extern "C" fn companion_dispatch(
+    kind: u32,
+    first: u32,
+    second: u32,
+    third: u32,
+) {
+    unsafe {
+        match kind {
+            DISPATCH_TICK => companion_tick(first),
+            DISPATCH_UI_MESSAGE => companion_ui_message(first, second, third),
+            _ => {}
         }
     }
 }

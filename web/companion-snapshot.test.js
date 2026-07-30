@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 14;
+const SNAPSHOT_ABI = 15;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -49,6 +49,7 @@ const FLAG_UI = 1 << 14;
 const FLAG_MERCHANT = 1 << 15;
 const FLAG_PROGRESSION = 1 << 16;
 const FLAG_SKILL_UNLOCKS = 1 << 17;
+const FLAG_DIALOG = 1 << 18;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -129,7 +130,8 @@ function domainSnapshot() {
       | FLAG_UI
       | FLAG_MERCHANT
       | FLAG_PROGRESSION
-      | FLAG_SKILL_UNLOCKS,
+      | FLAG_SKILL_UNLOCKS
+      | FLAG_DIALOG,
   });
   const view = new DataView(buffer);
   view.setUint32(64, 3, true);
@@ -338,6 +340,18 @@ function domainSnapshot() {
   view.setUint32(58924, 1 << 4, true);
   view.setUint32(59344, 1 << 3, true);
   view.setUint32(59368, 1 << 8, true);
+  view.setUint32(59776, 0b11, true);
+  view.setUint32(59780, 7, true);
+  view.setUint32(59784, 2, true);
+  view.setUint32(59788, 42, true);
+  view.setUint32(59800, 2, true);
+  view.setUint32(59804, 2, true);
+  view.setUint32(59808, 0x800001, true);
+  view.setUint32(59812, 4, true);
+  view.setUint32(59816, 0x0fff_ffff, true);
+  view.setUint32(59820, 0x800002, true);
+  view.setUint32(59824, 5, true);
+  view.setUint32(59828, 111, true);
   return buffer;
 }
 
@@ -647,6 +661,22 @@ describe('companion snapshot', () => {
       characterLearnedSkillIds: [3, 100],
       accountUnlockedSkillIds: [3, 200],
     });
+    assert.deepEqual(state.dialog, {
+      active: true,
+      bodyObserved: true,
+      contextInferred: false,
+      eventSequence: 7,
+      bodyType: 2,
+      agentId: 42,
+      contextDialogId: null,
+      lastSelectedDialogId: null,
+      buttonsTruncated: false,
+      buttonTotal: 2,
+      buttons: [
+        { dialogId: 0x800001, iconId: 4, skillId: null },
+        { dialogId: 0x800002, iconId: 5, skillId: 111 },
+      ],
+    });
     assert.ok(Object.isFrozen(state.party.players));
     assert.ok(Object.isFrozen(state.skillbar.skills));
     assert.ok(Object.isFrozen(state.effects.effects));
@@ -675,6 +705,8 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state.skillUnlocks.characterLearnedSkillIds));
     assert.ok(Object.isFrozen(state.skillUnlocks.accountUnlockedSkillIds));
     assert.ok(Object.isFrozen(state.skillUnlocks));
+    assert.ok(Object.isFrozen(state.dialog.buttons));
+    assert.ok(Object.isFrozen(state.dialog));
   });
 
   it('normalizes the GWCA no-map-marker sentinel', () => {
@@ -1009,6 +1041,58 @@ describe('companion snapshot', () => {
       true,
     );
     assert.equal(readCompanionSnapshot(absentSkillUnlocks, 0).reason, 'corrupt');
+
+    const unknownDialogFlag = domainSnapshot();
+    new DataView(unknownDialogFlag).setUint32(59776, 0x13, true);
+    assert.equal(readCompanionSnapshot(unknownDialogFlag, 0).reason, 'corrupt');
+
+    const duplicateDialogButton = domainSnapshot();
+    new DataView(duplicateDialogButton).setUint32(59820, 0x800001, true);
+    assert.equal(
+      readCompanionSnapshot(duplicateDialogButton, 0).reason,
+      'corrupt',
+    );
+
+    const staleClosedDialog = domainSnapshot();
+    new DataView(staleClosedDialog).setUint32(59776, 0, true);
+    assert.equal(readCompanionSnapshot(staleClosedDialog, 0).reason, 'corrupt');
+
+    const invalidDialogSkill = domainSnapshot();
+    new DataView(invalidDialogSkill).setUint32(59828, 3_456, true);
+    assert.equal(readCompanionSnapshot(invalidDialogSkill, 0).reason, 'corrupt');
+
+    const absentDialog = domainSnapshot();
+    const absentDialogView = new DataView(absentDialog);
+    absentDialogView.setUint32(
+      12,
+      absentDialogView.getUint32(12, true) & ~FLAG_DIALOG,
+      true,
+    );
+    assert.equal(readCompanionSnapshot(absentDialog, 0).reason, 'corrupt');
+  });
+
+  it('retains only the last selection after a dialog closes', () => {
+    const buffer = domainSnapshot();
+    const view = new DataView(buffer);
+    for (let offset = 59776; offset < 60576; offset += 4) {
+      view.setUint32(offset, 0, true);
+    }
+    view.setUint32(59780, 9, true);
+    view.setUint32(59796, 0x800001, true);
+
+    assert.deepEqual(readCompanionSnapshot(buffer, 0).dialog, {
+      active: false,
+      bodyObserved: false,
+      contextInferred: false,
+      eventSequence: 9,
+      bodyType: null,
+      agentId: null,
+      contextDialogId: null,
+      lastSelectedDialogId: 0x800001,
+      buttonsTruncated: false,
+      buttonTotal: 0,
+      buttons: [],
+    });
   });
 
   // The seqlock, which is the whole reason this can be read on the animation
@@ -1028,7 +1112,7 @@ describe('companion snapshot', () => {
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
       // A flag this build has no name for is either a newer companion or not a
       // companion at all.
-      { flags: FLAG_READY | FLAG_PLAYER | (1 << 18) },
+      { flags: FLAG_READY | FLAG_PLAYER | (1 << 19) },
     ]) {
       assert.equal(read(overrides).reason, 'snapshot', JSON.stringify(overrides));
     }

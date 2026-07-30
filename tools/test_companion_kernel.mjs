@@ -12,11 +12,12 @@ import {
   COMPANION_SNAPSHOT_BYTES,
   readCompanionSnapshot,
 } from '../web/companion-snapshot.js';
+import { decodeCompanionManifest } from '../web/enhancement-manifest.js';
 
 const kernelPath = process.env.GWNATIVE_COMPANION_KERNEL;
 assert(kernelPath, 'GWNATIVE_COMPANION_KERNEL is not set');
 
-const memory = new WebAssembly.Memory({ initial: 32 });
+const memory = new WebAssembly.Memory({ initial: 64 });
 const view = new DataView(memory.buffer);
 const u32 = (address, value) => view.setUint32(address, value, true);
 const u16 = (address, value) => view.setUint16(address, value, true);
@@ -62,8 +63,12 @@ const account = 0x16c000;
 const learnableSkills = 0x16d000;
 const learnedSkills = 0x16e000;
 const accountUnlockedSkills = 0x16f000;
+const dialogBody = 0x170000;
+const dialogButtonA = 0x170010;
+const dialogButtonB = 0x170020;
 const snapshot = 0x180000;
 const config = 0x1a0000;
+const kernelWorkspace = 0x200000;
 
 // Context and current-map invariants.
 u32(contextRoot, contexts);
@@ -331,7 +336,7 @@ u32(framePointers, rootFrame);
 u32(framePointers + 4, childFrame);
 u32(rootFrame + 0xbc, 0);
 u32(rootFrame + 0x128, 0);
-u32(rootFrame + 0x134, 0x1111);
+u32(rootFrame + 0x134, 3_856_160_816);
 u32(rootFrame + 0x18, 3);
 u32(rootFrame + 0x20, 4);
 u32(rootFrame + 0x24, 5);
@@ -553,15 +558,88 @@ Object.assign(layout, {
 });
 new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
-const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
-  env: { memory },
+const kernelModule = await WebAssembly.compile(await readFile(kernelPath));
+const kernelManifest = decodeCompanionManifest(kernelModule);
+assert(kernelManifest, 'the compiled companion has no relocation manifest');
+const fixedClientBytes = new Uint8Array(memory.buffer, 0x100000, 4096);
+fixedClientBytes.fill(0xa5);
+const workspaceGuardBefore = new Uint8Array(
+  memory.buffer,
+  kernelWorkspace - 64,
+  64,
+);
+const workspaceGuardAfter = new Uint8Array(
+  memory.buffer,
+  kernelWorkspace + kernelManifest.workspaceBytes,
+  64,
+);
+workspaceGuardBefore.fill(0x5a);
+workspaceGuardAfter.fill(0x5a);
+new Uint8Array(
+  memory.buffer,
+  kernelWorkspace,
+  kernelManifest.workspaceBytes,
+).fill(0);
+const kernel = await WebAssembly.instantiate(kernelModule, {
+  env: {
+    memory,
+    __stack_pointer: new WebAssembly.Global(
+      { value: 'i32', mutable: true },
+      kernelWorkspace + kernelManifest.stackBytes,
+    ),
+    __memory_base: new WebAssembly.Global(
+      { value: 'i32', mutable: false },
+      kernelWorkspace,
+    ),
+    __data_base: new WebAssembly.Global(
+      { value: 'i32', mutable: false },
+      kernelWorkspace + kernelManifest.dataOffset,
+    ),
+  },
   game: { enhancement_tick_original: () => {} },
 });
-const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
+const overwrittenClientOffsets = Array.from(fixedClientBytes.entries())
+  .filter(([, value]) => value !== 0xa5)
+  .map(([offset, value]) => ({ offset, value }));
+assert.deepEqual(
+  overwrittenClientOffsets,
+  [],
+  'instantiating the companion overwrote fixed client memory',
+);
+const {
+  companion_init: init,
+  companion_dispatch: dispatch,
+} = kernel.exports;
+const tick = (context) => dispatch(0, context, 0, 0);
+const uiMessage = (messageId, wparam, lparam) => (
+  dispatch(1, messageId, wparam, lparam)
+);
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 928, 0, 0, 1 << 1),
+  init(
+    snapshot,
+    COMPANION_SNAPSHOT_BYTES,
+    config,
+    928,
+    0,
+    0,
+    (1 << 1) | (1 << 2),
+  ),
   1,
 );
+u32(dialogBody, 2);
+u32(dialogBody + 4, 1);
+u32(dialogBody + 8, 0xdead_beef);
+u32(dialogButtonA, 4);
+u32(dialogButtonA + 4, 0xdead_beef);
+u32(dialogButtonA + 8, 0x800001);
+u32(dialogButtonA + 12, 0x0fff_ffff);
+u32(dialogButtonB, 5);
+u32(dialogButtonB + 4, 0xdead_beef);
+u32(dialogButtonB + 8, 0x800002);
+u32(dialogButtonB + 12, 111);
+uiMessage(0x100000a6, dialogBody, 0);
+uiMessage(0x100000a3, dialogButtonA, 0);
+uiMessage(0x100000a3, dialogButtonB, 0);
 tick(0);
 
 const state = readCompanionSnapshot(memory.buffer, snapshot);
@@ -599,6 +677,22 @@ assert.deepEqual(state.skillUnlocks, {
   learnableSkillIds: [111, 222],
   characterLearnedSkillIds: [3, 100],
   accountUnlockedSkillIds: [3, 200],
+});
+assert.deepEqual(state.dialog, {
+  active: true,
+  bodyObserved: true,
+  contextInferred: false,
+  eventSequence: 3,
+  bodyType: 2,
+  agentId: 1,
+  contextDialogId: null,
+  lastSelectedDialogId: null,
+  buttonsTruncated: false,
+  buttonTotal: 2,
+  buttons: [
+    { dialogId: 0x800001, iconId: 4, skillId: null },
+    { dialogId: 0x800002, iconId: 5, skillId: 111 },
+  ],
 });
 assert.equal(state.agents.agents[0].isCasting, true);
 assert.equal(state.quests.activeQuestId, 44);
@@ -688,7 +782,7 @@ assert.deepEqual(
       frameId: 0,
       parentId: null,
       childOffsetId: 0,
-      frameHash: 0x1111,
+      frameHash: 3_856_160_816,
       locallyVisible: true,
     },
     {
@@ -699,6 +793,82 @@ assert.deepEqual(
       locallyVisible: false,
     },
   ],
+);
+
+// A selected option becomes context only when the next body arrives for the
+// same agent. This mirrors Py4GW's explicit non-authoritative inference while
+// keeping the selected ID itself separately observable.
+uiMessage(0x30000014, 0x800001, 0);
+u32(dialogBody, 3);
+uiMessage(0x100000a6, dialogBody, 0);
+uiMessage(0x100000a3, dialogButtonB, 0);
+tick(0);
+const continuedDialog = readCompanionSnapshot(memory.buffer, snapshot);
+assert.deepEqual(continuedDialog.dialog, {
+  active: true,
+  bodyObserved: true,
+  contextInferred: true,
+  eventSequence: 6,
+  bodyType: 3,
+  agentId: 1,
+  contextDialogId: 0x800001,
+  lastSelectedDialogId: 0x800001,
+  buttonsTruncated: false,
+  buttonTotal: 1,
+  buttons: [{ dialogId: 0x800002, iconId: 5, skillId: 111 }],
+});
+
+// The frame is authoritative for lifecycle. Closing it drops the transient
+// body/buttons while retaining Py4GW's separate last-selected accessor.
+u32(rootFrame + 0x18c, 0x204);
+tick(0);
+const closedDialog = readCompanionSnapshot(memory.buffer, snapshot);
+assert.deepEqual(closedDialog.dialog, {
+  active: false,
+  bodyObserved: false,
+  contextInferred: false,
+  eventSequence: 6,
+  bodyType: null,
+  agentId: null,
+  contextDialogId: null,
+  lastSelectedDialogId: 0x800001,
+  buttonsTruncated: false,
+  buttonTotal: 0,
+  buttons: [],
+});
+
+// A selection that closes before its follow-up body cannot leak into the next
+// dialog. The overflow identity set also keeps repeated messages beyond the
+// published 64-button prefix from inflating the explicit total.
+u32(rootFrame + 0x18c, 0x4);
+u32(dialogBody, 4);
+uiMessage(0x100000a6, dialogBody, 0);
+uiMessage(0x30000014, 0x800003, 0);
+u32(rootFrame + 0x18c, 0x204);
+tick(0);
+u32(rootFrame + 0x18c, 0x4);
+uiMessage(0x100000a6, dialogBody, 0);
+for (let index = 0; index < 65; index += 1) {
+  u32(dialogButtonA + 8, 0x810000 + index);
+  uiMessage(0x100000a3, dialogButtonA, 0);
+}
+tick(0);
+const boundedDialog = readCompanionSnapshot(memory.buffer, snapshot).dialog;
+assert.equal(boundedDialog.active, true);
+assert.equal(boundedDialog.contextInferred, false);
+assert.equal(boundedDialog.contextDialogId, null);
+assert.equal(boundedDialog.lastSelectedDialogId, 0x800003);
+assert.equal(boundedDialog.buttonsTruncated, true);
+assert.equal(boundedDialog.buttonTotal, 65);
+assert.equal(boundedDialog.buttons.length, 64);
+assert.equal(boundedDialog.buttons[0].dialogId, 0x810000);
+assert.equal(boundedDialog.buttons[63].dialogId, 0x81003f);
+u32(dialogButtonA + 8, 0x810040);
+uiMessage(0x100000a3, dialogButtonA, 0);
+tick(0);
+assert.equal(
+  readCompanionSnapshot(memory.buffer, snapshot).dialog.buttonTotal,
+  65,
 );
 
 u32(trade + 0x18, 17);
@@ -739,3 +909,12 @@ const guildless = readCompanionSnapshot(memory.buffer, snapshot);
 assert.equal(guildless.status, 'ready');
 assert.equal(guildless.social.guild, null);
 assert.equal(guildless.social.friends.total, 1);
+assert(
+  fixedClientBytes.every((value) => value === 0xa5),
+  'a companion call wrote to the former fixed client span',
+);
+assert(
+  workspaceGuardBefore.every((value) => value === 0x5a)
+    && workspaceGuardAfter.every((value) => value === 0x5a),
+  'the companion wrote outside its allocated workspace',
+);

@@ -197,21 +197,31 @@ back to the unmodified module, preserving playability at the cost of the
 compatibility feature.
 
 When either optional enhancement is enabled, a second certified transform
-clones the client's main-loop function, adds a hook slot and manifest, and
-dispatches through an optional table entry. `build.rs` compiles
+clones the client's main-loop and typed UI-message gateway, adds one hook slot
+and a manifest, and dispatches both paths through the module's only empty table
+entry. The UI path always completes the cloned original first. A fourth
+dispatch word distinguishes ticks from observed UI messages, so the two
+different original signatures can safely share one table function.
+`build.rs` compiles
 `src/companion-kernel/lib.rs` directly as dependency-free `no_std`
 `wasm32-unknown-unknown` code and embeds it in the host.
 
 The companion imports the client's memory, performs bounds-checked read-only
 pointer traversal at a coherent point in the game loop, and publishes fixed
-state and cursor blocks through a seqlock. The page validates the snapshot again
-before rendering it. Installation allocates through the client's own allocator,
-instantiates the companion, fills the table slot, and only then enables the
-hook.
+state and cursor blocks through a seqlock. Importing an existing memory is not
+itself safe: an ordinary wasm-ld module initialises its stack, data, and BSS at
+fixed low addresses. The build therefore links position-independent code and
+certifies a relocation transform that replaces those bases with imports. The
+page validates the embedded workspace manifest, allocates and clears that
+workspace through the client, instantiates the companion entirely inside it,
+and verifies the companion ABI before filling the table slot and enabling the
+hook. No companion data segment or BSS initializer touches a fixed client
+address.
 
 The validated companion state is narrowed into the versioned v1 map, player,
 target, party, skillbar, effects, agent, quest, inventory, social, completion,
-camera, trade, UI-frame, merchant item-ID, and character-progression schema.
+camera, trade, UI-frame, dialog, merchant item-ID, and
+character-progression schema.
 Character skill availability is a separate schema so trainer-visible IDs,
 character-learned bits, and account-unlocked bits cannot be conflated. Large
 agent, quest, effect, bag, item, friend, UI-frame, merchant, and skill pages
@@ -235,8 +245,15 @@ API exposes a trade write.
 UI collection reads the exact-build global frame-array descriptor used by the
 compiled frame lookup routine. Publication rechecks each slot's embedded ID,
 parent back-reference, scalar state, and finite local rectangle while excluding
-labels, callbacks, tooltips, relation lists, dialog payloads, and every UI
+labels, callbacks, tooltips, relation lists, encoded content, and every UI
 write. The 128-record page retains full-array totals and explicit truncation.
+Dialog identity is event-derived instead: the post-dispatch observer accepts
+only four typed body/button/selection message IDs, reads bounded numeric fields,
+and never follows their encoded-text pointers. The NPC Dialog root frame gates
+the published lifecycle; close clears body and buttons while retaining only
+the last selection. Follow-up context is explicitly marked as an inference
+from a selection followed by a body for the same agent. No dialog message is
+blocked, replaced, or sent.
 Merchant collection reads only the independently verified numeric
 `WorldContext::merch_items` array. It validates at most 512 IDs and publishes
 128 with explicit totals and truncation, without inferring a merchant window,
