@@ -22,7 +22,7 @@ states. No guessed offset is read.
 The resulting state covers the numeric player agent and position, map/instance
 identity, current target position/range, bounded party roster, the player’s
 eight-slot skillbar and effects, a bounded map-agent page, and the quest log
-with mission objectives.
+with mission objectives, plus bounded inventory and account-storage summaries.
 
 ## Loopback endpoints
 
@@ -245,6 +245,67 @@ The envelope is revisioned and timestamped:
           "type": 2
         }
       ]
+    },
+    "inventory": {
+      "itemsTruncated": false,
+      "total": 1,
+      "goldCharacter": 1234,
+      "goldStorage": 50000,
+      "storagePanesUnlocked": 4,
+      "bags": [
+        {
+          "bagId": 1,
+          "bagType": 1,
+          "kind": "Inventory",
+          "containerItem": 0,
+          "capacity": 20,
+          "itemCount": 1,
+          "isInventory": true,
+          "isEquipped": false,
+          "isNotCollected": false,
+          "isStorage": false,
+          "isMaterialStorage": false
+        }
+      ],
+      "items": [
+        {
+          "itemId": 500,
+          "agentId": 0,
+          "bagId": 1,
+          "slot": 0,
+          "modelFileId": 123,
+          "type": 9,
+          "typeName": "Usable",
+          "value": 100,
+          "interaction": 17432577,
+          "modelId": 456,
+          "itemFormula": 0,
+          "quantity": 5,
+          "equipped": false,
+          "profession": 255,
+          "customized": true,
+          "materialSalvageable": false,
+          "modifierCount": 2,
+          "dyeTint": 7,
+          "dye1": 2,
+          "dye2": 3,
+          "dye3": 4,
+          "dye4": 5,
+          "isStackable": true,
+          "isInscribable": false,
+          "isIdentified": true,
+          "isTradable": true,
+          "isUsable": true,
+          "isPrefixUpgradable": true,
+          "isSuffixUpgradable": true,
+          "isInscription": false,
+          "isPurple": false,
+          "isGreen": false,
+          "isGold": true,
+          "isInventoryItem": true,
+          "isStorageItem": false
+        }
+      ]
     }
   }
 }
@@ -297,9 +358,28 @@ active ID must appear in the quest list. Mission objectives expose only their
 numeric ID and type flags, not client-owned encoded text. Independent
 truncation flags cover both arrays.
 
+The inventory domain follows the player `ItemContext → Inventory → Bag → Item`
+graph used by GWCA `Item` and PyItem/PyInventory. It publishes every present
+bag among the 22 defined bag IDs and at most 512 occupied slots, ordered by
+`bagId` and zero-based `slot`. `total` is the number of occupied slots across
+all readable bags; `itemsTruncated` distinguishes a complete page from the
+512-record cap. Bag type, index, capacity, occupied count, and every item
+back-reference are rechecked before publication. The sum of bag `itemCount`
+values must equal `total`.
+
+Item records retain numeric identity, agent, model/file, type, value,
+interaction, formula, quantity, profession, customization, material, dye, and
+modifier-count fields. The boolean stackable, inscribable, identified,
+tradable, usable, upgrade, inscription, rarity, inventory, and storage fields
+are exact derivatives of the same interaction and bag words and are checked
+again by Rust. Encoded item names, customization text, modifier words, and
+merchant/trade state are not read in this ABI. Inventory is sensitive account
+state: the loopback token is mandatory, the page publishes no faster than four
+times per second, and the domain has no move/use/equip/salvage/gold action.
+
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account data,
-inventory, chat, encoded quest text, or action surface.
+account identity, chat, encoded game text, or action surface.
 
 Long polling sleeps in the native server until the page publishes a newer
 revision. A consumer can therefore follow live state without a timer repeatedly
@@ -327,7 +407,8 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - player skillbar IDs;
 - player buff/effect counts;
 - map-agent totals;
-- quest and mission-objective counts; and
+- quest and mission-objective counts;
+- inventory, storage, and gold totals; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact

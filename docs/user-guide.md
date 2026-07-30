@@ -109,7 +109,7 @@ Open **View → Companion Tools…** or press **⌘⇧T** for profile-local comp
 tools:
 
 - movable clock, session timer, target/range, frame-rate, party, skillbar,
-  player-effects, map-agent, and quest widgets;
+  player-effects, map-agent, quest, and inventory widgets;
 - overlay layout editing, also toggled with **⌘⇧O**;
 - an opaque-code build and team library with validated JSON import/export; and
 - the current compatibility status of researched feature families.
@@ -118,11 +118,13 @@ Widget layout and the library follow the selected profile. Build codes are
 stored and organised but never applied to the game: the current versioned API
 has no certified write action.
 
-Party, hero, player-skillbar, buff, effect, map-agent, quest-log, and mission
-objective reads are available on recognised client builds. Inventory, map
-completion, chat, and texture features remain labelled as requiring another
-certified layout or further research. Unattended gameplay automation is
-blocked. See
+Party, hero, player-skillbar, buff, effect, map-agent, quest-log, mission
+objective, inventory-bag, item, gold, and account-storage reads are available
+on recognised client builds. Encoded item names and modifier words are not
+exposed, and the inventory widget cannot move, use, equip, salvage, or destroy
+items. Map completion, chat, and texture features remain labelled as requiring
+another certified layout or further research. Unattended gameplay automation
+is blocked. See
 [Feature compatibility](feature-compatibility.md) and
 [Game API and overlays](game-api.md).
 
