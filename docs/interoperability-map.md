@@ -100,7 +100,7 @@ client, not an in-game automation API.
 | --- | --- | --- | --- |
 | Runtime and host services | JSPI host paths and both WASM contracts mapped | Official artifact, image, DNS, socket, login, and storage bridges implemented | Keep callback contract tests generation-pinned |
 | Player and target | GWCA Agent/Player; PyAgent/PyPlayer; native resolvers | Certified IDs, coordinates, target kind, distance, range, and bounded agent summaries | Add names only after encoded-string lifetime validation |
-| Map and instance | GWCA Map; PyMap; native map resolvers | Certified map ID, instance identity, and 128-entry map-agent page | Add mission and map completion state |
+| Map and instance | GWCA Map; PyMap; native map resolvers | Certified map ID, instance identity, 128-entry map-agent page, and six completion bitmaps expanded to sorted map IDs | Add camera and render state |
 | Party and heroes | GWCA Party; PyParty; native party resolvers | Certified bounded roster, flags, IDs, summary widget, and agent-derived profession/health records | Join party members to agent summaries by ID |
 | Skills and effects | GWCA Skillbar/Effect; PySkill/PySkillbar/PyEffects | Certified player slots, adrenaline, recharge, event, disabled mask, cast count, and bounded buff/effect snapshots | Add effect expiry semantics only after live timing validation |
 | Items and inventory | GWCA Item; PyItem/PyInventory; item resolvers | Certified 22-bag/512-item page with location, model/type/value/quantity metadata, gold, storage panes, dye components, modifier counts, and interaction-derived flags | Encoded names and modifier words only after lifetime and size certification |
@@ -129,7 +129,8 @@ A mapped domain reaches the public API only when it has:
 5. an end-to-end observation proving that the client keeps rendering; and
 6. a separate policy decision for every state-changing operation.
 
-The next implementation sequence is map completion, then camera/render state.
+The next implementation sequence is camera/render state, then the remaining
+read-only domains with independently verified layouts.
 Native action bindings,
 packet injection, virtual input, and pathing automation are reference evidence
 only; they are not candidates for bulk exposure.
