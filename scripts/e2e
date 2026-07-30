@@ -550,7 +550,16 @@ def main() -> int:
             if game_description.get("transport", {}).get("longPoll") is not True:
                 raise Failure("the game-state API does not advertise long polling")
             domains = set(game_description.get("state", {}).get("domains", []))
-            if domains != {"player", "map", "target", "party", "skillbar", "effects"}:
+            if domains != {
+                "player",
+                "map",
+                "target",
+                "party",
+                "skillbar",
+                "effects",
+                "agents",
+                "quests",
+            }:
                 raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)
 
@@ -766,6 +775,8 @@ def main() -> int:
             party = state.get("party")
             skillbar = state.get("skillbar")
             effects = state.get("effects")
+            agents = state.get("agents")
+            quests = state.get("quests")
             if not isinstance(party, dict) or not party.get("players"):
                 raise Failure("certified party state did not include the player roster")
             skills = skillbar.get("skills") if isinstance(skillbar, dict) else None
@@ -808,13 +819,71 @@ def main() -> int:
                 != len(active_effects)
             ):
                 raise Failure("certified player effects state is incomplete")
+            map_agents = agents.get("agents") if isinstance(agents, dict) else None
+            if (
+                agents is None
+                or not isinstance(map_agents, list)
+                or not map_agents
+                or len(map_agents) > 128
+                or not isinstance(agents.get("total"), int)
+                or agents.get("total") < len(map_agents)
+                or agents.get("total") > 4_095
+                or agents.get("truncated") not in (True, False)
+                or (agents.get("truncated") and len(map_agents) != 128)
+                or (
+                    not agents.get("truncated")
+                    and agents.get("total") != len(map_agents)
+                )
+                or [agent.get("agentId") for agent in map_agents]
+                != sorted({agent.get("agentId") for agent in map_agents})
+                or not any(
+                    agent.get("agentId") == state.get("playerId")
+                    and agent.get("isLiving") is True
+                    for agent in map_agents
+                )
+            ):
+                raise Failure("certified map-agent state is incomplete")
+            quest_log = quests.get("quests") if isinstance(quests, dict) else None
+            objectives = (
+                quests.get("missionObjectives")
+                if isinstance(quests, dict)
+                else None
+            )
+            if (
+                quests is None
+                or not isinstance(quests.get("activeQuestId"), int)
+                or not 0 <= quests.get("activeQuestId") <= 100_000
+                or quests.get("questsTruncated") not in (True, False)
+                or quests.get("objectivesTruncated") not in (True, False)
+                or not isinstance(quest_log, list)
+                or len(quest_log) > 64
+                or not isinstance(objectives, list)
+                or len(objectives) > 32
+                or (quests.get("questsTruncated") and len(quest_log) != 64)
+                or (
+                    quests.get("objectivesTruncated")
+                    and len(objectives) != 32
+                )
+                or len({quest.get("questId") for quest in quest_log})
+                != len(quest_log)
+                or len(
+                    {
+                        objective.get("objectiveId")
+                        for objective in objectives
+                    }
+                )
+                != len(objectives)
+            ):
+                raise Failure("certified quest state is incomplete")
             print(
-                "[e2e] party, skillbar, and effects API PASS "
+                "[e2e] party, skillbar, effects, agents, and quests API PASS "
                 f"(players={len(party.get('players', []))}, "
                 f"heroes={len(party.get('heroes', []))}, "
                 f"henchmen={len(party.get('henchmen', []))}, "
                 f"populated-skills={sum(skill.get('skillId', 0) > 0 for skill in skills)}, "
-                f"buffs={len(buffs)}, effects={len(active_effects)})"
+                f"buffs={len(buffs)}, effects={len(active_effects)}, "
+                f"agents={len(map_agents)}/{agents.get('total')}, "
+                f"quests={len(quest_log)}, objectives={len(objectives)})"
             )
 
             before = position(ready)
