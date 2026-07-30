@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 7;
-export const COMPANION_SNAPSHOT_BYTES = 48_732;
+export const COMPANION_SNAPSHOT_ABI = 8;
+export const COMPANION_SNAPSHOT_BYTES = 48_784;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -48,6 +48,7 @@ const FLAGS = Object.freeze({
   inventory: 1 << 9,
   social: 1 << 10,
   completion: 1 << 11,
+  camera: 1 << 12,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -61,7 +62,8 @@ const KNOWN_FLAGS =
   | FLAGS.quests
   | FLAGS.inventory
   | FLAGS.social
-  | FLAGS.completion;
+  | FLAGS.completion
+  | FLAGS.camera;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -1002,6 +1004,79 @@ function readCompletion(view) {
   });
 }
 
+function readCamera(view) {
+  const lookAtAgentId = view.getUint32(48732, true);
+  const mode = view.getUint32(48736, true);
+  const yaw = view.getFloat32(48740, true);
+  const pitch = view.getFloat32(48744, true);
+  const distance = view.getFloat32(48748, true);
+  const maxDistance = view.getFloat32(48752, true);
+  const position = Object.freeze({
+    x: view.getFloat32(48756, true),
+    y: view.getFloat32(48760, true),
+    z: view.getFloat32(48764, true),
+  });
+  const lookAt = Object.freeze({
+    x: view.getFloat32(48768, true),
+    y: view.getFloat32(48772, true),
+    z: view.getFloat32(48776, true),
+  });
+  const fieldOfView = view.getFloat32(48780, true);
+  if (
+    lookAtAgentId > MAX_AGENT_ID
+    || mode > 9
+    || !Number.isFinite(yaw)
+    || Math.abs(yaw) > 10
+    || !Number.isFinite(pitch)
+    || pitch < -1.01
+    || pitch > 1.01
+    || !Number.isFinite(distance)
+    || distance < 0
+    || distance > 100_000
+    || !Number.isFinite(maxDistance)
+    || maxDistance < 0
+    || maxDistance > 100_000
+    || !Object.values(position).every(validCoordinate)
+    || !Object.values(lookAt).every(validCoordinate)
+    || !Number.isFinite(fieldOfView)
+    || fieldOfView <= 0
+    || fieldOfView > Math.PI
+  ) {
+    return null;
+  }
+  const tangent = Math.atan2(position.y - lookAt.y, position.x - lookAt.x);
+  const currentYaw = tangent >= 0 ? tangent - Math.PI : tangent + Math.PI;
+  const renderFieldOfView = Math.atan2(
+    1,
+    (5 / 3) / Math.tan(fieldOfView * 0.5),
+  ) * 2;
+  if (!Number.isFinite(currentYaw) || !Number.isFinite(renderFieldOfView)) {
+    return null;
+  }
+  const modeName = mode === 0
+    ? 'Default'
+    : mode === 2
+      ? 'Follow'
+      : mode === 3
+        ? 'Unlocked'
+        : 'Unknown';
+  return Object.freeze({
+    lookAtAgentId,
+    mode,
+    modeName,
+    unlocked: mode === 3,
+    yaw,
+    currentYaw,
+    pitch,
+    distance,
+    maxDistance,
+    position,
+    lookAt,
+    fieldOfView,
+    renderFieldOfView,
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -1182,6 +1257,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const cameraValid = (flags & FLAGS.camera) !== 0;
+  const camera = cameraValid ? readCamera(view) : null;
+  if (
+    (cameraValid && camera === null)
+    || (!cameraValid && !wordsAreZero(view, 48732, 52))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -1203,6 +1286,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(inventory ? { inventory } : {}),
     ...(social ? { social } : {}),
     ...(completion ? { completion } : {}),
+    ...(camera ? { camera } : {}),
   });
 }
 

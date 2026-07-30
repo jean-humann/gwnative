@@ -49,6 +49,7 @@ const guild = 0x15f000;
 const rosterPointers = 0x160000;
 const guildPlayer = 0x161000;
 const completionWords = 0x162000;
+const camera = 0x163000;
 const snapshot = 0x180000;
 const config = 0x18c000;
 
@@ -207,7 +208,21 @@ for (let category = 0; category < completionOffsets.length; category += 1) {
   u32(buffer + Math.floor(mapId / 32) * 4, 2 ** (mapId % 32));
 }
 
-const layout = Array(163).fill(0);
+u32(camera, 1);
+f32(camera + 0x10, 5_000);
+f32(camera + 0x18, 1.25);
+f32(camera + 0x1c, -0.3);
+f32(camera + 0x20, 1_000);
+f32(camera + 0x78, 110);
+f32(camera + 0x7c, -260);
+f32(camera + 0x80, -50);
+f32(camera + 0xa8, 100);
+f32(camera + 0xac, -250);
+f32(camera + 0xb0, 3);
+f32(camera + 0xc0, 1.2);
+u32(camera + 0x11c, 2);
+
+const layout = Array(173).fill(0);
 Object.assign(layout, {
   0: contextRoot,
   1: agentArray,
@@ -338,6 +353,16 @@ Object.assign(layout, {
   148: 0x90,
   149: 0x174,
   150: 4,
+  163: camera,
+  164: 0,
+  165: 0x10,
+  166: 0x18,
+  167: 0x1c,
+  168: 0x20,
+  169: 0x78,
+  170: 0xa8,
+  171: 0xc0,
+  172: 0x11c,
 });
 new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
@@ -347,7 +372,7 @@ const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
 });
 const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 652, 0, 0, 1 << 1),
+  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 692, 0, 0, 1 << 1),
   1,
 );
 tick(0);
@@ -391,6 +416,15 @@ assert.deepEqual(state.completion.hardMode.completedMissions, [57]);
 assert.deepEqual(state.completion.hardMode.completedBonuses, [58]);
 assert.deepEqual(state.completion.unlockedMaps, [59]);
 assert.deepEqual(state.completion.vanquishedAreas, [60]);
+assert.equal(state.camera.lookAtAgentId, 1);
+assert.equal(state.camera.modeName, 'Follow');
+assert.equal(state.camera.unlocked, false);
+assert.equal(state.camera.yaw, 1.25);
+assert.equal(state.camera.pitch, -0.30000001192092896);
+assert.deepEqual(state.camera.position, { x: 110, y: -260, z: -50 });
+assert.deepEqual(state.camera.lookAt, { x: 100, y: -250, z: 3 });
+assert.ok(Math.abs(state.camera.fieldOfView - 1.2) < 0.000001);
+assert.ok(state.camera.renderFieldOfView > 0);
 
 // Index zero is the authoritative no-guild state even when the context keeps
 // stale rank and roster fields alive across a transition.

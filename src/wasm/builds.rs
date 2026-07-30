@@ -570,6 +570,19 @@ pub(super) struct EnhancementLayout {
     pub cursor_texture_type: u32,
     pub cursor_texture_width: u32,
     pub cursor_texture_height: u32,
+    /// Direct `Camera` singleton selected from the exact `GmCam.cpp` routines
+    /// in this build. Only the stable read-only GWCA fields below cross the
+    /// companion boundary; transition targets and controller pointers do not.
+    pub camera_address: u32,
+    pub camera_look_at_agent_id: u32,
+    pub camera_max_distance: u32,
+    pub camera_yaw: u32,
+    pub camera_pitch: u32,
+    pub camera_distance: u32,
+    pub camera_position: u32,
+    pub camera_look_at_target: u32,
+    pub camera_field_of_view: u32,
+    pub camera_mode: u32,
 }
 
 impl EnhancementLayout {
@@ -740,13 +753,23 @@ impl EnhancementLayout {
             self.cursor_texture_type,
             self.cursor_texture_width,
             self.cursor_texture_height,
+            self.camera_address,
+            self.camera_look_at_agent_id,
+            self.camera_max_distance,
+            self.camera_yaw,
+            self.camera_pitch,
+            self.camera_distance,
+            self.camera_position,
+            self.camera_look_at_target,
+            self.camera_field_of_view,
+            self.camera_mode,
         ]
     }
 }
 
 /// Fields in [`EnhancementLayout`]. Named because the companion's own `Layout`
 /// is this many words long and the two have to agree.
-pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 163;
+pub(super) const ENHANCEMENT_LAYOUT_WORDS: usize = 173;
 
 pub(super) struct EnhancementBuild {
     /// The *template-save* output, not ArenaNet's own module. That transform is
@@ -779,7 +802,7 @@ pub(super) struct EnhancementBuild {
 pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     EnhancementBuild {
         sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-        output_sha256: "0ab9946f5a9da234445fbcfb2780de5e1e37ef235bf1e02e0ed0f5e4b76b7b10",
+        output_sha256: "b3c063d8337544ceed5fdb7c584441b589f9e9a72d5c1460d880cdbaa5f96307",
         import_count: 219,
         program_id: 1,
         build_id: 38771,
@@ -951,11 +974,21 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             cursor_texture_type: 0x0c,
             cursor_texture_width: 0x14,
             cursor_texture_height: 0x18,
+            camera_address: 0x5a_b904,
+            camera_look_at_agent_id: 0x00,
+            camera_max_distance: 0x10,
+            camera_yaw: 0x18,
+            camera_pitch: 0x1c,
+            camera_distance: 0x20,
+            camera_position: 0x78,
+            camera_look_at_target: 0xa8,
+            camera_field_of_view: 0xc0,
+            camera_mode: 0x11c,
         },
     },
     EnhancementBuild {
         sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
-        output_sha256: "36d557f53b2fe2687ec743f6cbf802c5b390001b29268152dd94cf377cd106b4",
+        output_sha256: "d6f5ca38073d12dbdb5289fa9e522adaab83b4efc1f93297a74a305552668b1f",
         import_count: 219,
         program_id: 1,
         build_id: 38790,
@@ -1127,11 +1160,21 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             cursor_texture_type: 0x0c,
             cursor_texture_width: 0x14,
             cursor_texture_height: 0x18,
+            camera_address: 0x5a_b9f4,
+            camera_look_at_agent_id: 0x00,
+            camera_max_distance: 0x10,
+            camera_yaw: 0x18,
+            camera_pitch: 0x1c,
+            camera_distance: 0x20,
+            camera_position: 0x78,
+            camera_look_at_target: 0xa8,
+            camera_field_of_view: 0xc0,
+            camera_mode: 0x11c,
         },
     },
     EnhancementBuild {
         sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
-        output_sha256: "79200038cf9d7328c6ddbb9f4fca5c5b2e11680fce284df2272203b1bbbeb438",
+        output_sha256: "0a1d85520f38563e605557150969e3937d40a6e03033ec765a8a9cda91103e1e",
         import_count: 219,
         program_id: 1,
         build_id: 38795,
@@ -1303,6 +1346,16 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
             cursor_texture_type: 0x0c,
             cursor_texture_width: 0x14,
             cursor_texture_height: 0x18,
+            camera_address: 0x5a_b9c4,
+            camera_look_at_agent_id: 0x00,
+            camera_max_distance: 0x10,
+            camera_yaw: 0x18,
+            camera_pitch: 0x1c,
+            camera_distance: 0x20,
+            camera_position: 0x78,
+            camera_look_at_target: 0xa8,
+            camera_field_of_view: 0xc0,
+            camera_mode: 0x11c,
         },
     },
 ];
@@ -1391,6 +1444,23 @@ mod tests {
             assert_eq!(build.layout.world_missions_bonus_hm, 0x5fc);
             assert_eq!(build.layout.world_unlocked_map, 0x60c);
             assert_eq!(build.layout.world_vanquished_areas, 0x83c);
+        }
+    }
+
+    #[test]
+    fn every_certified_build_uses_the_verified_camera_layout() {
+        let addresses = [0x5a_b904, 0x5a_b9f4, 0x5a_b9c4];
+        for (build, address) in ENHANCEMENT_BUILDS.iter().zip(addresses) {
+            assert_eq!(build.layout.camera_address, address);
+            assert_eq!(build.layout.camera_look_at_agent_id, 0x00);
+            assert_eq!(build.layout.camera_max_distance, 0x10);
+            assert_eq!(build.layout.camera_yaw, 0x18);
+            assert_eq!(build.layout.camera_pitch, 0x1c);
+            assert_eq!(build.layout.camera_distance, 0x20);
+            assert_eq!(build.layout.camera_position, 0x78);
+            assert_eq!(build.layout.camera_look_at_target, 0xa8);
+            assert_eq!(build.layout.camera_field_of_view, 0xc0);
+            assert_eq!(build.layout.camera_mode, 0x11c);
         }
     }
 }
