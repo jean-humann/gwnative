@@ -19,6 +19,7 @@ export const FEATURES = Object.freeze([
   { id: 'quests', group: 'Game state', name: 'Quest log and objectives', status: 'available' },
   { id: 'completion', group: 'Game state', name: 'Mission and map completion', status: 'needs-layout' },
   { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'available' },
+  { id: 'social', group: 'Game state', name: 'Friends and guild summary', status: 'available' },
   { id: 'chat', group: 'Game state', name: 'Chat and party search', status: 'needs-layout' },
   { id: 'textures', group: 'Presentation', name: 'Texture and shader packs', status: 'research' },
   { id: 'automation', group: 'Policy', name: 'Unattended gameplay automation', status: 'blocked' },
@@ -177,6 +178,25 @@ function installWidgets(overlays) {
       );
     },
   });
+  const social = overlays.register({
+    id: 'social',
+    title: 'Friends and guild',
+    position: { x: 16, y: 576 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      if (!state.social) return setText(body, 'Unavailable for this client build');
+      const online = state.social.friends.entries.filter((friend) => friend.isOnline).length;
+      const suffix = state.social.friends.truncated ? ' · truncated' : '';
+      const guild = state.social.guild
+        ? `guild #${state.social.guild.index} · ${state.social.guild.rosterTotal} members`
+        : 'no guild';
+      setText(
+        body,
+        `${online}/${state.social.friends.total} contacts online · ${guild}${suffix}`,
+      );
+    },
+  });
 
   const updateTime = () => {
     if (clock.isVisible()) clock.update(new Date().toLocaleTimeString());
@@ -207,6 +227,7 @@ function installWidgets(overlays) {
     if (agents.isVisible()) agents.update(event.detail);
     if (quests.isVisible()) quests.update(event.detail);
     if (inventory.isVisible()) inventory.update(event.detail);
+    if (social.isVisible()) social.update(event.detail);
   });
 
   return Object.freeze({
@@ -220,6 +241,7 @@ function installWidgets(overlays) {
     agents,
     quests,
     inventory,
+    social,
     dispose: () => clearInterval(interval),
   });
 }
@@ -311,6 +333,7 @@ export function installToolsPanel({
     ['Map agents', widgets.agents],
     ['Quest log', widgets.quests],
     ['Inventory', widgets.inventory],
+    ['Friends and guild', widgets.social],
   ]) {
     widgetButtons.append(
       button(document, label, () => widget.visible(!widget.isVisible())),
