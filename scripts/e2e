@@ -560,6 +560,7 @@ def main() -> int:
                 "agents",
                 "quests",
                 "inventory",
+                "social",
             }:
                 raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)
@@ -779,6 +780,7 @@ def main() -> int:
             agents = state.get("agents")
             quests = state.get("quests")
             inventory = state.get("inventory")
+            social = state.get("social")
             if not isinstance(party, dict) or not party.get("players"):
                 raise Failure("certified party state did not include the player roster")
             skills = skillbar.get("skills") if isinstance(skillbar, dict) else None
@@ -934,8 +936,76 @@ def main() -> int:
                 or item_locations != sorted(set(item_locations))
             ):
                 raise Failure("certified inventory state is incomplete")
+            friend_page = (
+                social.get("friends")
+                if isinstance(social, dict)
+                else None
+            )
+            friend_entries = (
+                friend_page.get("entries")
+                if isinstance(friend_page, dict)
+                else None
+            )
+            guild = social.get("guild") if isinstance(social, dict) else None
+            if (
+                social is None
+                or not isinstance(social.get("playerStatus"), int)
+                or not 0 <= social.get("playerStatus") <= 4
+                or not isinstance(social.get("playerStatusName"), str)
+                or friend_page is None
+                or friend_page.get("truncated") not in (True, False)
+                or not isinstance(friend_page.get("total"), int)
+                or not 0 <= friend_page.get("total") <= 256
+                or any(
+                    not isinstance(friend_page.get(name), int)
+                    or not 0 <= friend_page.get(name) <= 256
+                    for name in ("friends", "ignores", "partners", "traders")
+                )
+                or not isinstance(friend_entries, list)
+                or len(friend_entries) > 128
+                or friend_page.get("total") < len(friend_entries)
+                or (
+                    friend_page.get("truncated")
+                    and (
+                        len(friend_entries) != 128
+                        or friend_page.get("total") <= len(friend_entries)
+                    )
+                )
+                or (
+                    not friend_page.get("truncated")
+                    and friend_page.get("total") != len(friend_entries)
+                )
+                or any(
+                    not isinstance(friend, dict)
+                    or not isinstance(friend.get("slot"), int)
+                    or not 0 <= friend.get("slot") < 256
+                    or not isinstance(friend.get("type"), int)
+                    or not 0 <= friend.get("type") <= 4
+                    or not isinstance(friend.get("status"), int)
+                    or not 0 <= friend.get("status") <= 4
+                    or friend.get("isOnline")
+                    != (1 <= friend.get("status") <= 3)
+                    for friend in friend_entries
+                )
+                or [friend.get("slot") for friend in friend_entries]
+                != sorted({friend.get("slot") for friend in friend_entries})
+                or (
+                    guild is not None
+                    and (
+                        not isinstance(guild, dict)
+                        or not isinstance(guild.get("index"), int)
+                        or not 1 <= guild.get("index") < 64
+                        or not isinstance(guild.get("faction"), int)
+                        or not 0 <= guild.get("faction") <= 1
+                        or not isinstance(guild.get("rosterTotal"), int)
+                        or not 0 <= guild.get("rosterTotal") <= 100
+                        or not isinstance(guild.get("cape"), dict)
+                    )
+                )
+            ):
+                raise Failure("certified social state is incomplete")
             print(
-                "[e2e] party, skillbar, effects, agents, quests, and inventory API PASS "
+                "[e2e] party, skillbar, effects, agents, quests, inventory, and social API PASS "
                 f"(players={len(party.get('players', []))}, "
                 f"heroes={len(party.get('heroes', []))}, "
                 f"henchmen={len(party.get('henchmen', []))}, "
@@ -944,7 +1014,9 @@ def main() -> int:
                 f"agents={len(map_agents)}/{agents.get('total')}, "
                 f"quests={len(quest_log)}, objectives={len(objectives)}, "
                 f"items={len(items)}/{inventory.get('total')}, "
-                f"bags={len(bags)})"
+                f"bags={len(bags)}, "
+                f"contacts={len(friend_entries)}/{friend_page.get('total')}, "
+                f"guild={'yes' if guild else 'no'})"
             )
 
             before = position(ready)
