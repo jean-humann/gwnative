@@ -104,7 +104,7 @@
               }
             ]
           },
-          "passiveEnhancements": true
+          "passiveEnhancements": false
         },
         {
           "runtime": "asyncify",
@@ -163,7 +163,7 @@
               }
             ]
           },
-          "passiveEnhancements": true
+          "passiveEnhancements": false
         }
       ]
     }
