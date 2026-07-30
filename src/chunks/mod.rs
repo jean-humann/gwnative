@@ -57,6 +57,9 @@ pub struct ChunkStore {
     /// Manifest path of the snapshot, resolved once at construction.
     snapshot: String,
     cache_dir: PathBuf,
+    /// Prevents another profile process from clearing the shared cache while
+    /// this store or one of its background workers can still touch it.
+    _cache_lease: crate::cache::Lease,
     inflight: Mutex<HashMap<ContentHash, Arc<Slot>>>,
     permits: Semaphore,
     /// Held *in addition to* `permits` by prefetch workers only. See
@@ -125,6 +128,7 @@ impl ChunkStore {
         cache_dir: PathBuf,
         mut protected_chunks: HashSet<String>,
     ) -> Result<Self> {
+        let cache_lease = crate::cache::prepare(&cache_dir)?;
         let snapshot = manifest.require_unique(crate::patch::SNAPSHOT)?.to_owned();
         fs::create_dir_all(&cache_dir)?;
         // Every hash this manifest can ever ask for, across every file in it,
@@ -142,7 +146,9 @@ impl ChunkStore {
         // nothing to gain by waiting for it.
         thread::spawn({
             let cache_dir = cache_dir.clone();
+            let cache_lease = cache_lease.clone();
             move || {
+                let _cache_lease = cache_lease;
                 crate::qos::set(crate::qos::Class::Utility);
                 sweep_orphans(&cache_dir);
                 prune(&cache_dir, &protected_chunks);
@@ -153,6 +159,7 @@ impl ChunkStore {
             manifest,
             snapshot,
             cache_dir,
+            _cache_lease: cache_lease,
             inflight: Mutex::new(HashMap::new()),
             permits: Semaphore::new(MAX_CONCURRENT_FETCHES),
             prefetch_permits: Semaphore::new(MAX_PREFETCH_FETCHES),

@@ -121,7 +121,8 @@ fn main() {
         }
     };
     let paths = paths::Layout::new(&invocation, &profile);
-    let force_sync = matches!(command, cli::Command::Sync | cli::Command::Repair);
+    let client_sync = command == cli::Command::Sync;
+    let maintenance = matches!(command, cli::Command::Sync | cli::Command::Repair);
     let headless = command == cli::Command::Serve;
     if command == cli::Command::Mods {
         let discovered = mods::discover(paths.mod_dir());
@@ -160,7 +161,7 @@ fn main() {
     }
     // The two commands above are the runs with a terminal attached. Everything
     // that would otherwise put a message on screen asks this first.
-    let windowed = !headless && !force_sync;
+    let windowed = !headless && !maintenance;
 
     // Held for as long as the process lives; the kernel takes it back if the
     // process does not.
@@ -175,27 +176,38 @@ fn main() {
     let client = patch::Client::from_env().with_offline(invocation.offline);
     let manifest = load_manifest(
         &client,
-        force_sync,
+        client_sync,
         paths.support_dir(),
         invocation.offline,
         invocation.no_update,
     );
 
-    let generations = install_client(
-        &root,
-        &client,
-        manifest.as_ref(),
-        force_sync,
-        windowed,
-        paths.support_dir(),
-    );
+    // Repair is a game-data operation. In particular, `repair --no-update`
+    // must not install a client merely because the cached manifest describes a
+    // newer one than the web root.
+    let generations = if command == cli::Command::Repair {
+        Arc::new(generation::Store::open(
+            paths.support_dir().join("generations"),
+        ))
+    } else {
+        install_client(
+            &root,
+            &client,
+            manifest.as_ref(),
+            client_sync,
+            windowed,
+            paths.support_dir(),
+        )
+    };
     if command == cli::Command::Sync && !invocation.full_image {
         return;
     }
     // Nothing was downloaded, so nothing was recorded — and a client with no
     // record is only ever checked for existence. Hash it once here and every
     // later launch gets a real check. No-op after the first time.
-    generations.adopt(&root, &patch::artifacts());
+    if command != cli::Command::Repair {
+        generations.adopt(&root, &patch::artifacts());
+    }
 
     let snapshot = match manifest {
         Ok(manifest) => open_and_warm_snapshot(
@@ -203,7 +215,7 @@ fn main() {
             manifest,
             paths.cache_dir(),
             &base_support,
-            invocation.no_prefetch || force_sync,
+            invocation.no_prefetch || maintenance,
         ),
         // Without a manifest there is no chunk list, so there is no snapshot —
         // the same outcome as failing to open one, reported the same way.
@@ -225,12 +237,8 @@ fn main() {
             std::process::exit(1);
         }
     }
-    if command == cli::Command::Sync {
-        download_snapshot(snapshot, invocation.jobs);
-        return;
-    }
-    if command == cli::Command::Repair {
-        repair_snapshot(snapshot, invocation.jobs);
+    if matches!(command, cli::Command::Sync | cli::Command::Repair) {
+        verify_and_download_snapshot(snapshot, invocation.jobs);
         return;
     }
 
@@ -346,7 +354,7 @@ fn main() {
         recorder,
         derived_wasm,
         settings,
-        generations,
+        generations: Arc::clone(&generations),
         token: token.clone(),
         port: paths.port(),
         credential_account: profile.keychain_account(),
@@ -355,7 +363,7 @@ fn main() {
     }) {
         Ok(loopback) => loopback,
         // Nothing downstream has an answer to this: the client is a page, and
-        // without an origin to serve it from there is no client. `force_sync`
+        // without an origin to serve it from there is no client. Maintenance
         // has already returned by here, so the only run with a terminal left is
         // the headless one.
         Err(e) => alert::fatal(
@@ -380,12 +388,19 @@ fn main() {
     if headless {
         park_headless(&loopback, &token);
     }
-    run_windowed(&loopback, &token, &module, &invocation, paths.support_dir());
+    run_windowed(
+        &loopback,
+        &token,
+        &module,
+        &invocation,
+        paths.support_dir(),
+        &generations,
+    );
 }
 
-fn repair_snapshot(snapshot: Option<Arc<chunks::ChunkStore>>, jobs: Option<usize>) {
+fn verify_and_download_snapshot(snapshot: Option<Arc<chunks::ChunkStore>>, jobs: Option<usize>) {
     let Some(snapshot) = snapshot else {
-        note!("[gwnative] game-data repair could not start without a cached manifest");
+        note!("[gwnative] game-data verification could not start without a cached manifest");
         std::process::exit(1);
     };
     if !snapshot.start_verify() {
@@ -538,7 +553,7 @@ fn acquire_instance(windowed: bool, lock_path: &Path) -> instance::Instance {
 /// now.
 fn load_manifest(
     client: &patch::Client,
-    force_sync: bool,
+    client_sync: bool,
     support_dir: &Path,
     offline: bool,
     no_update: bool,
@@ -547,7 +562,7 @@ fn load_manifest(
     if offline {
         return client.cached_manifest(dir);
     }
-    if force_sync {
+    if client_sync {
         return client.fetch_manifest(dir);
     }
     let (manifest, source) = client.manifest(dir)?;
@@ -574,7 +589,7 @@ fn install_client(
     root: &Path,
     client: &patch::Client,
     manifest: Result<&manifest::Manifest, &error::Error>,
-    force_sync: bool,
+    client_sync: bool,
     windowed: bool,
     support_dir: &Path,
 ) -> Arc<generation::Store> {
@@ -605,7 +620,7 @@ fn install_client(
     let outdated = plan
         .as_ref()
         .is_ok_and(|(_, offered)| generations.stale(offered));
-    if !(force_sync || !missing.is_empty() || outdated) {
+    if !(client_sync || !missing.is_empty() || outdated) {
         return generations;
     }
 
@@ -648,11 +663,6 @@ fn open_and_warm_snapshot(
     no_prefetch: bool,
 ) -> Option<Arc<chunks::ChunkStore>> {
     let cache_dir = cache_dir.to_owned();
-    // Before the store opens, which is the only moment this is safe: from here
-    // on the directory has a readahead thread, a prefetch thread and up to
-    // forty-eight fetches holding descriptors into it. See `cache::request_clear`
-    // for why the deletion is a launch behind the button that asks for it.
-    cache::take_clear_request(&cache_dir);
     let protected_chunks = client.cached_profile_chunk_names(base_support);
     match chunks::ChunkStore::open(client, manifest, cache_dir, protected_chunks).map(Arc::new) {
         Ok(store) => {
@@ -706,6 +716,7 @@ fn run_windowed(
     module: &wasm::Module,
     invocation: &cli::Invocation,
     support_dir: &Path,
+    generations: &generation::Store,
 ) {
     let mtm = MainThreadMarker::new().expect("main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -724,6 +735,10 @@ fn run_windowed(
     // resizes the window to the remembered one before it is ever shown, and the
     // content view follows.
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
+    // This is the first operation that can actually test the client. Downloads
+    // and native setup before it must not turn an unproven build into a failed
+    // boot if they exit early.
+    generations.attempt();
     let webview = webview::make(
         mtm,
         frame,

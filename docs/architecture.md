@@ -57,11 +57,14 @@ launcher, settings UI, and metrics.
 5. Select a writable profile web root.
 6. Load the cached manifest and revalidate it in the background, or fetch a
    current manifest for an explicit sync.
-7. Roll back an unproven client, verify installed artifacts, and fetch missing
-   or newer artifacts.
-8. Open the game-image chunk store, consume a pending clear request, replay the
-   boot prefetch list, and start cursor-based readahead.
-9. Complete a requested local-image import, full image, or repair operation.
+7. For launches and client syncs, roll back a previously attempted but
+   unproven client, verify installed artifacts, and fetch missing or newer
+   artifacts. Game-data repair does not alter the client.
+8. Acquire a shared cache lease, exclusively consume a pending clear request
+   when no profile is using the cache, open the chunk store, replay the boot
+   prefetch list, and start cursor-based readahead.
+9. Complete a requested local-image import, or verify and fill a requested full
+   image or repair operation.
 10. Start diagnostics and load profile settings.
 11. Prepare certified WebAssembly transforms when available.
 12. Start the loopback origin and inject its session token, current keyboard
@@ -142,13 +145,16 @@ Artifact presence is not treated as integrity:
 - each installed client artifact is recorded by length and SHA-256;
 - launch checks the record and downloads only unsound artifacts;
 - the offered build ID is derived from manifest data before download; and
-- a newly installed generation is unproven until `POST /__booted`.
+- a newly installed generation is unproven until `POST /__booted`; and
+- rollback is armed only when a real window attempts that generation.
 
-Before replacing a proven set, gwnative saves it. If the new set fails to report
-a first frame before the next launch, the prior set is restored and the failed
-build ID is refused. Refusals are bounded, a damaged installed copy may retry a
-refused build when no alternative exists, and first install never deletes its
-only client merely because an unrelated boot failure occurred.
+Before replacing a proven set, gwnative saves it. Data-only commands may install
+the replacement but do not count as attempts. If a later windowed launch tries
+the new set and fails to report a first frame, the following launch restores the
+prior set and refuses the failed build ID. Refusals are bounded, a damaged
+installed copy may retry a refused build when no alternative exists, and first
+install never deletes its only client merely because an unrelated boot failure
+occurred.
 
 ## Game-image storage
 
@@ -165,6 +171,8 @@ Core invariants:
 - cached bytes are hashed on first use in a session;
 - a corrupt file is unlinked and fetched again;
 - concurrent readers of the same missing hash share one fetch;
+- every open profile holds a shared cache lease, and clearing requires the
+  exclusive lease;
 - at most 48 network fetches run concurrently;
 - speculative boot, readahead, and full-download work shares a 32-permit subset
   so demand reads always have capacity;

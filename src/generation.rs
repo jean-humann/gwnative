@@ -17,9 +17,10 @@
 //! failure arrives as an app that will not start any more — with the previous,
 //! working client already overwritten. So a freshly synced set is not trusted
 //! until the page reports a first frame. Until then the set it replaced is kept
-//! beside it, and a launch that finds an unproven set restores what came
-//! before and refuses that build by identity, so the next sync does not walk
-//! straight back into it.
+//! beside it. Once a window has actually attempted that set, a later launch
+//! that still finds it unproven restores what came before and refuses that build
+//! by identity, so the next sync does not walk straight back into it. A
+//! maintenance command that only downloaded the files is not a failed boot.
 //!
 //! The two identities are deliberately different things. A generation's `id`
 //! says *which build* this is and comes from the manifest's chunk hashes, so it
@@ -78,9 +79,20 @@ struct State {
     current: Option<Generation>,
     /// Whether `current` has ever reported a first frame.
     proven: bool,
+    /// Whether a window has actually tried to boot `current`.
+    ///
+    /// Records written before this field existed described only installations
+    /// made by launches, so preserving their rollback semantics means treating
+    /// them as attempted.
+    #[serde(default = "legacy_attempted")]
+    attempted: bool,
     /// The set `current` replaced, whose files are stashed in `previous/`.
     previous: Option<Generation>,
     rejected: Vec<String>,
+}
+
+fn legacy_attempted() -> bool {
+    true
 }
 
 impl Default for State {
@@ -89,6 +101,7 @@ impl Default for State {
             format_version: FORMAT,
             current: None,
             proven: false,
+            attempted: false,
             previous: None,
             rejected: Vec::new(),
         }
@@ -253,7 +266,7 @@ impl Store {
         self.state.lock().unwrap().rejected.iter().any(|r| r == id)
     }
 
-    /// Undo a build that was installed but never reported a first frame.
+    /// Undo a build that a window attempted but that never reported a frame.
     ///
     /// Returns the id it refused, if it refused one. Does nothing when there is
     /// no previous set to go back to: on a first install, retrying is the only
@@ -261,7 +274,7 @@ impl Store {
     /// that failed for an unrelated reason into an app with no client at all.
     pub fn roll_back(&self, root: &Path) -> Option<String> {
         let mut state = self.state.lock().unwrap();
-        if state.proven {
+        if state.proven || !state.attempted {
             return None;
         }
         let (current, previous) = (state.current.clone()?, state.previous.clone()?);
@@ -290,6 +303,7 @@ impl Store {
         // being proven means. Nothing is left to fall back to, and nothing needs
         // to be: the next sync stashes this one before replacing it.
         state.proven = true;
+        state.attempted = true;
         state.previous = None;
         self.save(&state);
         let _ = fs::remove_dir_all(self.dir.join("previous"));
@@ -369,11 +383,13 @@ impl Store {
             .current
             .as_ref()
             .is_some_and(|current| current.id == id);
+        let attempted = state.attempted;
         state.current = Some(Generation {
             id: id.to_owned(),
             artifacts,
         });
         state.proven = same && state.proven;
+        state.attempted = same && attempted;
         if state.proven {
             // And with nothing to undo, nothing to undo it with. See
             // [`Store::forget_stash`], which this is the other half of.
@@ -416,8 +432,25 @@ impl Store {
             artifacts,
         });
         state.proven = true;
+        state.attempted = true;
         self.save(&state);
         note!("[generation] adopted the client already on disk; it is checked from now on");
+    }
+
+    /// A window is about to try the current set.
+    ///
+    /// Kept separate from [`Store::record`] because `sync`, `-image`, and other
+    /// maintenance runs install bytes without testing whether WebKit can boot
+    /// them. Only a real windowed launch may arm rollback.
+    pub fn attempt(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.proven || state.attempted || state.current.is_none() {
+            return;
+        }
+        state.attempted = true;
+        self.save(&state);
+        let id = state.current.as_ref().map_or("", |g| g.id.as_str());
+        note!("[generation] attempting client build {id}");
     }
 
     /// The page reached a first frame, so the current set works here.
@@ -431,6 +464,7 @@ impl Store {
             return;
         }
         state.proven = true;
+        state.attempted = true;
         state.previous = None;
         self.save(&state);
         let id = state.current.as_ref().map_or("", |g| g.id.as_str());
@@ -608,6 +642,7 @@ mod tests {
         store.stash(&root, &NAMES);
         write_client(&root, "patched");
         store.record("0123456789abcdef", &root, &NAMES);
+        store.attempt();
         store.adopt(&root, &NAMES);
         assert_eq!(
             store.roll_back(&root).as_deref(),
@@ -628,6 +663,7 @@ mod tests {
         store.stash(&root, &NAMES);
         write_client(&root, "new");
         store.record("new", &root, &NAMES);
+        store.attempt();
         drop(store);
 
         let store = Store::open(state.clone());
@@ -650,6 +686,37 @@ mod tests {
             None,
             "there is nothing left to undo"
         );
+    }
+
+    #[test]
+    fn downloading_a_build_without_launching_it_does_not_count_as_a_failed_boot() {
+        let temp = TempDir::new("generation-not-attempted");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "old");
+
+        // What `sync` and `-image` do: install the build, then exit without a
+        // window ever asking WebKit to instantiate it.
+        store.stash(&root, &NAMES);
+        write_client(&root, "downloaded");
+        store.record("downloaded", &root, &NAMES);
+        drop(store);
+
+        let store = Store::open(state.clone());
+        assert_eq!(store.roll_back(&root), None);
+        assert!(!store.rejected("downloaded"));
+        assert_eq!(
+            fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
+            "downloaded:Gw.jspi.js"
+        );
+
+        // The first real launch arms rollback. If it then dies without proving
+        // a frame, the following launch restores the known-good client.
+        store.attempt();
+        drop(store);
+        let store = Store::open(state);
+        assert_eq!(store.roll_back(&root).as_deref(), Some("downloaded"));
+        assert!(store.rejected("downloaded"));
     }
 
     /// The other half of that sequence: the sync that never gets past the
@@ -723,6 +790,7 @@ mod tests {
         store.stash(&root, &NAMES);
         write_client(&root, "new");
         store.record("new", &root, &NAMES);
+        store.attempt();
         store.prove();
         assert!(
             !state.join("previous").exists(),
@@ -742,6 +810,7 @@ mod tests {
         write_client(&root, "first");
         let store = Store::open(temp.0.join("state"));
         store.record("first", &root, &NAMES);
+        store.attempt();
 
         // Unproven, but there is no previous set — a crash for an unrelated
         // reason must not leave the app with nothing to run.
@@ -801,6 +870,7 @@ mod tests {
             store.stash(&root, &NAMES);
             write_client(&root, &format!("bad{round}"));
             store.record(&format!("bad{round}"), &root, &NAMES);
+            store.attempt();
             assert_eq!(
                 store.roll_back(&root).as_deref(),
                 Some(&*format!("bad{round}"))
