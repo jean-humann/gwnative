@@ -54,7 +54,7 @@ const MANIFEST_SECTION: &str = "enhancement_manifest";
 /// block beside it. Named here because they are the manifest's own words and
 /// the companion's `Snapshot`/`CursorSnapshot` at once — see
 /// `web/companion-snapshot.js`, which reads both back.
-const SNAPSHOT_ABI: u32 = 12;
+const SNAPSHOT_ABI: u32 = 13;
 const SNAPSHOT_BYTES: u32 = 56_844;
 const CURSOR_SNAPSHOT_ABI: u32 = 1;
 const CURSOR_SNAPSHOT_BYTES: u32 = 4160;
@@ -447,7 +447,7 @@ mod tests {
             .strip_prefix(&format!("\u{14}{MANIFEST_SECTION}",))
             .expect("the section does not start with its own name");
         assert!(
-            json.starts_with(r#"{"transformAbi":15,"snapshotAbi":12,"snapshotBytes":56844,"#),
+            json.starts_with(r#"{"transformAbi":15,"snapshotAbi":13,"snapshotBytes":56844,"#),
             "the key order changed, and with it the module's hash: {json}",
         );
         assert!(json.contains(r#""configBytes":912,"programId":1,"buildId":38771,"tableSlot":0,"#));

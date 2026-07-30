@@ -920,8 +920,21 @@ def main() -> int:
                     quests.get("objectivesTruncated")
                     and len(objectives) != 32
                 )
+                or any(not isinstance(quest, dict) for quest in quest_log)
                 or len({quest.get("questId") for quest in quest_log})
                 != len(quest_log)
+                or any(
+                    quest.get("hasMarker") not in (True, False)
+                    or (
+                        quest.get("hasMarker") is False
+                        and (
+                            quest.get("markerX") != 0
+                            or quest.get("markerY") != 0
+                            or quest.get("markerPlane") != 0
+                        )
+                    )
+                    for quest in quest_log
+                )
                 or len(
                     {
                         objective.get("objectiveId")

@@ -921,7 +921,7 @@ pub(super) struct EnhancementBuild {
 pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     EnhancementBuild {
         sha256: "68c6e09cec0f6992058a44a5617ca9eac7fab4697be1421943bbf664e6d444f6",
-        output_sha256: "d9922fa12dddd55d56269f3df1f2f53b821634bb4dca1f6c203b9939aed3609a",
+        output_sha256: "f1d88222aa36cacfe5bbb8e526466e5597894ce7e3b9ed85bb0bf63a1b4720a6",
         import_count: 219,
         program_id: 1,
         build_id: 38771,
@@ -1162,7 +1162,7 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     },
     EnhancementBuild {
         sha256: "5a767e11d9f1ae821eca656693f4b4ce5ab16fcf7f9a43c2bf3d094f5e2e5616",
-        output_sha256: "44eebb31287ad5c3534a85c2fe8f67bddb527a0c7754ddd5f353cb4f35d26758",
+        output_sha256: "87b41902956bb9b23576c3dc4a4c3397394ae665a502c3e75d469b044c05080b",
         import_count: 219,
         program_id: 1,
         build_id: 38790,
@@ -1403,7 +1403,7 @@ pub(super) const ENHANCEMENT_BUILDS: &[EnhancementBuild] = &[
     },
     EnhancementBuild {
         sha256: "706e0873dbc1fe7bdd6837fdb1a09969df133c17812ea0d2336991928380c6e3",
-        output_sha256: "043300e04f7d3250afacb078152b0f90a65cb3116ce2576bdae013de506089cf",
+        output_sha256: "6542da8ab8fd4751603e58fc460ade0fe8a0751b53dd58f68ae49c82740d9872",
         import_count: 219,
         program_id: 1,
         build_id: 38795,

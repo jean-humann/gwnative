@@ -17,7 +17,7 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 12;
+export const COMPANION_SNAPSHOT_ABI = 13;
 export const COMPANION_SNAPSHOT_BYTES = 56_844;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
@@ -91,6 +91,7 @@ const MAX_PLAYER_EFFECTS = 64;
 const MAX_MAP_AGENTS = 128;
 const MAX_QUESTS = 64;
 const MAX_MISSION_OBJECTIVES = 32;
+const NO_QUEST_MARKER = 0xffff_ffff;
 const MAX_INVENTORY_BAGS = 22;
 const MAX_INVENTORY_ITEMS = 512;
 const MAX_INVENTORY_ITEM_ID = 1_000_000;
@@ -560,13 +561,18 @@ function readQuests(view) {
       if (!wordsAreZero(view, offset, 28)) return null;
       continue;
     }
+    const markerX = view.getFloat32(offset + 12, true);
+    const markerY = view.getFloat32(offset + 16, true);
+    const rawMarkerPlane = view.getUint32(offset + 20, true);
+    const hasMarker = rawMarkerPlane !== NO_QUEST_MARKER;
     const quest = Object.freeze({
       questId: view.getUint32(offset, true),
       logState: view.getUint32(offset + 4, true),
       mapFrom: view.getUint32(offset + 8, true),
-      markerX: view.getFloat32(offset + 12, true),
-      markerY: view.getFloat32(offset + 16, true),
-      markerPlane: view.getUint32(offset + 20, true),
+      markerX,
+      markerY,
+      markerPlane: hasMarker ? rawMarkerPlane : 0,
+      hasMarker,
       mapTo: view.getUint32(offset + 24, true),
     });
     if (
@@ -575,9 +581,15 @@ function readQuests(view) {
       || questIds.has(quest.questId)
       || quest.mapFrom > 2_000
       || quest.mapTo > 2_000
-      || !validCoordinate(quest.markerX)
-      || !validCoordinate(quest.markerY)
-      || quest.markerPlane > 100_000
+      || (
+        hasMarker
+          ? (
+            !validCoordinate(quest.markerX)
+            || !validCoordinate(quest.markerY)
+            || quest.markerPlane > 100_000
+          )
+          : quest.markerX !== 0 || quest.markerY !== 0
+      )
     ) {
       return null;
     }

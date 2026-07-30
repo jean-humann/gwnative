@@ -242,6 +242,7 @@ The envelope is revisioned and timestamped:
           "markerX": 10,
           "markerY": 20,
           "markerPlane": 3,
+          "hasMarker": true,
           "mapTo": 56,
           "completed": true,
           "currentMission": false,
@@ -512,8 +513,11 @@ read because their lifetime and decoding contract have not been certified.
 
 The quest domain publishes at most 64 `Quest` records and 32 mission
 objectives. It preserves `questId`, `logState`, source/destination map IDs, and
-the numeric marker. `completed`, `currentMission`, `primary`, and
-`areaPrimary` must exactly match their documented `logState` bits.
+the numeric marker. `hasMarker: false` represents GWCA's infinite-coordinate
+"no map marker" sentinel; gwnative normalizes that case to `markerX: 0`,
+`markerY: 0`, and `markerPlane: 0`. Present markers are finite and bounded.
+`completed`, `currentMission`, `primary`, and `areaPrimary` must exactly match
+their documented `logState` bits.
 `activeQuestId: 0` means no selected quest; on an untruncated page a non-zero
 active ID must appear in the quest list. Mission objectives expose only their
 numeric ID and type flags, not client-owned encoded text. Independent

@@ -19,7 +19,7 @@ function uleb(value) {
 function moduleWithManifest(overrides = {}) {
   const manifest = {
     transformAbi: 15,
-    snapshotAbi: 12,
+    snapshotAbi: 13,
     snapshotBytes: 56_844,
     cursorSnapshotAbi: 1,
     cursorSnapshotBytes: 4_160,
@@ -43,7 +43,7 @@ describe('enhancement manifest', () => {
   it('accepts exactly the host and companion ABI', () => {
     const manifest = decodeEnhancementManifest(moduleWithManifest());
     assert.equal(manifest.transformAbi, 15);
-    assert.equal(manifest.snapshotAbi, 12);
+    assert.equal(manifest.snapshotAbi, 13);
     assert.equal(manifest.snapshotBytes, 56_844);
     assert.equal(manifest.configBytes, 912);
     assert.equal(manifest.layoutWords.length, 228);
