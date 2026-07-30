@@ -38,6 +38,8 @@ class ApiSurfaceTests(unittest.TestCase):
                 "    pub camera: Option<Camera>,\n"
                 "    pub trade: Option<Trade>,\n"
                 "    pub ui: Option<Ui>,\n"
+                "    pub merchant: Option<Merchant>,\n"
+                "    pub progression: Option<Progression>,\n"
                 "}\n"
             )
             (wasm / "builds.rs").write_text(
@@ -58,8 +60,10 @@ class ApiSurfaceTests(unittest.TestCase):
                 "guild",
                 "item",
                 "map",
+                "merchant",
                 "party",
                 "player",
+                "progression",
                 "quest",
                 "skillbar",
                 "target",
