@@ -81,10 +81,32 @@ pub fn wake() {
     unsafe { app::to_main(std::ptr::null_mut(), wake_on_main) };
 }
 
+/// Bring the test window forward when WebKit proves its first frame landed.
+///
+/// AppKit activation at construction can precede the content process and be
+/// superseded by the process that launched the test. Reasserting it on the
+/// page's first-frame event keeps subsequent animation frames observable
+/// without a timer, polling, or an early gameplay key.
+pub fn focus() {
+    if !INSTALLED.load(Ordering::Acquire) {
+        return;
+    }
+    // SAFETY: null carries no ownership, and `focus_on_main` consumes nothing.
+    unsafe { app::to_main(std::ptr::null_mut(), focus_on_main) };
+}
+
 extern "C" fn wake_on_main(_context: *mut c_void) {
     DISPATCHER.with(|slot| {
         if let Some(dispatcher) = slot.borrow().as_ref() {
             drain(Rc::clone(dispatcher));
+        }
+    });
+}
+
+extern "C" fn focus_on_main(_context: *mut c_void) {
+    DISPATCHER.with(|slot| {
+        if let Some(dispatcher) = slot.borrow().as_ref() {
+            activate(&dispatcher.window);
         }
     });
 }
@@ -191,6 +213,9 @@ fn deliver(dispatcher: Rc<Dispatcher>, action: Action) {
 fn activate(window: &NSWindow) {
     window.orderFrontRegardless();
     window.makeKeyAndOrderFront(None);
+    if let Some(mtm) = MainThreadMarker::new() {
+        NSApplication::sharedApplication(mtm).activate();
+    }
     NSRunningApplication::currentApplication()
         .activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
 }

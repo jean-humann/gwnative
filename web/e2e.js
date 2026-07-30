@@ -494,6 +494,7 @@ export async function runAppE2E({
       ['performance', 'Performance'],
       ['party-roster', 'Party roster'],
       ['player-skillbar', 'Player skillbar'],
+      ['player-effects', 'Player effects'],
     ]);
     for (const widget of widgets) {
       const id = widget.dataset.widget;
@@ -568,6 +569,7 @@ export async function runAppE2E({
           ['performance', 'Performance'],
           ['party-roster', 'Party roster'],
           ['player-skillbar', 'Player skillbar'],
+          ['player-effects', 'Player effects'],
         ]).get(id);
         if (label && !widget.hidden !== wanted) buttonNamed(surface, label).click();
       }

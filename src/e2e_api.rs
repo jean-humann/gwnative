@@ -268,6 +268,7 @@ impl Hub {
             serde_json::from_slice(bytes).map_err(|error| format!("invalid E2E event: {error}"))?;
         validate_event(&request.kind, &request.detail)?;
         let wake_native = request.kind == "action-prepared";
+        let focus_window = request.kind == "first-frame";
 
         let mut inner = lock(&self.inner);
         if wake_native {
@@ -304,6 +305,9 @@ impl Hub {
         // the page which finite action is coming.
         if wake_native {
             crate::native_e2e::wake();
+        }
+        if focus_window {
+            crate::native_e2e::focus();
         }
         Ok(sequence)
     }
