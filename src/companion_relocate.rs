@@ -219,7 +219,12 @@ fn read_i32_global(bytes: &[u8], cursor: &mut usize, mutable: bool) -> Result<u3
     u32::try_from(value).map_err(|_| fault("negative linker global"))
 }
 
-fn relocate_globals(body: &[u8]) -> Result<u32, String> {
+struct LinkerLayout {
+    data_end: u32,
+    workspace_bytes: u32,
+}
+
+fn relocate_globals(body: &[u8]) -> Result<LinkerLayout, String> {
     let mut cursor = 0;
     if read_uleb(body, &mut cursor)? != 4 {
         return Err(fault("expected four certified linker globals"));
@@ -231,15 +236,18 @@ fn relocate_globals(body: &[u8]) -> Result<u32, String> {
     if cursor != body.len()
         || stack != STACK_BYTES
         || memory_base != 0
-        || data_end != heap_base
-        || heap_base <= STACK_BYTES
+        || data_end < STACK_BYTES
+        || heap_base < data_end
     {
         return Err(fault(format!(
             "unexpected linker layout stack={stack} memory={memory_base} \
              data_end={data_end} heap={heap_base}",
         )));
     }
-    Ok(heap_base)
+    Ok(LinkerLayout {
+        data_end,
+        workspace_bytes: heap_base,
+    })
 }
 
 fn relocate_exports(body: &[u8]) -> Result<Vec<u8>, String> {
@@ -326,7 +334,7 @@ fn relocate_data(body: &[u8]) -> Result<(Vec<u8>, u32), String> {
 fn remove_fixed_bss_initializer(
     code: &[u8],
     start: &[u8],
-    workspace_bytes: u32,
+    layout: &LinkerLayout,
     data_bytes: u32,
 ) -> Result<Vec<u8>, String> {
     let mut start_cursor = 0;
@@ -367,14 +375,32 @@ fn remove_fixed_bss_initializer(
     if first.get(body_cursor..) != Some(&[0xfc, 0x0b, 0x00, 0x0b]) {
         return Err(fault("the BSS initializer contains unexpected work"));
     }
-    let expected_start = STACK_BYTES
+    let static_end = STACK_BYTES
         .checked_add(data_bytes)
-        .and_then(|value| value.checked_add(15))
-        .map(|value| value & !15)
+        .ok_or_else(|| fault("static data end overflow"))?;
+    let aligned_static_end = static_end
+        .checked_add(15)
+        .map(|end| end & !15)
         .ok_or_else(|| fault("BSS start overflow"))?;
-    if bss_start != expected_start || bss_start.checked_add(bss_bytes) != Some(workspace_bytes) {
+    let aligned_data_end = layout
+        .data_end
+        .checked_add(15)
+        .map(|end| end & !15)
+        .ok_or_else(|| fault("workspace alignment overflow"))?;
+    // wasm-ld versions disagree about whether up-to-16-byte alignment belongs
+    // before the BSS, after it, or neither. Certify the meaningful boundaries
+    // instead: initialised data, the exact zero-fill span, and the allocation
+    // containing both with alignment padding only.
+    if bss_start < static_end
+        || bss_start > aligned_static_end
+        || bss_start.checked_add(bss_bytes) != Some(layout.data_end)
+        || layout.workspace_bytes < layout.data_end
+        || layout.workspace_bytes > aligned_data_end
+    {
         return Err(fault(format!(
-            "unexpected BSS span {bss_start}+{bss_bytes}, workspace {workspace_bytes}",
+            "unexpected data/BSS layout static_end={static_end} \
+             bss={bss_start}+{bss_bytes} data_end={} workspace={}",
+            layout.data_end, layout.workspace_bytes,
         )));
     }
 
@@ -408,11 +434,11 @@ fn manifest(workspace_bytes: u32, data_bytes: u32) -> Section {
 /// a companion that might write into the client.
 pub fn relocate(input: &[u8]) -> Result<Vec<u8>, String> {
     let mut sections = split_sections(input)?;
-    let workspace_bytes = {
+    let layout = {
         let globals = section_mut(&mut sections, 6)?;
-        let bytes = relocate_globals(&globals.body)?;
+        let layout = relocate_globals(&globals.body)?;
         globals.body = vec![0]; // all former globals are now imports
-        bytes
+        layout
     };
     {
         let imports = section_mut(&mut sections, 2)?;
@@ -431,11 +457,11 @@ pub fn relocate(input: &[u8]) -> Result<Vec<u8>, String> {
     let start = section_mut(&mut sections, 8)?.body.clone();
     {
         let code = section_mut(&mut sections, 10)?;
-        code.body = remove_fixed_bss_initializer(&code.body, &start, workspace_bytes, data_bytes)?;
+        code.body = remove_fixed_bss_initializer(&code.body, &start, &layout, data_bytes)?;
     }
     if STACK_BYTES
         .checked_add(data_bytes)
-        .is_none_or(|end| end > workspace_bytes)
+        .is_none_or(|end| end > layout.workspace_bytes)
     {
         return Err(fault(
             "the static data does not fit in the linker workspace",
@@ -444,7 +470,7 @@ pub fn relocate(input: &[u8]) -> Result<Vec<u8>, String> {
     if let Some(data_count) = sections.iter_mut().find(|section| section.id == 12) {
         data_count.body = uleb(1);
     }
-    sections.push(manifest(workspace_bytes, data_bytes));
+    sections.push(manifest(layout.workspace_bytes, data_bytes));
 
     let mut output = WASM_HEADER.to_vec();
     for section in &sections {
