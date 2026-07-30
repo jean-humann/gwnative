@@ -23,6 +23,7 @@ export const FEATURES = Object.freeze([
   { id: 'ui', group: 'Game state', name: 'UI frame inventory', status: 'available' },
   { id: 'merchant', group: 'Game state', name: 'Merchant item IDs', status: 'available' },
   { id: 'progression', group: 'Game state', name: 'Character progression', status: 'available' },
+  { id: 'skill-unlocks', group: 'Game state', name: 'Character skill unlocks', status: 'available' },
   { id: 'inventory', group: 'Game state', name: 'Inventory and account storage', status: 'available' },
   { id: 'social', group: 'Game state', name: 'Friends and guild summary', status: 'available' },
   { id: 'chat', group: 'Game state', name: 'Chat and party search', status: 'needs-layout' },
@@ -77,6 +78,15 @@ export function formatProgressionSummary(progression) {
     + `L ${factions.luxon.current}/${factions.luxon.maximum}, `
     + `I ${factions.imperial.current}/${factions.imperial.maximum}, `
     + `B ${factions.balthazar.current}/${factions.balthazar.maximum}`;
+}
+
+export function formatSkillUnlockSummary(skillUnlocks) {
+  if (!skillUnlocks) return 'Unavailable for this client build';
+  const learnable = skillUnlocks.learnableTruncated
+    ? `${skillUnlocks.learnableSkillIds.length}/${skillUnlocks.learnableTotal} learnable`
+    : `${skillUnlocks.learnableTotal} learnable`;
+  return `${learnable} · ${skillUnlocks.characterLearnedSkillIds.length} learned · `
+    + `${skillUnlocks.accountUnlockedSkillIds.length} account unlocked`;
 }
 
 const setText = (element, value) => {
@@ -316,6 +326,16 @@ function installWidgets(overlays) {
       setText(body, formatProgressionSummary(state.progression));
     },
   });
+  const skillUnlocks = overlays.register({
+    id: 'skill-unlocks',
+    title: 'Character skill unlocks',
+    position: { x: 16, y: 968 },
+    visible: false,
+    render: (body, state) => {
+      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
+      setText(body, formatSkillUnlockSummary(state.skillUnlocks));
+    },
+  });
 
   const updateTime = () => {
     if (clock.isVisible()) clock.update(new Date().toLocaleTimeString());
@@ -353,6 +373,7 @@ function installWidgets(overlays) {
     if (ui.isVisible()) ui.update(event.detail);
     if (merchant.isVisible()) merchant.update(event.detail);
     if (progression.isVisible()) progression.update(event.detail);
+    if (skillUnlocks.isVisible()) skillUnlocks.update(event.detail);
   });
 
   return Object.freeze({
@@ -373,6 +394,7 @@ function installWidgets(overlays) {
     ui,
     merchant,
     progression,
+    skillUnlocks,
     dispose: () => clearInterval(interval),
   });
 }
@@ -471,6 +493,7 @@ export function installToolsPanel({
     ['UI frame inventory', widgets.ui],
     ['Merchant item IDs', widgets.merchant],
     ['Character progression', widgets.progression],
+    ['Character skill unlocks', widgets.skillUnlocks],
   ]) {
     widgetButtons.append(
       button(document, label, () => widget.visible(!widget.isVisible())),

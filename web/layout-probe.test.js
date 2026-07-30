@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import { probeLayout } from './layout-probe.js';
 
 const words = () => {
-  const layout = Array(228).fill(0);
+  const layout = Array(232).fill(0);
   Object.assign(layout, {
     0: 0x1000,
     1: 0x2000,

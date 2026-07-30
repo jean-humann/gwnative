@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 13;
-export const COMPANION_SNAPSHOT_BYTES = 56_844;
+export const COMPANION_SNAPSHOT_ABI = 14;
+export const COMPANION_SNAPSHOT_BYTES = 59_776;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -53,6 +53,7 @@ const FLAGS = Object.freeze({
   ui: 1 << 14,
   merchant: 1 << 15,
   progression: 1 << 16,
+  skillUnlocks: 1 << 17,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -71,7 +72,8 @@ const KNOWN_FLAGS =
   | FLAGS.trade
   | FLAGS.ui
   | FLAGS.merchant
-  | FLAGS.progression;
+  | FLAGS.progression
+  | FLAGS.skillUnlocks;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -134,6 +136,10 @@ const MAX_FACTION_CURRENT = 100_000_000;
 const MAX_FACTION_TOTAL = 2_000_000_000;
 const MAX_SKILL_POINTS_CURRENT = 1_000_000;
 const MAX_SKILL_POINTS_TOTAL = 2_000_000_000;
+const MAX_SKILL_BITMAP_WORDS = 108;
+const MAX_SKILL_ID = MAX_SKILL_BITMAP_WORDS * 32 - 1;
+const MAX_LEARNABLE_SKILLS = 512;
+const MAX_RAW_LEARNABLE_SKILLS = MAX_SKILL_ID + 1;
 const EFFECT_FLAGS = Object.freeze({
   buffsTruncated: 1 << 0,
   effectsTruncated: 1 << 1,
@@ -1422,6 +1428,72 @@ function readProgression(view) {
   });
 }
 
+function readSkillUnlocks(view) {
+  const base = 56844;
+  const pageFlags = view.getUint32(base, true);
+  const learnableCount = view.getUint32(base + 4, true);
+  const learnableTotal = view.getUint32(base + 8, true);
+  const learnedWordCount = view.getUint32(base + 12, true);
+  const accountWordCount = view.getUint32(base + 16, true);
+  const learnableTruncated = (pageFlags & 1) !== 0;
+  if (
+    (pageFlags & ~1) !== 0
+    || learnableCount > MAX_LEARNABLE_SKILLS
+    || learnableTotal > MAX_RAW_LEARNABLE_SKILLS
+    || learnableTotal < learnableCount
+    || learnedWordCount > MAX_SKILL_BITMAP_WORDS
+    || accountWordCount > MAX_SKILL_BITMAP_WORDS
+    || (learnableTruncated
+      ? learnableCount !== MAX_LEARNABLE_SKILLS
+        || learnableTotal <= MAX_LEARNABLE_SKILLS
+      : learnableTotal !== learnableCount)
+  ) {
+    return null;
+  }
+
+  const learnableSkillIds = [];
+  const learnableBase = base + 20;
+  for (let index = 0; index < MAX_LEARNABLE_SKILLS; index += 1) {
+    const skillId = view.getUint32(learnableBase + index * 4, true);
+    if (index >= learnableCount) {
+      if (skillId !== 0) return null;
+      continue;
+    }
+    if (skillId > MAX_SKILL_ID) return null;
+    learnableSkillIds.push(skillId);
+  }
+
+  const expandBitmap = (offset, count) => {
+    const skillIds = [];
+    for (let wordIndex = 0; wordIndex < MAX_SKILL_BITMAP_WORDS; wordIndex += 1) {
+      const word = view.getUint32(offset + wordIndex * 4, true);
+      if (wordIndex >= count) {
+        if (word !== 0) return null;
+        continue;
+      }
+      for (let bit = 0; bit < 32; bit += 1) {
+        if ((word & (1 << bit)) !== 0) skillIds.push(wordIndex * 32 + bit);
+      }
+    }
+    return Object.freeze(skillIds);
+  };
+
+  const learnedBase = learnableBase + MAX_LEARNABLE_SKILLS * 4;
+  const accountBase = learnedBase + MAX_SKILL_BITMAP_WORDS * 4;
+  const characterLearnedSkillIds = expandBitmap(learnedBase, learnedWordCount);
+  const accountUnlockedSkillIds = expandBitmap(accountBase, accountWordCount);
+  if (characterLearnedSkillIds === null || accountUnlockedSkillIds === null) {
+    return null;
+  }
+  return Object.freeze({
+    learnableTruncated,
+    learnableTotal,
+    learnableSkillIds: Object.freeze(learnableSkillIds),
+    characterLearnedSkillIds,
+    accountUnlockedSkillIds,
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -1642,6 +1714,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const skillUnlocksValid = (flags & FLAGS.skillUnlocks) !== 0;
+  const skillUnlocks = skillUnlocksValid ? readSkillUnlocks(view) : null;
+  if (
+    (skillUnlocksValid && skillUnlocks === null)
+    || (!skillUnlocksValid && !wordsAreZero(view, 56844, 2932))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -1668,6 +1748,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(ui ? { ui } : {}),
     ...(merchant ? { merchant } : {}),
     ...(progression ? { progression } : {}),
+    ...(skillUnlocks ? { skillUnlocks } : {}),
   });
 }
 

@@ -105,6 +105,13 @@ describe('public game state', () => {
       }),
       skillPoints: Object.freeze({ current: 5, totalEarned: 125 }),
     });
+    const skillUnlocks = Object.freeze({
+      learnableTruncated: false,
+      learnableTotal: 2,
+      learnableSkillIds: Object.freeze([111, 222]),
+      characterLearnedSkillIds: Object.freeze([3, 100]),
+      accountUnlockedSkillIds: Object.freeze([3, 200]),
+    });
     assert.deepEqual(
       publicState({
         status: 'ready',
@@ -121,6 +128,7 @@ describe('public game state', () => {
         ui,
         merchant,
         progression,
+        skillUnlocks,
       }),
       {
         status: 'ready',
@@ -137,6 +145,7 @@ describe('public game state', () => {
         ui,
         merchant,
         progression,
+        skillUnlocks,
       },
     );
   });

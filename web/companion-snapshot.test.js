@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 13;
+const SNAPSHOT_ABI = 14;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -48,6 +48,7 @@ const FLAG_TRADE = 1 << 13;
 const FLAG_UI = 1 << 14;
 const FLAG_MERCHANT = 1 << 15;
 const FLAG_PROGRESSION = 1 << 16;
+const FLAG_SKILL_UNLOCKS = 1 << 17;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -127,7 +128,8 @@ function domainSnapshot() {
       | FLAG_TRADE
       | FLAG_UI
       | FLAG_MERCHANT
-      | FLAG_PROGRESSION,
+      | FLAG_PROGRESSION
+      | FLAG_SKILL_UNLOCKS,
   });
   const view = new DataView(buffer);
   view.setUint32(64, 3, true);
@@ -326,6 +328,16 @@ function domainSnapshot() {
   view.setUint32(56832, 10_000, true);
   view.setUint32(56836, 5, true);
   view.setUint32(56840, 125, true);
+  view.setUint32(56848, 2, true);
+  view.setUint32(56852, 2, true);
+  view.setUint32(56856, 4, true);
+  view.setUint32(56860, 7, true);
+  view.setUint32(56864, 111, true);
+  view.setUint32(56868, 222, true);
+  view.setUint32(58912, 1 << 3, true);
+  view.setUint32(58924, 1 << 4, true);
+  view.setUint32(59344, 1 << 3, true);
+  view.setUint32(59368, 1 << 8, true);
   return buffer;
 }
 
@@ -628,6 +640,13 @@ describe('companion snapshot', () => {
       },
       skillPoints: { current: 5, totalEarned: 125 },
     });
+    assert.deepEqual(state.skillUnlocks, {
+      learnableTruncated: false,
+      learnableTotal: 2,
+      learnableSkillIds: [111, 222],
+      characterLearnedSkillIds: [3, 100],
+      accountUnlockedSkillIds: [3, 200],
+    });
     assert.ok(Object.isFrozen(state.party.players));
     assert.ok(Object.isFrozen(state.skillbar.skills));
     assert.ok(Object.isFrozen(state.effects.effects));
@@ -652,6 +671,10 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state.progression.factions));
     assert.ok(Object.isFrozen(state.progression.skillPoints));
     assert.ok(Object.isFrozen(state.progression));
+    assert.ok(Object.isFrozen(state.skillUnlocks.learnableSkillIds));
+    assert.ok(Object.isFrozen(state.skillUnlocks.characterLearnedSkillIds));
+    assert.ok(Object.isFrozen(state.skillUnlocks.accountUnlockedSkillIds));
+    assert.ok(Object.isFrozen(state.skillUnlocks));
   });
 
   it('normalizes the GWCA no-map-marker sentinel', () => {
@@ -969,6 +992,23 @@ describe('companion snapshot', () => {
       true,
     );
     assert.equal(readCompanionSnapshot(absentProgression, 0).reason, 'corrupt');
+
+    const badLearnableTotal = domainSnapshot();
+    new DataView(badLearnableTotal).setUint32(56852, 1, true);
+    assert.equal(readCompanionSnapshot(badLearnableTotal, 0).reason, 'corrupt');
+
+    const trailingLearnedWord = domainSnapshot();
+    new DataView(trailingLearnedWord).setUint32(58928, 1, true);
+    assert.equal(readCompanionSnapshot(trailingLearnedWord, 0).reason, 'corrupt');
+
+    const absentSkillUnlocks = domainSnapshot();
+    const absentSkillUnlocksView = new DataView(absentSkillUnlocks);
+    absentSkillUnlocksView.setUint32(
+      12,
+      absentSkillUnlocksView.getUint32(12, true) & ~FLAG_SKILL_UNLOCKS,
+      true,
+    );
+    assert.equal(readCompanionSnapshot(absentSkillUnlocks, 0).reason, 'corrupt');
   });
 
   // The seqlock, which is the whole reason this can be read on the animation
@@ -988,7 +1028,7 @@ describe('companion snapshot', () => {
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
       // A flag this build has no name for is either a newer companion or not a
       // companion at all.
-      { flags: FLAG_READY | FLAG_PLAYER | (1 << 17) },
+      { flags: FLAG_READY | FLAG_PLAYER | (1 << 18) },
     ]) {
       assert.equal(read(overrides).reason, 'snapshot', JSON.stringify(overrides));
     }

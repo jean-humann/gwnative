@@ -58,12 +58,17 @@ const framePointers = 0x168000;
 const rootFrame = 0x169000;
 const childFrame = 0x16a000;
 const merchantItems = 0x16b000;
+const account = 0x16c000;
+const learnableSkills = 0x16d000;
+const learnedSkills = 0x16e000;
+const accountUnlockedSkills = 0x16f000;
 const snapshot = 0x180000;
 const config = 0x1a0000;
 
 // Context and current-map invariants.
 u32(contextRoot, contexts);
 u32(contexts + 6 * 4, game);
+u32(game + 0x28, account);
 u32(game + 0x44, character);
 u32(game + 0x2c, world);
 u32(game + 0x3c, guildContext);
@@ -149,6 +154,24 @@ u32(world + 0x7b8, 10_000);
 u32(world + 0x7bc, 10_000);
 u32(world + 0x7c0, 10_000);
 u32(world + 0x7c4, 15_000);
+
+// Trainer-visible IDs are a plain list; character-learned and account-unlocked
+// skills are separate bitmaps in WorldContext and AccountContext respectively.
+u32(world + 0x700, learnableSkills);
+u32(world + 0x704, 2);
+u32(world + 0x708, 2);
+u32(learnableSkills, 111);
+u32(learnableSkills + 4, 222);
+u32(world + 0x710, learnedSkills);
+u32(world + 0x714, 4);
+u32(world + 0x718, 4);
+u32(learnedSkills, 1 << 3);
+u32(learnedSkills + 3 * 4, 1 << 4);
+u32(account + 0x124, accountUnlockedSkills);
+u32(account + 0x128, 7);
+u32(account + 0x12c, 7);
+u32(accountUnlockedSkills, 1 << 3);
+u32(accountUnlockedSkills + 6 * 4, 1 << 8);
 
 // One active quest, one quest without a map marker, and one mission objective.
 u32(world + 0x528, 44);
@@ -327,7 +350,7 @@ u32(childFrame + 0x20, 7);
 u32(childFrame + 0x24, 8);
 u32(childFrame + 0x18c, 0x204);
 
-const layout = Array(228).fill(0);
+const layout = Array(232).fill(0);
 Object.assign(layout, {
   0: contextRoot,
   1: agentArray,
@@ -523,6 +546,10 @@ Object.assign(layout, {
   225: 0x7ac,
   226: 0x7b0,
   227: 0x7b4,
+  228: 0x28,
+  229: 0x124,
+  230: 0x700,
+  231: 0x710,
 });
 new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
@@ -532,7 +559,7 @@ const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
 });
 const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 912, 0, 0, 1 << 1),
+  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 928, 0, 0, 1 << 1),
   1,
 );
 tick(0);
@@ -565,6 +592,13 @@ assert.deepEqual(state.progression, {
     balthazar: { current: 500, totalEarned: 2_500, maximum: 10_000 },
   },
   skillPoints: { current: 5, totalEarned: 125 },
+});
+assert.deepEqual(state.skillUnlocks, {
+  learnableTruncated: false,
+  learnableTotal: 2,
+  learnableSkillIds: [111, 222],
+  characterLearnedSkillIds: [3, 100],
+  accountUnlockedSkillIds: [3, 200],
 });
 assert.equal(state.agents.agents[0].isCasting, true);
 assert.equal(state.quests.activeQuestId, 44);

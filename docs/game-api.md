@@ -31,7 +31,9 @@ following client-owned labels or callbacks. The numeric merchant item array is
 available as a separately bounded page without implying that a merchant window
 is open. Character progression adds level, experience, hard-mode availability,
 four bounded faction counters, and skill-point totals from independently
-verified scalar fields.
+verified scalar fields. Skill availability remains a separate domain: trainer
+IDs, character-learned skills, and account-wide unlocks retain their distinct
+GWCA/Py4GW meanings.
 Client-owned names, UUIDs, messages, and announcements are not read.
 
 ## Loopback endpoints
@@ -468,6 +470,13 @@ The envelope is revisioned and timestamped:
         "balthazar": { "current": 500, "totalEarned": 2500, "maximum": 10000 }
       },
       "skillPoints": { "current": 5, "totalEarned": 125 }
+    },
+    "skillUnlocks": {
+      "learnableTruncated": false,
+      "learnableTotal": 2,
+      "learnableSkillIds": [111, 222],
+      "characterLearnedSkillIds": [3, 100],
+      "accountUnlockedSkillIds": [3, 200]
     }
   }
 }
@@ -672,6 +681,24 @@ rewards, morale, equipment status, or progression actions. The values are a
 coherent live client reading, not a promise about server persistence or an
 account-wide scope beyond the field semantics above.
 
+The skill-unlock domain follows three independently verified arrays rather than
+collapsing their meanings:
+
+- `learnableSkillIds` is the plain `WorldContext` list populated by a skill
+  trainer or Signet of Capture;
+- `characterLearnedSkillIds` expands the character bitmap queried by GWCA's
+  `GetIsSkillLearnt`; and
+- `accountUnlockedSkillIds` expands the account bitmap queried by
+  `GetIsSkillUnlocked`, which can make skills available to heroes or tomes
+  without saying that the current character learned them.
+
+The two bitmaps retain the 108-word range independently maintained by Py4GW
+Native, yielding sorted IDs from 0 through 3455. The trainer list publishes at
+most 512 IDs in client order; `learnableTotal` and `learnableTruncated` make a
+capped page explicit. No skill name, profession, elite status, trainer
+identity, unlock request, tome use, template load, or skill activation is
+inferred or exposed.
+
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account
 identity, chat, encoded game text, or action surface.
@@ -711,7 +738,8 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - validated UI-frame totals and local visibility;
 - bounded merchant item-ID totals;
 - level, experience, hard-mode availability, faction, and skill-point
-  progression; and
+  progression;
+- trainer-visible, character-learned, and account-unlocked skill totals; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact

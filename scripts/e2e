@@ -413,6 +413,7 @@ GAMEPLAY_DOMAINS = (
     "ui",
     "merchant",
     "progression",
+    "skillUnlocks",
 )
 
 
@@ -660,6 +661,7 @@ def main() -> int:
                 "ui",
                 "merchant",
                 "progression",
+                "skillUnlocks",
             }:
                 raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)
@@ -903,6 +905,7 @@ def main() -> int:
             ui_state = state.get("ui")
             merchant = state.get("merchant")
             progression = state.get("progression")
+            skill_unlocks = state.get("skillUnlocks")
             if not isinstance(party, dict) or not party.get("players"):
                 present = sorted(
                     name for name in GAMEPLAY_DOMAINS if isinstance(state.get(name), dict)
@@ -1663,6 +1666,59 @@ def main() -> int:
                 <= 2_000_000_000
             ):
                 raise Failure("certified character progression is incomplete")
+            learnable_skills = (
+                skill_unlocks.get("learnableSkillIds")
+                if isinstance(skill_unlocks, dict)
+                else None
+            )
+            learned_skills = (
+                skill_unlocks.get("characterLearnedSkillIds")
+                if isinstance(skill_unlocks, dict)
+                else None
+            )
+            account_skills = (
+                skill_unlocks.get("accountUnlockedSkillIds")
+                if isinstance(skill_unlocks, dict)
+                else None
+            )
+            learnable_total = (
+                skill_unlocks.get("learnableTotal")
+                if isinstance(skill_unlocks, dict)
+                else None
+            )
+            if (
+                not isinstance(skill_unlocks, dict)
+                or not isinstance(skill_unlocks.get("learnableTruncated"), bool)
+                or not isinstance(learnable_total, int)
+                or not 0 <= learnable_total <= 3_456
+                or not isinstance(learnable_skills, list)
+                or len(learnable_skills) > 512
+                or len(learnable_skills) > learnable_total
+                or any(
+                    not isinstance(skill_id, int)
+                    or not 0 <= skill_id < 3_456
+                    for skill_id in learnable_skills
+                )
+                or (
+                    skill_unlocks.get("learnableTruncated")
+                    and (len(learnable_skills) != 512 or learnable_total <= 512)
+                )
+                or (
+                    not skill_unlocks.get("learnableTruncated")
+                    and learnable_total != len(learnable_skills)
+                )
+                or any(
+                    not isinstance(values, list)
+                    or values != sorted(set(values))
+                    or any(
+                        not isinstance(skill_id, int)
+                        or not 0 <= skill_id < 3_456
+                        for skill_id in values
+                    )
+                    for values in (learned_skills, account_skills)
+                )
+            ):
+                raise Failure("certified skill unlock state is incomplete")
             print(
                 "[e2e] bounded game-state API PASS "
                 f"(players={len(party.get('players', []))}, "
@@ -1682,7 +1738,10 @@ def main() -> int:
                 f"ui-frames={len(ui_frames)}/{ui_total}, "
                 f"merchant-items={len(merchant_items)}/{merchant_total}, "
                 f"level={progression.get('level')}, "
-                f"experience={progression.get('experience')})"
+                f"experience={progression.get('experience')}, "
+                f"learnable-skills={len(learnable_skills)}/{learnable_total}, "
+                f"learned-skills={len(learned_skills)}, "
+                f"account-unlocked-skills={len(account_skills)})"
             )
 
             before = position(ready)
