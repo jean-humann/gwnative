@@ -5,6 +5,7 @@ import {
   FEATURES,
   formatDuration,
   formatMerchantSummary,
+  formatProgressionSummary,
   formatTradeSummary,
   formatUiSummary,
   setPanelVisible,
@@ -35,6 +36,7 @@ describe('companion tools', () => {
     assert.equal(FEATURES.find((feature) => feature.id === 'trade').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'ui').status, 'available');
     assert.equal(FEATURES.find((feature) => feature.id === 'merchant').status, 'available');
+    assert.equal(FEATURES.find((feature) => feature.id === 'progression').status, 'available');
   });
 
   it('summarises the bounded UI frame inventory', () => {
@@ -97,6 +99,26 @@ describe('companion tools', () => {
         itemIds: Array(128).fill(900),
       }),
       '128/200 merchant item IDs · first 128',
+    );
+  });
+
+  it('summarises character progression without inventing names or ranks', () => {
+    assert.equal(formatProgressionSummary(null), 'Unavailable for this client build');
+    assert.equal(
+      formatProgressionSummary({
+        hardModeUnlocked: true,
+        level: 20,
+        experience: 1_337_500,
+        factions: {
+          kurzick: { current: 1_000, maximum: 10_000 },
+          luxon: { current: 2_000, maximum: 10_000 },
+          imperial: { current: 100, maximum: 15_000 },
+          balthazar: { current: 500, maximum: 10_000 },
+        },
+        skillPoints: { current: 5, totalEarned: 125 },
+      }),
+      'Level 20 · 1337500 XP · 5/125 skill points · HM unlocked · '
+        + 'factions K 1000/10000, L 2000/10000, I 100/15000, B 500/10000',
     );
   });
 
