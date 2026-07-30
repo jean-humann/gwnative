@@ -118,9 +118,12 @@ the shipped target for advisories, duplicate or wildcard dependencies,
 licences, and nonstandard sources. The separate `cargo check` uses the
 `rust-version` declared in `Cargo.toml`, so changing the compiler floor changes
 the check instead of leaving a second version constant behind. The Rust suite
-contains unit and socket-level integration tests. One ignored test reaches the
-GitHub API and is excluded from the default run. The `tests/web.rs` integration
-test invokes:
+contains unit and socket-level integration tests. `tests/companion.rs`
+instantiates the exact freestanding kernel over a deterministic client-memory
+fixture, executes one tick, and sends the resulting agent/quest seqlock page
+through the production JavaScript decoder. One ignored test reaches the GitHub
+API and is excluded from the default run. The `tests/web.rs` integration test
+invokes:
 
 ```sh
 node --test "*.test.js"
@@ -159,8 +162,9 @@ Wars client. The runner:
 7. sends only a finite set of named AppKit actions: activate, forward/backward,
    left/right, next target, interact, cancel, and skill 1; and
 8. when the installed client has a certified state layout, requires two stable
-   revisions, validates bounded party, eight-slot skillbar, and player-effects
-   state, and confirms bidirectional movement through newer revisions.
+   revisions, validates bounded party, eight-slot skillbar, player effects,
+   map agents, quests, and mission objectives, and confirms bidirectional
+   movement through newer revisions.
 
 ```sh
 scripts/e2e

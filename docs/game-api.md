@@ -20,8 +20,9 @@ states. No guessed offset is read.
    consistency again.
 
 The resulting state covers the numeric player agent and position, map/instance
-identity, current target position/range, bounded party roster, and the player’s
-eight-slot skillbar, buffs, and effects.
+identity, current target position/range, bounded party roster, the player’s
+eight-slot skillbar and effects, a bounded map-agent page, and the quest log
+with mission objectives.
 
 ## Loopback endpoints
 
@@ -187,6 +188,63 @@ The envelope is revisioned and timestamped:
           "timestamp": 400
         }
       ]
+    },
+    "agents": {
+      "truncated": false,
+      "total": 1,
+      "agents": [
+        {
+          "agentId": 4,
+          "typeBits": 219,
+          "kind": "Living",
+          "playerNumber": 42,
+          "primary": 7,
+          "secondary": 0,
+          "level": 20,
+          "health": 0.75,
+          "rotation": 1.25,
+          "x": 1.5,
+          "y": 2.5,
+          "z": 3,
+          "modelState": 65,
+          "effects": 0,
+          "allegiance": 1,
+          "isLiving": true,
+          "isItem": false,
+          "isGadget": false,
+          "isDead": false,
+          "isMoving": false,
+          "isAttacking": false,
+          "isKnockedDown": false,
+          "isCasting": true
+        }
+      ]
+    },
+    "quests": {
+      "activeQuestId": 44,
+      "questsTruncated": false,
+      "objectivesTruncated": false,
+      "quests": [
+        {
+          "questId": 44,
+          "logState": 34,
+          "mapFrom": 55,
+          "markerX": 10,
+          "markerY": 20,
+          "markerPlane": 3,
+          "mapTo": 56,
+          "completed": true,
+          "currentMission": false,
+          "primary": true,
+          "areaPrimary": false
+        }
+      ],
+      "missionObjectives": [
+        {
+          "objectiveId": 7,
+          "type": 2
+        }
+      ]
     }
   }
 }
@@ -220,9 +278,28 @@ and timestamp fields. Identifiers are unique within each published array and
 durations must be finite and non-negative. Empty arrays are a valid certified
 reading: they mean the player currently has no corresponding state.
 
+The agent page contains at most 128 live entries from the client’s agent array,
+in increasing `agentId` order. `total` counts readable entries and `truncated`
+distinguishes a complete page from the 128-record cap. Each record corresponds
+to the read side of GWCA `Agent`/`AgentLiving` and PyAgent: numeric type bits,
+position, rotation, model identity, profession, level, health, allegiance, and
+model/effect state. The boolean kind and movement/combat fields are derived
+from those same numeric words and are rechecked by Rust. Non-living records
+must carry zeroes in every living-only field. Names and encoded strings are not
+read because their lifetime and decoding contract have not been certified.
+
+The quest domain publishes at most 64 `Quest` records and 32 mission
+objectives. It preserves `questId`, `logState`, source/destination map IDs, and
+the numeric marker. `completed`, `currentMission`, `primary`, and
+`areaPrimary` must exactly match their documented `logState` bits.
+`activeQuestId: 0` means no selected quest; on an untruncated page a non-zero
+active ID must appear in the quest list. Mission objectives expose only their
+numeric ID and type flags, not client-owned encoded text. Independent
+truncation flags cover both arrays.
+
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account data,
-inventory, chat, quest, or action surface.
+inventory, chat, encoded quest text, or action surface.
 
 Long polling sleeps in the native server until the page publishes a newer
 revision. A consumer can therefore follow live state without a timer repeatedly
@@ -248,7 +325,9 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - measured frame rate;
 - party roster summary;
 - player skillbar IDs;
-- player buff/effect counts; and
+- player buff/effect counts;
+- map-agent totals;
+- quest and mission-objective counts; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact
