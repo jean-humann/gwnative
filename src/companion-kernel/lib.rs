@@ -143,7 +143,9 @@ const _: [(); 4160] = [(); size_of::<CursorSnapshot>()];
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {}
+    // A synchronous infinite loop would freeze the page and prevent the
+    // JavaScript observer from applying its fail-closed trap handling.
+    core::arch::wasm32::unreachable()
 }
 
 fn memory_bytes() -> u32 {
@@ -703,6 +705,7 @@ pub unsafe extern "C" fn companion_init(
         return 3;
     }
     if config_size != CONFIG_BYTES
+        || config_ptr == 0
         || config_ptr & 3 != 0
         || !contains(config_ptr, config_size)
     {

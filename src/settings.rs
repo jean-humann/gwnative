@@ -6,7 +6,7 @@
 //! gesture translation `input.js` installs, `showDiagnostics` opens the log pane
 //! at boot, `dataStrategy` records the answer to the launcher's one question,
 //! `autoCheckUpdates`, `autoInstallUpdates` and `lastUpdateCheckAt` describe
-//! update intent and cadence, `compatibilityNoticeSeenFor` is which client build
+//! update intent and cadence, `compatibilityNoticeSeenFor` is which client artifact
 //! the player has already been warned about, and `nativeCursor` plus
 //! `targetReadout` select the two optional enhancements. Nothing is stored for a
 //! feature this app does not have — a settings file whose fields nothing reads
@@ -118,11 +118,10 @@ pub struct Settings {
     /// seconds since the epoch. What makes an opted-in launch ask once a day
     /// rather than once a launch.
     pub last_update_check_at: Option<u64>,
-    /// The sha256 of the `Gw.jspi.wasm` this profile has already been warned
-    /// about, when the warning applied. Per build rather than a boolean because
-    /// the thing being acknowledged is *this* ArenaNet build being one we have
-    /// not certified — the next one deserves its own sentence, and a boolean
-    /// would either nag every launch or stay silent through every future patch.
+    /// The SHA-256 of the selected runtime's Wasm this profile has already been
+    /// warned about. Per artifact rather than a boolean because the next exact
+    /// pair deserves its own sentence, while a boolean would either nag every
+    /// launch or stay silent through every future patch.
     pub compatibility_notice_seen_for: Option<String>,
     /// Draw the game's own cursor art with the page's compositor instead of
     /// letting the client draw it into the frame. See [`crate::wasm`] for what
@@ -676,7 +675,7 @@ mod tests {
     }
 
     /// The two host-owned fields. A page that could write either could tell
-    /// this build that a check had just happened, or that a client build had
+    /// this build that a check had just happened, or that a client artifact had
     /// been warned about when it had not — and both are how a notice comes to
     /// be silently suppressed for good.
     #[test]

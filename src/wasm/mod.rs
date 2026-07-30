@@ -151,19 +151,23 @@ pub fn prepare(
 /// Build an unsigned, fail-closed candidate from a new official artifact pair.
 ///
 /// The most recent certificate supplies semantic function identities and the
-/// read-only layout as review input. Stub body hashes and both transform output
-/// hashes are recomputed. Passive enhancements stay disabled until live layout
-/// probes have independently certified the copied offsets.
+/// read-only layout as review input. Every target body must retain its exact
+/// anchor; only the two transform output hashes are recomputed. Passive
+/// enhancements stay disabled until live layout probes have independently
+/// certified the copied offsets.
 pub fn certificate_candidate(root: &Path) -> Outcome<String> {
     let feed = certificate::bundled()?;
     let prototype = feed
         .families
         .last()
         .ok_or("certificate candidate: no prototype family")?;
-    let global_count = prototype.layout.shared_global_count;
+    let global_count = prototype
+        .layout
+        .as_ref()
+        .map(|layout| layout.shared_global_count);
 
     let mut runtimes = Vec::new();
-    let mut shared_proof: Option<rewrite::LayoutProof> = None;
+    let mut layout_proofs = Vec::new();
     for runtime in [Runtime::Jspi, Runtime::Asyncify] {
         let prototype_runtime = prototype
             .runtimes
@@ -181,29 +185,34 @@ pub fn certificate_candidate(root: &Path) -> Outcome<String> {
             .map_err(|e| format!("certificate candidate: {}: {e}", wasm_path.display()))?;
         let glue = fs::read(&glue_path)
             .map_err(|e| format!("certificate candidate: {}: {e}", glue_path.display()))?;
-        let proof = rewrite::layout_proof(&wasm, global_count)?;
-        if let Some(shared) = &shared_proof {
-            if proof.data_sha256 != shared.data_sha256
-                || proof.element_sha256 != shared.element_sha256
-                || proof.shared_global_prefix_sha256 != shared.shared_global_prefix_sha256
-            {
-                return Err(format!(
-                    "certificate candidate: {} does not share the artifact-family layout",
-                    runtime.key()
-                ));
-            }
-        } else {
-            shared_proof = Some(proof);
+        if let Some(global_count) = global_count {
+            layout_proofs.push(rewrite::layout_proof(&wasm, global_count));
         }
         let (certificate, _) = rewrite::recertify(&wasm, &glue, prototype_runtime)?;
         runtimes.push(certificate);
     }
 
-    let proof = shared_proof.ok_or("certificate candidate: no runtime artifacts")?;
-    let mut layout = prototype.layout.clone();
-    layout.data_sha256 = proof.data_sha256;
-    layout.element_sha256 = proof.element_sha256;
-    layout.shared_global_prefix_sha256 = proof.shared_global_prefix_sha256;
+    let layout = match (prototype.layout.clone(), layout_proofs.as_slice()) {
+        (Some(mut layout), [Ok(jspi), Ok(asyncify)])
+            if jspi.data_sha256 == asyncify.data_sha256
+                && jspi.element_sha256 == asyncify.element_sha256
+                && jspi.shared_global_prefix_sha256 == asyncify.shared_global_prefix_sha256 =>
+        {
+            layout.data_sha256.clone_from(&jspi.data_sha256);
+            layout.element_sha256.clone_from(&jspi.element_sha256);
+            layout
+                .shared_global_prefix_sha256
+                .clone_from(&jspi.shared_global_prefix_sha256);
+            Some(layout)
+        }
+        _ => {
+            note!(
+                "[gwnative] certificate candidate: no shared passive-observer layout; \
+                 template transforms remain independently certifiable"
+            );
+            None
+        }
+    };
     let family_id = certificate::artifact_family_id(&runtimes)?;
     let family = certificate::BuildFamily {
         family_id,
@@ -272,21 +281,25 @@ fn prepare_runtime_inner(
         ));
     };
 
-    rewrite::verify_layout(&input, &selected.family.layout)?;
     let derived = derive(cache_root, runtime, &input, &selected)?;
-    let enhancement_state = if !enhance {
-        enhancements::OFF
-    } else if selected.runtime.passive_enhancements {
-        enhancements::READY
+    let (enhancement_state, manifest) = if !enhance {
+        (enhancements::OFF, None)
+    } else if !selected.runtime.passive_enhancements {
+        (enhancements::UNCERTIFIED, None)
+    } else if let Some(layout) = &selected.family.layout {
+        match rewrite::verify_layout(&input, layout) {
+            Ok(()) => (
+                enhancements::READY,
+                Some(layout.page_manifest(&selected.family.family_id)),
+            ),
+            Err(reason) => {
+                note!("[gwnative] {} enhancements: {reason}", runtime.key());
+                (enhancements::FAILED, None)
+            }
+        }
     } else {
-        enhancements::UNCERTIFIED
+        (enhancements::UNCERTIFIED, None)
     };
-    let manifest = (enhancement_state == enhancements::READY).then(|| {
-        selected
-            .family
-            .layout
-            .page_manifest(&selected.family.family_id)
-    });
     Ok((
         Some(derived),
         RuntimeModule {
@@ -523,7 +536,9 @@ mod tests {
             let selected = feed
                 .select(runtime, &digest(&wasm), &digest(&glue))
                 .expect("the exact official pair is in the certificate");
-            rewrite::verify_layout(&wasm, &selected.family.layout).unwrap();
+            if let Some(layout) = &selected.family.layout {
+                rewrite::verify_layout(&wasm, layout).unwrap();
+            }
             let output = rewrite::candidate(&wasm, selected.runtime).unwrap();
             eprintln!("{} candidate sha256 {}", runtime.key(), digest(&output));
             assert_eq!(digest(&output), selected.runtime.template.output_sha256);

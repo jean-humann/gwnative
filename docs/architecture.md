@@ -118,13 +118,13 @@ Artifact presence is not treated as integrity:
 
 - each installed client artifact is recorded by length and SHA-256;
 - launch checks the record and downloads only unsound artifacts;
-- the offered build ID is derived from manifest data before download; and
+- the offered generation ID is derived from manifest data before download; and
 - a newly installed generation is unproven until `POST /__booted`.
 
 Before replacing a proven set, gwnative saves it. If the new set fails to report
 a first frame before the next launch, the prior set is restored and the failed
-build ID is refused. Refusals are bounded, a damaged installed copy may retry a
-refused build when no alternative exists, and first install never deletes its
+generation ID is refused. Refusals are bounded, a damaged installed copy may
+retry a refused generation when no alternative exists, and first install never deletes its
 only client merely because an unrelated boot failure occurred.
 
 ## Game-image storage
@@ -171,10 +171,11 @@ SHA-256 for the selected runtime before its transform is considered:
 4. handle those markers in `web/template-save.js` against IDBFS.
 
 Asyncify can change every body and add functions, types and globals, so its
-anchors and output hash are separate from JSPI's. The verifier validates the
-resulting WebAssembly, proves all sections other than function and code are
-byte-identical, proves the existing bodies differ only at authorized calls, and
-then asserts the runtime-specific output hash. Unknown or failed transforms
+anchors and output hash are separate from JSPI's. A structural verifier,
+separate from the output builder, validates the resulting WebAssembly, proves
+all sections other than function and code are byte-identical, checks appended
+types and forwarders, proves existing bodies differ only at authorized calls,
+and then asserts the runtime-specific output hash. Unknown or failed transforms
 fall back to the unmodified module, preserving playability at the cost of the
 compatibility feature.
 
@@ -263,7 +264,7 @@ See the [performance guide](performance.md) for measurement semantics.
 - Hidden-page and high-refresh behaviour relies on guarded WebKit feature keys.
   Missing keys degrade to WebKit defaults and are logged.
 - Client transforms are intentionally pinned to exact module hashes. A new
-  ArenaNet build can temporarily disable templates and tools without preventing
+  ArenaNet artifact pair can temporarily disable templates and tools without preventing
   launch.
 - Development and packaged builds use separate WebKit storage roots.
 - The loopback port fallback changes the page origin for that session.

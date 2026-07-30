@@ -97,7 +97,7 @@
               {
                 "kind": "fileExists",
                 "stubFunction": 552,
-                "stubBodySha256": null,
+                "stubBodySha256": "65fbded4f294c74d67972efe9c666f626f3ab6b1223abd17e05228046bb157d4",
                 "callSites": [
                   { "localFunction": 9541, "occurrence": 0, "expectedTargetCalls": 2 }
                 ]
@@ -156,7 +156,7 @@
               {
                 "kind": "fileExists",
                 "stubFunction": 552,
-                "stubBodySha256": null,
+                "stubBodySha256": "df9a7b45c9c96939edf60e799f6dd3838fe29ab3cc5af35d866b00373aae8723",
                 "callSites": [
                   { "localFunction": 9541, "occurrence": 0, "expectedTargetCalls": 2 }
                 ]

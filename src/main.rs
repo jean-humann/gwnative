@@ -1,8 +1,9 @@
 //! Native macOS host for the Guild Wars WebAssembly client.
 //!
-//! ArenaNet ships `Gw.jspi.js` alongside `Gw.jspi.wasm` and regenerates both on
-//! every patch, so their JavaScript has to run as-is — in an engine with JSPI
-//! and WebGL. On macOS 27 that is WKWebView. Everything outside that realm
+//! ArenaNet publishes matching JSPI and Asyncify JavaScript/WebAssembly pairs.
+//! Their generated JavaScript has to run as-is in WebKit; this app probes its
+//! own WKWebView and chooses the JSPI pair only when suspend/resume works,
+//! otherwise it uses the official Asyncify pair. Everything outside that realm
 //! (patching, chunk storage, sockets, credentials, windowing) is Rust.
 
 // Out of alphabetical order on purpose: `macro_rules!` is in scope only for
@@ -305,7 +306,7 @@ fn install_client(
     ));
     if let Some(refused) = generations.roll_back(root) {
         note!(
-            "[gwnative] client build {refused} never reached a first frame; \
+            "[gwnative] client generation {refused} never reached a first frame; \
              restored the one before it"
         );
     }
@@ -496,14 +497,14 @@ fn revalidate_manifest() {
             // manifest, sees it offers a build that is not the one on disk, and
             // fetches it. See [`patch::Client::revalidate`].
             Ok(true) => note!(
-                "[gwnative] the service has published a new client build; \
+                "[gwnative] the service has published a new client generation; \
                  it will be installed at the next launch"
             ),
             Ok(false) => {}
             // Not an error the player has anything to do about: the app is
             // running the client it already had, which is what it would have
             // done anyway.
-            Err(e) => note!("[gwnative] could not check for a new client build: {e}"),
+            Err(e) => note!("[gwnative] could not check for a new client generation: {e}"),
         }
     });
 }
@@ -524,7 +525,7 @@ fn sync(
     offered: &str,
 ) -> error::Result<()> {
     if unsound.is_empty() {
-        note!("[gwnative] installing client build {offered}");
+        note!("[gwnative] installing client generation {offered}");
     } else {
         note!(
             "[gwnative] fetching client artifacts: {}",
@@ -536,7 +537,7 @@ fn sync(
     if generations.rejected(offered) {
         if unsound.is_empty() {
             note!(
-                "[gwnative] the service still offers client build {offered}, which never reached \
+                "[gwnative] the service still offers client generation {offered}, which never reached \
                  a first frame here; keeping the one on disk"
             );
             return Ok(());
@@ -545,7 +546,7 @@ fn sync(
         // it gets another try — loudly, because if it fails the same way the
         // line above is the one that explains why nothing changed.
         note!(
-            "[gwnative] client build {offered} never reached a first frame here, but the client \
+            "[gwnative] client generation {offered} never reached a first frame here, but the client \
              on disk is incomplete, so there is nothing else to run"
         );
     }

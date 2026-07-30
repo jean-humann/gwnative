@@ -190,7 +190,12 @@ The secrets are:
 | `APPLE_NOTARY_KEY_P8` | Base64-encoded App Store Connect API key |
 | `APPLE_NOTARY_KEY_ID` | API key ID |
 | `APPLE_NOTARY_KEY_ISSUER` | API issuer UUID |
-| `SPARKLE_PRIVATE_KEY` | EdDSA private key for update archives and client-certificate feeds |
+| `SPARKLE_PRIVATE_KEY` | EdDSA private key for update archives |
+
+The separate `certificate-publishing` environment is restricted to `main`,
+requires review, and contains only `CERTIFICATE_PRIVATE_KEY`, a base64-encoded
+PKCS#8 Ed25519 key. Certificate signing runs in a fresh job that neither checks
+out nor executes repository code; the following no-secret job opens the PR.
 
 The workflow creates a temporary Keychain, imports the identity and public
 intermediate chain, grants access only to signing tools, stores the notarization

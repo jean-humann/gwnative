@@ -46,7 +46,7 @@ Commands:
   (none)         open the window
   sync           download the client and exit
   serve          run the origin without a window
-  certify        print a build-family certificate candidate
+  certify        print an artifact-family certificate candidate
 
 Options:
   -h, --help     print this and exit

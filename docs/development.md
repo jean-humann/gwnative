@@ -54,7 +54,7 @@ cargo run -- serve
 
 Use `scripts/client-certify WEB_ROOT` for the guarded certification
 workflow rather than invoking `certify` directly. See
-[Client build certification](certification.md).
+[Client artifact certification](certification.md).
 
 `serve` prints the bound address and session token on one line, then parks:
 
@@ -150,7 +150,8 @@ All runtime overrides are optional.
 | `GWNATIVE_TRACE_SOCKETS` | Log socket frame sizes; value `hex` also logs at most the first 16 bytes |
 | `GWNATIVE_SIGN_IDENTITY` | Select a development or release signing identity |
 | `GWNATIVE_NOTARY_PROFILE` | Select the notarytool Keychain profile for `scripts/release` |
-| `SPARKLE_PRIVATE_KEY` | Pass the update-signing key to release or protected certificate-publishing scripts |
+| `SPARKLE_PRIVATE_KEY` | Pass the update-signing key to release scripts |
+| `CERTIFICATE_PRIVATE_KEY` | Base64-encoded PKCS#8 Ed25519 key for protected certificate-feed signing |
 
 `GWNATIVE_RELEASE` is an internal switch set by `scripts/release`; it selects a
 timestamped hardened-runtime signature without debug entitlements. Do not use it

@@ -1,4 +1,4 @@
-//! Which client build is on disk, whether it has ever reached a first frame,
+//! Which client generation is on disk, whether it has ever reached a first frame,
 //! and what to go back to when it has not.
 //!
 //! Two problems, one record.
@@ -11,18 +11,19 @@
 //! this host says can help. So the size and a digest of each artifact are
 //! recorded when it is written, and checked before the window opens.
 //!
-//! The second is that a *correctly downloaded* build can still be one this
+//! The second is that a *correctly downloaded* generation can still be one this
 //! harness cannot run. ArenaNet ships when they ship; the transform in `wasm`
 //! is certified against a specific module, the JSPI glue changes shape, and the
 //! failure arrives as an app that will not start any more — with the previous,
 //! working client already overwritten. So a freshly synced set is not trusted
 //! until the page reports a first frame. Until then the set it replaced is kept
 //! beside it, and a launch that finds an unproven set restores what came
-//! before and refuses that build by identity, so the next sync does not walk
+//! before and refuses that generation by identity, so the next sync does not walk
 //! straight back into it.
 //!
 //! The two identities are deliberately different things. A generation's `id`
-//! says *which build* this is and comes from the manifest's chunk hashes, so it
+//! says *which patch generation* this is and comes from the manifest's chunk
+//! hashes, so it
 //! is known before a byte is downloaded — that is what makes refusing one
 //! possible. An artifact's `hash` says *what is on this disk* and is taken from
 //! the bytes as written. Neither can stand in for the other.
@@ -66,7 +67,7 @@ pub struct Artifact {
 /// A set of client artifacts that belong together.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Generation {
-    /// What the patch service called this build. See the module docs.
+    /// Manifest-derived patch-generation identity. See the module docs.
     id: String,
     artifacts: BTreeMap<String, Artifact>,
 }
@@ -95,7 +96,7 @@ impl Default for State {
     }
 }
 
-/// The identity of the build this manifest is currently offering.
+/// The identity of the patch generation this manifest is currently offering.
 ///
 /// Taken from the chunk hashes of the artifacts themselves, so it changes when
 /// and only when the bytes a sync would fetch change. Available before any of
@@ -114,7 +115,7 @@ pub fn identify(manifest: &Manifest, names: &[&str]) -> Result<String> {
         }
         digest.update(b"\n");
     }
-    // Sixteen hex characters is a build label, not a security boundary: it goes
+    // Sixteen hex characters is a generation label, not a security boundary: it goes
     // in a log line a player might read out, and the full 64 buys nothing when
     // the alternative it must be told apart from is the handful of builds this
     // machine has ever seen.
@@ -224,7 +225,7 @@ impl Store {
             .collect()
     }
 
-    /// Whether the build on offer is one this Mac has not installed.
+    /// Whether the generation on offer is one this Mac has not installed.
     ///
     /// The patch check, and the only one that notices a build shipping rather
     /// than a file rotting: [`Store::unsound`] compares the disk against the
@@ -232,10 +233,11 @@ impl Store {
     /// This compares the record against the service.
     ///
     /// True when there is no record at all, and true for the client [adopted]
-    /// from the disk — `ADOPTED` is not a build id, so that client is known to
+    /// from the disk — `ADOPTED` is not a generation id, so that client is known to
     /// be intact and not known to be current, and the way to make it current is
-    /// to install what is on offer. That is one download of three small files,
-    /// once, after which the record names a real build and this answers false
+    /// to install what is on offer. That is one download of the four runtime
+    /// artifacts plus `version.json`, once, after which the record names a real
+    /// generation and this answers false
     /// until the service publishes another.
     ///
     /// [adopted]: Store::adopt
@@ -248,7 +250,7 @@ impl Store {
             .is_none_or(|current| current.id != offered)
     }
 
-    /// Whether this build has already failed to reach a first frame here.
+    /// Whether this generation has already failed to reach a first frame here.
     pub fn rejected(&self, id: &str) -> bool {
         self.state.lock().unwrap().rejected.iter().any(|r| r == id)
     }
@@ -353,7 +355,7 @@ impl Store {
     /// Record a freshly written set as current, unproven — unless it is the set
     /// that was already here.
     ///
-    /// Writing the same build again is not a new build, and two ordinary things
+    /// Writing the same generation again is not a new generation, and two ordinary things
     /// do it: the `sync` command, and repairing an artifact that rotted. Calling
     /// either of those unproven arms a rollback whose target is a copy of the
     /// same set, so an app that then dies before its first frame restores what
@@ -381,9 +383,9 @@ impl Store {
         }
         self.save(&state);
         if state.proven {
-            note!("[generation] client build {id} reinstalled; it had already booted here");
+            note!("[generation] client generation {id} reinstalled; it had already booted here");
         } else {
-            note!("[generation] client build {id} installed, not yet proven");
+            note!("[generation] client generation {id} installed, not yet proven");
         }
         if state.previous.is_none() {
             let _ = fs::remove_dir_all(self.dir.join("previous"));
@@ -400,7 +402,7 @@ impl Store {
     ///
     /// Adopted proven, which is not a fiction: this set was here before the
     /// process started, so either it has booted or the only thing to roll back
-    /// to is nothing at all. Its id is deliberately not a build id — no manifest
+    /// to is nothing at all. Its id is deliberately not a generation id — no manifest
     /// can produce this string — because what is on the disk is known but which
     /// build it came from is not.
     pub fn adopt(&self, root: &Path, names: &[&'static str]) {
@@ -434,7 +436,7 @@ impl Store {
         state.previous = None;
         self.save(&state);
         let id = state.current.as_ref().map_or("", |g| g.id.as_str());
-        note!("[generation] client build {id} reached a first frame; keeping it");
+        note!("[generation] client generation {id} reached a first frame; keeping it");
         let _ = fs::remove_dir_all(self.dir.join("previous"));
     }
 }

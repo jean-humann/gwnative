@@ -1,17 +1,17 @@
 //! Signed, data-only certification for ArenaNet client artifact families.
 //!
 //! ArenaNet can publish a client more often than gwnative can publish an app.
-//! Keeping build identities in Rust therefore turns every otherwise compatible
+//! Keeping artifact identities in Rust therefore turns every otherwise compatible
 //! client into an application release.  This feed moves only the evidence that
 //! changes per client — hashes, semantic call-site identities, and read-only
 //! memory offsets — outside the binary.  The transform itself remains compiled
 //! Rust code and accepts no instruction bytes from the feed.
 //!
-//! The feed uses the same Ed25519 key as the Sparkle update feed.  The public
-//! half is compiled into the application; a cached or downloaded feed is used
-//! only after its detached signature verifies and its schema passes every
-//! invariant below.  A bad or unavailable update therefore removes optional
-//! compatibility for a new build, never changes how an old one executes.
+//! The feed has a dedicated Ed25519 key. The public half is compiled into the
+//! application; a cached or downloaded feed is used only after its detached
+//! signature verifies and its schema passes every invariant below. A bad or
+//! unavailable update therefore removes optional compatibility for a new
+//! artifact family, never changes how an old one executes.
 
 use std::collections::HashSet;
 use std::fs;
@@ -28,12 +28,12 @@ use super::Outcome;
 
 const SCHEMA_VERSION: u32 = 1;
 pub(super) const TRANSFORM_ABI: u32 = 2;
-const MAX_FAMILIES: usize = 32;
+const MAX_FAMILIES: usize = 256;
 const MAX_FEED_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 256;
 const FEED_NAME: &str = "builds.json";
 const SIGNATURE_NAME: &str = "builds.json.sig";
-const PUBLIC_KEY: &str = include_str!("../../packaging/sparkle/public-key.txt");
+const PUBLIC_KEY: &str = include_str!("../../certificates/public-key.txt");
 const BUNDLED_FEED: &[u8] = include_bytes!("../../certificates/builds.json");
 const REMOTE_FEED: &str =
     "https://raw.githubusercontent.com/jean-humann/gwnative/main/certificates/builds.json";
@@ -126,7 +126,10 @@ pub struct BuildFamily {
     /// not publisher metadata: candidate generation and feed validation
     /// independently compute it from the four artifact hashes.
     pub family_id: String,
-    pub layout: LayoutCertificate,
+    /// Optional because template saving does not depend on game-memory layout.
+    /// A family whose two runtimes do not share a proven layout can still
+    /// certify both fixed template transforms with passive tools disabled.
+    pub layout: Option<LayoutCertificate>,
     pub runtimes: Vec<RuntimeCertificate>,
 }
 
@@ -173,10 +176,10 @@ pub struct BridgeCertificate {
     /// index: appending functions cannot move it, and imported functions cannot
     /// accidentally be selected.
     pub stub_function: usize,
-    /// Exact body identity where the target is an ArenaNet stub. FileExists is
-    /// a real implementation and is instead bound by the signed artifact hash
-    /// plus the semantic call-site target.
-    pub stub_body_sha256: Option<String>,
+    /// Exact body identity of the function the certified call sites target.
+    /// Candidate generation must preserve this anchor; it never blesses a new
+    /// body merely because it occupies the previous function index.
+    pub stub_body_sha256: String,
     pub call_sites: Vec<CallSiteCertificate>,
 }
 
@@ -244,7 +247,9 @@ impl CertificateFeed {
                     family.family_id
                 ));
             }
-            family.layout.validate()?;
+            if let Some(layout) = &family.layout {
+                layout.validate()?;
+            }
             if family.runtimes.len() != 2 {
                 return Err(format!(
                     "certificate: family {} must contain both official runtimes",
@@ -269,6 +274,23 @@ impl CertificateFeed {
                     ));
                 }
                 runtime.template.validate()?;
+            }
+            let passive_count = family
+                .runtimes
+                .iter()
+                .filter(|runtime| runtime.passive_enhancements)
+                .count();
+            if passive_count != 0 && passive_count != family.runtimes.len() {
+                return Err(format!(
+                    "certificate: family {} enables passive enhancements for only one runtime",
+                    family.family_id
+                ));
+            }
+            if passive_count != 0 && family.layout.is_none() {
+                return Err(format!(
+                    "certificate: family {} enables passive enhancements without a layout",
+                    family.family_id
+                ));
             }
             if artifact_family_id(&family.runtimes)? != family.family_id {
                 return Err(format!(
@@ -381,9 +403,7 @@ impl TemplateCertificate {
             if !kinds.insert(bridge.kind) || bridge.call_sites.is_empty() {
                 return Err("certificate: duplicate or empty bridge".to_owned());
             }
-            if let Some(body) = &bridge.stub_body_sha256 {
-                hash("stub body", body)?;
-            }
+            hash("stub body", &bridge.stub_body_sha256)?;
             for site in &bridge.call_sites {
                 if site.expected_target_calls == 0 || site.occurrence >= site.expected_target_calls
                 {
@@ -477,9 +497,10 @@ pub fn load(cache: &Path) -> Outcome<CertificateFeed> {
 
 /// Fetch a signed update in the background and make it available next launch.
 ///
-/// The two files are fetched and verified as a pair before either cache entry
-/// is replaced.  Publishing JSON before its signature, or vice versa, is
-/// therefore merely a missed refresh and cannot poison the cache.
+/// Both files are fetched and verified before cache writes begin. Each cache
+/// entry is replaced atomically; interruption between the two renames can leave
+/// a mismatched pair, but [`load`] rejects that pair and falls back to the
+/// bundled feed until the next refresh repairs it.
 pub fn spawn_refresh(cache: PathBuf, minimum_sequence: u64) {
     let _ = thread::Builder::new()
         .name("gwnative-certificates".into())
@@ -580,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn the_signed_feed_has_a_bounded_build_history() {
+    fn the_signed_feed_has_a_bounded_family_history() {
         let mut feed = bundled().unwrap();
         let family = feed.families[0].clone();
         feed.families = (1..=MAX_FAMILIES)
@@ -614,6 +635,21 @@ mod tests {
         let mut feed = bundled().unwrap();
         feed.families[0].family_id =
             "0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        assert!(feed.validate().is_err());
+    }
+
+    #[test]
+    fn template_certification_does_not_require_an_observer_layout() {
+        let mut feed = bundled().unwrap();
+        feed.families[0].layout = None;
+        for runtime in &mut feed.families[0].runtimes {
+            runtime.passive_enhancements = false;
+        }
+        feed.validate().unwrap();
+
+        feed.families[0].runtimes[0].passive_enhancements = true;
+        assert!(feed.validate().is_err());
+        feed.families[0].runtimes[1].passive_enhancements = true;
         assert!(feed.validate().is_err());
     }
 }

@@ -18,7 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FEED = ROOT / "certificates" / "builds.json"
-MAX_FAMILIES = 32
+MAX_FAMILIES = 256
 
 
 def arguments() -> argparse.Namespace:
@@ -62,6 +62,10 @@ def main() -> int:
     if any(runtime["passiveEnhancements"] for runtime in family["runtimes"]):
         raise SystemExit("candidate generation must leave live layouts disabled")
     if args.certify_passive_enhancements:
+        if family.get("layout") is None:
+            raise SystemExit(
+                "the two runtimes have no shared observer layout to certify"
+            )
         for runtime in family["runtimes"]:
             runtime["passiveEnhancements"] = True
 

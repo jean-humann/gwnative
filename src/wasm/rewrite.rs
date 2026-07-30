@@ -1,4 +1,4 @@
-//! The fixed template-save transform and its independent verifier.
+//! The fixed template-save transform and its structural verifier.
 //!
 //! Certificates identify calls semantically — the Nth call to the certified
 //! target in a certified function — rather than by a byte offset. Asyncify
@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use wasmparser::{BinaryReader, FunctionBody, GlobalSectionReader, Operator};
+use wasmparser::{
+    BinaryReader, FunctionBody, GlobalSectionReader, ImportSectionReader, Operator, TypeRef,
+};
 
 use super::certificate::{
     BridgeCertificate, BridgeKind, LayoutCertificate, RuntimeCertificate, TemplateCertificate,
@@ -31,6 +33,12 @@ struct Patch {
 struct Plan {
     patches: Vec<Patch>,
     forwarders: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Debug)]
+struct AuthorizedCall {
+    input: Range<usize>,
+    forwarder: u32,
 }
 
 fn forwarder(kind: BridgeKind, carrier: u32, target: u32) -> Vec<u8> {
@@ -142,7 +150,30 @@ fn call_ranges(body: &[u8], target: u32) -> Outcome<Vec<Range<usize>>> {
     Ok(ranges)
 }
 
+fn function_import_count(input: &[u8]) -> Outcome<u32> {
+    let sections = split_sections(input)?;
+    let imports = ImportSectionReader::new(BinaryReader::new(section_by_id(&sections, 2)?, 0))
+        .map_err(|e| format!("template-save: cannot read imports: {e}"))?;
+    imports.into_imports().try_fold(0u32, |count, import| {
+        let import = import.map_err(|e| format!("template-save: cannot read import: {e}"))?;
+        if matches!(import.ty, TypeRef::Func(_) | TypeRef::FuncExact(_)) {
+            count
+                .checked_add(1)
+                .ok_or_else(|| "template-save: too many function imports".to_owned())
+        } else {
+            Ok(count)
+        }
+    })
+}
+
 fn build_expected(input: &[u8], certificate: &RuntimeCertificate) -> Outcome<Vec<u8>> {
+    let actual_imports = function_import_count(input)?;
+    if actual_imports != certificate.template.import_count {
+        return Err(format!(
+            "template-save: module has {actual_imports} function imports, certificate has {}",
+            certificate.template.import_count
+        ));
+    }
     let sections = split_sections(input)?;
     let function_types = parse_index_vector(section_by_id(&sections, 3)?)?;
     let bodies = parse_code(section_by_id(&sections, 10)?)?;
@@ -268,13 +299,125 @@ fn certify_stub(bodies: &[Vec<u8>], bridge: &BridgeCertificate) -> Outcome<()> {
     let body = bodies
         .get(bridge.stub_function)
         .ok_or_else(|| format!("template-save: missing stub for {}", bridge.kind.key()))?;
-    if let Some(expected) = &bridge.stub_body_sha256
-        && digest(body) != *expected
-    {
+    if digest(body) != bridge.stub_body_sha256 {
         return Err(format!(
             "template-save: {} has an unexpected body",
             bridge.kind.key()
         ));
+    }
+    Ok(())
+}
+
+fn authorized_calls(
+    bodies: &[Vec<u8>],
+    template: &TemplateCertificate,
+) -> Outcome<HashMap<usize, Vec<AuthorizedCall>>> {
+    let mut by_function: HashMap<usize, Vec<AuthorizedCall>> = HashMap::new();
+    for (bridge_index, bridge) in template.bridges.iter().enumerate() {
+        certify_stub(bodies, bridge)?;
+        let target = template.import_count + bridge.stub_function as u32;
+        let forwarder = template.import_count
+            + bodies.len() as u32
+            + u32::try_from(bridge_index)
+                .map_err(|_| "template-save: too many forwarders".to_owned())?;
+        for site in &bridge.call_sites {
+            let body = bodies.get(site.local_function).ok_or_else(|| {
+                format!(
+                    "template-save: {} call site is out of range",
+                    bridge.kind.key()
+                )
+            })?;
+            let calls = call_ranges(body, target)?;
+            if calls.len() != site.expected_target_calls {
+                return Err(format!(
+                    "template-save: {} caller {} has {} target calls, expected {}",
+                    bridge.kind.key(),
+                    site.local_function,
+                    calls.len(),
+                    site.expected_target_calls
+                ));
+            }
+            let input = calls.get(site.occurrence).cloned().ok_or_else(|| {
+                format!(
+                    "template-save: {} call occurrence is out of range",
+                    bridge.kind.key()
+                )
+            })?;
+            by_function
+                .entry(site.local_function)
+                .or_default()
+                .push(AuthorizedCall { input, forwarder });
+        }
+    }
+    for calls in by_function.values_mut() {
+        calls.sort_by_key(|call| call.input.start);
+        for pair in calls.windows(2) {
+            if pair[0].input.end > pair[1].input.start {
+                return Err("template-save: overlapping certified call sites".to_owned());
+            }
+        }
+    }
+    Ok(by_function)
+}
+
+fn call_at(body: &[u8], offset: usize) -> Outcome<(u32, Range<usize>)> {
+    let function = FunctionBody::new(BinaryReader::new(body, 0));
+    let operators = function
+        .get_operators_reader()
+        .map_err(|e| format!("template-save: cannot read output function: {e}"))?
+        .into_iter_with_offsets()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("template-save: cannot read output operator: {e}"))?;
+    let Some((index, (operator, start))) = operators
+        .iter()
+        .enumerate()
+        .find(|(_, (_, start))| *start == offset)
+    else {
+        return Err("template-save: authorized output call moved".to_owned());
+    };
+    let Operator::Call { function_index } = operator else {
+        return Err("template-save: authorized output instruction is not a call".to_owned());
+    };
+    let end = operators
+        .get(index + 1)
+        .map_or(body.len(), |(_, next)| *next);
+    Ok((*function_index, *start..end))
+}
+
+fn verify_body_mutations(input: &[u8], output: &[u8], calls: &[AuthorizedCall]) -> Outcome<()> {
+    let mut input_cursor = 0usize;
+    let mut output_cursor = 0usize;
+    for call in calls {
+        let unchanged = call
+            .input
+            .start
+            .checked_sub(input_cursor)
+            .ok_or_else(|| "template-save: authorized calls are out of order".to_owned())?;
+        let output_unchanged_end = output_cursor
+            .checked_add(unchanged)
+            .filter(|end| *end <= output.len())
+            .ok_or_else(|| "template-save: output body is truncated".to_owned())?;
+        if input[input_cursor..call.input.start] != output[output_cursor..output_unchanged_end] {
+            return Err(
+                "template-save: existing body changed outside an authorized call".to_owned(),
+            );
+        }
+        output_cursor = output_unchanged_end;
+        let (target, output_call) = call_at(output, output_cursor)?;
+        if target != call.forwarder {
+            return Err(format!(
+                "template-save: authorized call targets {target}, expected {}",
+                call.forwarder
+            ));
+        }
+        if output_call.len() < call.input.len() {
+            return Err("template-save: call operand width was not preserved".to_owned());
+        }
+        input_cursor = call.input.end;
+        output_cursor = output_call.end;
+    }
+    if input[input_cursor..] != output[output_cursor..] {
+        return Err("template-save: existing body changed outside an authorized call".to_owned());
     }
     Ok(())
 }
@@ -328,10 +471,6 @@ pub(super) fn layout_proof(input: &[u8], global_count: u32) -> Outcome<LayoutPro
 fn verify_output(input: &[u8], output: &[u8], certificate: &RuntimeCertificate) -> Outcome<()> {
     wasmparser::validate(output)
         .map_err(|e| format!("template-save: output is invalid WebAssembly: {e}"))?;
-    let expected = build_expected(input, certificate)?;
-    if output != expected {
-        return Err("template-save: independent output comparison failed".to_owned());
-    }
 
     let before = split_sections(input)?;
     let after = split_sections(output)?;
@@ -348,6 +487,61 @@ fn verify_output(input: &[u8], output: &[u8], certificate: &RuntimeCertificate) 
             return Err(format!(
                 "template-save: unauthorized mutation of section {}",
                 left.id
+            ));
+        }
+    }
+
+    let before_types = parse_index_vector(section_by_id(&before, 3)?)?;
+    let after_types = parse_index_vector(section_by_id(&after, 3)?)?;
+    let expected_type_count = before_types
+        .len()
+        .checked_add(certificate.template.bridges.len())
+        .ok_or_else(|| "template-save: function section is too large".to_owned())?;
+    if after_types.len() != expected_type_count
+        || after_types.get(..before_types.len()) != Some(before_types.as_slice())
+    {
+        return Err("template-save: existing function types changed".to_owned());
+    }
+    for (offset, bridge) in certificate.template.bridges.iter().enumerate() {
+        let expected = before_types
+            .get(bridge.stub_function)
+            .ok_or_else(|| format!("template-save: {} stub has no type", bridge.kind.key()))?;
+        if after_types.get(before_types.len() + offset) != Some(expected) {
+            return Err(format!(
+                "template-save: {} forwarder has the wrong type",
+                bridge.kind.key()
+            ));
+        }
+    }
+
+    let before_bodies = parse_code(section_by_id(&before, 10)?)?;
+    let after_bodies = parse_code(section_by_id(&after, 10)?)?;
+    if before_types.len() != before_bodies.len() {
+        return Err("template-save: function and code sections disagree".to_owned());
+    }
+    let expected_body_count = before_bodies
+        .len()
+        .checked_add(certificate.template.bridges.len())
+        .ok_or_else(|| "template-save: code section is too large".to_owned())?;
+    if after_bodies.len() != expected_body_count {
+        return Err("template-save: unexpected appended function count".to_owned());
+    }
+    let authorized = authorized_calls(&before_bodies, &certificate.template)?;
+    for (index, (original, rewritten)) in before_bodies.iter().zip(after_bodies.iter()).enumerate()
+    {
+        verify_body_mutations(
+            original,
+            rewritten,
+            authorized.get(&index).map_or(&[], Vec::as_slice),
+        )?;
+    }
+    for (offset, bridge) in certificate.template.bridges.iter().enumerate() {
+        let target = certificate.template.import_count + bridge.stub_function as u32;
+        let expected = forwarder(bridge.kind, certificate.template.carrier_import, target);
+        if after_bodies.get(before_bodies.len() + offset) != Some(&expected) {
+            return Err(format!(
+                "template-save: {} forwarder body changed",
+                bridge.kind.key()
             ));
         }
     }
@@ -381,13 +575,8 @@ pub(super) fn recertify(
     certificate.wasm_sha256 = digest(input);
     certificate.glue_sha256 = digest(glue);
     certificate.passive_enhancements = false;
-    for bridge in &mut certificate.template.bridges {
-        if bridge.stub_body_sha256.is_some() {
-            let body = bodies.get(bridge.stub_function).ok_or_else(|| {
-                format!("certificate candidate: missing {} stub", bridge.kind.key())
-            })?;
-            bridge.stub_body_sha256 = Some(digest(body));
-        }
+    for bridge in &certificate.template.bridges {
+        certify_stub(&bodies, bridge)?;
     }
     certificate.template.output_sha256 = "0".repeat(64);
     let output = build_expected(input, &certificate)?;
@@ -433,5 +622,24 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn structural_verifier_accepts_only_the_authorized_call_operand() {
+        let input = [0x00, 0x41, 0x00, 0x10, 0x01, 0x1a, 0x0b];
+        let output = [0x00, 0x41, 0x00, 0x10, 0xac, 0x02, 0x1a, 0x0b];
+        let calls = [AuthorizedCall {
+            input: 3..5,
+            forwarder: 300,
+        }];
+        verify_body_mutations(&input, &output, &calls).unwrap();
+
+        let mut wrong_target = output;
+        wrong_target[4] = 0xad;
+        assert!(verify_body_mutations(&input, &wrong_target, &calls).is_err());
+
+        let mut unauthorized = output;
+        unauthorized[6] = 0x01;
+        assert!(verify_body_mutations(&input, &unauthorized, &calls).is_err());
     }
 }

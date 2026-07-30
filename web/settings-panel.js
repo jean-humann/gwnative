@@ -179,10 +179,9 @@ export const CONTROLS = [
       { value: true, label: 'Install on its own' },
     ],
   },
-  // The optional enhancements. Both require a relaunch for the same reason, and
-  // it is not a UI limitation: turning either on changes which client module the
-  // host builds and serves, and that is decided before this page exists. There
-  // is deliberately no master switch above them — "are the tools on" is derived
+  // The optional enhancements. Both require a relaunch because the host selects
+  // and injects the exact signed layout before this page exists. There is
+  // deliberately no master switch above them — "are the tools on" is derived
   // from "is any tool on", so there is nothing that can disagree with the two
   // controls it would be speaking for.
   {
