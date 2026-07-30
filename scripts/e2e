@@ -598,6 +598,7 @@ def main() -> int:
                 "trade",
                 "ui",
                 "merchant",
+                "progression",
             }:
                 raise Failure(f"unexpected game-state domains: {sorted(domains)}")
             request_json(origin, "/__game/v1/actions", token, expected=409)
@@ -823,6 +824,7 @@ def main() -> int:
             trade = state.get("trade")
             ui_state = state.get("ui")
             merchant = state.get("merchant")
+            progression = state.get("progression")
             if not isinstance(party, dict) or not party.get("players"):
                 raise Failure("certified party state did not include the player roster")
             skills = skillbar.get("skills") if isinstance(skillbar, dict) else None
@@ -1376,6 +1378,61 @@ def main() -> int:
                 )
             ):
                 raise Failure("certified merchant item state is incomplete")
+            factions = (
+                progression.get("factions")
+                if isinstance(progression, dict)
+                else None
+            )
+            skill_points = (
+                progression.get("skillPoints")
+                if isinstance(progression, dict)
+                else None
+            )
+            faction_values = (
+                list(factions.values())
+                if isinstance(factions, dict)
+                and set(factions) == {
+                    "kurzick",
+                    "luxon",
+                    "imperial",
+                    "balthazar",
+                }
+                else []
+            )
+            if (
+                not isinstance(progression, dict)
+                or not isinstance(progression.get("hardModeUnlocked"), bool)
+                or not isinstance(progression.get("level"), int)
+                or not 1 <= progression.get("level") <= 20
+                or not isinstance(progression.get("experience"), int)
+                or not 0 <= progression.get("experience") <= 2_000_000_000
+                or len(faction_values) != 4
+                or any(
+                    not isinstance(faction, dict)
+                    or set(faction) != {"current", "totalEarned", "maximum"}
+                    or any(
+                        not isinstance(faction.get(field), int)
+                        for field in ("current", "totalEarned", "maximum")
+                    )
+                    or not 0 <= faction.get("current") <= 100_000_000
+                    or not faction.get("current")
+                    <= faction.get("maximum")
+                    <= 100_000_000
+                    or not faction.get("current")
+                    <= faction.get("totalEarned")
+                    <= 2_000_000_000
+                    for faction in faction_values
+                )
+                or not isinstance(skill_points, dict)
+                or set(skill_points) != {"current", "totalEarned"}
+                or not isinstance(skill_points.get("current"), int)
+                or not 0 <= skill_points.get("current") <= 1_000_000
+                or not isinstance(skill_points.get("totalEarned"), int)
+                or not skill_points.get("current")
+                <= skill_points.get("totalEarned")
+                <= 2_000_000_000
+            ):
+                raise Failure("certified character progression is incomplete")
             print(
                 "[e2e] bounded game-state API PASS "
                 f"(players={len(party.get('players', []))}, "
@@ -1393,7 +1450,9 @@ def main() -> int:
                 f"camera={camera.get('modeName')}, "
                 f"trade={trade.get('statusName')}, "
                 f"ui-frames={len(ui_frames)}/{ui_total}, "
-                f"merchant-items={len(merchant_items)}/{merchant_total})"
+                f"merchant-items={len(merchant_items)}/{merchant_total}, "
+                f"level={progression.get('level')}, "
+                f"experience={progression.get('experience')})"
             )
 
             before = position(ready)
