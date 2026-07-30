@@ -25,7 +25,9 @@ eight-slot skillbar and effects, a bounded map-agent page, and the quest log
 with mission objectives, plus bounded inventory and account-storage summaries.
 It also includes a privacy-minimised friend-presence page and numeric guild
 summary, six completion bitmaps, the current camera/render geometry, and a
-bounded read-only trade-offer summary.
+bounded read-only trade-offer summary. A capped UI inventory exposes numeric
+frame identity, state bits, parent identity, and local geometry without
+following client-owned labels or callbacks.
 Client-owned names, UUIDs, messages, and announcements are not read.
 
 ## Loopback endpoints
@@ -413,6 +415,37 @@ The envelope is revisioned and timestamped:
           { "slot": 1, "itemId": 800, "quantity": 2 }
         ]
       }
+    },
+    "ui": {
+      "truncated": false,
+      "total": 2,
+      "createdTotal": 2,
+      "visibleTotal": 1,
+      "frames": [
+        {
+          "frameId": 0,
+          "parentId": null,
+          "childOffsetId": 0,
+          "frameHash": 4369,
+          "visibilityFlags": 3,
+          "type": 4,
+          "templateType": 5,
+          "state": 4,
+          "created": true,
+          "destroying": false,
+          "disabled": false,
+          "hidden": false,
+          "locallyVisible": true,
+          "positionValid": true,
+          "positionFlags": 9,
+          "position": {
+            "left": 10,
+            "bottom": 100,
+            "right": 200,
+            "top": 20
+          }
+        }
+      ]
     }
   }
 }
@@ -551,6 +584,27 @@ Trade state is read-only. The actions endpoint exposes no operation to open,
 cancel, accept, change, submit, add, or remove an offer, and no packet or UI
 event is injected.
 
+The UI domain follows the global `GWArray<Frame*>` used by GWCA and Py4GW.
+The array descriptor is independently anchored in each certified browser
+client by its compiled frame lookup routine. The companion rejects a page
+unless every non-empty slot is aligned and readable, the embedded `frameId`
+matches its array index, and every parent relation points back to the exact
+frame stored in the same array.
+
+The API publishes at most 128 of 2,048 validated frames in array order.
+`total` counts all non-empty frames and `truncated` identifies a capped page.
+`createdTotal` and `visibleTotal` cover the full validated array, not only the
+published prefix. `locallyVisible` means the frame is created, not being
+destroyed, and does not carry its own hidden bit; it does not claim that every
+ancestor is visible. `positionValid: false` carries a zero rectangle when the
+client's local geometry is transient or non-finite.
+
+Frame labels, encoded strings, callback tables, tooltips, relation lists,
+dialog bodies/buttons, and UI message handlers are excluded. The actions
+endpoint exposes no click, focus, visibility, frame-message, or dialog action.
+This keeps the UI inventory useful for diagnostics and future certification
+without turning it into an interaction surface.
+
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account
 identity, chat, encoded game text, or action surface.
@@ -586,7 +640,8 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - mission and map completion totals;
 - friend presence and numeric guild summary;
 - camera mode, distance, pitch, and render FOV;
-- trade status, item counts, and gold for both sides; and
+- trade status, item counts, and gold for both sides;
+- validated UI-frame totals and local visibility; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact
