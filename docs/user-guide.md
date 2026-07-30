@@ -104,8 +104,8 @@ shows a compatibility notice. Loading existing templates remains available.
 Open **View → Companion Tools…** or press **⌘⇧T** for profile-local companion
 tools:
 
-- movable clock, session timer, target/range, frame-rate, party, and skillbar
-  widgets;
+- movable clock, session timer, target/range, frame-rate, party, skillbar, and
+  player-effects widgets;
 - overlay layout editing, also toggled with **⌘⇧O**;
 - an opaque-code build and team library with validated JSON import/export; and
 - the current compatibility status of researched feature families.
@@ -114,10 +114,10 @@ Widget layout and the library follow the selected profile. Build codes are
 stored and organised but never applied to the game: the current versioned API
 has no certified write action.
 
-Party, hero, and player-skillbar reads are available on recognised client
-builds. Effects, inventory, quest, chat, and texture features remain labelled
-as requiring another certified layout or further research. Unattended gameplay
-automation is blocked. See
+Party, hero, player-skillbar, buff, and effect reads are available on
+recognised client builds. Inventory, quest, chat, and texture features remain
+labelled as requiring another certified layout or further research. Unattended
+gameplay automation is blocked. See
 [Feature compatibility](feature-compatibility.md) and
 [Game API and overlays](game-api.md).
 

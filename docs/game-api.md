@@ -16,11 +16,12 @@ states. No guessed offset is read.
 3. A seqlock snapshot crosses into the page.
 4. JavaScript copies only the public schema and publishes at most four times a
    second.
-5. Rust validates the schema, finite ranges, and target consistency again.
+5. Rust validates the schema, finite ranges, ownership, IDs, and truncation
+   consistency again.
 
 The resulting state covers the numeric player agent and position, map/instance
 identity, current target position/range, bounded party roster, and the player’s
-eight-slot skillbar.
+eight-slot skillbar, buffs, and effects.
 
 ## Loopback endpoints
 
@@ -164,6 +165,28 @@ The envelope is revisioned and timestamped:
           "disabled": false
         }
       ]
+    },
+    "effects": {
+      "agentId": 4,
+      "buffsTruncated": false,
+      "effectsTruncated": false,
+      "buffs": [
+        {
+          "skillId": 200,
+          "buffId": 300,
+          "targetAgentId": 4
+        }
+      ],
+      "effects": [
+        {
+          "skillId": 201,
+          "attributeLevel": 12,
+          "effectId": 301,
+          "agentId": 8,
+          "duration": 12.5,
+          "timestamp": 400
+        }
+      ]
     }
   }
 }
@@ -187,6 +210,15 @@ timestamps. Empty slots have `skillId: 0`. The API exposes no operation to use
 a skill or load a build. `disabledMask` preserves the client’s eight-slot mask,
 each slot carries the corresponding derived `disabled` value, and `castCount`
 is the bounded size of the client’s current cast queue.
+
+Effects state is also optional and belongs to `playerId`. It publishes at most
+32 maintained buffs and 64 active effects. `buffsTruncated` and
+`effectsTruncated` distinguish a complete page from a capped one. Buff records
+carry the skill, buff, and target-agent identifiers. Effect records retain the
+client/GWCA skill, attribute level, effect identifier, source agent, duration,
+and timestamp fields. Identifiers are unique within each published array and
+durations must be finite and non-negative. Empty arrays are a valid certified
+reading: they mean the player currently has no corresponding state.
 
 The token is a session capability, not a long-lived API key. Do not persist or
 publish it. The API has no remote listener, WebSocket transport, account data,
@@ -215,7 +247,8 @@ Open **View → Companion Tools…** or press **⌘⇧T**. The available widgets
 - current target and range;
 - measured frame rate;
 - party roster summary;
-- player skillbar IDs; and
+- player skillbar IDs;
+- player buff/effect counts; and
 - profile-local build and team library.
 
 Press **⌘⇧O** to toggle layout editing. The hotkey engine requires an exact
