@@ -17,8 +17,8 @@
 // client's heap that anything in the client could in principle have written —
 // and answers `waiting` rather than rendering a coordinate it does not believe.
 
-export const COMPANION_SNAPSHOT_ABI = 6;
-export const COMPANION_SNAPSHOT_BYTES = 47_940;
+export const COMPANION_SNAPSHOT_ABI = 7;
+export const COMPANION_SNAPSHOT_BYTES = 48_732;
 
 /** 'GWTB' little-endian, the first word of every published snapshot. */
 const MAGIC = 0x42545747;
@@ -47,6 +47,7 @@ const FLAGS = Object.freeze({
   quests: 1 << 8,
   inventory: 1 << 9,
   social: 1 << 10,
+  completion: 1 << 11,
 });
 const KNOWN_FLAGS =
   FLAGS.ready
@@ -59,7 +60,8 @@ const KNOWN_FLAGS =
   | FLAGS.agents
   | FLAGS.quests
   | FLAGS.inventory
-  | FLAGS.social;
+  | FLAGS.social
+  | FLAGS.completion;
 const PARTY_FLAGS = Object.freeze({
   hardMode: 1 << 0,
   defeated: 1 << 1,
@@ -85,6 +87,7 @@ const MAX_INVENTORY_ITEM_ID = 1_000_000;
 const MAX_TOTAL_BAG_SLOTS = 1_024;
 const MAX_RAW_FRIENDS = 256;
 const MAX_FRIENDS = 128;
+const MAX_COMPLETION_WORDS = 32;
 const EFFECT_FLAGS = Object.freeze({
   buffsTruncated: 1 << 0,
   effectsTruncated: 1 << 1,
@@ -961,6 +964,44 @@ function readSocial(view) {
   });
 }
 
+function readCompletion(view) {
+  const counts = [];
+  for (let category = 0; category < 6; category += 1) {
+    const count = view.getUint32(47940 + category * 4, true);
+    if (count > MAX_COMPLETION_WORDS) return null;
+    counts.push(count);
+  }
+
+  const categories = [];
+  for (let category = 0; category < 6; category += 1) {
+    const mapIds = [];
+    const base = 47964 + category * MAX_COMPLETION_WORDS * 4;
+    for (let wordIndex = 0; wordIndex < MAX_COMPLETION_WORDS; wordIndex += 1) {
+      const word = view.getUint32(base + wordIndex * 4, true);
+      if (wordIndex >= counts[category]) {
+        if (word !== 0) return null;
+        continue;
+      }
+      for (let bit = 0; bit < 32; bit += 1) {
+        if ((word & (1 << bit)) !== 0) mapIds.push(wordIndex * 32 + bit);
+      }
+    }
+    categories.push(Object.freeze(mapIds));
+  }
+  return Object.freeze({
+    normalMode: Object.freeze({
+      completedMissions: categories[0],
+      completedBonuses: categories[1],
+    }),
+    hardMode: Object.freeze({
+      completedMissions: categories[2],
+      completedBonuses: categories[3],
+    }),
+    unlockedMaps: categories[4],
+    vanquishedAreas: categories[5],
+  });
+}
+
 /**
  * Decode one state snapshot.
  *
@@ -1133,6 +1174,14 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
+  const completionValid = (flags & FLAGS.completion) !== 0;
+  const completion = completionValid ? readCompletion(view) : null;
+  if (
+    (completionValid && completion === null)
+    || (!completionValid && !wordsAreZero(view, 47940, 792))
+  ) {
+    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
   // frame while those arrays were being copied.
@@ -1153,6 +1202,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     ...(quests ? { quests } : {}),
     ...(inventory ? { inventory } : {}),
     ...(social ? { social } : {}),
+    ...(completion ? { completion } : {}),
   });
 }
 

@@ -66,12 +66,18 @@ describe('public game state', () => {
       friends: Object.freeze({ total: 1, entries: Object.freeze([]) }),
       guild: null,
     });
+    const completion = Object.freeze({
+      normalMode: Object.freeze({ completedMissions: Object.freeze([55]), completedBonuses: Object.freeze([]) }),
+      hardMode: Object.freeze({ completedMissions: Object.freeze([]), completedBonuses: Object.freeze([]) }),
+      unlockedMaps: Object.freeze([55]),
+      vanquishedAreas: Object.freeze([]),
+    });
     assert.deepEqual(
       publicState({
-        status: 'ready', party, skillbar, effects, agents, quests, inventory, social,
+        status: 'ready', party, skillbar, effects, agents, quests, inventory, social, completion,
       }),
       {
-        status: 'ready', party, skillbar, effects, agents, quests, inventory, social,
+        status: 'ready', party, skillbar, effects, agents, quests, inventory, social, completion,
       },
     );
   });

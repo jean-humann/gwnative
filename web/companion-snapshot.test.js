@@ -28,7 +28,7 @@ import {
 
 const MAGIC = 0x42545747;
 const CURSOR_MAGIC = 0x43545747;
-const SNAPSHOT_ABI = 6;
+const SNAPSHOT_ABI = 7;
 const CURSOR_ABI = 1;
 
 const FLAG_READY = 1 << 0;
@@ -42,6 +42,7 @@ const FLAG_AGENTS = 1 << 7;
 const FLAG_QUESTS = 1 << 8;
 const FLAG_INVENTORY = 1 << 9;
 const FLAG_SOCIAL = 1 << 10;
+const FLAG_COMPLETION = 1 << 11;
 
 const CURSOR_VALID = 1 << 0;
 const CURSOR_HIDDEN = 1 << 1;
@@ -115,7 +116,8 @@ function domainSnapshot() {
       | FLAG_AGENTS
       | FLAG_QUESTS
       | FLAG_INVENTORY
-      | FLAG_SOCIAL,
+      | FLAG_SOCIAL
+      | FLAG_COMPLETION,
   });
   const view = new DataView(buffer);
   view.setUint32(64, 3, true);
@@ -235,6 +237,13 @@ function domainSnapshot() {
   view.setUint32(45388, 1, true);
   view.setUint32(45392, 77, true);
   view.setUint32(45396, 248, true);
+  for (let category = 0; category < 6; category += 1) {
+    view.setUint32(47940 + category * 4, 25, true);
+    const mapId = 55 + category;
+    const word = Math.floor(mapId / 32);
+    const bit = mapId % 32;
+    view.setUint32(47964 + category * 128 + word * 4, 2 ** bit, true);
+  }
   return buffer;
 }
 
@@ -440,6 +449,12 @@ describe('companion snapshot', () => {
     assert.equal(state.social.guild.factionName, 'Kurzick');
     assert.equal(state.social.guild.rosterTotal, 50);
     assert.equal(state.social.guild.cape.trim, 7);
+    assert.deepEqual(state.completion.normalMode.completedMissions, [55]);
+    assert.deepEqual(state.completion.normalMode.completedBonuses, [56]);
+    assert.deepEqual(state.completion.hardMode.completedMissions, [57]);
+    assert.deepEqual(state.completion.hardMode.completedBonuses, [58]);
+    assert.deepEqual(state.completion.unlockedMaps, [59]);
+    assert.deepEqual(state.completion.vanquishedAreas, [60]);
     assert.ok(Object.isFrozen(state.party.players));
     assert.ok(Object.isFrozen(state.skillbar.skills));
     assert.ok(Object.isFrozen(state.effects.effects));
@@ -448,6 +463,8 @@ describe('companion snapshot', () => {
     assert.ok(Object.isFrozen(state.inventory.items));
     assert.ok(Object.isFrozen(state.social.friends.entries));
     assert.ok(Object.isFrozen(state.social.guild.cape));
+    assert.ok(Object.isFrozen(state.completion.normalMode.completedMissions));
+    assert.ok(Object.isFrozen(state.completion));
   });
 
   it('accepts a complete bounded inventory page with an explicit remainder', () => {
@@ -578,6 +595,25 @@ describe('companion snapshot', () => {
     const unusedFriend = domainSnapshot();
     new DataView(unusedFriend).setUint32(45400, 1, true);
     assert.equal(readCompanionSnapshot(unusedFriend, 0).reason, 'corrupt');
+
+    const oversizedCompletion = domainSnapshot();
+    new DataView(oversizedCompletion).setUint32(47940, 33, true);
+    assert.equal(readCompanionSnapshot(oversizedCompletion, 0).reason, 'corrupt');
+
+    const staleCompletion = domainSnapshot();
+    const staleCompletionView = new DataView(staleCompletion);
+    staleCompletionView.setUint32(47940, 1, true);
+    staleCompletionView.setUint32(47968, 1, true);
+    assert.equal(readCompanionSnapshot(staleCompletion, 0).reason, 'corrupt');
+
+    const absentCompletion = domainSnapshot();
+    const absentCompletionView = new DataView(absentCompletion);
+    absentCompletionView.setUint32(
+      12,
+      absentCompletionView.getUint32(12, true) & ~FLAG_COMPLETION,
+      true,
+    );
+    assert.equal(readCompanionSnapshot(absentCompletion, 0).reason, 'corrupt');
   });
 
   // The seqlock, which is the whole reason this can be read on the animation
@@ -597,7 +633,7 @@ describe('companion snapshot', () => {
       { byteLength: COMPANION_SNAPSHOT_BYTES - 4 },
       // A flag this build has no name for. The companion sets only four, so a
       // fifth is either a newer companion or not a companion at all.
-      { flags: FLAG_READY | FLAG_PLAYER | (1 << 11) },
+      { flags: FLAG_READY | FLAG_PLAYER | (1 << 12) },
     ]) {
       assert.equal(read(overrides).reason, 'snapshot', JSON.stringify(overrides));
     }
