@@ -88,12 +88,12 @@ jobs:
 
       - name: Report the candidate
         if: steps.generate.outcome == 'success' && steps.verify.outcome == 'success'
+        continue-on-error: true
         env:
           FAMILY_ID: ${{ steps.generate.outputs.family_id }}
         run: |
           passive="$(jq -r --arg family_id "$FAMILY_ID" \
-            '.families[] | select(.familyId == $family_id) | \
-             if all(.runtimes[]; .passiveEnhancements) then "eligible" else "disabled" end' \
+            '.families[] | select(.familyId == $family_id) | if all(.runtimes[]; .passiveEnhancements) then "eligible" else "disabled" end' \
             certificates/builds.candidate.json)"
           {
             echo "### Automatic client certificate"
@@ -122,6 +122,7 @@ jobs:
 
       - name: Close a resolved transformer-review issue
         if: steps.generate.outcome == 'success' && steps.verify.outcome == 'success'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
