@@ -812,10 +812,6 @@ fn run_windowed(
     // resizes the window to the remembered one before it is ever shown, and the
     // content view follows.
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
-    // This is the first operation that can actually test the client. Downloads
-    // and native setup before it must not turn an unproven build into a failed
-    // boot if they exit early.
-    generations.attempt();
     let webview = webview::make(
         mtm,
         frame,
