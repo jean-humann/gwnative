@@ -64,6 +64,8 @@ const learnedSkills = 0x16e000;
 const accountUnlockedSkills = 0x16f000;
 const snapshot = 0x180000;
 const config = 0x1a0000;
+const runtime = 0x1b0000;
+const stackTop = 0x1e0000;
 
 // Context and current-map invariants.
 u32(contextRoot, contexts);
@@ -555,14 +557,32 @@ new Uint32Array(memory.buffer, config, layout.length).set(layout);
 
 const kernel = await WebAssembly.instantiate(await readFile(kernelPath), {
   env: { memory },
-  game: { enhancement_tick_original: () => {} },
 });
-const { companion_init: init, companion_tick: tick } = kernel.instance.exports;
+const {
+  __stack_pointer: stackPointer,
+  companion_init: init,
+  companion_observe: observe,
+  companion_runtime_size: runtimeSize,
+} = kernel.instance.exports;
+assert(stackPointer instanceof WebAssembly.Global);
+stackPointer.value = stackTop;
+const runtimeBytes = runtimeSize();
+assert(Number.isInteger(runtimeBytes) && runtimeBytes > 0 && runtimeBytes % 4 === 0);
 assert.equal(
-  init(snapshot, COMPANION_SNAPSHOT_BYTES, config, 928, 0, 0, 1 << 1),
+  init(
+    runtime,
+    runtimeBytes,
+    snapshot,
+    COMPANION_SNAPSHOT_BYTES,
+    config,
+    928,
+    0,
+    0,
+    1 << 1,
+  ),
   1,
 );
-tick(0);
+observe(runtime);
 
 const state = readCompanionSnapshot(memory.buffer, snapshot);
 assert.equal(state.status, 'ready');
@@ -707,7 +727,7 @@ for (let index = 0; index < 17; index += 1) {
   u32(tradePlayerItems + index * 8, 700 + index);
   u32(tradePlayerItems + index * 8 + 4, 1);
 }
-tick(0);
+observe(runtime);
 const truncatedTrade = readCompanionSnapshot(memory.buffer, snapshot);
 assert.equal(truncatedTrade.status, 'ready');
 assert.equal(truncatedTrade.trade.player.items.length, 16);
@@ -717,7 +737,7 @@ assert.equal(truncatedTrade.trade.player.items[15].itemId, 715);
 // The client can leave the last offer in memory after closing the window.
 // Closed is authoritative and must never leak that stale gold or item list.
 u32(trade, 0);
-tick(0);
+observe(runtime);
 const closedTrade = readCompanionSnapshot(memory.buffer, snapshot);
 assert.equal(closedTrade.status, 'ready');
 assert.deepEqual(closedTrade.trade, {
@@ -734,7 +754,7 @@ assert.deepEqual(closedTrade.trade, {
 // Index zero is the authoritative no-guild state even when the context keeps
 // stale rank and roster fields alive across a transition.
 u32(guildContext + 0x60, 0);
-tick(0);
+observe(runtime);
 const guildless = readCompanionSnapshot(memory.buffer, snapshot);
 assert.equal(guildless.status, 'ready');
 assert.equal(guildless.social.guild, null);

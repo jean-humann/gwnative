@@ -102,7 +102,6 @@ const MAX_RAW_UI_FRAMES: u32 = 2_048;
 const MAX_UI_FRAMES: usize = 128;
 const UI_FRAME_CREATED: u32 = 0x4;
 const UI_FRAME_DESTROYING: u32 = 0x8;
-const UI_FRAME_DISABLED: u32 = 0x10;
 const UI_FRAME_HIDDEN: u32 = 0x200;
 const UI_RECORD_POSITION_VALID: u32 = 1;
 const MAX_RAW_MERCHANT_ITEMS: u32 = 512;
@@ -379,243 +378,6 @@ struct Layout {
     world_unlocked_character_skills: u32,
 }
 
-impl Layout {
-    const EMPTY: Self = Self {
-        context_root: 0,
-        agent_array: 0,
-        manual_target_agent_id: 0,
-        automatic_target_agent_id: 0,
-        game_context_slot: 0,
-        character_context: 0,
-        map_id: 0,
-        is_explorable: 0,
-        current_map_id: 0,
-        current_instance_type: 0,
-        player_number: 0,
-        agent_id: 0,
-        agent_x: 0,
-        agent_y: 0,
-        agent_z: 0,
-        agent_rotation: 0,
-        agent_type: 0,
-        agent_player_number: 0,
-        agent_model_type: 0,
-        agent_primary: 0,
-        agent_secondary: 0,
-        agent_level: 0,
-        agent_hp: 0,
-        agent_model_state: 0,
-        agent_effects: 0,
-        agent_allegiance: 0,
-        game_world_context: 0,
-        game_party_context: 0,
-        party_flag: 0,
-        party_player_party: 0,
-        party_id: 0,
-        party_players: 0,
-        party_henchmen: 0,
-        party_heroes: 0,
-        party_others: 0,
-        party_player_stride: 0,
-        party_player_login_number: 0,
-        party_player_called_target_id: 0,
-        party_player_state: 0,
-        party_hero_stride: 0,
-        party_hero_agent_id: 0,
-        party_hero_owner_player_id: 0,
-        party_hero_id: 0,
-        party_hero_level: 0,
-        party_henchman_stride: 0,
-        party_henchman_agent_id: 0,
-        party_henchman_profession: 0,
-        party_henchman_level: 0,
-        world_skillbar: 0,
-        skillbar_stride: 0,
-        skillbar_agent_id: 0,
-        skillbar_skills: 0,
-        skillbar_disabled: 0,
-        skillbar_cast_count: 0,
-        skill_stride: 0,
-        skill_adrenaline_a: 0,
-        skill_adrenaline_b: 0,
-        skill_recharge: 0,
-        skill_id: 0,
-        skill_event: 0,
-        world_party_effects: 0,
-        agent_effects_stride: 0,
-        agent_effects_agent_id: 0,
-        agent_effects_buffs: 0,
-        agent_effects_effects: 0,
-        buff_stride: 0,
-        buff_skill_id: 0,
-        buff_id: 0,
-        buff_target_agent_id: 0,
-        effect_stride: 0,
-        effect_skill_id: 0,
-        effect_attribute_level: 0,
-        effect_id: 0,
-        effect_agent_id: 0,
-        effect_duration: 0,
-        effect_timestamp: 0,
-        world_active_quest: 0,
-        world_quest_log: 0,
-        quest_stride: 0,
-        quest_id: 0,
-        quest_log_state: 0,
-        quest_map_from: 0,
-        quest_marker: 0,
-        quest_map_to: 0,
-        world_mission_objectives: 0,
-        mission_objective_stride: 0,
-        mission_objective_id: 0,
-        mission_objective_type: 0,
-        world_missions_completed: 0,
-        world_missions_bonus: 0,
-        world_missions_completed_hm: 0,
-        world_missions_bonus_hm: 0,
-        world_unlocked_map: 0,
-        world_vanquished_areas: 0,
-        game_item_context: 0,
-        item_context_inventory: 0,
-        inventory_bags: 0,
-        inventory_storage_panes: 0,
-        inventory_gold_character: 0,
-        inventory_gold_storage: 0,
-        bag_type: 0,
-        bag_index: 0,
-        bag_container_item: 0,
-        bag_items_count: 0,
-        bag_items: 0,
-        item_id: 0,
-        item_agent_id: 0,
-        item_bag: 0,
-        item_modifiers: 0,
-        item_modifier_count: 0,
-        item_customized: 0,
-        item_model_file_id: 0,
-        item_type: 0,
-        item_dye: 0,
-        item_value: 0,
-        item_interaction: 0,
-        item_model_id: 0,
-        item_formula: 0,
-        item_material_salvageable: 0,
-        item_quantity: 0,
-        item_equipped: 0,
-        item_profession: 0,
-        item_slot: 0,
-        friend_list_address: 0,
-        friend_list_friends: 0,
-        friend_list_number_friend: 0,
-        friend_list_number_ignore: 0,
-        friend_list_number_partner: 0,
-        friend_list_number_trade: 0,
-        friend_list_player_status: 0,
-        friend_type: 0,
-        friend_status: 0,
-        friend_id: 0,
-        friend_zone_id: 0,
-        game_guild_context: 0,
-        guild_context_player_index: 0,
-        guild_context_player_key: 0,
-        guild_context_player_rank: 0,
-        guild_context_guilds: 0,
-        guild_context_roster: 0,
-        guild_key: 0,
-        guild_index: 0,
-        guild_rank: 0,
-        guild_features: 0,
-        guild_rating: 0,
-        guild_faction: 0,
-        guild_faction_point: 0,
-        guild_qualifier_point: 0,
-        guild_cape: 0,
-        guild_player_stride: 0,
-        guild_player_name_pointer: 0,
-        cursor_active_art: 0,
-        cursor_software_model: 0,
-        cursor_show_count: 0,
-        cursor_color_buffer: 0,
-        cursor_art_hotspot: 0,
-        cursor_art_texture: 0,
-        cursor_handle_key: 0,
-        cursor_handle_object: 0,
-        cursor_view_texture: 0,
-        cursor_texture_type: 0,
-        cursor_texture_width: 0,
-        cursor_texture_height: 0,
-        camera_address: 0,
-        camera_look_at_agent_id: 0,
-        camera_max_distance: 0,
-        camera_yaw: 0,
-        camera_pitch: 0,
-        camera_distance: 0,
-        camera_position: 0,
-        camera_look_at_target: 0,
-        camera_field_of_view: 0,
-        camera_mode: 0,
-        game_trade_context: 0,
-        trade_flags: 0,
-        trade_player_gold: 0,
-        trade_player_items: 0,
-        trade_partner_gold: 0,
-        trade_partner_items: 0,
-        trade_item_stride: 0,
-        trade_item_id: 0,
-        trade_item_quantity: 0,
-        ui_frame_array: 0,
-        ui_frame_size: 0,
-        ui_frame_visibility_flags: 0,
-        ui_frame_type: 0,
-        ui_frame_template_type: 0,
-        ui_frame_child_offset_id: 0,
-        ui_frame_id: 0,
-        ui_frame_position: 0,
-        ui_position_flags: 0,
-        ui_position_left: 0,
-        ui_position_bottom: 0,
-        ui_position_right: 0,
-        ui_position_top: 0,
-        ui_frame_parent_relation: 0,
-        ui_frame_hash: 0,
-        ui_frame_state: 0,
-        world_merchant_items: 0,
-        world_hard_mode_unlocked: 0,
-        world_experience: 0,
-        world_experience_duplicate: 0,
-        world_kurzick_current: 0,
-        world_kurzick_current_duplicate: 0,
-        world_kurzick_total: 0,
-        world_kurzick_total_duplicate: 0,
-        world_kurzick_maximum: 0,
-        world_luxon_current: 0,
-        world_luxon_current_duplicate: 0,
-        world_luxon_total: 0,
-        world_luxon_total_duplicate: 0,
-        world_luxon_maximum: 0,
-        world_imperial_current: 0,
-        world_imperial_current_duplicate: 0,
-        world_imperial_total: 0,
-        world_imperial_total_duplicate: 0,
-        world_imperial_maximum: 0,
-        world_level: 0,
-        world_level_duplicate: 0,
-        world_balthazar_current: 0,
-        world_balthazar_current_duplicate: 0,
-        world_balthazar_total: 0,
-        world_balthazar_total_duplicate: 0,
-        world_balthazar_maximum: 0,
-        world_skill_points_current: 0,
-        world_skill_points_current_duplicate: 0,
-        world_skill_points_total: 0,
-        world_skill_points_total_duplicate: 0,
-        game_account_context: 0,
-        account_unlocked_skills: 0,
-        world_learnable_character_skills: 0,
-        world_unlocked_character_skills: 0,
-    };
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct PartyPlayer {
@@ -763,31 +525,12 @@ struct CameraState {
     field_of_view: f32,
 }
 
-impl CameraState {
-    const EMPTY: Self = Self {
-        look_at_agent_id: 0,
-        mode: 0,
-        yaw: 0.0,
-        pitch: 0.0,
-        distance: 0.0,
-        max_distance: 0.0,
-        position: [0.0; 3],
-        look_at: [0.0; 3],
-        field_of_view: 0.0,
-    };
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TradeItem {
     item_id: u32,
     quantity: u32,
 }
-
-const EMPTY_TRADE_ITEM: TradeItem = TradeItem {
-    item_id: 0,
-    quantity: 0,
-};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -821,23 +564,6 @@ struct UiFrame {
     top: f32,
 }
 
-const EMPTY_UI_FRAME: UiFrame = UiFrame {
-    record_flags: 0,
-    frame_id: 0,
-    parent_id: 0,
-    child_offset_id: 0,
-    frame_hash: 0,
-    visibility_flags: 0,
-    frame_type: 0,
-    template_type: 0,
-    frame_state: 0,
-    position_flags: 0,
-    left: 0.0,
-    bottom: 0.0,
-    right: 0.0,
-    top: 0.0,
-};
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UiState {
@@ -866,14 +592,6 @@ struct FactionProgress {
     maximum: u32,
 }
 
-impl FactionProgress {
-    const EMPTY: Self = Self {
-        current: 0,
-        total_earned: 0,
-        maximum: 0,
-    };
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct ProgressionState {
@@ -888,20 +606,6 @@ struct ProgressionState {
     total_skill_points: u32,
 }
 
-impl ProgressionState {
-    const EMPTY: Self = Self {
-        hard_mode_unlocked: 0,
-        level: 0,
-        experience: 0,
-        kurzick: FactionProgress::EMPTY,
-        luxon: FactionProgress::EMPTY,
-        imperial: FactionProgress::EMPTY,
-        balthazar: FactionProgress::EMPTY,
-        current_skill_points: 0,
-        total_skill_points: 0,
-    };
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct SkillUnlockState {
@@ -913,19 +617,6 @@ struct SkillUnlockState {
     learnable_skill_ids: [u32; MAX_LEARNABLE_SKILLS as usize],
     learned_words: [u32; MAX_SKILL_BITMAP_WORDS as usize],
     account_words: [u32; MAX_SKILL_BITMAP_WORDS as usize],
-}
-
-impl SkillUnlockState {
-    const EMPTY: Self = Self {
-        page_flags: 0,
-        learnable_count: 0,
-        learnable_total: 0,
-        learned_word_count: 0,
-        account_word_count: 0,
-        learnable_skill_ids: [0; MAX_LEARNABLE_SKILLS as usize],
-        learned_words: [0; MAX_SKILL_BITMAP_WORDS as usize],
-        account_words: [0; MAX_SKILL_BITMAP_WORDS as usize],
-    };
 }
 
 #[repr(C)]
@@ -1066,6 +757,34 @@ fn indexed(base: u32, index: u32, stride: u32) -> Option<u32> {
     checked_add(base, checked_mul(index, stride)?)
 }
 
+#[inline(never)]
+unsafe fn zero_volatile<T>(destination: *mut T) {
+    let mut word = 0;
+    while word < size_of::<T>() / size_of::<u32>() {
+        unsafe {
+            write_volatile(destination.cast::<u32>().add(word), 0);
+        }
+        word += 1;
+    }
+}
+
+#[inline(never)]
+fn zeroed_value<T>() -> T {
+    let mut value = core::mem::MaybeUninit::<T>::uninit();
+    unsafe {
+        zero_volatile(value.as_mut_ptr());
+        value.assume_init()
+    }
+}
+
+unsafe fn write_volatile_or_zero<T>(destination: *mut T, value: Option<T>) {
+    if let Some(value) = value {
+        unsafe { write_volatile(destination, value) };
+    } else {
+        unsafe { zero_volatile(destination) };
+    }
+}
+
 fn contains(address: u32, bytes: u32) -> bool {
     checked_add(address, bytes).is_some_and(|end| end <= memory_bytes())
 }
@@ -1158,103 +877,6 @@ struct AgentState {
     y: f32,
 }
 
-const EMPTY_PARTY_PLAYER: PartyPlayer = PartyPlayer {
-    login_number: 0,
-    called_target_id: 0,
-    state: 0,
-};
-const EMPTY_PARTY_HERO: PartyHero = PartyHero {
-    agent_id: 0,
-    owner_player_id: 0,
-    hero_id: 0,
-    level: 0,
-};
-const EMPTY_PARTY_HENCHMAN: PartyHenchman = PartyHenchman {
-    agent_id: 0,
-    profession: 0,
-    level: 0,
-};
-const EMPTY_SKILL_SLOT: SkillSlot = SkillSlot {
-    adrenaline_a: 0,
-    adrenaline_b: 0,
-    recharge: 0,
-    skill_id: 0,
-    event: 0,
-};
-const EMPTY_PLAYER_BUFF: PlayerBuff = PlayerBuff {
-    skill_id: 0,
-    buff_id: 0,
-    target_agent_id: 0,
-};
-const EMPTY_PLAYER_EFFECT: PlayerEffect = PlayerEffect {
-    skill_id: 0,
-    attribute_level: 0,
-    effect_id: 0,
-    agent_id: 0,
-    duration: 0.0,
-    timestamp: 0,
-};
-const EMPTY_MAP_AGENT: MapAgent = MapAgent {
-    agent_id: 0,
-    type_bits: 0,
-    player_number: 0,
-    primary: 0,
-    secondary: 0,
-    level: 0,
-    health: 0.0,
-    rotation: 0.0,
-    x: 0.0,
-    y: 0.0,
-    z: 0.0,
-    model_state: 0,
-    effects: 0,
-    allegiance: 0,
-};
-const EMPTY_QUEST: Quest = Quest {
-    quest_id: 0,
-    log_state: 0,
-    map_from: 0,
-    marker_x: 0.0,
-    marker_y: 0.0,
-    marker_plane: 0,
-    map_to: 0,
-};
-const EMPTY_MISSION_OBJECTIVE: MissionObjective = MissionObjective {
-    objective_id: 0,
-    objective_type: 0,
-};
-const EMPTY_INVENTORY_BAG: InventoryBag = InventoryBag {
-    bag_id: 0,
-    bag_type: 0,
-    container_item: 0,
-    capacity: 0,
-    item_count: 0,
-};
-const EMPTY_INVENTORY_ITEM: InventoryItem = InventoryItem {
-    item_id: 0,
-    agent_id: 0,
-    bag_id: 0,
-    slot: 0,
-    model_file_id: 0,
-    item_type: 0,
-    value: 0,
-    interaction: 0,
-    model_id: 0,
-    item_formula: 0,
-    quantity: 0,
-    equipped: 0,
-    profession: 0,
-    metadata_flags: 0,
-    modifier_count: 0,
-    dye_info: 0,
-};
-const EMPTY_FRIEND: Friend = Friend {
-    slot: 0,
-    friend_type: 0,
-    status: 0,
-    friend_id: 0,
-    zone_id: 0,
-};
 #[derive(Clone, Copy)]
 struct PartyState {
     id: u32,
@@ -1269,36 +891,12 @@ struct PartyState {
     allies: [u32; MAX_PARTY_ALLIES],
 }
 
-impl PartyState {
-    const EMPTY: Self = Self {
-        id: 0,
-        flags: 0,
-        player_count: 0,
-        hero_count: 0,
-        henchman_count: 0,
-        ally_count: 0,
-        players: [EMPTY_PARTY_PLAYER; MAX_PARTY_PLAYERS],
-        heroes: [EMPTY_PARTY_HERO; MAX_PARTY_HEROES],
-        henchmen: [EMPTY_PARTY_HENCHMAN; MAX_PARTY_HENCHMEN],
-        allies: [0; MAX_PARTY_ALLIES],
-    };
-}
-
 #[derive(Clone, Copy)]
 struct SkillbarState {
     agent_id: u32,
     disabled_mask: u32,
     cast_count: u32,
     skills: [SkillSlot; SKILL_SLOTS],
-}
-
-impl SkillbarState {
-    const EMPTY: Self = Self {
-        agent_id: 0,
-        disabled_mask: 0,
-        cast_count: 0,
-        skills: [EMPTY_SKILL_SLOT; SKILL_SLOTS],
-    };
 }
 
 // Keep only validated source spans here, never the full published page. This
@@ -1338,13 +936,6 @@ struct MapAgentsSource {
     size: u32,
 }
 
-impl MapAgentsSource {
-    const EMPTY: Self = Self {
-        buffer: 0,
-        size: 0,
-    };
-}
-
 #[derive(Clone, Copy)]
 struct QuestsSource {
     active_quest_id: u32,
@@ -1353,17 +944,6 @@ struct QuestsSource {
     objective_count: u32,
     quest_buffer: u32,
     objective_buffer: u32,
-}
-
-impl QuestsSource {
-    const EMPTY: Self = Self {
-        active_quest_id: 0,
-        flags: 0,
-        quest_count: 0,
-        objective_count: 0,
-        quest_buffer: 0,
-        objective_buffer: 0,
-    };
 }
 
 // Inventory is a graph of bags and item pointers. Retain only the owning
@@ -1376,10 +956,6 @@ struct InventorySource {
     inventory: u32,
 }
 
-impl InventorySource {
-    const EMPTY: Self = Self { inventory: 0 };
-}
-
 // The social page contains pointer arrays just like inventory. Keep only the
 // owning objects across the tick and revalidate every record while publishing.
 // No string, UUID, announcement, or message pointer is ever followed.
@@ -1389,25 +965,12 @@ struct SocialSource {
     guild_context: u32,
 }
 
-impl SocialSource {
-    const EMPTY: Self = Self {
-        friend_list: 0,
-        guild_context: 0,
-    };
-}
-
 // Each completion category is a fixed-cap bitmap in WorldContext. Keep only
 // the six validated source descriptors between collect and publish; JavaScript
 // expands set bits into sorted numeric map IDs.
 #[derive(Clone, Copy)]
 struct CompletionSource {
     arrays: [ArrayView; 6],
-}
-
-impl CompletionSource {
-    const EMPTY: Self = Self {
-        arrays: [ArrayView::EMPTY; 6],
-    };
 }
 
 // The trade window owns two GWArray descriptors. Retain only their bounded
@@ -1442,24 +1005,12 @@ struct UiSource {
     frames: ArrayView,
 }
 
-impl UiSource {
-    const EMPTY: Self = Self {
-        frames: ArrayView::EMPTY,
-    };
-}
-
 // WorldContext owns a transient numeric item-ID array used by merchant UI.
 // Retain only its descriptor; prices, quotes, names, transaction state, and
 // the merchant window lifecycle are intentionally outside this contract.
 #[derive(Clone, Copy)]
 struct MerchantSource {
     items: ArrayView,
-}
-
-impl MerchantSource {
-    const EMPTY: Self = Self {
-        items: ArrayView::EMPTY,
-    };
 }
 
 // The three arrays intentionally keep their native meanings separate:
@@ -1470,14 +1021,6 @@ struct SkillUnlockSource {
     learnable: ArrayView,
     learned: ArrayView,
     account: ArrayView,
-}
-
-impl SkillUnlockSource {
-    const EMPTY: Self = Self {
-        learnable: ArrayView::EMPTY,
-        learned: ArrayView::EMPTY,
-        account: ArrayView::EMPTY,
-    };
 }
 
 #[derive(Clone, Copy)]
@@ -1506,36 +1049,12 @@ struct State {
 }
 
 impl State {
-    const fn empty() -> Self {
-        const EMPTY_AGENT: AgentState = AgentState {
-            id: 0,
-            kind: 0,
-            x: 0.0,
-            y: 0.0,
-        };
-        Self {
-            flags: 0,
-            map_id: 0,
-            instance_type: 0,
-            player: EMPTY_AGENT,
-            target: EMPTY_AGENT,
-            distance: 0.0,
-            band: 0,
-            party: PartyState::EMPTY,
-            skillbar: SkillbarState::EMPTY,
-            effects: EffectsSource::EMPTY,
-            map_agents: MapAgentsSource::EMPTY,
-            quests: QuestsSource::EMPTY,
-            inventory: InventorySource::EMPTY,
-            social: SocialSource::EMPTY,
-            completion: CompletionSource::EMPTY,
-            camera: CameraState::EMPTY,
-            trade: TradeSource::EMPTY,
-            ui: UiSource::EMPTY,
-            merchant: MerchantSource::EMPTY,
-            progression: ProgressionState::EMPTY,
-            skill_unlocks: SkillUnlockSource::EMPTY,
-        }
+    fn empty() -> Self {
+        // Every field is an integer, float, or aggregate of those, so an
+        // all-zero value is valid. Building this large value as a Rust const
+        // makes LLVM emit an active data segment, which would overwrite the
+        // imported game memory as soon as the kernel is instantiated.
+        zeroed_value()
     }
 }
 
@@ -1581,15 +1100,13 @@ unsafe fn read_map_agent(layout: Layout, address: u32, id: u32) -> Option<MapAge
         return None;
     }
 
-    let mut agent = MapAgent {
-        agent_id: id,
-        type_bits,
-        rotation,
-        x,
-        y,
-        z,
-        ..EMPTY_MAP_AGENT
-    };
+    let mut agent: MapAgent = zeroed_value();
+    agent.agent_id = id;
+    agent.type_bits = type_bits;
+    agent.rotation = rotation;
+    agent.x = x;
+    agent.y = y;
+    agent.z = z;
     if type_bits & 0xdb == 0 {
         return Some(agent);
     }
@@ -2488,18 +2005,16 @@ unsafe fn collect_party(layout: Layout, game: u32, agent_count: u32) -> Option<P
     }
 
     let raw_flags = unsafe { read_u32(offset(party, layout.party_flag)?)? };
-    let mut state = PartyState {
-        id: unsafe { read_u32(offset(info, layout.party_id)?)? },
-        flags: ((raw_flags & 0x10 != 0) as u32)
-            | (((raw_flags & 0x20 != 0) as u32) << 1)
-            | (((raw_flags & 0x80 != 0) as u32) << 2)
-            | ((others.size > MAX_PARTY_ALLIES as u32) as u32) << 3,
-        player_count: players.size,
-        hero_count: heroes.size,
-        henchman_count: henchmen.size,
-        ally_count: others.size.min(MAX_PARTY_ALLIES as u32),
-        ..PartyState::EMPTY
-    };
+    let mut state: PartyState = zeroed_value();
+    state.id = unsafe { read_u32(offset(info, layout.party_id)?)? };
+    state.flags = ((raw_flags & 0x10 != 0) as u32)
+        | (((raw_flags & 0x20 != 0) as u32) << 1)
+        | (((raw_flags & 0x80 != 0) as u32) << 2)
+        | ((others.size > MAX_PARTY_ALLIES as u32) as u32) << 3;
+    state.player_count = players.size;
+    state.hero_count = heroes.size;
+    state.henchman_count = henchmen.size;
+    state.ally_count = others.size.min(MAX_PARTY_ALLIES as u32);
 
     for index in 0..players.size {
         let entry = indexed(players.buffer, index, layout.party_player_stride)?;
@@ -2511,7 +2026,10 @@ unsafe fn collect_party(layout: Layout, game: u32, agent_count: u32) -> Option<P
         if login_number == 0 || called_target_id >= agent_count {
             return None;
         }
-        state.players[index as usize] = PartyPlayer {
+        let Some(slot) = state.players.get_mut(index as usize) else {
+            return None;
+        };
+        *slot = PartyPlayer {
             login_number,
             called_target_id,
             state: member_state,
@@ -2532,7 +2050,10 @@ unsafe fn collect_party(layout: Layout, game: u32, agent_count: u32) -> Option<P
             || hero.agent_id >= agent_count
             || hero.owner_player_id == 0
             || !(0..players.size).any(|player_index| {
-                state.players[player_index as usize].login_number == hero.owner_player_id
+                state
+                    .players
+                    .get(player_index as usize)
+                    .is_some_and(|player| player.login_number == hero.owner_player_id)
             })
             || hero.hero_id == 0
             || hero.hero_id > 1_000
@@ -2540,7 +2061,10 @@ unsafe fn collect_party(layout: Layout, game: u32, agent_count: u32) -> Option<P
         {
             return None;
         }
-        state.heroes[index as usize] = hero;
+        let Some(slot) = state.heroes.get_mut(index as usize) else {
+            return None;
+        };
+        *slot = hero;
     }
 
     for index in 0..henchmen.size {
@@ -2559,7 +2083,10 @@ unsafe fn collect_party(layout: Layout, game: u32, agent_count: u32) -> Option<P
         {
             return None;
         }
-        state.henchmen[index as usize] = henchman;
+        let Some(slot) = state.henchmen.get_mut(index as usize) else {
+            return None;
+        };
+        *slot = henchman;
     }
 
     for index in 0..state.ally_count {
@@ -2567,7 +2094,10 @@ unsafe fn collect_party(layout: Layout, game: u32, agent_count: u32) -> Option<P
         if agent_id == 0 || agent_id >= agent_count {
             return None;
         }
-        state.allies[index as usize] = agent_id;
+        let Some(slot) = state.allies.get_mut(index as usize) else {
+            return None;
+        };
+        *slot = agent_id;
     }
     Some(state)
 }
@@ -2598,12 +2128,10 @@ unsafe fn collect_skillbar(layout: Layout, game: u32, player_id: u32) -> Option<
         if disabled_mask & !0xff != 0 || cast_count > 64 {
             return None;
         }
-        let mut state = SkillbarState {
-            agent_id,
-            disabled_mask,
-            cast_count,
-            ..SkillbarState::EMPTY
-        };
+        let mut state: SkillbarState = zeroed_value();
+        state.agent_id = agent_id;
+        state.disabled_mask = disabled_mask;
+        state.cast_count = cast_count;
         let skills = offset(bar, layout.skillbar_skills)?;
         for slot in 0..SKILL_SLOTS as u32 {
             let skill = indexed(skills, slot, layout.skill_stride)?;
@@ -3003,7 +2531,11 @@ unsafe fn publish_map_agents(
     }
     for index in count..MAX_MAP_AGENTS {
         unsafe {
-            write_volatile(&mut (*snapshot).map_agents[index], EMPTY_MAP_AGENT);
+            zero_volatile(
+                core::ptr::addr_of_mut!((*snapshot).map_agents)
+                    .cast::<MapAgent>()
+                    .add(index),
+            );
         }
     }
     unsafe {
@@ -3095,7 +2627,12 @@ unsafe fn publish_inventory(
             total_slots = next_slots;
             backpack_found |= bag_id == 1;
             unsafe {
-                write_volatile(&mut (*snapshot).inventory_bags[bag_count], bag);
+                write_volatile(
+                    core::ptr::addr_of_mut!((*snapshot).inventory_bags)
+                        .cast::<InventoryBag>()
+                        .add(bag_count),
+                    bag,
+                );
             }
             bag_count += 1;
 
@@ -3161,17 +2698,19 @@ unsafe fn publish_inventory(
     }
     for index in bag_count..MAX_INVENTORY_BAGS {
         unsafe {
-            write_volatile(
-                &mut (*snapshot).inventory_bags[index],
-                EMPTY_INVENTORY_BAG,
+            zero_volatile(
+                core::ptr::addr_of_mut!((*snapshot).inventory_bags)
+                    .cast::<InventoryBag>()
+                    .add(index),
             );
         }
     }
     for index in item_count..MAX_INVENTORY_ITEMS {
         unsafe {
-            write_volatile(
-                &mut (*snapshot).inventory_items[index],
-                EMPTY_INVENTORY_ITEM,
+            zero_volatile(
+                core::ptr::addr_of_mut!((*snapshot).inventory_items)
+                    .cast::<InventoryItem>()
+                    .add(index),
             );
         }
     }
@@ -3470,7 +3009,13 @@ unsafe fn publish_social(
         guild_cape = [0; 7];
     }
     for index in friend_count..MAX_FRIENDS {
-        unsafe { write_volatile(&mut (*snapshot).friends[index], EMPTY_FRIEND) };
+        unsafe {
+            zero_volatile(
+                core::ptr::addr_of_mut!((*snapshot).friends)
+                    .cast::<Friend>()
+                    .add(index),
+            );
+        }
     }
     unsafe {
         write_volatile(&mut (*snapshot).social_flags, social_flags);
@@ -3732,25 +3277,26 @@ unsafe fn publish_trade(
     }
     for index in 0..MAX_TRADE_ITEMS {
         let player_item = if index < player_count as usize {
-            unsafe {
-                read_trade_item(layout, source.player_items, index as u32)
-                    .unwrap_or(EMPTY_TRADE_ITEM)
-            }
+            unsafe { read_trade_item(layout, source.player_items, index as u32) }
         } else {
-            EMPTY_TRADE_ITEM
+            None
         };
         let partner_item = if index < partner_count as usize {
-            unsafe {
-                read_trade_item(layout, source.partner_items, index as u32)
-                    .unwrap_or(EMPTY_TRADE_ITEM)
-            }
+            unsafe { read_trade_item(layout, source.partner_items, index as u32) }
         } else {
-            EMPTY_TRADE_ITEM
+            None
         };
         unsafe {
-            write_volatile(&mut (*snapshot).trade.player_items[index], player_item);
-            write_volatile(
-                &mut (*snapshot).trade.partner_items[index],
+            write_volatile_or_zero(
+                core::ptr::addr_of_mut!((*snapshot).trade.player_items)
+                    .cast::<TradeItem>()
+                    .add(index),
+                player_item,
+            );
+            write_volatile_or_zero(
+                core::ptr::addr_of_mut!((*snapshot).trade.partner_items)
+                    .cast::<TradeItem>()
+                    .add(index),
                 partner_item,
             );
         }
@@ -3816,7 +3362,11 @@ unsafe fn publish_ui(
     }
     for index in frame_count..MAX_UI_FRAMES {
         unsafe {
-            write_volatile(&mut (*snapshot).ui.frames[index], EMPTY_UI_FRAME);
+            zero_volatile(
+                core::ptr::addr_of_mut!((*snapshot).ui.frames)
+                    .cast::<UiFrame>()
+                    .add(index),
+            );
         }
     }
     unsafe {
@@ -3954,20 +3504,28 @@ unsafe fn publish(runtime: &mut RuntimeState, mut state: State, layout: Layout) 
         for index in 0..MAX_PLAYER_BUFFS {
             let value = if index < state.effects.buff_count as usize {
                 read_player_buff(layout, state.effects.buff_buffer, index as u32)
-                    .unwrap_or(EMPTY_PLAYER_BUFF)
             } else {
-                EMPTY_PLAYER_BUFF
+                None
             };
-            write_volatile(&mut (*snapshot).buffs[index], value);
+            write_volatile_or_zero(
+                core::ptr::addr_of_mut!((*snapshot).buffs)
+                    .cast::<PlayerBuff>()
+                    .add(index),
+                value,
+            );
         }
         for index in 0..MAX_PLAYER_EFFECTS {
             let value = if index < state.effects.effect_count as usize {
                 read_player_effect(layout, state.effects.effect_buffer, index as u32)
-                    .unwrap_or(EMPTY_PLAYER_EFFECT)
             } else {
-                EMPTY_PLAYER_EFFECT
+                None
             };
-            write_volatile(&mut (*snapshot).effects[index], value);
+            write_volatile_or_zero(
+                core::ptr::addr_of_mut!((*snapshot).effects)
+                    .cast::<PlayerEffect>()
+                    .add(index),
+                value,
+            );
         }
         if !publish_map_agents(snapshot, layout, state.map_agents) {
             state.flags &= !FLAG_MAP_AGENTS_VALID;
@@ -3985,11 +3543,15 @@ unsafe fn publish(runtime: &mut RuntimeState, mut state: State, layout: Layout) 
         for index in 0..MAX_QUESTS {
             let value = if index < state.quests.quest_count as usize {
                 read_quest(layout, state.quests.quest_buffer, index as u32)
-                    .unwrap_or(EMPTY_QUEST)
             } else {
-                EMPTY_QUEST
+                None
             };
-            write_volatile(&mut (*snapshot).quests[index], value);
+            write_volatile_or_zero(
+                core::ptr::addr_of_mut!((*snapshot).quests)
+                    .cast::<Quest>()
+                    .add(index),
+                value,
+            );
         }
         for index in 0..MAX_MISSION_OBJECTIVES {
             let value = if index < state.quests.objective_count as usize {
@@ -3998,11 +3560,15 @@ unsafe fn publish(runtime: &mut RuntimeState, mut state: State, layout: Layout) 
                     state.quests.objective_buffer,
                     index as u32,
                 )
-                .unwrap_or(EMPTY_MISSION_OBJECTIVE)
             } else {
-                EMPTY_MISSION_OBJECTIVE
+                None
             };
-            write_volatile(&mut (*snapshot).mission_objectives[index], value);
+            write_volatile_or_zero(
+                core::ptr::addr_of_mut!((*snapshot).mission_objectives)
+                    .cast::<MissionObjective>()
+                    .add(index),
+                value,
+            );
         }
         if !publish_inventory(snapshot, layout, state.inventory) {
             state.flags &= !FLAG_INVENTORY_VALID;
