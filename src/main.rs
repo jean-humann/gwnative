@@ -671,16 +671,15 @@ fn install_client(
     }
 
     let failure = match &plan {
-        Ok((manifest, _, offered)) => sync(
+        Ok((manifest, _, offered)) => ClientSync {
             root,
-            &missing,
-            &generations,
+            generations: &generations,
             client,
             manifest,
             offered,
-            client_sync,
             support_dir,
-        )
+        }
+        .run(&missing, client_sync)
         .err()
         .map(|e| e.to_string()),
         Err(e) => Some(e.clone()),
@@ -894,78 +893,88 @@ fn revalidate_manifest(support_dir: std::path::PathBuf) {
 /// naming that build is how the caller decided this was worth calling, and the
 /// rejection check below needs the same name while declining still costs
 /// nothing. Nothing here fetches a manifest — see [`load_manifest`].
-fn sync(
-    root: &Path,
-    unsound: &[&'static str],
-    generations: &generation::Store,
-    client: &patch::Client,
-    manifest: &manifest::Manifest,
-    offered: &str,
-    force: bool,
-    support_dir: &Path,
-) -> error::Result<()> {
-    if unsound.is_empty() {
-        note!("[gwnative] installing client generation {offered}");
-    } else {
-        note!(
-            "[gwnative] fetching client artifacts: {}",
-            unsound.join(", ")
-        );
-    }
-    let names = patch::artifacts();
+struct ClientSync<'a> {
+    root: &'a Path,
+    generations: &'a generation::Store,
+    client: &'a patch::Client,
+    manifest: &'a manifest::Manifest,
+    offered: &'a str,
+    support_dir: &'a Path,
+}
 
-    if generations.rejected(offered) && !force {
+impl ClientSync<'_> {
+    fn run(self, unsound: &[&'static str], force: bool) -> error::Result<()> {
+        let Self {
+            root,
+            generations,
+            client,
+            manifest,
+            offered,
+            support_dir,
+        } = self;
         if unsound.is_empty() {
+            note!("[gwnative] installing client generation {offered}");
+        } else {
             note!(
-                "[gwnative] the service still offers client generation {offered}, which never reached \
-                 a first frame here; keeping the one on disk"
+                "[gwnative] fetching client artifacts: {}",
+                unsound.join(", ")
             );
-            return Ok(());
         }
-        // The alternative to a build that did not work is no client at all, so
-        // it gets another try — loudly, because if it fails the same way the
-        // line above is the one that explains why nothing changed.
-        note!(
-            "[gwnative] client generation {offered} never reached a first frame here, but the client \
-             on disk is incomplete, so there is nothing else to run"
-        );
-    }
+        let names = patch::artifacts();
 
-    if !generations.stash(root, &names) && unsound.is_empty() {
-        return Err(std::io::Error::other(
-            "the working client could not be preserved before replacement",
-        )
-        .into());
-    }
-    let fetched = match patch::sync_with(client, manifest, root) {
-        Ok(fetched) => fetched,
-        Err(error) => {
-            // Promotion has its own best-effort restore, but a failure in that
-            // restore is exactly when the durable, verified generation stash
-            // matters. Keep its record until the whole pair is back in place.
+        if generations.rejected(offered) && !force {
+            if unsound.is_empty() {
+                note!(
+                    "[gwnative] the service still offers client generation {offered}, which never reached \
+                 a first frame here; keeping the one on disk"
+                );
+                return Ok(());
+            }
+            // The alternative to a build that did not work is no client at all, so
+            // it gets another try — loudly, because if it fails the same way the
+            // line above is the one that explains why nothing changed.
+            note!(
+                "[gwnative] client generation {offered} never reached a first frame here, but the client \
+             on disk is incomplete, so there is nothing else to run"
+            );
+        }
+
+        if !generations.stash(root, &names) && unsound.is_empty() {
+            return Err(std::io::Error::other(
+                "the working client could not be preserved before replacement",
+            )
+            .into());
+        }
+        let fetched = match patch::sync_with(client, manifest, root) {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                // Promotion has its own best-effort restore, but a failure in that
+                // restore is exactly when the durable, verified generation stash
+                // matters. Keep its record until the whole pair is back in place.
+                if matches!(
+                    generations.recover(root),
+                    generation::Recovery::InstallationRestored
+                ) {
+                    note!("[gwnative] restored the proven client after sync failed");
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = client.activate_manifest(support_dir) {
             if matches!(
                 generations.recover(root),
                 generation::Recovery::InstallationRestored
             ) {
-                note!("[gwnative] restored the proven client after sync failed");
+                note!("[gwnative] restored the proven client after manifest activation failed");
             }
             return Err(error);
         }
-    };
-    if let Err(error) = client.activate_manifest(support_dir) {
-        if matches!(
-            generations.recover(root),
-            generation::Recovery::InstallationRestored
-        ) {
-            note!("[gwnative] restored the proven client after manifest activation failed");
+        for (name, bytes) in fetched {
+            note!("[gwnative]   {name} ({bytes} bytes)");
         }
-        return Err(error);
+        generations.record(offered, root, &names);
+        Ok(())
     }
-    for (name, bytes) in fetched {
-        note!("[gwnative]   {name} ({bytes} bytes)");
-    }
-    generations.record(offered, root, &names);
-    Ok(())
 }
 
 /// A fresh random secret per launch, shared with the page and nothing else.
