@@ -35,8 +35,18 @@ function createSurface(edge) {
   return { canvas, context };
 }
 
-const source = createSurface(EDGE);
-const retina = createSurface(RETINA_EDGE);
+let surfaces = null;
+
+function cursorSurfaces() {
+  if (surfaces === null) {
+    surfaces = {
+      source: createSurface(EDGE),
+      retina: createSurface(RETINA_EDGE),
+    };
+  }
+  return surfaces;
+}
+
 /** @type {Map<string, string>} */
 const cssCache = new Map();
 
@@ -59,6 +69,7 @@ const cssCache = new Map();
  * @param {number} hotspotY
  */
 export function buildCursorCss(pixels, hotspotX, hotspotY) {
+  const { source, retina } = cursorSurfaces();
   const image = source.context.createImageData(EDGE, EDGE);
   image.data.set(pixels);
   source.context.putImageData(image, 0, 0);
