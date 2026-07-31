@@ -10,11 +10,9 @@ import { createCursorConsumer } from './enhancement-cursor.js';
 import { createTargetReadout } from './enhancement-readout.js';
 import {
   readCompanionSnapshot,
-  COMPANION_CURSOR_ABI,
-  COMPANION_CURSOR_BYTES,
-  COMPANION_SNAPSHOT_ABI,
   COMPANION_SNAPSHOT_BYTES,
 } from './companion-snapshot.js';
+import { decodeCompanionManifest } from './companion-manifest.js';
 import { probeLayout } from './layout-probe.js';
 import * as diagnostics from './diagnostics.js';
 import {
@@ -25,7 +23,6 @@ import {
 /** Must match `FEATURE_*` in `src/companion-kernel/lib.rs`. */
 const FEATURE_NATIVE_CURSOR = 1 << 0;
 const FEATURE_TARGET_READOUT = 1 << 1;
-const COMPANION_LAYOUT_WORDS = 232;
 
 /** How many render-cost samples to keep for `window.gwCompanionRuntime`. */
 const SAMPLE_WINDOW = 240;
@@ -34,50 +31,6 @@ const SAMPLE_WINDOW = 240;
  * address is inside the imported game memory and must never be used.
  */
 const COMPANION_STACK_BYTES = 64 * 1024;
-
-/**
- * The signed manifest the native host selected, or `null` if it is not one this
- * page can act on.
- *
- * Everything is checked rather than read. This page and the host are versioned
- * together, so a disagreement here means something is wrong with the build
- * rather than that a field needs defaulting — and the consequence of guessing
- * is a companion pointed at the wrong offsets in a live game's memory.
- *
- * @param {unknown} candidate
- */
-export function decodeManifest(candidate) {
-  try {
-    const value = candidate;
-    if (
-      value?.snapshotAbi !== COMPANION_SNAPSHOT_ABI
-      || value?.snapshotBytes !== COMPANION_SNAPSHOT_BYTES
-      || value?.cursorSnapshotAbi !== COMPANION_CURSOR_ABI
-      || value?.cursorSnapshotBytes !== COMPANION_CURSOR_BYTES
-      || typeof value?.familyId !== 'string'
-      || !/^[0-9a-f]{64}$/.test(value.familyId)
-      || !Array.isArray(value?.layoutWords)
-      || value.layoutWords.length !== COMPANION_LAYOUT_WORDS
-      || value.layoutWords.some(
-        (/** @type {unknown} */ word) =>
-          !Number.isInteger(word)
-          || Number(word) < 0
-          || Number(word) > 0xffff_ffff,
-      )
-      // The companion is handed a byte count and reads that many words out of
-      // it, so the two have to be the same statement.
-      || value?.configBytes !== value.layoutWords.length * Uint32Array.BYTES_PER_ELEMENT
-    ) {
-      return null;
-    }
-    return Object.freeze({
-      ...value,
-      layoutWords: Object.freeze([...value.layoutWords]),
-    });
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Read the snapshot once per frame and hand it to whichever surfaces are on.
@@ -162,7 +115,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
     | (observeState ? FEATURE_TARGET_READOUT : 0);
   if (featureFlags === 0) return null;
 
-  const manifest = decodeManifest(manifestValue);
+  const manifest = decodeCompanionManifest(manifestValue);
   const exports = instance?.exports;
   // Every one of these is something the transform or Emscripten is supposed to
   // have left behind. Checked together, and before anything is allocated, so

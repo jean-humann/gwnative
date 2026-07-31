@@ -5,7 +5,7 @@ import {
   asyncifyStateReader,
   createPassiveObserver,
 } from './passive-observer.js';
-import { decodeManifest } from './enhancements.js';
+import { decodeCompanionManifest } from './companion-manifest.js';
 
 const FAMILY_ID = 'a'.repeat(64);
 
@@ -24,7 +24,7 @@ function manifest(overrides = {}) {
 
 describe('signed companion manifest', () => {
   it('accepts the exact compiled snapshot and layout ABI', () => {
-    const decoded = decodeManifest(manifest());
+    const decoded = decodeCompanionManifest(manifest());
     assert.equal(decoded.familyId, FAMILY_ID);
     assert.equal(decoded.layoutWords.length, 232);
     assert(Object.isFrozen(decoded));
@@ -32,9 +32,9 @@ describe('signed companion manifest', () => {
   });
 
   it('rejects stale or internally inconsistent layouts', () => {
-    assert.equal(decodeManifest(manifest({ snapshotAbi: 13 })), null);
-    assert.equal(decodeManifest(manifest({ layoutWords: Array(231).fill(0) })), null);
-    assert.equal(decodeManifest(manifest({ configBytes: 924 })), null);
+    assert.equal(decodeCompanionManifest(manifest({ snapshotAbi: 13 })), null);
+    assert.equal(decodeCompanionManifest(manifest({ layoutWords: Array(231).fill(0) })), null);
+    assert.equal(decodeCompanionManifest(manifest({ configBytes: 924 })), null);
   });
 });
 
