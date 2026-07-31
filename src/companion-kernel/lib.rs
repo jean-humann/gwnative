@@ -520,7 +520,13 @@ struct RuntimeState {
 
 const RUNTIME_BYTES: u32 = size_of::<RuntimeState>() as u32;
 const RUNTIME_ABI_AND_SIZE: u32 = (RUNTIME_BYTES << 16) | 1;
-const _: [(); 168] = [(); size_of::<RuntimeState>()];
+
+/// The runtime block is private to this kernel, so the loader asks the kernel
+/// how much memory to allocate instead of duplicating the Rust struct size.
+#[no_mangle]
+pub extern "C" fn companion_runtime_size() -> u32 {
+    RUNTIME_BYTES
+}
 
 // FNV-1a over the source BGRA words, so an unchanged cursor costs one pass and
 // no conversion. None means unreadable or never committed by the game.

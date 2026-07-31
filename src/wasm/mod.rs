@@ -571,6 +571,9 @@ mod tests {
         assert!(exports.iter().any(|(name, kind, _)| {
             name == "companion_observe" && *kind == wasmparser::ExternalKind::Func
         }));
+        assert!(exports.iter().any(|(name, kind, _)| {
+            name == "companion_runtime_size" && *kind == wasmparser::ExternalKind::Func
+        }));
         let (_, _, stack_index) = exports
             .iter()
             .find(|(name, kind, _)| {

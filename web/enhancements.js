@@ -28,8 +28,6 @@ const FEATURE_TARGET_READOUT = 1 << 1;
 
 /** How many render-cost samples to keep for `window.gwCompanionRuntime`. */
 const SAMPLE_WINDOW = 240;
-/** Must match `RuntimeState` in `src/companion-kernel/lib.rs`. */
-const COMPANION_STATE_BYTES = 168;
 /**
  * Private downward-growing stack for the companion. Its linker-provided stack
  * address is inside the imported game memory and must never be used.
@@ -219,6 +217,41 @@ export async function installEnhancements(instance, manifestValue, selection) {
     }
   };
   try {
+    const response = await fetch('companion-kernel.wasm');
+    if (!response.ok) throw new Error('the companion module is unavailable');
+    if (!runtimeIdle()) {
+      throw new Error('the client began unwinding or rewinding during installation');
+    }
+    const kernel = await WebAssembly.instantiate(await response.arrayBuffer(), {
+      // The whole trick: `env.memory` is an import, so the companion is
+      // instantiated over the game's heap rather than one of its own.
+      env: { memory: exports.memory },
+    });
+    const kernelExports = kernel.instance.exports;
+    const kernelInit = kernelExports.companion_init;
+    const kernelObserve = kernelExports.companion_observe;
+    const kernelRuntimeSize = kernelExports.companion_runtime_size;
+    const kernelStack = kernelExports.__stack_pointer;
+    if (
+      typeof kernelInit !== 'function'
+      || kernelInit.length !== 9
+      || typeof kernelObserve !== 'function'
+      || kernelObserve.length !== 1
+      || typeof kernelRuntimeSize !== 'function'
+      || kernelRuntimeSize.length !== 0
+    ) {
+      throw new Error('the companion exports do not match their ABI');
+    }
+    const runtimeBytes = Number(kernelRuntimeSize());
+    if (
+      !Number.isSafeInteger(runtimeBytes)
+      || runtimeBytes <= 0
+      || runtimeBytes > 0xffff
+      || runtimeBytes % Uint32Array.BYTES_PER_ELEMENT !== 0
+    ) {
+      throw new Error('the companion reported an invalid runtime size');
+    }
+
     // The client's own allocator, so these are inside the memory the companion
     // is about to be instantiated over. Nothing the page allocates for itself
     // would be visible from there at all.
@@ -229,7 +262,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
     if (selection.nativeCursor) {
       cursorPointer = Number(exports.malloc(COMPANION_CURSOR_BYTES));
     }
-    statePointer = Number(exports.malloc(COMPANION_STATE_BYTES));
+    statePointer = Number(exports.malloc(runtimeBytes));
     // Fifteen spare bytes let us align the stack base without losing the
     // original allocation pointer needed by `free`.
     stackAllocationPointer = Number(exports.malloc(COMPANION_STACK_BYTES + 15));
@@ -248,20 +281,9 @@ export async function installEnhancements(instance, manifestValue, selection) {
       manifest.layoutWords.length,
     ).set(manifest.layoutWords);
 
-    const response = await fetch('companion-kernel.wasm');
-    if (!response.ok) throw new Error('the companion module is unavailable');
     if (!runtimeIdle()) {
-      throw new Error('the client began unwinding or rewinding during installation');
+      throw new Error('the client began unwinding or rewinding during allocation');
     }
-    const kernel = await WebAssembly.instantiate(await response.arrayBuffer(), {
-      // The whole trick: `env.memory` is an import, so the companion is
-      // instantiated over the game's heap rather than one of its own.
-      env: { memory: exports.memory },
-    });
-    const kernelExports = kernel.instance.exports;
-    const kernelInit = kernelExports.companion_init;
-    const kernelObserve = kernelExports.companion_observe;
-    const kernelStack = kernelExports.__stack_pointer;
     const stackBase = Math.ceil(stackAllocationPointer / 16) * 16;
     const stackTop = stackBase + COMPANION_STACK_BYTES;
     if (
@@ -279,17 +301,9 @@ export async function installEnhancements(instance, manifestValue, selection) {
     // `companion_init` re-checks every region against the memory size it can
     // see and answers 1 only if it accepted all of them, so this is the
     // companion's own veto rather than a formality.
-    if (
-      typeof kernelInit !== 'function'
-      || kernelInit.length !== 9
-      || typeof kernelObserve !== 'function'
-      || kernelObserve.length !== 1
-    ) {
-      throw new Error('the companion exports do not match their ABI');
-    }
     const initStatus = kernelInit(
       statePointer,
-      COMPANION_STATE_BYTES,
+      runtimeBytes,
       snapshotPointer,
       observeState ? COMPANION_SNAPSHOT_BYTES : 0,
       configPointer,
