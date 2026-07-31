@@ -19,7 +19,7 @@ use std::sync::Arc;
 use super::{Context, Flow, tracing};
 use crate::chunks::ChunkStore;
 use crate::http::{Request, json, no_content, respond, text, token_matches};
-use crate::{app, cache, diagnostics, disk, dock, keychain, net, relaunch, ws};
+use crate::{app, cache, diagnostics, disk, dock, generation, keychain, net, relaunch, ws};
 
 /// Room to leave behind after a full download.
 ///
@@ -73,6 +73,10 @@ pub(super) fn serve(
         "__dns" => dns(request, stream)?,
         "__credentials" => credentials(request, stream)?,
         "__settings" => settings(request, stream, context)?,
+        "__runtime" if request.method == "POST" => runtime_attempt(request, stream, context)?,
+        "__transform-failed" if request.method == "POST" => {
+            transform_failed(request, stream, context)?
+        }
         "__socket" => return socket(request, stream, flow).map(Some),
         "__diag" => diag(request, stream, context)?,
         "__resident" => match &context.snapshot {
@@ -281,6 +285,72 @@ fn settings(request: &Request, stream: &mut TcpStream, context: &Context) -> std
             }
         }
         _ => not_allowed(stream, "GET, PUT"),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeAttempt {
+    runtime: String,
+    build: Option<String>,
+    transformed: bool,
+}
+
+fn runtime_state_failure(
+    stream: &mut TcpStream,
+    action: &str,
+    error: generation::RuntimeStateError,
+) -> std::io::Result<()> {
+    let status = match &error {
+        generation::RuntimeStateError::Invalid(_) => 400,
+        generation::RuntimeStateError::NotSaved => 500,
+    };
+    note!("[generation] could not {action}: {error}");
+    text(stream, status, &error.to_string())
+}
+
+fn runtime_attempt(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+) -> std::io::Result<()> {
+    let recorded = serde_json::from_slice::<RuntimeAttempt>(&request.body)
+        .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
+        .and_then(|attempt| {
+            context.generations.record_attempt(
+                &attempt.runtime,
+                attempt.build.as_deref(),
+                attempt.transformed,
+            )
+        });
+    match recorded {
+        Ok(()) => no_content(stream),
+        Err(error) => runtime_state_failure(stream, "record a runtime attempt", error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TransformFailure {
+    runtime: String,
+    build: String,
+}
+
+fn transform_failed(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+) -> std::io::Result<()> {
+    let disabled = serde_json::from_slice::<TransformFailure>(&request.body)
+        .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
+        .and_then(|failure| {
+            context
+                .generations
+                .disable_transform(&failure.runtime, &failure.build)
+        });
+    match disabled {
+        Ok(()) => no_content(stream),
+        Err(error) => runtime_state_failure(stream, "record a transform failure", error),
     }
 }
 

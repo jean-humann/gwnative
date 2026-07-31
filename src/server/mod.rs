@@ -38,6 +38,7 @@ use crate::qos;
 use crate::relaunch;
 use crate::settings;
 use crate::sockets::{self, Registry};
+use crate::wasm;
 
 /// The origin's port. Any constant would do; this one is unassigned by IANA and
 /// sits below macOS's ephemeral floor of 49152, so the kernel will not hand it
@@ -85,7 +86,7 @@ struct Context {
     recorder: Arc<Recorder>,
     /// The derived client, served in place of the one on disk. See `crate::wasm`
     /// for what it changes and why the base module is kept untouched.
-    derived_wasm: Option<PathBuf>,
+    derived_wasm: wasm::DerivedModules,
     settings: Arc<settings::Store>,
     generations: Arc<generation::Store>,
     token: String,
@@ -126,7 +127,7 @@ pub fn spawn(
     root: PathBuf,
     snapshot: Option<Arc<ChunkStore>>,
     recorder: Arc<Recorder>,
-    derived_wasm: Option<PathBuf>,
+    derived_wasm: wasm::DerivedModules,
     settings: Arc<settings::Store>,
     generations: Arc<generation::Store>,
     token: String,
@@ -376,7 +377,7 @@ mod tests {
             dir.clone(),
             None,
             Recorder::open(dir.join("diagnostics")),
-            None,
+            wasm::DerivedModules::default(),
             Arc::new(settings::Store::open(file.clone())),
             Arc::new(generation::Store::open(dir.join("generations"))),
             token.to_owned(),
@@ -452,7 +453,7 @@ mod tests {
             // one.
             None,
             Recorder::open(dir.join("diagnostics")),
-            None,
+            wasm::DerivedModules::default(),
             Arc::new(settings::Store::open(dir.join("settings.json"))),
             Arc::new(generation::Store::open(dir.join("generations"))),
             token.to_owned(),
@@ -497,7 +498,7 @@ mod tests {
             dir.clone(),
             None,
             Recorder::open(diagnostics.clone()),
-            None,
+            wasm::DerivedModules::default(),
             Arc::new(settings::Store::open(dir.join("settings.json"))),
             Arc::new(generation::Store::open(dir.join("generations"))),
             token.to_owned(),
@@ -535,6 +536,104 @@ mod tests {
         assert!(
             !body.contains("leaked"),
             "the refused batch was recorded anyway: {body}",
+        );
+    }
+
+    #[test]
+    fn a_failed_transform_can_request_the_exact_official_module() {
+        let temp = TempDir::new("server-original-wasm");
+        let dir = temp.0.clone();
+        std::fs::write(dir.join("Gw.wasm"), b"official").unwrap();
+        let transformed = dir.join("transformed.wasm");
+        std::fs::write(&transformed, b"transformed").unwrap();
+        let mut derived = wasm::DerivedModules::default();
+        derived.insert(wasm::Runtime::Asyncify, transformed);
+        let loopback = spawn(
+            dir.clone(),
+            None,
+            Recorder::open(dir.join("diagnostics")),
+            derived,
+            Arc::new(settings::Store::open(dir.join("settings.json"))),
+            Arc::new(generation::Store::open(dir.join("generations"))),
+            "test-token".to_owned(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            request(loopback.addr, "GET", "/Gw.wasm", None, ""),
+            (200, "transformed".to_owned())
+        );
+        assert_eq!(
+            request(
+                loopback.addr,
+                "GET",
+                "/Gw.wasm?gwnative-original=1",
+                None,
+                ""
+            ),
+            (200, "official".to_owned())
+        );
+    }
+
+    #[test]
+    fn runtime_fallback_state_is_token_gated_and_strictly_validated() {
+        const BUILD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let temp = TempDir::new("server-runtime-state");
+        let dir = temp.0.clone();
+        let token = "test-token";
+        let generations = Arc::new(generation::Store::open(dir.join("generations")));
+        let loopback = spawn(
+            dir.clone(),
+            None,
+            Recorder::open(dir.join("diagnostics")),
+            wasm::DerivedModules::default(),
+            Arc::new(settings::Store::open(dir.join("settings.json"))),
+            Arc::clone(&generations),
+            token.to_owned(),
+        )
+        .unwrap();
+
+        let attempt = format!(r#"{{"runtime":"jspi","build":"{BUILD}","transformed":true}}"#);
+        assert_eq!(
+            request(loopback.addr, "POST", "/__runtime", None, &attempt).0,
+            403
+        );
+        assert_eq!(
+            request(
+                loopback.addr,
+                "POST",
+                "/__runtime",
+                Some(token),
+                r#"{"runtime":"other","build":null,"transformed":false}"#
+            )
+            .0,
+            400
+        );
+        assert_eq!(
+            request(loopback.addr, "POST", "/__runtime", Some(token), &attempt).0,
+            204
+        );
+        assert_eq!(
+            request(
+                loopback.addr,
+                "POST",
+                "/__transform-failed",
+                Some(token),
+                &format!(r#"{{"runtime":"jspi","build":"{BUILD}"}}"#)
+            )
+            .0,
+            204
+        );
+        assert!(generations.transform_disabled("jspi", BUILD));
+
+        // A valid request is a server failure, not an acknowledgement, when the
+        // journal cannot make the attempt durable. The page logs this response
+        // and still boots, so honesty here does not put bookkeeping on its path.
+        std::fs::remove_file(dir.join("generations/state.json")).unwrap();
+        std::fs::create_dir(dir.join("generations/state.json")).unwrap();
+        assert_eq!(
+            request(loopback.addr, "POST", "/__runtime", Some(token), &attempt).0,
+            500
         );
     }
 }

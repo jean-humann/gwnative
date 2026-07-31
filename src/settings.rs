@@ -6,8 +6,8 @@
 //! gesture translation `input.js` installs, `showDiagnostics` opens the log pane
 //! at boot, `dataStrategy` records the answer to the launcher's one question,
 //! `autoCheckUpdates`, `autoInstallUpdates` and `lastUpdateCheckAt` describe
-//! update intent and cadence, `compatibilityNoticeSeenFor` is which client build
-//! the player has already been warned about, and `nativeCursor` plus
+//! update intent and cadence, `compatibilityNoticeSeenFor` is which exact
+//! runtime pair has already been recorded, and `nativeCursor` plus
 //! `targetReadout` select the two optional enhancements. Nothing is stored for a
 //! feature this app does not have — a settings file whose fields nothing reads
 //! is a migration burden that never bought anything.
@@ -118,11 +118,11 @@ pub struct Settings {
     /// seconds since the epoch. What makes an opted-in launch ask once a day
     /// rather than once a launch.
     pub last_update_check_at: Option<u64>,
-    /// The sha256 of the `Gw.jspi.wasm` this profile has already been warned
-    /// about, when the warning applied. Per build rather than a boolean because
-    /// the thing being acknowledged is *this* ArenaNet build being one we have
-    /// not certified — the next one deserves its own sentence, and a boolean
-    /// would either nag every launch or stay silent through every future patch.
+    /// The domain-separated SHA-256 of the selected runtime, exact generated
+    /// JavaScript/WebAssembly pair, transform ABI and selected output this
+    /// profile has already been warned about. Per compatibility attempt rather
+    /// than a boolean because a changed pair or fixed transform deserves its
+    /// own record.
     pub compatibility_notice_seen_for: Option<String>,
     /// Draw the game's own cursor art with the page's compositor instead of
     /// letting the client draw it into the frame. See [`crate::wasm`] for what
@@ -202,10 +202,10 @@ struct Wire {
 /// the second is set.
 ///
 /// `compatibilityNoticeSeenFor` is here rather than beside them because the page
-/// is the thing that gives the notice: the dismissal is a button in the overlay,
-/// so the write has to come from there. What stops it being abused is the shape
-/// check below — the value must be a client hash, and a build hash the player
-/// has genuinely seen is the only thing that can silence anything.
+/// records the selected runtime-pair state after rendering the same state in
+/// Settings. What stops it being abused is the shape check below: the value must
+/// be a client hash, and only the exact value injected for a later launch can
+/// suppress its diagnostic record.
 const PATCHABLE: [&str; 9] = [
     "renderScale",
     "touchMode",
@@ -222,7 +222,7 @@ const PATCHABLE: [&str; 9] = [
 /// characters.
 ///
 /// Checked rather than taken on trust because the field is compared for equality
-/// against this launch's client hash, and a value that can never match is a
+/// against this launch's runtime-pair hash, and a value that can never match is a
 /// notice that reappears at every launch with nothing on screen to explain why.
 /// The failure is loud here instead.
 fn is_sha256(value: &str) -> bool {
@@ -676,7 +676,7 @@ mod tests {
     }
 
     /// The two host-owned fields. A page that could write either could tell
-    /// this build that a check had just happened, or that a client build had
+    /// this build that a check had just happened, or that a client artifact had
     /// been warned about when it had not — and both are how a notice comes to
     /// be silently suppressed for good.
     #[test]

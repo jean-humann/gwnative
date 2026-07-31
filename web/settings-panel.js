@@ -24,7 +24,10 @@
 // unreachable. Tabs keep any one view short enough to fit; the dialog scrolls
 // inside itself for the sizes where even that is not enough.
 
-import { templateSaveNotice } from './compatibility.js';
+import {
+  enhancementNotice,
+  templateSaveNotice,
+} from './compatibility.js';
 import * as diagnostics from './diagnostics.js';
 
 /** How often the game-image figure is re-read while the panel is open. */
@@ -176,10 +179,9 @@ export const CONTROLS = [
       { value: true, label: 'Install on its own' },
     ],
   },
-  // The optional enhancements. Both require a relaunch for the same reason, and
-  // it is not a UI limitation: turning either on changes which client module the
-  // host builds and serves, and that is decided before this page exists. There
-  // is deliberately no master switch above them — "are the tools on" is derived
+  // The optional enhancements. Both require a relaunch because the host selects
+  // and injects the exact signed layout before this page exists. There is
+  // deliberately no master switch above them — "are the tools on" is derived
   // from "is any tool on", so there is nothing that can disagree with the two
   // controls it would be speaking for.
   {
@@ -415,9 +417,12 @@ export function installSettingsPanel({
 
   const notice = document.getElementById('settings-compat');
   if (notice) {
-    const sentence = templateSaveNotice(globalThis.__gwnativeTemplateSave);
-    notice.textContent = sentence ?? '';
-    notice.hidden = sentence === null;
+    const sentences = [
+      templateSaveNotice(globalThis.__gwnativeTemplateSave),
+      enhancementNotice(globalThis.__gwnativeEnhancements),
+    ].filter((sentence) => sentence !== null);
+    notice.textContent = sentences.join(' ');
+    notice.hidden = sentences.length === 0;
   }
 
   /** The `<select>` for each control, by key. */

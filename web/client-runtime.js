@@ -28,13 +28,21 @@ const CLIENTS = Object.freeze({
   }),
 });
 
+const RUNTIME_STATE_DEADLINE_MS = 1_500;
+const JSPI_PROBE_DEADLINE_MS = 1_500;
+const JSPI_PROBE_TIMED_OUT = Symbol('JSPI probe timed out');
+
 /**
  * Prove that this realm implements the JSPI operation the client needs.
  *
  * @param {typeof WebAssembly} wasm
+ * @param {number} deadlineMs
  * @returns {Promise<boolean>}
  */
-export async function supportsJspi(wasm = WebAssembly) {
+export async function supportsJspi(
+  wasm = WebAssembly,
+  deadlineMs = JSPI_PROBE_DEADLINE_MS,
+) {
   if (
     typeof wasm?.Suspending !== 'function'
     || typeof wasm?.promising !== 'function'
@@ -52,7 +60,13 @@ export async function supportsJspi(wasm = WebAssembly) {
       },
     };
     const instance = new wasm.Instance(module, imports);
-    const result = await wasm.promising(instance.exports.g)();
+    let deadline;
+    const result = await Promise.race([
+      wasm.promising(instance.exports.g)(),
+      new Promise((resolve) => {
+        deadline = setTimeout(() => resolve(JSPI_PROBE_TIMED_OUT), deadlineMs);
+      }),
+    ]).finally(() => clearTimeout(deadline));
     return result === 42;
   } catch {
     return false;
@@ -87,23 +101,54 @@ export async function selectClient(
 }
 
 /**
- * Apply only the feature limits introduced by the selected runtime.
+ * Apply the independently certified facts for the selected official runtime.
  *
- * The native host prepared and described the JSPI module before the page
- * existed. A capable WebKit must keep those values byte-for-byte; changing them
- * here would silently disable the certified template and enhancement transforms
- * on macOS 27. Asyncify is the untransformed compatibility module, so only that
- * path replaces the two affected states.
+ * The host prepares both modules before this realm can perform the JSPI probe.
+ * Keeping the facts keyed by runtime prevents a macOS 26 Asyncify selection
+ * from inheriting JSPI hashes, while preserving the JSPI certificate unchanged
+ * on macOS 27.
  *
  * @param {(typeof CLIENTS)[keyof typeof CLIENTS]} client
  * @param {{ nativeCursor?: unknown, targetReadout?: unknown }} settings
  * @param {Record<string, unknown>} target
  */
 export function applyClientLimits(client, settings, target = globalThis) {
-  if (client.mode !== 'asyncify') return;
-  target.__gwnativeTemplateSave = 'asyncify';
-  target.__gwnativeEnhancements =
-    settings.nativeCursor === true || settings.targetReadout === true
-      ? 'uncertified'
-      : 'off';
+  const selected = target.__gwnativeRuntimeCapabilities?.[client.mode];
+  const wanted = settings.nativeCursor === true || settings.targetReadout === true;
+  target.__gwnativeClientBuild = selected?.build ?? null;
+  target.__gwnativeTemplateSave = selected?.templateSave ?? 'uncertified';
+  target.__gwnativeEnhancements = selected?.enhancements ?? (wanted ? 'uncertified' : 'off');
+  target.__gwnativeEnhancementManifest = selected?.enhancementManifest ?? null;
+}
+
+/**
+ * Persist launch/fallback state without allowing an auxiliary loopback write
+ * to hold the client boot indefinitely.
+ *
+ * @param {string} path
+ * @param {object} body
+ * @param {{ fetch?: typeof fetch, token?: string, deadlineMs?: number }} options
+ */
+export async function postRuntimeState(path, body, options = {}) {
+  const send = options.fetch ?? fetch;
+  const token = options.token ?? globalThis.__gwnativeToken ?? '';
+  const deadlineMs = options.deadlineMs ?? RUNTIME_STATE_DEADLINE_MS;
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), deadlineMs);
+  try {
+    const response = await send(path, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Gwnative-Token': token,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error((await response.text()) || `${path} failed: ${response.status}`);
+    }
+  } finally {
+    clearTimeout(deadline);
+  }
 }

@@ -59,8 +59,8 @@ that file directly.
 | Target distance | Hidden | After relaunch | Shows the target distance and range band |
 
 Settings files include a format version plus two internal values: the last
-successful update-check time and the client-build hash for an acknowledged
-compatibility notice. An unreadable file is preserved as
+successful update-check time and the runtime-compatibility hash for a recorded
+state. An unreadable file is preserved as
 `settings.json.corrupt-<timestamp>` before defaults are restored; the three most
 recent backups are kept.
 
@@ -91,13 +91,17 @@ The optional tools are read-only:
 - **Target distance** displays the distance already held by the client and its
   range band.
 
-Both require a relaunch because they change which WebAssembly module is served.
-They also require gwnative to recognise the exact ArenaNet client build.
+Both require a relaunch because their signed layout certificate is selected
+before the page starts. They require gwnative to recognise the exact official
+JavaScript/WebAssembly pair for the runtime this Mac selected.
 
-Build-template save, rename, list, and delete support uses the same
-build-certification rule. When ArenaNet publishes an unrecognised module,
-gwnative runs the original module safely, disables the transform and tools, and
-shows a compatibility notice. Loading existing templates remains available.
+Build-template save, rename, list, and delete support uses the same exact-pair
+rule, with independent JSPI and Asyncify transform outputs. When ArenaNet
+publishes an unrecognised pair, gwnative runs the original module safely and
+disables only the transform and optional tools. Settings explains the current
+compatibility state; startup never waits for that notice. Loading existing
+templates remains available. A later signed certificate can restore template
+saving on the next launch without an application update.
 
 ## Updates
 
@@ -124,8 +128,10 @@ the macOS login Keychain, and WebKit page data uses the roots described below.
 | `chunks/` | Content-addressed game-image chunks |
 | `web/` | Writable copy of the web shell plus downloaded client artifacts |
 | `derived/` | Certified transformed WebAssembly modules |
+| `certificates/` | Verified signed compatibility-feed updates |
 | `diagnostics/` | Rotating JSONL logs and generated problem reports |
 | `manifest.cache` | Cached patch manifest, service URL, and validator |
+| `manifest.pending.cache` | Verified newer manifest awaiting client promotion |
 | `settings.json` | User settings and update preferences |
 | `window.json` | Window frame and mode |
 | `generations/` | Installed-client hashes, proof state, rollback copy, and refusals |
@@ -189,10 +195,13 @@ When the client fails to boot, the overlay offers:
 ### Newly downloaded client does not run
 
 Client artifacts are checked by length and SHA-256 at launch. A newly installed
-set remains *unproven* until it reports a first frame. If the next launch finds
-that it never did, gwnative restores the previous 8–9 MB artifact set and
-remembers the rejected build. On a first install, where there is no previous
-set, the only available client is retained.
+set remains *unproven* until it reports a first frame. If a certified transform
+fails first, only that exact runtime transform is disabled and the same
+ArenaNet module is retried unmodified. If the unmodified client then also fails,
+gwnative restores the previous artifact set and its manifest and remembers the
+rejected patch generation. On a first install, where there is no previous set,
+the only available client is retained. Running `gwnative sync` explicitly
+retries a rejected generation.
 
 ### Renderer disappears
 

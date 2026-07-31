@@ -11,9 +11,12 @@
 //! `--import-memory` is what makes it a companion rather than a program: the
 //! linker leaves `env.memory` unresolved so the page can instantiate it over
 //! the *client's* memory, which is the only reason any of it can see game
-//! state. `panic=abort` and `-C opt-level=s` keep it small and free of the
-//! unwinder; `--strip-all` drops the name section, which is a third of the
-//! output and of no use to anything that reads this module.
+//! state. Its stack pointer is exported so the page can relocate the stack
+//! into a region allocated by the client before calling any companion code;
+//! the linker's default stack address belongs to the game. `panic=abort` and
+//! `-C opt-level=s` keep it small and free of the unwinder; `--strip-all`
+//! drops the name section, which is a third of the output and of no use to
+//! anything that reads this module.
 //!
 //! The result is `include_bytes!`d by [`crate::server`] rather than written
 //! into `web/`, so the kernel a build serves is always the one that build
@@ -58,6 +61,7 @@ fn main() {
         .args(["-C", "opt-level=s"])
         .args(["-C", "panic=abort"])
         .args(["-C", "link-arg=--import-memory"])
+        .args(["-C", "link-arg=--export=__stack_pointer"])
         .args(["-C", "link-arg=--strip-all"])
         .arg("-o")
         .arg(&out)

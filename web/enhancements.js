@@ -1,28 +1,10 @@
-// Installing optional enhancements: the page's half of the enhancement chain.
+// Installing optional enhancements as a passive, read-only observer.
 //
-// By the time anything here runs, the host has already decided the hard part.
-// It read the player's settings, saw that a tool was wanted, derived a client
-// with a hook in its main loop, and told this page so through
-// `window.__gwnativeEnhancements`. What is left is to hand that hook something
-// to call.
-//
-// The order matters and is not obvious:
-//
-//   1. Read the manifest out of the module itself. The host wrote it there as
-//      a custom section rather than sending it alongside, so a manifest and
-//      the module it describes cannot be separated — a companion reading one
-//      build's field offsets out of another build's memory is exactly the bug
-//      that would produce.
-//   2. Allocate the two published regions from the *client's* allocator, so
-//      they live in the memory the companion will be instantiated over.
-//   3. Instantiate the companion over that same memory, and let it check the
-//      ABI before it is trusted with anything.
-//   4. Put its tick in the table slot, and only then set the global that makes
-//      the dispatcher call it.
-//
-// Nothing between steps 1 and 4 can leave the game worse off: the hook global
-// stays at zero, which is the untouched client to the byte, and every failure
-// path below puts it back there and frees what it took.
+// The host selected a signed certificate for the exact glue/module pair and
+// injected its layout under the selected runtime. The companion shares memory
+// but imports no game function and never enters the client's call graph.
+// Asyncify frames are observed only while its generated state machine reports
+// Normal (0); Unwinding and Rewinding are skipped.
 
 import { createCursorConsumer } from './enhancement-cursor.js';
 import { createTargetReadout } from './enhancement-readout.js';
@@ -34,6 +16,10 @@ import {
   COMPANION_SNAPSHOT_BYTES,
 } from './companion-snapshot.js';
 import * as diagnostics from './diagnostics.js';
+import {
+  asyncifyStateReader,
+  createPassiveObserver,
+} from './passive-observer.js';
 
 /** Must match `FEATURE_*` in `src/companion-kernel/lib.rs`. */
 const FEATURE_NATIVE_CURSOR = 1 << 0;
@@ -41,9 +27,16 @@ const FEATURE_TARGET_READOUT = 1 << 1;
 
 /** How many render-cost samples to keep for `window.gwCompanionRuntime`. */
 const SAMPLE_WINDOW = 240;
+/** Must match `RuntimeState` in `src/companion-kernel/lib.rs`. */
+const COMPANION_STATE_BYTES = 168;
+/**
+ * Private downward-growing stack for the companion. Its linker-provided stack
+ * address is inside the imported game memory and must never be used.
+ */
+const COMPANION_STACK_BYTES = 64 * 1024;
 
 /**
- * The manifest the host wrote into the module, or `null` if it is not one this
+ * The signed manifest the native host selected, or `null` if it is not one this
  * page can act on.
  *
  * Everything is checked rather than read. This page and the host are versioned
@@ -51,24 +44,18 @@ const SAMPLE_WINDOW = 240;
  * rather than that a field needs defaulting — and the consequence of guessing
  * is a companion pointed at the wrong offsets in a live game's memory.
  *
- * @param {WebAssembly.Module} module
+ * @param {unknown} candidate
  */
-function decodeManifest(module) {
-  const sections = WebAssembly.Module.customSections(module, 'enhancement_manifest');
-  if (sections.length !== 1) return null;
+function decodeManifest(candidate) {
   try {
-    const value = JSON.parse(new TextDecoder().decode(sections[0]));
+    const value = candidate;
     if (
       value?.snapshotAbi !== COMPANION_SNAPSHOT_ABI
       || value?.snapshotBytes !== COMPANION_SNAPSHOT_BYTES
       || value?.cursorSnapshotAbi !== COMPANION_CURSOR_ABI
       || value?.cursorSnapshotBytes !== COMPANION_CURSOR_BYTES
-      || !Number.isSafeInteger(value?.buildId)
-      || value.buildId <= 0
-      || !Number.isSafeInteger(value?.programId)
-      || value.programId <= 0
-      || !Number.isSafeInteger(value?.tableSlot)
-      || value.tableSlot < 0
+      || typeof value?.familyId !== 'string'
+      || !/^[0-9a-f]{64}$/.test(value.familyId)
       || !Array.isArray(value?.layoutWords)
       || value.layoutWords.length === 0
       || value.layoutWords.some(
@@ -83,7 +70,10 @@ function decodeManifest(module) {
     ) {
       return null;
     }
-    return Object.freeze(value);
+    return Object.freeze({
+      ...value,
+      layoutWords: Object.freeze([...value.layoutWords]),
+    });
   } catch {
     return null;
   }
@@ -100,12 +90,22 @@ function decodeManifest(module) {
  * @param {{ poll: () => void } | null} cursor
  * @param {{ update: (state: any) => void } | null} readout
  * @param {boolean} observeState
+ * @param {() => boolean} observeGame
  */
-function observeSnapshots(runtime, cursor, readout, observeState) {
+function observeSnapshots(runtime, cursor, readout, observeState, observeGame) {
   let frame = 0;
   let cadenceAt = performance.now();
   let cadenceTick = 0;
   const observe = () => {
+    if (!observeGame()) {
+      runtime.observerSkips += 1;
+      frame = requestAnimationFrame(observe);
+      return;
+    }
+    runtime.observerRuns += 1;
+    if (runtime.observerRuns === 1) {
+      console.log('[enhancement] passive observer active');
+    }
     if (observeState) {
       const started = performance.now();
       const state = readCompanionSnapshot(
@@ -150,16 +150,17 @@ function observeSnapshots(runtime, cursor, readout, observeState) {
  * that and the game carries on without it.
  *
  * @param {WebAssembly.Instance} instance
- * @param {WebAssembly.Module} module
- * @param {{ nativeCursor: boolean, targetReadout: boolean }} selection
+ * @param {unknown} manifestValue
+ * @param {{ nativeCursor: boolean, targetReadout: boolean,
+ *           runtime: 'jspi' | 'asyncify' }} selection
  */
-export async function installEnhancements(instance, module, selection) {
+export async function installEnhancements(instance, manifestValue, selection) {
   const featureFlags =
     (selection.nativeCursor ? FEATURE_NATIVE_CURSOR : 0)
     | (selection.targetReadout ? FEATURE_TARGET_READOUT : 0);
   if (featureFlags === 0) return null;
 
-  const manifest = decodeManifest(module);
+  const manifest = decodeManifest(manifestValue);
   const exports = instance?.exports;
   // Every one of these is something the transform or Emscripten is supposed to
   // have left behind. Checked together, and before anything is allocated, so
@@ -168,14 +169,8 @@ export async function installEnhancements(instance, module, selection) {
     ? 'the module carries no manifest this page can act on'
     : [
       ['memory', exports?.memory instanceof WebAssembly.Memory],
-      [
-        '__indirect_function_table',
-        exports?.__indirect_function_table instanceof WebAssembly.Table,
-      ],
       ['malloc', typeof exports?.malloc === 'function'],
       ['free', typeof exports?.free === 'function'],
-      ['enhancement_tick_original', typeof exports?.enhancement_tick_original === 'function'],
-      ['enhancement_hook_slot', exports?.enhancement_hook_slot instanceof WebAssembly.Global],
     ].filter(([, present]) => !present).map(([name]) => name).join(', ');
   if (missing !== '') {
     // Said out loud rather than returned quietly. The host has already told
@@ -189,23 +184,37 @@ export async function installEnhancements(instance, module, selection) {
     return null;
   }
 
-  const table = exports.__indirect_function_table;
-  const hookSlot = /** @type {WebAssembly.Global} */ (exports.enhancement_hook_slot);
   const free = /** @type {(pointer: number) => void} */ (exports.free);
-  // The host checked the same thing before it certified the module. Checked
-  // again because between then and now the client has run its own start
-  // function, and overwriting an occupied slot would break whatever put it
-  // there.
-  if (table.get(manifest.tableSlot) !== null) {
-    throw new Error(`table slot ${manifest.tableSlot} is occupied`);
-  }
+  const asyncifyState = asyncifyStateReader(exports, selection.runtime);
+  const runtimeIdle = () => asyncifyState === null || asyncifyState() === 0;
+  if (!runtimeIdle()) throw new Error('the client is currently unwinding or rewinding');
 
   let snapshotPointer = 0;
   let configPointer = 0;
   let cursorPointer = 0;
+  let statePointer = 0;
+  let stackAllocationPointer = 0;
   let stopObserver = () => {};
   let disposeCursor = () => {};
   let disposeReadout = () => {};
+  const release = () => {
+    stopObserver();
+    disposeCursor();
+    disposeReadout();
+    // Page teardown is not a reason to enter an Asyncify module during
+    // unwind/rewind. Leaking these page-lifetime allocations is harmless
+    // because the instance is being discarded with the page.
+    if (!runtimeIdle()) return;
+    for (const pointer of [
+      stackAllocationPointer,
+      statePointer,
+      cursorPointer,
+      configPointer,
+      snapshotPointer,
+    ]) {
+      if (pointer) free(pointer);
+    }
+  };
   try {
     // The client's own allocator, so these are inside the memory the companion
     // is about to be instantiated over. Nothing the page allocates for itself
@@ -217,8 +226,14 @@ export async function installEnhancements(instance, module, selection) {
     if (selection.nativeCursor) {
       cursorPointer = Number(exports.malloc(COMPANION_CURSOR_BYTES));
     }
+    statePointer = Number(exports.malloc(COMPANION_STATE_BYTES));
+    // Fifteen spare bytes let us align the stack base without losing the
+    // original allocation pointer needed by `free`.
+    stackAllocationPointer = Number(exports.malloc(COMPANION_STACK_BYTES + 15));
     if (
       !configPointer
+      || !statePointer
+      || !stackAllocationPointer
       || (selection.targetReadout && !snapshotPointer)
       || (selection.nativeCursor && !cursorPointer)
     ) {
@@ -232,31 +247,56 @@ export async function installEnhancements(instance, module, selection) {
 
     const response = await fetch('companion-kernel.wasm');
     if (!response.ok) throw new Error('the companion module is unavailable');
+    if (!runtimeIdle()) {
+      throw new Error('the client began unwinding or rewinding during installation');
+    }
     const kernel = await WebAssembly.instantiate(await response.arrayBuffer(), {
       // The whole trick: `env.memory` is an import, so the companion is
       // instantiated over the game's heap rather than one of its own.
       env: { memory: exports.memory },
-      game: { enhancement_tick_original: exports.enhancement_tick_original },
     });
-    const kernelInit = kernel.instance.exports.companion_init;
+    const kernelExports = kernel.instance.exports;
+    const kernelInit = kernelExports.companion_init;
+    const kernelObserve = kernelExports.companion_observe;
+    const kernelStack = kernelExports.__stack_pointer;
+    const stackBase = Math.ceil(stackAllocationPointer / 16) * 16;
+    const stackTop = stackBase + COMPANION_STACK_BYTES;
+    if (
+      !(kernelStack instanceof WebAssembly.Global)
+      || !Number.isSafeInteger(stackTop)
+      || stackTop > exports.memory.buffer.byteLength
+    ) {
+      throw new Error('the companion has no relocatable private stack');
+    }
+    try {
+      kernelStack.value = stackTop;
+    } catch {
+      throw new Error('the companion stack pointer is not mutable');
+    }
     // `companion_init` re-checks every region against the memory size it can
     // see and answers 1 only if it accepted all of them, so this is the
     // companion's own veto rather than a formality.
     if (
       typeof kernelInit !== 'function'
-      || kernelInit.length !== 7
-      || typeof kernel.instance.exports.companion_tick !== 'function'
-      || kernelInit(
-        snapshotPointer,
-        selection.targetReadout ? COMPANION_SNAPSHOT_BYTES : 0,
-        configPointer,
-        manifest.configBytes,
-        cursorPointer,
-        selection.nativeCursor ? COMPANION_CURSOR_BYTES : 0,
-        featureFlags,
-      ) !== 1
+      || kernelInit.length !== 9
+      || typeof kernelObserve !== 'function'
+      || kernelObserve.length !== 1
     ) {
-      throw new Error('the companion module refused its ABI');
+      throw new Error('the companion exports do not match their ABI');
+    }
+    const initStatus = kernelInit(
+      statePointer,
+      COMPANION_STATE_BYTES,
+      snapshotPointer,
+      selection.targetReadout ? COMPANION_SNAPSHOT_BYTES : 0,
+      configPointer,
+      manifest.configBytes,
+      cursorPointer,
+      selection.nativeCursor ? COMPANION_CURSOR_BYTES : 0,
+      featureFlags,
+    );
+    if (initStatus !== 1) {
+      throw new Error(`the companion module refused its ABI (status ${initStatus})`);
     }
 
     let cursor = null;
@@ -275,20 +315,21 @@ export async function installEnhancements(instance, module, selection) {
     const readout = selection.targetReadout ? createTargetReadout(document.body) : null;
     if (readout) disposeReadout = readout.dispose;
 
-    table.set(manifest.tableSlot, kernel.instance.exports.companion_tick);
     const runtime = {
       status: 'installed',
-      buildId: manifest.buildId,
-      programId: manifest.programId,
+      familyId: manifest.familyId,
       memory: exports.memory,
       snapshotPointer,
       configPointer,
-      tableSlot: manifest.tableSlot,
+      statePointer,
+      stackPointer: stackBase,
       hertz: 0,
       lastRenderUs: 0,
       renderSamples: [],
       snapshotReads: 0,
       rejectedSnapshots: 0,
+      observerRuns: 0,
+      observerSkips: 0,
       // Presentation state only: no pixels and no pointer leave this module.
       get cursor() {
         return cursor?.state ?? null;
@@ -298,50 +339,49 @@ export async function installEnhancements(instance, module, selection) {
         return readout?.state ?? null;
       },
       /**
-       * Turn the hook off and on without tearing anything down, which is how
-       * the cost of the whole chain is measured against the same session
-       * rather than against a second launch.
+       * Turn passive observation off and on without changing the game module.
        *
        * @param {boolean} enabled
        */
-      setHookEnabled(enabled) {
-        hookSlot.value = enabled ? manifest.tableSlot + 1 : 0;
+      setObserverEnabled(enabled) {
+        runtime.observerEnabled = enabled === true;
       },
+      observerEnabled: true,
     };
     window.gwCompanionRuntime = runtime;
-    stopObserver = observeSnapshots(runtime, cursor, readout, selection.targetReadout);
-    // Last: from here the client's main loop is calling into the companion.
-    hookSlot.value = manifest.tableSlot + 1;
+    let kernelFailed = false;
+    const passiveObserve = createPassiveObserver(asyncifyState, () => {
+      try {
+        kernelObserve(statePointer);
+      } catch (error) {
+        kernelFailed = true;
+        console.warn('[enhancement] passive observer stopped after a trap');
+        throw error;
+      }
+    });
+    const observeGame = () =>
+      runtime.observerEnabled && !kernelFailed && passiveObserve();
+    stopObserver = observeSnapshots(
+      runtime,
+      cursor,
+      readout,
+      selection.targetReadout,
+      observeGame,
+    );
 
     const teardown = () => {
-      // Same order reversed. The global goes first, so nothing is calling the
-      // tick by the time its slot is cleared and its regions are freed.
-      hookSlot.value = 0;
-      stopObserver();
-      disposeCursor();
-      disposeReadout();
-      if (table.get(manifest.tableSlot) === kernel.instance.exports.companion_tick) {
-        table.set(manifest.tableSlot, null);
-      }
-      if (cursorPointer) free(cursorPointer);
-      free(configPointer);
-      if (snapshotPointer) free(snapshotPointer);
+      runtime.observerEnabled = false;
+      release();
       window.gwCompanionRuntime = null;
     };
     window.addEventListener('pagehide', teardown, { once: true });
     // `log`, not `info`: the harness forwards log, warn and error to the host
     // and nothing else, so an `info` here is a line that reaches the WebKit
     // inspector and no log file, report or overlay anyone will actually open.
-    console.log(`[enhancement] installed for client build ${manifest.buildId}`);
+    console.log(`[enhancement] installed for artifact family ${manifest.familyId.slice(0, 12)}`);
     return runtime;
   } catch (error) {
-    hookSlot.value = 0;
-    stopObserver();
-    disposeCursor();
-    disposeReadout();
-    if (cursorPointer) free(cursorPointer);
-    if (configPointer) free(configPointer);
-    if (snapshotPointer) free(snapshotPointer);
+    release();
     window.gwCompanionState = Object.freeze({
       status: 'error',
       reason: error instanceof Error ? error.message : String(error),

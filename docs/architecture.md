@@ -16,10 +16,11 @@ flowchart LR
 
     subgraph WebKit["WebKit processes"]
         Harness["Web harness\ninput, graphics, audio, filesystem"]
-        Client["ArenaNet client\nGw.jspi.js + Gw.jspi.wasm"]
+        Client["ArenaNet client\nJSPI or Asyncify pair"]
         Companion["Optional companion WASM\nread-only game state"]
         Harness <--> Client
-        Client --> Companion
+        Harness --> Companion
+        Companion -. "shared read-only memory" .-> Client
     end
 
     Origin <--> Harness
@@ -49,10 +50,12 @@ launcher, settings UI, and metrics.
 2. Acquire the per-support-directory single-instance lock.
 3. Check whether the current code-signing identity can use the Keychain item.
 4. Select a writable web root.
-5. Load the cached manifest and revalidate it in the background, or fetch a
-   current manifest for an explicit sync.
-6. Roll back an unproven client, verify installed artifacts, and fetch missing
-   or newer artifacts.
+5. Load a pending patch offer when one exists, otherwise load the active
+   manifest. Explicit sync fetches a fresh pending offer.
+6. Recover a failed optional transform or unproven official generation, verify
+   installed artifacts, and promote missing or newer artifacts with their
+   matching manifest. After promotion, revalidate the manifest in the
+   background for the next launch.
 7. Open the game-image chunk store, consume a pending clear request, replay the
    boot prefetch list, and start cursor-based readahead.
 8. Start diagnostics and load settings.
@@ -110,21 +113,42 @@ top-level navigation away from the exact loopback origin.
 ## Client artifacts and generation rollback
 
 The patch manifest describes the official client files and the chunked game
-image. gwnative stores manifest validators and can start from the disk copy,
-moving revalidation off the window's critical path.
+image. gwnative keeps an active manifest paired with the installed client and a
+separate pending offer. Revalidation writes only the pending file, moving the
+network check off the window's critical path without changing the snapshot
+under a running or unsuccessfully updated client.
+
+If ArenaNet changes only snapshot metadata while the five client artifacts
+remain identical, the next launch promotes that pending manifest without
+reinstalling or unproving the client. The generation record reconciles the new
+manifest digest idempotently, including after a process exit between the
+manifest rename and state update.
 
 Artifact presence is not treated as integrity:
 
 - each installed client artifact is recorded by length and SHA-256;
-- launch checks the record and downloads only unsound artifacts;
-- the offered build ID is derived from manifest data before download; and
+- launch checks the record and stages a complete replacement set when any
+  artifact is unsound or the offered generation is newer;
+- the offered generation ID is derived from manifest data before download; and
 - a newly installed generation is unproven until `POST /__booted`.
 
-Before replacing a proven set, gwnative saves it. If the new set fails to report
-a first frame before the next launch, the prior set is restored and the failed
-build ID is refused. Refusals are bounded, a damaged installed copy may retry a
-refused build when no alternative exists, and first install never deletes its
-only client merely because an unrelated boot failure occurred.
+Before replacing a proven set, gwnative verifies and saves its files and active
+manifest, then requires the rollback record to persist before touching live
+paths. A new manifest becomes active only after the complete five-file client
+set has been staged, verified and promoted.
+
+The page records which exact runtime it is about to execute. Recovery separates
+two failures:
+
+- a transformed attempt disables only that runtime/artifact transform and
+  retries the same official module; and
+- only a failed unmodified attempt can restore the previous files and manifest
+  and refuse the offered patch-generation ID.
+
+Transform refusals and generation refusals are bounded. A damaged installed
+copy may retry a refused generation when no alternative exists, an explicit
+`sync` can retry one deliberately, and first install never deletes its only
+client merely because an unrelated boot failure occurred.
 
 ## Game-image storage
 
@@ -159,31 +183,49 @@ not pay for a full reread.
 
 ## WebAssembly compatibility layers
 
-ArenaNet's current module has broken or missing file routines for build
-templates. `src/wasm` applies a transform only when the input SHA-256 matches a
-certified build:
+ArenaNet's modules have broken or missing file routines for build templates.
+`src/wasm` prepares the official JSPI and Asyncify modules independently. A
+signed artifact-family certificate must match both the JavaScript and WebAssembly
+SHA-256 for the selected runtime before its transform is considered:
 
 1. append small forwarding functions;
-2. redirect specific call sites without shifting later bytecode;
+2. locate calls by certified target and occurrence rather than byte offset;
 3. use impossible negative directory descriptors as bridge markers; and
 4. handle those markers in `web/template-save.js` against IDBFS.
 
-The transform asserts the exact output hash. Unknown or failed transforms fall
-back to the unmodified module, preserving playability at the cost of the
+Asyncify can change every body and add functions, types and globals, so its
+anchors and output hash are separate from JSPI's. A structural verifier,
+separate from the output builder, validates the resulting WebAssembly, proves
+all sections other than function and code are byte-identical, checks appended
+types and forwarders, proves existing bodies differ only at authorized calls,
+and then asserts the runtime-specific output hash. Unknown or failed transforms
+fall back to the unmodified module, preserving playability at the cost of the
 compatibility feature.
 
-When either optional enhancement is enabled, a second certified transform
-clones the client's main-loop function, adds a hook slot and manifest, and
-dispatches through an optional table entry. `build.rs` compiles
-`src/companion-kernel/lib.rs` directly as dependency-free `no_std`
-`wasm32-unknown-unknown` code and embeds it in the host.
+Optional enhancements do not transform or call back into the game. `build.rs`
+compiles `src/companion-kernel/lib.rs` directly as dependency-free `no_std`
+`wasm32-unknown-unknown` code and embeds it in the host. The companion imports
+only the selected client's memory, performs bounds-checked read-only pointer
+traversal, and publishes fixed state and cursor blocks through a seqlock. The
+page validates each snapshot before rendering it.
 
-The companion imports the client's memory, performs bounds-checked read-only
-pointer traversal at a coherent point in the game loop, and publishes fixed
-state and cursor blocks through a seqlock. The page validates the snapshot again
-before rendering it. Installation allocates through the client's own allocator,
-instantiates the companion, fills the table slot, and only then enables the
-hook.
+An imported-memory module cannot safely use linker-chosen memory addresses:
+active data segments, mutable statics, and its default stack would all overlap
+the client. The build rejects any companion data segment or start function.
+The page allocates private state and a 64 KiB stack through the client's
+allocator, relocates the exported mutable stack pointer before the first
+companion call, and passes the state pointer explicitly on every observation.
+
+JavaScript drives the observer from its own animation frame. JSPI can be read
+directly. Asyncify is read only while its generated `asyncify_get_state` export
+reports Normal (0); Unwinding and Rewinding are skipped, and the companion has
+no game import through which it could resume or re-enter the instrumented call
+graph.
+
+The complete transaction and fallback state model is in
+[Client compatibility mechanism](client-compatibility.md). The certificate
+feed, fast ArenaNet patch workflow, signing boundary and operator runbook are
+detailed in [Client build certification](certification.md).
 
 ## WebKit and native integration
 
@@ -247,7 +289,7 @@ See the [performance guide](performance.md) for measurement semantics.
 - Hidden-page and high-refresh behaviour relies on guarded WebKit feature keys.
   Missing keys degrade to WebKit defaults and are logged.
 - Client transforms are intentionally pinned to exact module hashes. A new
-  ArenaNet build can temporarily disable templates and tools without preventing
+  ArenaNet artifact pair can temporarily disable templates and tools without preventing
   launch.
 - Development and packaged builds use separate WebKit storage roots.
 - The loopback port fallback changes the page origin for that session.

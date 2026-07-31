@@ -105,8 +105,8 @@ export const GUIDE = [
       'Both are read when the app starts, so the panel offers to restart rather than ' +
         'pretending they took effect. Both also need this app to recognise the inside of ' +
         'the client ArenaNet is shipping, the same recognition build templates need. On a ' +
-        'client build this release has not been checked against, they stay off and the app ' +
-        'says so in the diagnostics overlay.',
+        'client build this release has not been checked against, they stay off and Settings ' +
+        'explains why. The original client still starts normally.',
     ],
   },
   {
@@ -115,9 +115,9 @@ export const GUIDE = [
       'Saving a build template needs this app to recognise the inside of the client ' +
         'ArenaNet is shipping, and ArenaNet changes it without warning. On a client build ' +
         'this release has not been checked against, the Save button in the template window ' +
-        'does nothing and the app says so — once at the launch it becomes true, and ' +
-        'whenever Settings is open. Everything else, including loading templates other ' +
-        'people have posted, is unaffected.',
+        'does nothing and Settings explains why. Everything else, including loading ' +
+        'templates other people have posted, is unaffected. A verified compatibility ' +
+        'update can restore saving on the next launch without reinstalling the app.',
     ],
   },
   {

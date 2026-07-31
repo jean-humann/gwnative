@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { applyClientLimits, selectClient, supportsJspi } from './client-runtime.js';
+import {
+  applyClientLimits,
+  postRuntimeState,
+  selectClient,
+  supportsJspi,
+} from './client-runtime.js';
 
 const workingJspi = {
   Module: class {},
@@ -41,6 +46,14 @@ describe('client runtime selection', () => {
     assert.equal((await selectClient(broken)).mode, 'asyncify');
   });
 
+  it('falls back when a partial JSPI implementation never resumes', async () => {
+    const stuck = {
+      ...workingJspi,
+      promising: () => () => new Promise(() => {}),
+    };
+    assert.equal(await supportsJspi(stuck, 1), false);
+  });
+
   it('can force Asyncify for runner coverage', async () => {
     assert.equal((await selectClient({}, 'asyncify')).mode, 'asyncify');
   });
@@ -52,39 +65,89 @@ describe('client runtime selection', () => {
     );
   });
 
-  it('leaves the native JSPI module state completely untouched', () => {
+  it('applies only the independently selected JSPI certificate', () => {
     const state = {
-      __gwnativeTemplateSave: 'ready',
-      __gwnativeClientBuild: 'certified-jspi-build',
-      __gwnativeEnhancements: 'ready',
+      __gwnativeRuntimeCapabilities: {
+        jspi: {
+          build: 'certified-jspi-build',
+          templateSave: 'ready',
+          enhancements: 'ready',
+          enhancementManifest: { familyId: 'jspi-asyncify-pair' },
+        },
+        asyncify: {
+          build: 'certified-asyncify-build',
+          templateSave: 'ready',
+          enhancements: 'ready',
+          enhancementManifest: { familyId: 'jspi-asyncify-pair' },
+        },
+      },
     };
     applyClientLimits(
       { mode: 'jspi', glue: 'Gw.jspi.js', wasm: 'Gw.jspi.wasm' },
       { nativeCursor: true, targetReadout: true },
       state,
     );
-    assert.deepEqual(state, {
-      __gwnativeTemplateSave: 'ready',
-      __gwnativeClientBuild: 'certified-jspi-build',
-      __gwnativeEnhancements: 'ready',
+    assert.equal(state.__gwnativeTemplateSave, 'ready');
+    assert.equal(state.__gwnativeClientBuild, 'certified-jspi-build');
+    assert.equal(state.__gwnativeEnhancements, 'ready');
+    assert.deepEqual(state.__gwnativeEnhancementManifest, {
+      familyId: 'jspi-asyncify-pair',
     });
   });
 
-  it('limits only the untransformed Asyncify module', () => {
+  it('does not inherit JSPI facts when Asyncify is selected', () => {
     const state = {
-      __gwnativeTemplateSave: 'ready',
-      __gwnativeClientBuild: 'same-patch-identity',
-      __gwnativeEnhancements: 'ready',
+      __gwnativeRuntimeCapabilities: {
+        jspi: {
+          build: 'jspi',
+          templateSave: 'ready',
+          enhancements: 'ready',
+          enhancementManifest: { runtime: 'jspi' },
+        },
+        asyncify: {
+          build: 'asyncify',
+          templateSave: 'ready',
+          enhancements: 'ready',
+          enhancementManifest: { runtime: 'asyncify' },
+        },
+      },
     };
     applyClientLimits(
       { mode: 'asyncify', glue: 'Gw.js', wasm: 'Gw.wasm' },
       { nativeCursor: true, targetReadout: false },
       state,
     );
-    assert.deepEqual(state, {
-      __gwnativeTemplateSave: 'asyncify',
-      __gwnativeClientBuild: 'same-patch-identity',
-      __gwnativeEnhancements: 'uncertified',
+    assert.equal(state.__gwnativeTemplateSave, 'ready');
+    assert.equal(state.__gwnativeClientBuild, 'asyncify');
+    assert.equal(state.__gwnativeEnhancements, 'ready');
+    assert.deepEqual(state.__gwnativeEnhancementManifest, { runtime: 'asyncify' });
+  });
+
+  it('fails closed when the selected artifact has no certificate', () => {
+    const state = {};
+    applyClientLimits(
+      { mode: 'asyncify', glue: 'Gw.js', wasm: 'Gw.wasm' },
+      { nativeCursor: true, targetReadout: false },
+      state,
+    );
+    assert.equal(state.__gwnativeTemplateSave, 'uncertified');
+    assert.equal(state.__gwnativeEnhancements, 'uncertified');
+    assert.equal(state.__gwnativeEnhancementManifest, null);
+  });
+
+  it('does not let runtime-state persistence hold client startup', async () => {
+    const neverAnswers = (_path, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        reject(new DOMException('timed out', 'AbortError'));
+      });
     });
+    await assert.rejects(
+      postRuntimeState('__runtime', {}, {
+        fetch: neverAnswers,
+        token: 'test',
+        deadlineMs: 1,
+      }),
+      { name: 'AbortError' },
+    );
   });
 });

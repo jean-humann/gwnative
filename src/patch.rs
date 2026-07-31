@@ -97,22 +97,26 @@ impl Client {
         )
     }
 
-    /// The manifest the service is offering now, stored for the next launch.
+    /// The manifest the service is offering now, stored as a pending install.
     ///
-    /// What [`Client::manifest`] falls back to, and what the `sync` command
+    /// What [`Client::manifest`] prefers, and what the `sync` command
     /// calls directly: an explicit request to install the client is a request
     /// for whatever is on offer at that moment, so it is the one caller for
-    /// which reading the cache — being deliberately a launch behind, everywhere
-    /// else — would be the wrong answer. It still *writes* the cache, because
-    /// the artifacts it is about to install come from these bytes and the next
-    /// launch has to open on the manifest that describes them.
+    /// which reading only the active cache would be the wrong answer. It writes
+    /// the pending cache because the artifacts installed from these bytes and
+    /// their manifest must be promoted as one generation.
     pub fn fetch_manifest(&self, dir: &Path) -> Result<Manifest> {
         let fetched = self.fetch_with(&self.manifest_url(), MAX_MANIFEST_BYTES, None)?;
         let bytes = fetched.body.expect("an unconditional GET returns a body");
         // Parsed before it is stored: a body that cannot be read is not a copy
         // worth booting the next launch from.
         let manifest = Manifest::parse(&bytes)?;
-        write_cache(dir, &self.root, fetched.validator.as_deref(), &bytes);
+        write_cache(
+            &pending_manifest_path(dir),
+            &self.root,
+            fetched.validator.as_deref(),
+            &bytes,
+        )?;
         Ok(manifest)
     }
 
@@ -120,7 +124,7 @@ impl Client {
         format!("{}/manifest.json", self.root)
     }
 
-    /// The manifest this launch should run on, preferring the copy on disk.
+    /// The manifest this launch should offer to installation.
     ///
     /// A warm launch has the whole client installed and wants the manifest for
     /// one thing: the snapshot's chunk list, which [`crate::chunks::ChunkStore`]
@@ -129,22 +133,50 @@ impl Client {
     /// of a launch spent asking the service to re-send a file that had not
     /// changed in six days.
     ///
-    /// Being a launch behind costs nothing here, which is the part worth being
-    /// precise about. The client artifacts on disk were installed from this same
-    /// cached manifest and their hashes are checked against the record before
-    /// this is called, so the cached manifest describes exactly the client that
-    /// is about to run. It is the arrangement this replaces — a *fresh* manifest
-    /// paired with a client from whenever the last sync happened — that
-    /// describes something nobody has installed.
+    /// A pending manifest is an offer fetched behind the preceding launch. It
+    /// intentionally takes precedence here so `install_client` can install it.
+    /// Snapshot reads use [`Client::active_manifest`] instead, which stays
+    /// paired with the client files currently on disk until installation
+    /// succeeds.
     ///
     /// The caller revalidates off the launch path. See [`Client::revalidate`].
     pub fn manifest(&self, dir: &Path) -> Result<(Manifest, Source)> {
-        if let Some((_, bytes)) = read_cache(dir, &self.root)
+        if let Some((_, bytes)) = read_cache(&pending_manifest_path(dir), &self.root)
             && let Ok(manifest) = Manifest::parse(&bytes)
         {
-            return Ok((manifest, Source::Disk));
+            return Ok((manifest, Source::Pending));
+        }
+        if let Some((_, bytes)) = read_cache(&active_manifest_path(dir), &self.root)
+            && let Ok(manifest) = Manifest::parse(&bytes)
+        {
+            return Ok((manifest, Source::Active));
         }
         Ok((self.fetch_manifest(dir)?, Source::Service))
+    }
+
+    /// The manifest paired with the client files currently on disk.
+    pub fn active_manifest(&self, dir: &Path) -> Result<Manifest> {
+        let (_, bytes) = read_cache(&active_manifest_path(dir), &self.root)
+            .ok_or_else(|| Error::ManifestFormat("there is no active manifest".to_owned()))?;
+        Manifest::parse(&bytes)
+    }
+
+    /// Promote the already validated offered manifest after its complete client
+    /// artifact set has been promoted. Returns whether a pending entry existed
+    /// and was activated.
+    pub fn activate_manifest(&self, dir: &Path) -> Result<bool> {
+        let pending = pending_manifest_path(dir);
+        if !pending.exists() {
+            return Ok(false);
+        }
+        // Re-read and parse before the rename so a damaged pending file can
+        // never become the manifest paired with the live client.
+        let (_, bytes) = read_cache(&pending, &self.root).ok_or_else(|| {
+            Error::ManifestFormat("the pending manifest is unreadable".to_owned())
+        })?;
+        Manifest::parse(&bytes)?;
+        fs::rename(&pending, active_manifest_path(dir))?;
+        Ok(true)
     }
 
     /// Refresh the cached manifest if the service has a different one, and say
@@ -159,15 +191,12 @@ impl Client {
     /// chunk list underneath a live game would pair a running client with a
     /// snapshot it was not built against.
     ///
-    /// What it does *not* do is install anything, and it does not have to:
-    /// storing the manifest is what installs it, one launch later. The next
-    /// launch opens on these bytes, `install_client` reads the build they offer
-    /// with [`crate::generation::identify`], and a build that is not the one on
-    /// disk is fetched then — with the whole comparison done from a file that
-    /// was already going to be read. That is why the check runs here, behind a
-    /// launch that is already serving, instead of in front of one that is not.
+    /// What it does *not* do is install anything. It stores a pending offer.
+    /// The next launch reads its generation identity, stages the complete
+    /// client, and promotes this manifest only after those files are live.
     pub fn revalidate(&self, dir: &Path) -> Result<bool> {
-        let Some((known, _)) = read_cache(dir, &self.root) else {
+        let active = active_manifest_path(dir);
+        let Some((known, _)) = read_cache(&active, &self.root) else {
             return Ok(false);
         };
         let fetched =
@@ -178,11 +207,16 @@ impl Client {
         // A service with no ETag answers every conditional request in full, so
         // compare the bytes rather than trusting the 200: without this, a
         // validator-less service would look like it patched on every launch.
-        if read_cache(dir, &self.root).is_some_and(|(_, cached)| cached == bytes) {
+        if read_cache(&active, &self.root).is_some_and(|(_, cached)| cached == bytes) {
             return Ok(false);
         }
         Manifest::parse(&bytes)?;
-        write_cache(dir, &self.root, fetched.validator.as_deref(), &bytes);
+        write_cache(
+            &pending_manifest_path(dir),
+            &self.root,
+            fetched.validator.as_deref(),
+            &bytes,
+        )?;
         Ok(true)
     }
 
@@ -377,22 +411,25 @@ struct Fetched {
     /// `None` only when the service answered 304 — the caller's copy stands.
     body: Option<Vec<u8>>,
     /// The service's `ETag` for these bytes, when it published one. Kept beside
-    /// the body it names so the two can be stored together; see [`CACHE_FILE`].
+    /// the body it names so the two can be stored together; see
+    /// [`ACTIVE_MANIFEST`].
     validator: Option<String>,
 }
 
 /// Where [`Client::manifest`] came from.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     /// Fetched from the service, because there was no readable local copy.
     /// Already current — nothing to revalidate.
     Service,
-    /// Read from disk, and therefore as old as the last launch that stored one.
-    Disk,
+    /// A newer manifest already fetched behind the previous launch.
+    Pending,
+    /// The manifest paired with the client files currently on disk.
+    Active,
 }
 
-/// The cached manifest: the service it came from, its validator, then the bytes
-/// that validator names, each on its own line.
+/// Each cached manifest: the service it came from, its validator, then the
+/// bytes that validator names, each on its own line.
 ///
 /// One file rather than three, and that is the whole reason it has a format at
 /// all. Split across a body file and an ETag file, a crash between the two
@@ -409,7 +446,16 @@ pub enum Source {
 ///
 /// Neither a URL nor a header value can contain a newline, so splitting on the
 /// first two leaves the manifest's own bytes untouched.
-const CACHE_FILE: &str = "manifest.cache";
+const ACTIVE_MANIFEST: &str = "manifest.cache";
+const PENDING_MANIFEST: &str = "manifest.pending.cache";
+
+pub fn active_manifest_path(dir: &Path) -> PathBuf {
+    dir.join(ACTIVE_MANIFEST)
+}
+
+fn pending_manifest_path(dir: &Path) -> PathBuf {
+    dir.join(PENDING_MANIFEST)
+}
 
 /// The cached validator — `None` if the service published none — and the bytes,
 /// if what is stored was stored for `root`.
@@ -418,8 +464,8 @@ const CACHE_FILE: &str = "manifest.cache";
 /// left by a run pointed at another service, written by a version that spelled
 /// it differently. The caller's answer to all of those is the same, and it is
 /// the answer that was correct before this cache existed — fetch it.
-fn read_cache(dir: &Path, root: &str) -> Option<(Option<String>, Vec<u8>)> {
-    let raw = fs::read(dir.join(CACHE_FILE)).ok()?;
+fn read_cache(path: &Path, root: &str) -> Option<(Option<String>, Vec<u8>)> {
+    let raw = fs::read(path).ok()?;
     let (stored, rest) = split_line(&raw)?;
     if stored != root {
         return None;
@@ -441,13 +487,15 @@ fn split_line(raw: &[u8]) -> Option<(&str, &[u8])> {
 /// Store `bytes`, the service they came from and the validator that names them,
 /// atomically.
 ///
-/// Failures are logged and dropped. What a failed write costs is one launch
-/// that fetches the manifest the old way, which is the behaviour this replaced
-/// and is not worth refusing to start over.
-fn write_cache(dir: &Path, root: &str, validator: Option<&str>, bytes: &[u8]) {
-    let path = dir.join(CACHE_FILE);
-    let tmp = temp_path(&path);
+/// A failed pending write is returned to the caller. Continuing with a manifest
+/// that cannot later be promoted would make the client and snapshot describe
+/// different generations.
+fn write_cache(path: &Path, root: &str, validator: Option<&str>, bytes: &[u8]) -> Result<()> {
+    let tmp = temp_path(path);
     let write = || -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let mut file = fs::File::create(&tmp)?;
         file.write_all(root.as_bytes())?;
         file.write_all(b"\n")?;
@@ -455,12 +503,13 @@ fn write_cache(dir: &Path, root: &str, validator: Option<&str>, bytes: &[u8]) {
         file.write_all(b"\n")?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&tmp, &path)
+        fs::rename(&tmp, path)
     };
     if let Err(e) = write() {
         let _ = fs::remove_file(&tmp);
-        note!("[patch] could not store the manifest: {e}");
+        return Err(e.into());
     }
+    Ok(())
 }
 
 /// Every artifact a sync writes, in the order it writes them.
@@ -646,6 +695,7 @@ mod tests {
     #[test]
     fn a_stored_manifest_comes_back_byte_for_byte() {
         let dir = TempDir::new("manifest-cache");
+        let path = dir.0.join(ACTIVE_MANIFEST);
         for (validator, body) in [
             (Some("\"8fa40eee\""), &b"{\"files\":{}}"[..]),
             // The manifest is JSON, and JSON is routinely pretty-printed. Every
@@ -662,8 +712,8 @@ mod tests {
             (Some("\"leading\""), &b"\n{\"files\":{}}"[..]),
             (None, &b""[..]),
         ] {
-            write_cache(&dir.0, PATCH_ROOT, validator, body);
-            let (stored, bytes) = read_cache(&dir.0, PATCH_ROOT).expect("just written");
+            write_cache(&path, PATCH_ROOT, validator, body).unwrap();
+            let (stored, bytes) = read_cache(&path, PATCH_ROOT).expect("just written");
             assert_eq!(stored.as_deref(), validator);
             assert_eq!(bytes, body);
         }
@@ -675,21 +725,22 @@ mod tests {
     #[test]
     fn an_unreadable_cache_is_no_cache() {
         let dir = TempDir::new("manifest-cache-bad");
-        assert!(read_cache(&dir.0, PATCH_ROOT).is_none());
+        let path = dir.0.join(ACTIVE_MANIFEST);
+        assert!(read_cache(&path, PATCH_ROOT).is_none());
 
         // One newline where the format wants two: a root and no validator, so
         // there is no body either.
-        fs::write(dir.0.join(CACHE_FILE), format!("{PATCH_ROOT}\n")).unwrap();
-        assert!(read_cache(&dir.0, PATCH_ROOT).is_none());
+        fs::write(&path, format!("{PATCH_ROOT}\n")).unwrap();
+        assert!(read_cache(&path, PATCH_ROOT).is_none());
 
         // No newline anywhere: there is no validator and no body, only bytes.
-        fs::write(dir.0.join(CACHE_FILE), b"no newline here").unwrap();
-        assert!(read_cache(&dir.0, PATCH_ROOT).is_none());
+        fs::write(&path, b"no newline here").unwrap();
+        assert!(read_cache(&path, PATCH_ROOT).is_none());
 
         // A URL is ASCII, and so is a validator. Bytes that are not valid UTF-8
         // mean this file is not one of ours.
-        fs::write(dir.0.join(CACHE_FILE), b"\xff\xfe\n\n{}").unwrap();
-        assert!(read_cache(&dir.0, PATCH_ROOT).is_none());
+        fs::write(&path, b"\xff\xfe\n\n{}").unwrap();
+        assert!(read_cache(&path, PATCH_ROOT).is_none());
     }
 
     /// The cache belongs to the service that filled it. `GWNATIVE_PATCH_ROOT`
@@ -699,11 +750,118 @@ mod tests {
     #[test]
     fn a_cache_written_for_one_service_is_not_read_for_another() {
         let dir = TempDir::new("manifest-cache-root");
-        write_cache(&dir.0, "http://127.0.0.1:8080", Some("\"local\""), b"{}");
+        let path = dir.0.join(ACTIVE_MANIFEST);
+        write_cache(&path, "http://127.0.0.1:8080", Some("\"local\""), b"{}").unwrap();
 
-        assert!(read_cache(&dir.0, PATCH_ROOT).is_none());
-        assert!(read_cache(&dir.0, "http://127.0.0.1:8081").is_none());
-        assert!(read_cache(&dir.0, "http://127.0.0.1:8080").is_some());
+        assert!(read_cache(&path, PATCH_ROOT).is_none());
+        assert!(read_cache(&path, "http://127.0.0.1:8081").is_none());
+        assert!(read_cache(&path, "http://127.0.0.1:8080").is_some());
+    }
+
+    fn manifest_bytes(name: &str, hash: char) -> Vec<u8> {
+        format!(
+            r#"{{"compressionMode":"none","chunkSize":16,
+                 "files":[{{"name":"{name}","size":16,"chunkHashes":["{}"]}}]}}"#,
+            std::iter::repeat_n(hash, 64).collect::<String>()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_pending_offer_does_not_replace_the_active_manifest_until_activation() {
+        let dir = TempDir::new("manifest-pair");
+        let client = Client::new(PATCH_ROOT, String::new());
+        let active = active_manifest_path(&dir.0);
+        let pending = pending_manifest_path(&dir.0);
+        write_cache(
+            &active,
+            PATCH_ROOT,
+            Some("\"old\""),
+            &manifest_bytes("old.bin", 'a'),
+        )
+        .unwrap();
+        write_cache(
+            &pending,
+            PATCH_ROOT,
+            Some("\"new\""),
+            &manifest_bytes("new.bin", 'b'),
+        )
+        .unwrap();
+
+        let (offered, source) = client.manifest(&dir.0).unwrap();
+        assert_eq!(source, Source::Pending);
+        assert!(offered.files.contains_key("new.bin"));
+        assert!(
+            client
+                .active_manifest(&dir.0)
+                .unwrap()
+                .files
+                .contains_key("old.bin"),
+            "snapshot readers must stay on the installed generation"
+        );
+
+        assert!(client.activate_manifest(&dir.0).unwrap());
+        assert!(!pending.exists());
+        assert!(
+            client
+                .active_manifest(&dir.0)
+                .unwrap()
+                .files
+                .contains_key("new.bin")
+        );
+    }
+
+    #[test]
+    fn an_invalid_pending_manifest_cannot_displace_the_active_one() {
+        let dir = TempDir::new("manifest-invalid-pending");
+        let client = Client::new(PATCH_ROOT, String::new());
+        let active = active_manifest_path(&dir.0);
+        write_cache(
+            &active,
+            PATCH_ROOT,
+            Some("\"old\""),
+            &manifest_bytes("old.bin", 'a'),
+        )
+        .unwrap();
+        write_cache(
+            &pending_manifest_path(&dir.0),
+            PATCH_ROOT,
+            Some("\"broken\""),
+            b"not json",
+        )
+        .unwrap();
+
+        assert!(client.activate_manifest(&dir.0).is_err());
+        assert!(
+            client
+                .active_manifest(&dir.0)
+                .unwrap()
+                .files
+                .contains_key("old.bin")
+        );
+    }
+
+    #[test]
+    fn activating_without_a_pending_offer_changes_nothing() {
+        let dir = TempDir::new("manifest-no-pending");
+        let client = Client::new(PATCH_ROOT, String::new());
+        let active = active_manifest_path(&dir.0);
+        write_cache(
+            &active,
+            PATCH_ROOT,
+            Some("\"old\""),
+            &manifest_bytes("old.bin", 'a'),
+        )
+        .unwrap();
+
+        assert!(!client.activate_manifest(&dir.0).unwrap());
+        assert!(
+            client
+                .active_manifest(&dir.0)
+                .unwrap()
+                .files
+                .contains_key("old.bin")
+        );
     }
 
     #[test]

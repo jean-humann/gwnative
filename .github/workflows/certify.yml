@@ -1,0 +1,315 @@
+name: Client certificate
+
+on:
+  schedule:
+    # ArenaNet has no release signal this project can subscribe to. Deriving
+    # the identity from the official files makes polling authoritative.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Sign and open a certificate pull request
+        required: true
+        default: false
+        type: boolean
+      certify_passive_enhancements:
+        description: Both JSPI and Asyncify live login/map/cursor/target fixtures passed
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      family_id: ${{ steps.identity.outputs.family_id }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Fetch all four official runtime artifacts
+        env:
+          GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
+        run: cargo run --locked --release -- sync
+
+      - name: Generate an unsigned fail-closed candidate
+        id: generate
+        continue-on-error: ${{ github.event_name == 'schedule' }}
+        env:
+          GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
+        run: scripts/client-certify "$GWNATIVE_WEB_ROOT"
+
+      - name: Verify both transforms against the fetched artifacts
+        if: steps.generate.outcome == 'success'
+        env:
+          GWNATIVE_CERTIFY_JSPI_WASM: ${{ runner.temp }}/gwnative-client/Gw.jspi.wasm
+          GWNATIVE_CERTIFY_JSPI_GLUE: ${{ runner.temp }}/gwnative-client/Gw.jspi.js
+          GWNATIVE_CERTIFY_ASYNCIFY_WASM: ${{ runner.temp }}/gwnative-client/Gw.wasm
+          GWNATIVE_CERTIFY_ASYNCIFY_GLUE: ${{ runner.temp }}/gwnative-client/Gw.js
+          GWNATIVE_CERTIFY_FEED: ${{ github.workspace }}/certificates/builds.candidate.json
+        run: cargo test wasm::tests::external_official_pairs_produce_valid_candidates -- --nocapture
+
+      - name: Export the derived artifact-family identity
+        if: steps.generate.outcome == 'success'
+        id: identity
+        run: |
+          family_id="$(jq -r '.families[-1].familyId' certificates/builds.candidate.json)"
+          case "$family_id" in
+            *[!0-9a-f]*|'') exit 1 ;;
+          esac
+          test "${#family_id}" -eq 64
+          echo "family_id=$family_id" >> "$GITHUB_OUTPUT"
+          if jq -e --arg family_id "$family_id" \
+            'any(.families[]; .familyId == $family_id)' \
+            certificates/builds.json >/dev/null; then
+            echo "known=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "known=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report the unsigned candidate
+        if: steps.generate.outcome == 'success'
+        run: |
+          {
+            echo "### Unsigned certificate candidate"
+            echo
+            echo "Artifact family: \`${{ steps.identity.outputs.family_id }}\`"
+            echo "Feed SHA-256: \`$(shasum -a 256 certificates/builds.candidate.json | cut -d' ' -f1)\`"
+            echo
+            echo "Passive enhancements remain disabled in this unprivileged stage."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open a tracking issue for a new artifact family
+        if: github.event_name == 'schedule' && steps.identity.outputs.known == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAMILY_ID: ${{ steps.identity.outputs.family_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          short_id="${FAMILY_ID:0:12}"
+          existing="$(gh issue list --state open \
+            --search "$FAMILY_ID in:body" --json number --jq '.[0].number // empty')"
+          if [ -z "$existing" ]; then
+            body="$(printf '%s\n\n%s\n\n%s\n\n%s\n' \
+              "The automatic client scan found a new official JSPI/Asyncify artifact family:" \
+              "\`$FAMILY_ID\`" \
+              "Both exact template transforms passed. Passive enhancements remain disabled until the JSPI and Asyncify live fixtures pass." \
+              "Scan: $RUN_URL")"
+            gh issue create \
+              --title "cert(client): review artifact family $short_id" \
+              --body "$body"
+          fi
+
+      - name: Close a tracking issue once its family is certified
+        if: github.event_name == 'schedule' && steps.identity.outputs.known == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAMILY_ID: ${{ steps.identity.outputs.family_id }}
+        run: |
+          existing="$(gh issue list --state open \
+            --search "$FAMILY_ID in:body" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" \
+              --comment "The signed certificate feed now contains this artifact family."
+          fi
+
+      - name: Report a candidate that needs transformer review
+        if: github.event_name == 'schedule' && steps.generate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="cert(client): automatic candidate needs transformer review"
+          existing="$(gh issue list --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" \
+              --body "The latest scan still needs transformer review: $RUN_URL"
+          else
+            body="$(printf '%s\n\n%s\n\n%s\n' \
+              "The official client artifacts no longer match the semantic anchors in the newest certificate." \
+              "Nothing was signed or published. The installed client remains playable with uncertified compatibility features disabled." \
+              "Failed scan: $RUN_URL")"
+            gh issue create --title "$title" --body "$body"
+          fi
+
+      - name: Close a resolved transformer-review issue
+        if: github.event_name == 'schedule' && steps.generate.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="cert(client): automatic candidate needs transformer review"
+          existing="$(gh issue list --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" \
+              --comment "The automatic candidate matches the reviewed semantic anchors again."
+          fi
+
+      - name: Fail a scheduled scan whose candidate could not be generated
+        if: github.event_name == 'schedule' && steps.generate.outcome == 'failure'
+        run: exit 1
+
+  reproduce:
+    if: ${{ inputs.publish }}
+    needs: candidate
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      EXPECTED_FAMILY_ID: ${{ needs.candidate.outputs.family_id }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Fetch all four official runtime artifacts again
+        env:
+          GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
+        run: cargo run --locked --release -- sync
+
+      - name: Reproduce the reviewed candidate
+        env:
+          GWNATIVE_WEB_ROOT: ${{ runner.temp }}/gwnative-client
+        run: |
+          if [ "${{ inputs.certify_passive_enhancements }}" = true ]; then
+            scripts/client-certify --certify-passive-enhancements "$GWNATIVE_WEB_ROOT"
+          else
+            scripts/client-certify "$GWNATIVE_WEB_ROOT"
+          fi
+
+      - name: Verify the reproduced transforms and artifact identity
+        env:
+          GWNATIVE_CERTIFY_JSPI_WASM: ${{ runner.temp }}/gwnative-client/Gw.jspi.wasm
+          GWNATIVE_CERTIFY_JSPI_GLUE: ${{ runner.temp }}/gwnative-client/Gw.jspi.js
+          GWNATIVE_CERTIFY_ASYNCIFY_WASM: ${{ runner.temp }}/gwnative-client/Gw.wasm
+          GWNATIVE_CERTIFY_ASYNCIFY_GLUE: ${{ runner.temp }}/gwnative-client/Gw.js
+          GWNATIVE_CERTIFY_FEED: ${{ github.workspace }}/certificates/builds.candidate.json
+        run: |
+          actual_family_id="$(jq -r '.families[-1].familyId' certificates/builds.candidate.json)"
+          test "$actual_family_id" = "$EXPECTED_FAMILY_ID"
+          cargo test wasm::tests::external_official_pairs_produce_valid_candidates -- --nocapture
+
+      - name: Hand the verified feed to the isolated signer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsigned-certificate-feed
+          path: certificates/builds.candidate.json
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    if: ${{ inputs.publish }}
+    needs: [candidate, reproduce]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: certificate-publishing
+    permissions:
+      actions: read
+      contents: read
+    env:
+      EXPECTED_FAMILY_ID: ${{ needs.candidate.outputs.family_id }}
+
+    steps:
+      - name: Download only the reproduced data
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: unsigned-certificate-feed
+          path: ${{ runner.temp }}/unsigned
+
+      - name: Sign with the dedicated certificate key
+        env:
+          CERTIFICATE_PRIVATE_KEY: ${{ secrets.CERTIFICATE_PRIVATE_KEY }}
+          CERTIFICATE_PUBLIC_KEY: Uo9sqXxlPVzozJ/kiUVIiiLGkMlqvnuh8Y3Iz6Yge5k=
+        run: |
+          set -eu
+          feed="$RUNNER_TEMP/unsigned/builds.candidate.json"
+          actual_family_id="$(jq -r '.families[-1].familyId' "$feed")"
+          test "$actual_family_id" = "$EXPECTED_FAMILY_ID"
+
+          work="$RUNNER_TEMP/signing"
+          mkdir -p "$work"
+          private="$work/private.der"
+          trap 'rm -f "$private"' EXIT INT TERM
+          printf '%s' "$CERTIFICATE_PRIVATE_KEY" | openssl base64 -d -A > "$private"
+          chmod 600 "$private"
+
+          openssl pkey -inform DER -in "$private" -pubout -outform DER \
+            -out "$work/public.der"
+          actual_public="$(tail -c 32 "$work/public.der" | openssl base64 -A)"
+          test "$actual_public" = "$CERTIFICATE_PUBLIC_KEY"
+
+          cp "$feed" "$work/builds.json"
+          openssl pkeyutl -sign -rawin -keyform DER -inkey "$private" \
+            -in "$work/builds.json" -out "$work/signature.raw"
+          openssl base64 -A -in "$work/signature.raw" > "$work/builds.json.sig"
+          printf '\n' >> "$work/builds.json.sig"
+          openssl pkeyutl -verify -pubin -keyform DER -inkey "$work/public.der" \
+            -rawin -in "$work/builds.json" -sigfile "$work/signature.raw"
+
+      - name: Hand off the signed, verified pair
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-certificate-feed
+          path: |
+            ${{ runner.temp }}/signing/builds.json
+            ${{ runner.temp }}/signing/builds.json.sig
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: ${{ inputs.publish }}
+    needs: [candidate, sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    env:
+      EXPECTED_FAMILY_ID: ${{ needs.candidate.outputs.family_id }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download the signed feed
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-certificate-feed
+          path: certificates
+
+      - name: Open a certificate-only pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          short_id="${EXPECTED_FAMILY_ID:0:12}"
+          branch="certificates/family-$short_id-${{ github.run_id }}"
+          git switch -c "$branch"
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add certificates/builds.json certificates/builds.json.sig
+          git commit -m "cert(client): add artifact family $short_id"
+          git push origin "$branch"
+          if [ "${{ inputs.certify_passive_enhancements }}" = true ]; then
+            passive="enabled after protected approval of both live runtime fixtures"
+          else
+            passive="disabled pending both live runtime fixtures"
+          fi
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "cert(client): support artifact family $short_id" \
+            --body "Derived from all four official runtime artifacts. Two no-secret jobs independently fetched the artifacts, reproduced the same family identity, and verified both exact transform outputs. A fresh protected job signed only the reproduced data with the dedicated certificate key; this no-secret job opened the PR. Passive enhancements: $passive."

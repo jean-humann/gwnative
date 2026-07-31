@@ -139,10 +139,10 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences) {
 /// beside it is what the page compares against
 /// [`settings::Settings::compatibility_notice_seen_for`], and is `null` on the
 /// one launch where the module could not be read at all. Enhancement state rides
-/// alongside for the same reason and one more: the page installs its tick from
-/// inside `instantiateWasm`, before anything it could await has happened, and a
-/// tick that arrived a round trip later would have missed the frames it exists
-/// to run in.
+/// alongside for the same reason and one more: after runtime initialization
+/// the page installs a passive observer from this exact preselected layout.
+/// A later round trip could pair a refreshed certificate with the already
+/// instantiated artifact, so the immutable launch snapshot is injected here.
 fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -> String {
     let forced_runtime = std::env::var("GWNATIVE_CLIENT_RUNTIME")
         .ok()
@@ -150,15 +150,16 @@ fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -
     format!(
         "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
-         window.__gwnativeTemplateSave = {};\nwindow.__gwnativeClientBuild = {};\n\
+         window.__gwnativeRuntimeCapabilities = {};\n\
+         window.__gwnativeTemplateSave = \"uncertified\";\nwindow.__gwnativeClientBuild = null;\n\
          window.__gwnativeUpdates = {};\nwindow.__gwnativeAutoInstall = {};\n\
-         window.__gwnativeEnhancements = {};\nwindow.__gwnativeClientRuntime = {};",
+         window.__gwnativeEnhancements = \"off\";\n\
+         window.__gwnativeEnhancementManifest = null;\nwindow.__gwnativeClientRuntime = {};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
         serde_json::to_string(settings).unwrap_or_else(|_| "{}".to_owned()),
-        serde_json::Value::from(module.template_save),
-        serde_json::Value::from(module.build.clone()),
+        module.runtimes_json(),
         // The same question the Help menu asks itself before offering "Check for
         // Updates…", answered once and injected so the settings panel does not
         // offer a switch for something this build cannot do. A page that guessed
@@ -169,7 +170,6 @@ fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -
         // for it on a build that only knows how to open a web page would be a
         // promise nothing could keep.
         serde_json::Value::from(crate::updater::available()),
-        serde_json::Value::from(module.enhancements),
         serde_json::Value::from(forced_runtime),
     )
 }
