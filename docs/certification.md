@@ -66,113 +66,89 @@ separate structural verifier validates the resulting module with `wasmparser`,
 checks the appended types and bodies, and proves that existing code changed only
 at the authorized call operands before accepting the pinned output hash.
 
-The read-only companion layout is shared by the two runtime records only after
-the section proof matches both exact artifacts. If it does not, candidate
-generation keeps `layout` null but still verifies the independent template
-transforms. A generated candidate always sets `passiveEnhancements` to `false`;
-login, map transition, socket suspension, cursor and target fixtures must pass
-on both runtimes before a reviewer enables it. Template save never reads those
-memory offsets.
+The read-only companion layout is inherited only when both exact new artifacts
+reproduce each other's data, element and shared-global-prefix identities *and*
+those identities exactly match the most recent certified layout. The generator
+never updates copied offsets merely because JSPI and Asyncify agree with each
+other. A proof change keeps `layout` null and `passiveEnhancements` false while
+still allowing both independent template transforms to be certified. Template
+save never reads game-memory offsets.
 
-## Fast patch workflow
+## Automatic patch workflow
 
-The normal ArenaNet patch cycle does not require a gwnative release:
+The normal ArenaNet patch cycle requires neither an operator nor a gwnative
+release. `Client certificate` runs every six hours and can also be started
+manually without capability checkboxes or publisher build numbers.
 
-1. Fetch all four official files into one directory.
-2. Run:
+```mermaid
+flowchart LR
+    A["Poll ArenaNet"] --> B["Fetch all 4 official artifacts"]
+    B --> C["Derive family and capability gates"]
+    C --> D["Verify both exact transform outputs"]
+    D --> E{"Feed changed?"}
+    E -- "No" --> F["Finish without signing"]
+    E -- "Yes" --> G["Fetch all 4 artifacts again"]
+    G --> H["Require identical family and candidate SHA-256"]
+    H --> I["Isolated Ed25519 signer; no checkout"]
+    I --> J["Verify monotonic sequence and exact file scope"]
+    J --> K["Publish signed feed on main"]
+    K --> L["Installed apps cache it for next launch"]
+```
 
-   ```sh
-   scripts/client-certify WEB_ROOT
-   ```
+The four stages have deliberately separate authority:
 
-3. Review `certificates/builds.candidate.json`. Every target body must still
-   match its previous exact anchor. If a function moved or changed, the
-   generator fails instead of blessing the body at its old index; investigate
-   and update the reviewed anchors before continuing.
-4. Run the candidate transform and live login, map-transition, socket,
-   cursor and target fixtures for both runtimes. Keep `passiveEnhancements`
-   off unless both layouts pass.
-5. From a machine with the dedicated certificate key in its login Keychain,
-   sign the reviewed feed:
+1. The first no-secret macOS job fetches the official JSPI and Asyncify pairs,
+   generates the candidate, exercises both transforms, validates the passive
+   capability gate and reports whether the feed actually changed.
+2. A second no-secret macOS job fetches all four files again. It must reproduce
+   both the family ID and the complete candidate-feed SHA-256 before uploading
+   data for signing. An ArenaNet update between the two fetches therefore stops
+   the run.
+3. A fresh `certificate-publishing` job receives only the reproduced JSON. It
+   checks the bounded schema and capability invariants, derives the compiled
+   public key from the private key, signs, and immediately verifies the result.
+   It never checks out or executes repository code.
+4. A no-secret publisher verifies the detached signature again, requires the
+   sequence to be exactly the current sequence plus one, stages exactly
+   `builds.json` and `builds.json.sig`, and publishes those two files. If `main`
+   advanced during the run, publication fails and the next poll retries.
 
-   ```sh
-   cp certificates/builds.candidate.json certificates/builds.json
-   scripts/certificate-sign --publish certificates/builds.json
-   ```
+A known identical family produces a byte-identical candidate, so the signing
+key and repository are untouched. A new family with unchanged reviewed anchors
+is published automatically. A changed passive proof publishes template support
+with native cursor and target readout disabled. A changed template anchor signs
+nothing, opens or updates one transformer-review issue, and leaves players on
+ArenaNet's unmodified client.
 
-6. Review and merge the certificate-only pull request.
+For local diagnosis, the first two stages can be reproduced without signing:
 
-The manual `Client certificate` workflow automates fetching, candidate
-generation, static validation and creation of that signed review pull request.
-No publisher build number is an input. The generator derives a stable family
-identity from the exact JSPI and Asyncify Wasm/JavaScript hashes.
+```sh
+scripts/client-certify WEB_ROOT
+```
 
-The same workflow scans the official files every six hours, because ArenaNet
-does not provide a release event this project can subscribe to:
+The command writes `certificates/builds.candidate.json` and prints the derived
+family ID. Manual signing remains available for incident recovery, but it is
+not part of the normal patch path:
 
-- a known family passes silently;
-- a new family whose two template transforms pass opens one tracking issue;
-- moved semantic anchors open one transformer-review issue and fail the scan;
-- transient download failures fail the Actions run but never alter or sign the
-  feed.
+```sh
+scripts/certificate-sign --publish FEED
+```
 
-The issue, rather than an ArenaNet build-number feed, starts the human part of
-certification. There is no need to know when ArenaNet plans a release.
-
-The publishing path has four deliberately small jobs:
-
-1. an unprivileged job fetches all four official runtime artifacts, generates
-   an unsigned candidate with enhancements disabled, verifies both transforms,
-   and exports only the derived family identity;
-2. a second no-secret job fetches all four files again, reproduces the
-   candidate, requires the same derived identity, repeats both transform tests,
-   and uploads only the verified JSON;
-3. a fresh `certificate-publishing` job, restricted to `main` and held for
-   reviewer approval, downloads that JSON and signs it with the dedicated
-   certificate key without checking out or executing repository code;
-4. a final no-secret job downloads the signed pair and opens a certificate-only
-   pull request.
-
-This catches an artifact change between fetches instead of signing whichever
-bytes happened to arrive last, and it keeps the private key out of every job
-that compiles project code. Its `certify_passive_enhancements` checkbox is an
-explicit attestation reviewed at the protected signing gate that both live
-runtime fixtures passed. Without it the signed certificate enables template
-saving only. The workflow never merges its pull request.
-
-## Operator runbook for a detected family
-
-When the automatic issue appears:
-
-1. The scheduled scan has already proved both exact template outputs. Generate
-   the same candidate in a temporary test checkout and confirm its family ID
-   matches the issue.
-2. Run the local, unshipped enhancement candidate through JSPI on macOS 27 and
-   Asyncify on macOS 26. Cover sign-in, a map transition, socket suspension,
-   cursor and target readout. Watch for traps, rewinds and duplicate resumes.
-3. If both live fixtures pass, dispatch `Client certificate` with `publish`
-   and `certify_passive_enhancements` enabled. If only template saving passes,
-   publish with passive enhancements disabled instead.
-4. After the two no-secret fetch/test jobs agree on the family identity,
-   approve the protected signing job. It signs only their reproduced JSON; a
-   separate no-secret job opens the certificate-only pull request.
-5. Review and merge that pull request. Existing applications download the
-   signed feed in the background and use it on their next launch; no gwnative
-   application release is required.
-
-If candidate generation cannot locate the old semantic anchors, review the
-new modules and update the certification data. An application release is
-needed only if the compiled transform or its ABI must change, not merely
-because function indices moved.
+If an anchor changes, inspect the new module before changing compiled transform
+logic or reviewed anchors. An application release is needed only when that
+compiled policy or its ABI changes; a compatible artifact family is handled by
+the signed feed alone.
 
 ## Trust and rollback
 
 The certificate bundled into an application is covered by the app's code
 signature. A downloaded or cached replacement must verify against the dedicated
 Ed25519 certificate public key compiled into the app. The corresponding private
-key exists only in the protected `certificate-publishing` environment (and an
-operator's Keychain); candidate generation, ordinary CI, and app releases never
-receive or use it.
+key exists only in the main-only `certificate-publishing` environment (and an
+operator's Keychain); candidate generation, ordinary CI, app releases and the
+publisher never receive or use it. Unattended publication makes the workflow
+on `main` part of the signing trust boundary, so changes to that workflow need
+the same review as changes to the compiled certificate verifier.
 
 Feed `sequence` is monotonic. A validly signed lower sequence is ignored, a bad
 signature falls back to the bundled feed, and a refresh is written only after

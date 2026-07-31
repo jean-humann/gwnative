@@ -22,3 +22,7 @@
 
 # Python bytecode from running the scripts in `scripts/`.
 __pycache__/
+
+# Unsigned output from scripts/client-certify. Only the separately verified and
+# signed builds.json/builds.json.sig pair is publishable.
+/certificates/builds.candidate.json

@@ -179,8 +179,9 @@ does not inherit a local refusal of the older result.
 
 The native cursor and target readout are separate from the template transform.
 They remain disabled until both exact runtime artifacts share the same
-certified data, element, and global-prefix proof and both live runtime fixtures
-have passed.
+data, element, and global-prefix proof and that proof exactly reproduces the
+most recent certified layout. Agreement between two newly produced runtimes is
+not enough to bless changed offsets.
 
 The companion:
 
@@ -202,25 +203,25 @@ skips or permanently stops the observer without stopping the game.
 ```mermaid
 flowchart LR
     A["Scheduled no-secret scan"] --> B["Fetch all 4 official artifacts"]
-    B --> C["Generate fail-closed candidate"]
+    B --> C["Derive candidate + capability gates"]
     C --> D["Verify both exact transform outputs"]
-    D --> E["Tracking issue / human runtime review"]
-    E --> F["Second no-secret fetch + reproduction"]
-    F --> G["Protected certificate-publishing approval"]
-    G --> H["Fresh signer job; no checkout"]
-    H --> I["Signed JSON + detached Ed25519 signature"]
-    I --> J["No-secret publisher opens certificate-only PR"]
-    J --> K["Human review and merge"]
-    K --> L["Existing apps refresh in background for next launch"]
+    D --> E{"Candidate differs?"}
+    E -- "No" --> M["Finish"]
+    E -- "Yes" --> F["Second fetch + exact reproduction"]
+    F --> G["Fresh signer job; no checkout"]
+    G --> H["Signed JSON + detached Ed25519 signature"]
+    H --> I["Verify signature, sequence and 2-file scope"]
+    I --> J["Publish certificate files to main"]
+    J --> K["Existing apps refresh for next launch"]
 ```
 
-The private key is available only to the protected signer job. Candidate jobs
+The private key is available only to the main-only signer job. Candidate jobs
 compile repository code but receive no secret. The signer receives only the
-reproduced JSON and checks that its private key derives the public key compiled
-into the app. The publisher receives only the signed pair and has no secret.
-
-The GitHub repository must allow Actions to create pull requests; otherwise the
-final job can push its certificate branch but cannot open the review PR.
+reproduced JSON, checks its bounded schema and verifies that its private key
+derives the public key compiled into the app. The publisher receives only the
+signed pair and has no secret. It refuses a non-consecutive sequence, any base
+branch movement during the run, or a staged path outside the two certificate
+files; a later poll safely retries.
 
 ## Failure outcome matrix
 
