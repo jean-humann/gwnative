@@ -625,5 +625,15 @@ mod tests {
             204
         );
         assert!(generations.transform_disabled("jspi", BUILD));
+
+        // A valid request is a server failure, not an acknowledgement, when the
+        // journal cannot make the attempt durable. The page logs this response
+        // and still boots, so honesty here does not put bookkeeping on its path.
+        std::fs::remove_file(dir.join("generations/state.json")).unwrap();
+        std::fs::create_dir(dir.join("generations/state.json")).unwrap();
+        assert_eq!(
+            request(loopback.addr, "POST", "/__runtime", Some(token), &attempt).0,
+            500
+        );
     }
 }

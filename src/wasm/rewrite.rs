@@ -24,6 +24,9 @@ use super::codec::{
 };
 use super::{Outcome, digest};
 
+const CARRIER_MODULE: &str = "env";
+const CARRIER_NAME: &str = "__syscall_newfstatat";
+
 #[derive(Clone, Debug)]
 struct Patch {
     local_function: usize,
@@ -151,30 +154,42 @@ fn call_ranges(body: &[u8], target: u32) -> Outcome<Vec<Range<usize>>> {
     Ok(ranges)
 }
 
-fn function_import_count(input: &[u8]) -> Outcome<u32> {
+fn certify_function_imports(input: &[u8], template: &TemplateCertificate) -> Outcome<()> {
     let sections = split_sections(input)?;
     let imports = ImportSectionReader::new(BinaryReader::new(section_by_id(&sections, 2)?, 0))
         .map_err(|e| format!("template-save: cannot read imports: {e}"))?;
-    imports.into_imports().try_fold(0u32, |count, import| {
+    let mut function_count = 0u32;
+    let mut carrier = None;
+    for import in imports.into_imports() {
         let import = import.map_err(|e| format!("template-save: cannot read import: {e}"))?;
         if matches!(import.ty, TypeRef::Func(_) | TypeRef::FuncExact(_)) {
-            count
+            if function_count == template.carrier_import {
+                carrier = Some((import.module.to_owned(), import.name.to_owned()));
+            }
+            function_count = function_count
                 .checked_add(1)
-                .ok_or_else(|| "template-save: too many function imports".to_owned())
-        } else {
-            Ok(count)
+                .ok_or_else(|| "template-save: too many function imports".to_owned())?;
         }
-    })
+    }
+    if function_count != template.import_count {
+        return Err(format!(
+            "template-save: module has {function_count} function imports, certificate has {}",
+            template.import_count
+        ));
+    }
+    let carrier =
+        carrier.ok_or_else(|| "template-save: carrier import is out of range".to_owned())?;
+    if carrier.0 != CARRIER_MODULE || carrier.1 != CARRIER_NAME {
+        return Err(format!(
+            "template-save: carrier import is {}.{}, expected {CARRIER_MODULE}.{CARRIER_NAME}",
+            carrier.0, carrier.1
+        ));
+    }
+    Ok(())
 }
 
 fn build_expected(input: &[u8], certificate: &RuntimeCertificate) -> Outcome<Vec<u8>> {
-    let actual_imports = function_import_count(input)?;
-    if actual_imports != certificate.template.import_count {
-        return Err(format!(
-            "template-save: module has {actual_imports} function imports, certificate has {}",
-            certificate.template.import_count
-        ));
-    }
+    certify_function_imports(input, &certificate.template)?;
     let sections = split_sections(input)?;
     let function_types = parse_index_vector(section_by_id(&sections, 3)?)?;
     let bodies = parse_code(section_by_id(&sections, 10)?)?;
@@ -608,6 +623,30 @@ pub(super) fn candidate(input: &[u8], certificate: &RuntimeCertificate) -> Outco
 mod tests {
     use super::*;
 
+    fn module_with_function_imports(imports: &[(&str, &str)]) -> Vec<u8> {
+        let mut body = uleb(imports.len() as u64);
+        for (module, name) in imports {
+            body.extend_from_slice(&uleb(module.len() as u64));
+            body.extend_from_slice(module.as_bytes());
+            body.extend_from_slice(&uleb(name.len() as u64));
+            body.extend_from_slice(name.as_bytes());
+            body.push(0x00); // function import
+            body.push(0x00); // type index
+        }
+        let mut module = WASM_HEADER.to_vec();
+        module.extend_from_slice(&encode_section(&Section { id: 2, body }));
+        module
+    }
+
+    fn import_template() -> TemplateCertificate {
+        TemplateCertificate {
+            output_sha256: "0".repeat(64),
+            import_count: 2,
+            carrier_import: 1,
+            bridges: Vec::new(),
+        }
+    }
+
     #[test]
     fn fixed_leb_preserves_the_certified_width() {
         assert_eq!(fixed_uleb(3, 1).unwrap(), [3]);
@@ -634,6 +673,26 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn candidate_generation_rejects_a_reordered_carrier_import() {
+        let template = import_template();
+        let certified = module_with_function_imports(&[
+            ("env", "same_typed_import"),
+            (CARRIER_MODULE, CARRIER_NAME),
+        ]);
+        certify_function_imports(&certified, &template).unwrap();
+
+        let reordered = module_with_function_imports(&[
+            (CARRIER_MODULE, CARRIER_NAME),
+            ("env", "same_typed_import"),
+        ]);
+        let reason = certify_function_imports(&reordered, &template).unwrap_err();
+        assert!(
+            reason.contains("expected env.__syscall_newfstatat"),
+            "{reason}"
+        );
     }
 
     #[test]

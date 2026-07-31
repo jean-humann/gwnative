@@ -166,6 +166,9 @@ pub struct RuntimeCertificate {
 pub struct TemplateCertificate {
     pub output_sha256: String,
     pub import_count: u32,
+    /// Ordinal among function imports. The transformer independently requires
+    /// this entry to remain `env.__syscall_newfstatat`; a matching count and
+    /// function type cannot certify an import that was reordered or replaced.
     pub carrier_import: u32,
     pub bridges: Vec<BridgeCertificate>,
 }

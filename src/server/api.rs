@@ -19,7 +19,7 @@ use std::sync::Arc;
 use super::{Context, Flow, tracing};
 use crate::chunks::ChunkStore;
 use crate::http::{Request, json, no_content, respond, text, token_matches};
-use crate::{app, cache, diagnostics, disk, dock, keychain, net, relaunch, ws};
+use crate::{app, cache, diagnostics, disk, dock, generation, keychain, net, relaunch, ws};
 
 /// Room to leave behind after a full download.
 ///
@@ -296,13 +296,26 @@ struct RuntimeAttempt {
     transformed: bool,
 }
 
+fn runtime_state_failure(
+    stream: &mut TcpStream,
+    action: &str,
+    error: generation::RuntimeStateError,
+) -> std::io::Result<()> {
+    let status = match &error {
+        generation::RuntimeStateError::Invalid(_) => 400,
+        generation::RuntimeStateError::NotSaved => 500,
+    };
+    note!("[generation] could not {action}: {error}");
+    text(stream, status, &error.to_string())
+}
+
 fn runtime_attempt(
     request: &Request,
     stream: &mut TcpStream,
     context: &Context,
 ) -> std::io::Result<()> {
     let recorded = serde_json::from_slice::<RuntimeAttempt>(&request.body)
-        .map_err(|error| error.to_string())
+        .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
         .and_then(|attempt| {
             context.generations.record_attempt(
                 &attempt.runtime,
@@ -312,10 +325,7 @@ fn runtime_attempt(
         });
     match recorded {
         Ok(()) => no_content(stream),
-        Err(reason) => {
-            note!("[generation] refused a runtime attempt: {reason}");
-            text(stream, 400, &reason)
-        }
+        Err(error) => runtime_state_failure(stream, "record a runtime attempt", error),
     }
 }
 
@@ -332,7 +342,7 @@ fn transform_failed(
     context: &Context,
 ) -> std::io::Result<()> {
     let disabled = serde_json::from_slice::<TransformFailure>(&request.body)
-        .map_err(|error| error.to_string())
+        .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
         .and_then(|failure| {
             context
                 .generations
@@ -340,10 +350,7 @@ fn transform_failed(
         });
     match disabled {
         Ok(()) => no_content(stream),
-        Err(reason) => {
-            note!("[generation] refused a transform failure: {reason}");
-            text(stream, 400, &reason)
-        }
+        Err(error) => runtime_state_failure(stream, "record a transform failure", error),
     }
 }
 

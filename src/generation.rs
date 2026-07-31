@@ -135,6 +135,21 @@ pub enum Recovery {
     GenerationRolledBack(String),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum RuntimeStateError {
+    Invalid(String),
+    NotSaved,
+}
+
+impl std::fmt::Display for RuntimeStateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(reason) => formatter.write_str(reason),
+            Self::NotSaved => formatter.write_str("the runtime state could not be recorded"),
+        }
+    }
+}
+
 /// The identity of the patch generation this manifest is currently offering.
 ///
 /// Taken from the chunk hashes of the artifacts themselves, so it changes when
@@ -347,7 +362,7 @@ impl Store {
         runtime: &str,
         build: Option<&str>,
         transformed: bool,
-    ) -> std::result::Result<(), String> {
+    ) -> std::result::Result<(), RuntimeStateError> {
         validate_runtime_attempt(runtime, build, transformed)?;
         let mut state = self.state.lock().unwrap();
         state.attempt = Some(RuntimeAttempt {
@@ -355,13 +370,18 @@ impl Store {
             build: build.map(str::to_owned),
             transformed,
         });
-        self.save(&state);
-        Ok(())
+        self.save(&state)
+            .then_some(())
+            .ok_or(RuntimeStateError::NotSaved)
     }
 
     /// The derived module failed before gameplay, so remember to serve the
     /// exact official module for this runtime/artifact from now on.
-    pub fn disable_transform(&self, runtime: &str, build: &str) -> std::result::Result<(), String> {
+    pub fn disable_transform(
+        &self,
+        runtime: &str,
+        build: &str,
+    ) -> std::result::Result<(), RuntimeStateError> {
         validate_runtime_attempt(runtime, Some(build), true)?;
         let mut state = self.state.lock().unwrap();
         remember_disabled(&mut state, runtime, build);
@@ -371,8 +391,9 @@ impl Store {
             build: Some(build.to_owned()),
             transformed: false,
         });
-        self.save(&state);
-        Ok(())
+        self.save(&state)
+            .then_some(())
+            .ok_or(RuntimeStateError::NotSaved)
     }
 
     /// Recover an unproven launch without blaming an optional transform on the
@@ -709,12 +730,16 @@ fn validate_runtime_attempt(
     runtime: &str,
     build: Option<&str>,
     transformed: bool,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), RuntimeStateError> {
     if runtime != "jspi" && runtime != "asyncify" {
-        return Err("runtime must be jspi or asyncify".to_owned());
+        return Err(RuntimeStateError::Invalid(
+            "runtime must be jspi or asyncify".to_owned(),
+        ));
     }
     if transformed && build.is_none() {
-        return Err("a transformed runtime must name its artifact".to_owned());
+        return Err(RuntimeStateError::Invalid(
+            "a transformed runtime must name its artifact".to_owned(),
+        ));
     }
     if let Some(build) = build
         && (build.len() != 64
@@ -722,7 +747,9 @@ fn validate_runtime_attempt(
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
     {
-        return Err("runtime artifact must be a lowercase SHA-256".to_owned());
+        return Err(RuntimeStateError::Invalid(
+            "runtime artifact must be a lowercase SHA-256".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -1023,6 +1050,26 @@ mod tests {
         assert_eq!(
             fs::read_to_string(temp.0.join("manifest.cache")).unwrap(),
             "old:manifest"
+        );
+    }
+
+    #[test]
+    fn runtime_state_is_not_acknowledged_without_a_durable_record() {
+        const BUILD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let temp = TempDir::new("generation-undurable-runtime-state");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "working");
+        fs::remove_file(state.join("state.json")).unwrap();
+        fs::create_dir(state.join("state.json")).unwrap();
+
+        assert_eq!(
+            store.record_attempt("jspi", Some(BUILD), true),
+            Err(RuntimeStateError::NotSaved),
+        );
+        assert_eq!(
+            store.disable_transform("jspi", BUILD),
+            Err(RuntimeStateError::NotSaved),
         );
     }
 
