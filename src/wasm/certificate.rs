@@ -311,11 +311,11 @@ impl CertificateFeed {
 
 impl LayoutCertificate {
     fn validate(&self) -> Outcome<()> {
-        if self.snapshot_abi != 1
-            || self.snapshot_bytes != 64
+        if self.snapshot_abi != 14
+            || self.snapshot_bytes != 59_776
             || self.cursor_snapshot_abi != 1
             || self.cursor_snapshot_bytes != 4160
-            || self.layout_words.len() != 29
+            || self.layout_words.len() != 232
         {
             return Err("certificate: unsupported companion layout ABI".to_owned());
         }
@@ -572,6 +572,19 @@ mod tests {
     fn bundled_feed_is_self_consistent() {
         let feed = bundled().unwrap();
         assert!(!feed.families.is_empty());
+    }
+
+    #[test]
+    fn bundled_layout_matches_the_compiled_passive_companion() {
+        let feed = bundled().unwrap();
+        let family = &feed.families[0];
+        let layout = family.layout.as_ref().unwrap();
+        let manifest = layout.page_manifest(&family.family_id);
+
+        assert_eq!(manifest["snapshotAbi"], 14);
+        assert_eq!(manifest["snapshotBytes"], 59_776);
+        assert_eq!(manifest["configBytes"], 928);
+        assert_eq!(manifest["layoutWords"].as_array().unwrap().len(), 232);
     }
 
     #[test]

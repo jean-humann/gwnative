@@ -5,6 +5,38 @@ import {
   asyncifyStateReader,
   createPassiveObserver,
 } from './passive-observer.js';
+import { decodeManifest } from './enhancements.js';
+
+const FAMILY_ID = 'a'.repeat(64);
+
+function manifest(overrides = {}) {
+  return {
+    snapshotAbi: 14,
+    snapshotBytes: 59_776,
+    cursorSnapshotAbi: 1,
+    cursorSnapshotBytes: 4_160,
+    configBytes: 928,
+    familyId: FAMILY_ID,
+    layoutWords: Array(232).fill(0),
+    ...overrides,
+  };
+}
+
+describe('signed companion manifest', () => {
+  it('accepts the exact compiled snapshot and layout ABI', () => {
+    const decoded = decodeManifest(manifest());
+    assert.equal(decoded.familyId, FAMILY_ID);
+    assert.equal(decoded.layoutWords.length, 232);
+    assert(Object.isFrozen(decoded));
+    assert(Object.isFrozen(decoded.layoutWords));
+  });
+
+  it('rejects stale or internally inconsistent layouts', () => {
+    assert.equal(decodeManifest(manifest({ snapshotAbi: 13 })), null);
+    assert.equal(decodeManifest(manifest({ layoutWords: Array(231).fill(0) })), null);
+    assert.equal(decodeManifest(manifest({ configBytes: 924 })), null);
+  });
+});
 
 describe('passive enhancement observer', () => {
   it('observes JSPI without requiring an Asyncify export', () => {
