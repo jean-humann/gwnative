@@ -463,6 +463,7 @@ pub(super) fn verify_layout(input: &[u8], layout: &LayoutCertificate) -> Outcome
     Ok(())
 }
 
+#[derive(Clone)]
 pub(super) struct LayoutProof {
     pub data_sha256: String,
     pub element_sha256: String,

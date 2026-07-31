@@ -188,16 +188,24 @@ pub fn prepare(
 /// The most recent certificate supplies semantic function identities and the
 /// read-only layout as review input. Every target body must retain its exact
 /// anchor; only the two transform output hashes are recomputed. Passive
-/// enhancements stay disabled until live layout probes have independently
-/// certified the copied offsets.
+/// enhancements are inherited only when both new runtimes reproduce every
+/// exact section identity that authorized the reviewed layout. A changed proof
+/// keeps template saving certifiable while leaving the observer disabled.
 pub fn certificate_candidate(root: &Path) -> Outcome<String> {
     let feed = certificate::bundled()?;
     let prototype = feed
         .families
         .last()
         .ok_or("certificate candidate: no prototype family")?;
-    let global_count = prototype
-        .layout
+    // Template anchors follow the newest family, but one changed layout proof
+    // must not erase the last layout that was actually certified. A later
+    // ArenaNet build may return to those exact bytes.
+    let layout_prototype = feed
+        .families
+        .iter()
+        .rev()
+        .find_map(|family| family.layout.clone());
+    let global_count = layout_prototype
         .as_ref()
         .map(|layout| layout.shared_global_count);
 
@@ -227,27 +235,11 @@ pub fn certificate_candidate(root: &Path) -> Outcome<String> {
         runtimes.push(certificate);
     }
 
-    let layout = match (prototype.layout.clone(), layout_proofs.as_slice()) {
-        (Some(mut layout), [Ok(jspi), Ok(asyncify)])
-            if jspi.data_sha256 == asyncify.data_sha256
-                && jspi.element_sha256 == asyncify.element_sha256
-                && jspi.shared_global_prefix_sha256 == asyncify.shared_global_prefix_sha256 =>
-        {
-            layout.data_sha256.clone_from(&jspi.data_sha256);
-            layout.element_sha256.clone_from(&jspi.element_sha256);
-            layout
-                .shared_global_prefix_sha256
-                .clone_from(&jspi.shared_global_prefix_sha256);
-            Some(layout)
-        }
-        _ => {
-            note!(
-                "[gwnative] certificate candidate: no shared passive-observer layout; \
-                 template transforms remain independently certifiable"
-            );
-            None
-        }
-    };
+    let layout = inherit_layout(layout_prototype, layout_proofs.as_slice());
+    let passive_enhancements = layout.is_some();
+    for runtime in &mut runtimes {
+        runtime.passive_enhancements = passive_enhancements;
+    }
     let family_id = certificate::artifact_family_id(&runtimes)?;
     let family = certificate::BuildFamily {
         family_id,
@@ -257,6 +249,31 @@ pub fn certificate_candidate(root: &Path) -> Outcome<String> {
     certificate::validate_candidate(&family)?;
     serde_json::to_string_pretty(&family)
         .map_err(|e| format!("certificate candidate: cannot encode JSON: {e}"))
+}
+
+fn inherit_layout(
+    prototype: Option<certificate::LayoutCertificate>,
+    proofs: &[Outcome<rewrite::LayoutProof>],
+) -> Option<certificate::LayoutCertificate> {
+    match (prototype, proofs) {
+        (Some(layout), [Ok(jspi), Ok(asyncify)])
+            if jspi.data_sha256 == asyncify.data_sha256
+                && jspi.element_sha256 == asyncify.element_sha256
+                && jspi.shared_global_prefix_sha256 == asyncify.shared_global_prefix_sha256
+                && jspi.data_sha256 == layout.data_sha256
+                && jspi.element_sha256 == layout.element_sha256
+                && jspi.shared_global_prefix_sha256 == layout.shared_global_prefix_sha256 =>
+        {
+            Some(layout)
+        }
+        _ => {
+            note!(
+                "[gwnative] certificate candidate: no shared passive-observer layout; \
+                 template transforms remain independently certifiable"
+            );
+            None
+        }
+    }
 }
 
 fn prepare_runtime(
@@ -486,6 +503,32 @@ mod tests {
     }
 
     #[test]
+    fn passive_layout_is_inherited_only_from_two_exact_proofs() {
+        let layout = certificate::bundled().unwrap().families[0]
+            .layout
+            .clone()
+            .unwrap();
+        let proof = || rewrite::LayoutProof {
+            data_sha256: layout.data_sha256.clone(),
+            element_sha256: layout.element_sha256.clone(),
+            shared_global_prefix_sha256: layout.shared_global_prefix_sha256.clone(),
+        };
+        let inherited = inherit_layout(Some(layout.clone()), &[Ok(proof()), Ok(proof())]).unwrap();
+        assert_eq!(inherited.layout_words, layout.layout_words);
+
+        let mut changed = proof();
+        changed.data_sha256 = "0".repeat(64);
+        assert!(inherit_layout(Some(layout.clone()), &[Ok(proof()), Ok(changed)]).is_none());
+        assert!(
+            inherit_layout(
+                Some(layout.clone()),
+                &[Ok(proof()), Ok(proof()), Ok(proof())]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn companion_cannot_reenter_the_game() {
         let mut imports = Vec::new();
         let mut exports = Vec::new();
@@ -702,29 +745,40 @@ mod tests {
         let Ok(root) = std::env::var("GWNATIVE_CERTIFY_ROOT") else {
             return;
         };
+        let feed = match std::env::var("GWNATIVE_CERTIFY_FEED") {
+            Ok(path) => {
+                serde_json::from_slice::<CertificateFeed>(&fs::read(path).unwrap()).unwrap()
+            }
+            Err(_) => certificate::bundled().unwrap(),
+        };
+        feed.validate().unwrap();
         let temporary = crate::scratch::TempDir::new("dual-runtime-derive");
         let generations = generation::Store::open(temporary.0.join("support").join("generations"));
-        let prepared = prepare(
-            Path::new(&root),
-            &temporary.0.join("derived"),
-            &temporary.0.join("certificates"),
-            true,
-            &generations,
-        )
-        .unwrap();
-        assert!(prepared.derived.get(Runtime::Jspi.wasm_name()).is_some());
-        assert!(
-            prepared
-                .derived
-                .get(Runtime::Asyncify.wasm_name())
-                .is_some()
-        );
-        let modules: serde_json::Value =
-            serde_json::from_str(&prepared.module.runtimes_json()).unwrap();
-        for runtime in ["jspi", "asyncify"] {
-            assert_eq!(modules[runtime]["templateSave"], "ready");
-            assert_eq!(modules[runtime]["enhancements"], "uncertified");
-            assert!(modules[runtime]["enhancementManifest"].is_null());
+        for runtime in Runtime::ALL {
+            let (derived, module) = prepare_runtime(
+                Path::new(&root),
+                &temporary.0.join("derived"),
+                &feed,
+                runtime,
+                true,
+                &generations,
+            );
+            assert!(derived.is_some());
+            assert_eq!(module.template_save, "ready");
+            let selected = feed
+                .select(
+                    runtime,
+                    &digest(&fs::read(Path::new(&root).join(runtime.wasm_name())).unwrap()),
+                    &digest(&fs::read(Path::new(&root).join(runtime.glue_name())).unwrap()),
+                )
+                .unwrap();
+            if selected.runtime.passive_enhancements {
+                assert_eq!(module.enhancements, enhancements::READY);
+                assert!(module.enhancement_manifest.is_some());
+            } else {
+                assert_eq!(module.enhancements, enhancements::UNCERTIFIED);
+                assert!(module.enhancement_manifest.is_none());
+            }
         }
     }
 }

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Generate an unsigned artifact-family certificate candidate.
 
-The Rust transformer performs the WebAssembly parsing and independent output
-verification. This wrapper only merges its reviewed family object into a copy
-of the current feed and increments the monotonic sequence. It never modifies or
-signs the live feed.
+The Rust transformer performs the WebAssembly parsing, layout eligibility and
+independent output verification. This wrapper only merges its family object
+into a copy of the current feed. It never modifies or signs the live feed.
 """
 
 from __future__ import annotations
@@ -24,14 +23,6 @@ MAX_FEED_BYTES = 4 * 1024 * 1024
 
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--certify-passive-enhancements",
-        action="store_true",
-        help=(
-            "enable the copied layout only after both live runtime fixtures "
-            "passed; signing remains a separate protected step"
-        ),
-    )
     parser.add_argument("web_root", type=Path)
     parser.add_argument(
         "output",
@@ -60,33 +51,46 @@ def main() -> int:
         check=True,
     )
     family = json.loads(completed.stdout)
-    if any(runtime["passiveEnhancements"] for runtime in family["runtimes"]):
-        raise SystemExit("candidate generation must leave live layouts disabled")
-    if args.certify_passive_enhancements:
-        if family.get("layout") is None:
-            raise SystemExit(
-                "the two runtimes have no shared observer layout to certify"
-            )
-        for runtime in family["runtimes"]:
-            runtime["passiveEnhancements"] = True
+    passive = [runtime["passiveEnhancements"] for runtime in family["runtimes"]]
+    eligible = family.get("layout") is not None
+    if passive != [eligible, eligible]:
+        raise SystemExit("candidate runtime eligibility is inconsistent")
 
-    feed = json.loads(FEED.read_text())
-    feed["sequence"] = int(feed["sequence"]) + 1
-    feed["families"] = [
-        current
-        for current in feed["families"]
-        if current["familyId"] != family["familyId"]
-    ]
-    feed["families"].append(family)
-    # Feed order is certification order. Keeping the tail makes retention
-    # independent of publisher build numbering and preserves the most recently
-    # re-attested family.
-    feed["families"] = feed["families"][-MAX_FAMILIES:]
+    feed_bytes = FEED.read_bytes()
+    feed = json.loads(feed_bytes)
+    current = next(
+        (
+            item
+            for item in reversed(feed["families"])
+            if item["familyId"] == family["familyId"]
+        ),
+        None,
+    )
+    changed = current != family
+    if changed:
+        feed["sequence"] = int(feed["sequence"]) + 1
+        feed["families"] = [
+            item
+            for item in feed["families"]
+            if item["familyId"] != family["familyId"]
+        ]
+        feed["families"].append(family)
+        # Feed order is certification order. Keeping the tail makes retention
+        # independent of publisher build numbering and preserves the most
+        # recently re-attested family.
+        feed["families"] = feed["families"][-MAX_FAMILIES:]
 
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
-    encoded = (json.dumps(feed, indent=2) + "\n").encode()
+    # A semantic no-op must also be a byte no-op. Otherwise harmless manual
+    # formatting would look publishable without a sequence increment and the
+    # monotonic publisher would correctly refuse it forever.
+    encoded = (
+        (json.dumps(feed, indent=2) + "\n").encode()
+        if changed
+        else feed_bytes
+    )
     if len(encoded) > MAX_FEED_BYTES:
         raise SystemExit(
             f"candidate feed is {len(encoded)} bytes; "
@@ -95,7 +99,8 @@ def main() -> int:
     temporary.write_bytes(encoded)
     temporary.replace(output)
     print(
-        f"candidate sequence {feed['sequence']} family {family['familyId']}: {output}",
+        f"candidate sequence {feed['sequence']} family {family['familyId']} "
+        f"({'changed' if changed else 'already certified'}): {output}",
         file=sys.stderr,
     )
     for runtime in family["runtimes"]:
@@ -104,6 +109,7 @@ def main() -> int:
             f"{runtime['template']['outputSha256']}",
             file=sys.stderr,
         )
+    print(family["familyId"])
     return 0
 
 
