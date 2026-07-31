@@ -20,7 +20,8 @@ signed certificate is reviewed and published.
 flowchart TD
     A["ArenaNet publishes one manifest"] --> B["Load pending offer, else active manifest"]
     B --> C{"New generation or damaged local set?"}
-    C -- "No" --> H["Keep verified installed set"]
+    C -- "No, manifest unchanged" --> H["Keep verified installed set"]
+    C -- "No, only snapshot metadata changed" --> X["Promote pending manifest and refresh its generation digest"]
     C -- "Yes" --> D["Persist proven files + active manifest as previous"]
     D --> E["Download all 4 runtime artifacts + version.json into staging"]
     E --> F["Verify every content-addressed chunk"]
@@ -28,6 +29,7 @@ flowchart TD
     G --> I["Promote matching pending manifest"]
     I --> J["Record generation as unproven"]
     H --> K["Probe JSPI inside this WKWebView"]
+    X --> K
     J --> K
     K -- "Suspend/resume succeeds" --> L["Select official JSPI glue/Wasm pair"]
     K -- "Unavailable or broken" --> M["Select official Asyncify glue/Wasm pair"]
@@ -94,7 +96,9 @@ The durable ordering is:
 7. Hash the live pair and record the offered generation as unproven.
 
 The persistent stash, not the patcher's private staging backup, is the
-crash-consistency boundary. On the next launch:
+crash-consistency boundary. Replacement does not begin if step 3 cannot be
+persisted, and a manifest that changed behind a recorded generation is never
+accepted as a rollback target. On the next launch:
 
 - if live files and manifest still match `previous`, the process died before
   mutation and the redundant stash is discarded;
@@ -106,6 +110,10 @@ crash-consistency boundary. On the next launch:
 
 A normal sync or manifest-activation error also restores through this verified
 durable path. The record is cleared only after the whole prior pair is back.
+When only snapshot metadata changes, no client artifact is replaced or
+unproven: the pending manifest is promoted directly and its digest is
+reconciled idempotently on the next launch if the process exits between those
+two atomic writes.
 
 ## Runtime selection and fallback
 
@@ -113,7 +121,8 @@ Safari Technology Preview does not change an application's system WKWebView.
 The JSPI decision is therefore made inside the actual game WKWebView. The probe
 instantiates a tiny module, suspends through an asynchronous import, resumes a
 promising export, and requires the value `42`. API presence without a working
-suspend/resume round trip selects Asyncify.
+suspend/resume round trip selects Asyncify. The probe also has a bounded
+deadline, so a partial implementation that never resumes cannot hold startup.
 
 The selected glue and Wasm always come from the same official pair:
 
@@ -265,17 +274,22 @@ Critical invariants have named regressions:
 | --- | --- |
 | Both official runtime pairs are installed | `patch::tests::installs_both_official_runtime_pairs` |
 | Active manifest stays paired until promotion | `patch::tests::a_pending_offer_does_not_replace_the_active_manifest_until_activation` |
+| Snapshot-only metadata updates do not reinstall or unprove the client | `tests::unchanged_client_artifacts_activate_pending_snapshot_metadata` |
 | Partial promotion restores the live set | `patch::tests::a_failed_promotion_restores_the_whole_live_set` |
 | Interrupted download clears only a redundant stash | `generation::tests::an_interrupted_download_discards_the_redundant_stash_on_next_launch` |
 | Interrupted promotion restores exact files and manifest | `generation::tests::an_interrupted_promotion_restores_the_entry_generation` |
 | Interrupted repair of an unproven set restores its proven predecessor | `generation::tests::an_interrupted_repair_of_an_unproven_set_restores_the_proven_predecessor` |
 | Corrupt bytes cannot become a rollback target | `generation::tests::corrupted_live_bytes_are_never_saved_as_a_rollback_target` |
+| Changed manifests cannot become rollback targets | `generation::tests::a_changed_manifest_is_never_saved_as_a_rollback_target` |
+| An undurable stash cannot authorize replacement | `generation::tests::a_stash_is_not_armed_without_a_durable_record` |
+| A manifest-activation crash is reconciled on the next launch | `generation::tests::an_active_manifest_update_is_reconciled_without_rehashing_the_client` |
 | Old generation records migrate safely | `generation::tests::a_pre_manifest_record_can_still_be_stashed_safely` |
 | Transform failure does not reject official files | `generation::tests::a_failed_transform_is_disabled_without_rolling_back_official_files` |
 | Official fallback bytes remain addressable | `server::tests::a_failed_transform_can_request_the_exact_official_module` |
 | Runtime state is gated and validated | `server::tests::runtime_fallback_state_is_token_gated_and_strictly_validated` |
 | Runtime-state persistence cannot hold startup | `client-runtime.test.js` — “does not let runtime-state persistence hold client startup” |
 | JSPI requires a functional suspended round trip | `client-runtime.test.js` — “uses JSPI only after a functional suspend/resume round trip” |
+| A stuck JSPI probe falls back within its deadline | `client-runtime.test.js` — “falls back when a partial JSPI implementation never resumes” |
 | A changed caller at a reused function index is rejected | `wasm::rewrite::tests::candidate_generation_rejects_a_reused_index_with_a_changed_caller` |
 | Latest correction wins for reused exact artifacts | `wasm::certificate::tests::the_newest_certificate_wins_for_a_reused_exact_runtime_pair` |
 | Asyncify cannot lose its state gate silently | `enhancements.test.js` — “does not mistake a missing Asyncify state export for JSPI” |

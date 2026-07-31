@@ -118,6 +118,12 @@ separate pending offer. Revalidation writes only the pending file, moving the
 network check off the window's critical path without changing the snapshot
 under a running or unsuccessfully updated client.
 
+If ArenaNet changes only snapshot metadata while the five client artifacts
+remain identical, the next launch promotes that pending manifest without
+reinstalling or unproving the client. The generation record reconciles the new
+manifest digest idempotently, including after a process exit between the
+manifest rename and state update.
+
 Artifact presence is not treated as integrity:
 
 - each installed client artifact is recorded by length and SHA-256;
@@ -126,9 +132,10 @@ Artifact presence is not treated as integrity:
 - the offered generation ID is derived from manifest data before download; and
 - a newly installed generation is unproven until `POST /__booted`.
 
-Before replacing a proven set, gwnative saves its files and active manifest. A
-new manifest becomes active only after the complete five-file client set has
-been staged, verified and promoted.
+Before replacing a proven set, gwnative verifies and saves its files and active
+manifest, then requires the rollback record to persist before touching live
+paths. A new manifest becomes active only after the complete five-file client
+set has been staged, verified and promoted.
 
 The page records which exact runtime it is about to execute. Recovery separates
 two failures:

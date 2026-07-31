@@ -29,14 +29,20 @@ const CLIENTS = Object.freeze({
 });
 
 const RUNTIME_STATE_DEADLINE_MS = 1_500;
+const JSPI_PROBE_DEADLINE_MS = 1_500;
+const JSPI_PROBE_TIMED_OUT = Symbol('JSPI probe timed out');
 
 /**
  * Prove that this realm implements the JSPI operation the client needs.
  *
  * @param {typeof WebAssembly} wasm
+ * @param {number} deadlineMs
  * @returns {Promise<boolean>}
  */
-export async function supportsJspi(wasm = WebAssembly) {
+export async function supportsJspi(
+  wasm = WebAssembly,
+  deadlineMs = JSPI_PROBE_DEADLINE_MS,
+) {
   if (
     typeof wasm?.Suspending !== 'function'
     || typeof wasm?.promising !== 'function'
@@ -54,7 +60,13 @@ export async function supportsJspi(wasm = WebAssembly) {
       },
     };
     const instance = new wasm.Instance(module, imports);
-    const result = await wasm.promising(instance.exports.g)();
+    let deadline;
+    const result = await Promise.race([
+      wasm.promising(instance.exports.g)(),
+      new Promise((resolve) => {
+        deadline = setTimeout(() => resolve(JSPI_PROBE_TIMED_OUT), deadlineMs);
+      }),
+    ]).finally(() => clearTimeout(deadline));
     return result === 42;
   } catch {
     return false;

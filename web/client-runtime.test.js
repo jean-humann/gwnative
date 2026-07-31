@@ -46,6 +46,14 @@ describe('client runtime selection', () => {
     assert.equal((await selectClient(broken)).mode, 'asyncify');
   });
 
+  it('falls back when a partial JSPI implementation never resumes', async () => {
+    const stuck = {
+      ...workingJspi,
+      promising: () => () => new Promise(() => {}),
+    };
+    assert.equal(await supportsJspi(stuck, 1), false);
+  });
+
   it('can force Asyncify for runner coverage', async () => {
     assert.equal((await selectClient({}, 'asyncify')).mode, 'asyncify');
   });

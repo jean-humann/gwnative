@@ -162,11 +162,12 @@ impl Client {
     }
 
     /// Promote the already validated offered manifest after its complete client
-    /// artifact set has been promoted.
-    pub fn activate_manifest(&self, dir: &Path) -> Result<()> {
+    /// artifact set has been promoted. Returns whether a pending entry existed
+    /// and was activated.
+    pub fn activate_manifest(&self, dir: &Path) -> Result<bool> {
         let pending = pending_manifest_path(dir);
         if !pending.exists() {
-            return Ok(());
+            return Ok(false);
         }
         // Re-read and parse before the rename so a damaged pending file can
         // never become the manifest paired with the live client.
@@ -175,7 +176,7 @@ impl Client {
         })?;
         Manifest::parse(&bytes)?;
         fs::rename(&pending, active_manifest_path(dir))?;
-        Ok(())
+        Ok(true)
     }
 
     /// Refresh the cached manifest if the service has a different one, and say
@@ -416,7 +417,7 @@ struct Fetched {
 }
 
 /// Where [`Client::manifest`] came from.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     /// Fetched from the service, because there was no readable local copy.
     /// Already current — nothing to revalidate.
@@ -799,7 +800,7 @@ mod tests {
             "snapshot readers must stay on the installed generation"
         );
 
-        client.activate_manifest(&dir.0).unwrap();
+        assert!(client.activate_manifest(&dir.0).unwrap());
         assert!(!pending.exists());
         assert!(
             client
@@ -831,6 +832,29 @@ mod tests {
         .unwrap();
 
         assert!(client.activate_manifest(&dir.0).is_err());
+        assert!(
+            client
+                .active_manifest(&dir.0)
+                .unwrap()
+                .files
+                .contains_key("old.bin")
+        );
+    }
+
+    #[test]
+    fn activating_without_a_pending_offer_changes_nothing() {
+        let dir = TempDir::new("manifest-no-pending");
+        let client = Client::new(PATCH_ROOT, String::new());
+        let active = active_manifest_path(&dir.0);
+        write_cache(
+            &active,
+            PATCH_ROOT,
+            Some("\"old\""),
+            &manifest_bytes("old.bin", 'a'),
+        )
+        .unwrap();
+
+        assert!(!client.activate_manifest(&dir.0).unwrap());
         assert!(
             client
                 .active_manifest(&dir.0)

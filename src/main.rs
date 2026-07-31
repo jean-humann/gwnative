@@ -115,7 +115,9 @@ fn main() {
     let generations = install_client(
         &root,
         &client,
-        manifest.as_ref().map(|(manifest, _)| manifest),
+        manifest
+            .as_ref()
+            .map(|(manifest, source)| (manifest, *source)),
         force_sync,
         windowed,
     );
@@ -313,7 +315,7 @@ fn load_manifest(
 fn install_client(
     root: &Path,
     client: &patch::Client,
-    manifest: Result<&manifest::Manifest, &error::Error>,
+    manifest: Result<(&manifest::Manifest, patch::Source), &error::Error>,
     force_sync: bool,
     windowed: bool,
 ) -> Arc<generation::Store> {
@@ -355,21 +357,88 @@ fn install_client(
         generations.adopt(root, &names);
     }
 
-    let plan = manifest.map_err(|e| e.to_string()).and_then(|manifest| {
-        generation::identify(manifest, &names)
-            .map(|offered| (manifest, offered))
-            .map_err(|e| e.to_string())
-    });
+    let plan = manifest
+        .map_err(|e| e.to_string())
+        .and_then(|(manifest, source)| {
+            generation::identify(manifest, &names)
+                .map(|offered| (manifest, source, offered))
+                .map_err(|e| e.to_string())
+        });
 
     let outdated = plan
         .as_ref()
-        .is_ok_and(|(_, offered)| generations.stale(offered));
+        .is_ok_and(|(_, _, offered)| generations.stale(offered));
+
+    // A manifest can change while all five client artifacts stay byte-for-byte
+    // identical: snapshot chunks and their metadata have their own release
+    // cadence. It is also possible to lose only the active manifest cache while
+    // the recorded official client remains sound. In both cases the fetched
+    // pending manifest names the exact installed artifact generation, so
+    // promote it without re-downloading or unproving the client.
+    if let Ok((_, source, offered)) = &plan
+        && should_activate_pending_manifest(
+            force_sync,
+            missing.is_empty(),
+            *source,
+            generations.stale(offered),
+        )
+    {
+        let failure = match client.activate_manifest(&paths::support_dir()) {
+            Ok(true) => {
+                if !generations.refresh_manifest(offered) {
+                    note!(
+                        "[gwnative] activated snapshot metadata but could not update its \
+                         generation record; the next launch will retry"
+                    );
+                }
+                note!(
+                    "[gwnative] activated updated snapshot metadata for client generation {offered}"
+                );
+                return generations;
+            }
+            Ok(false) => "the offered manifest had no pending cache entry".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        // A valid active manifest for these exact client artifacts still
+        // describes a playable snapshot, so an update that could not be
+        // promoted is deferred. If there is no matching active copy,
+        // continuing would start the shell with an incoherent game image.
+        let active_matches = client
+            .active_manifest(&paths::support_dir())
+            .and_then(|active| generation::identify(&active, &names))
+            .is_ok_and(|active| active == *offered);
+        if active_matches {
+            note!(
+                "[gwnative] could not activate updated snapshot metadata; \
+                 keeping the active manifest: {failure}"
+            );
+            return generations;
+        }
+        alert::fatal(
+            windowed,
+            "Guild Wars could not be installed",
+            &format!(
+                "The client files are complete, but their matching game-data manifest \
+                 could not be restored, so Guild Wars will not start with an unknown \
+                 snapshot.\n\n{failure}"
+            ),
+        );
+    }
+    if missing.is_empty()
+        && !outdated
+        && let Ok((_, patch::Source::Active, offered)) = &plan
+        && !generations.refresh_manifest(offered)
+    {
+        note!(
+            "[gwnative] could not reconcile the active manifest with client generation {offered}"
+        );
+    }
     if !(force_sync || !missing.is_empty() || outdated) {
         return generations;
     }
 
     let failure = match &plan {
-        Ok((manifest, offered)) => sync(
+        Ok((manifest, _, offered)) => sync(
             root,
             &missing,
             &generations,
@@ -406,6 +475,15 @@ fn install_client(
         }
     }
     generations
+}
+
+fn should_activate_pending_manifest(
+    force_sync: bool,
+    artifacts_sound: bool,
+    source: patch::Source,
+    client_is_stale: bool,
+) -> bool {
+    !force_sync && artifacts_sound && source != patch::Source::Active && !client_is_stale
 }
 
 /// Open the snapshot store and set it reading before anything asks it for bytes.
@@ -663,4 +741,53 @@ fn getrandom(buffer: &mut [u8]) {
 unsafe extern "C" {
     #[link_name = "getentropy"]
     fn libc_getentropy(buffer: *mut u8, length: usize) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_client_artifacts_activate_pending_snapshot_metadata() {
+        assert!(should_activate_pending_manifest(
+            false,
+            true,
+            patch::Source::Pending,
+            false,
+        ));
+        assert!(should_activate_pending_manifest(
+            false,
+            true,
+            patch::Source::Service,
+            false,
+        ));
+    }
+
+    #[test]
+    fn manifest_activation_never_replaces_client_installation_work() {
+        assert!(!should_activate_pending_manifest(
+            true,
+            true,
+            patch::Source::Pending,
+            false,
+        ));
+        assert!(!should_activate_pending_manifest(
+            false,
+            false,
+            patch::Source::Pending,
+            false,
+        ));
+        assert!(!should_activate_pending_manifest(
+            false,
+            true,
+            patch::Source::Pending,
+            true,
+        ));
+        assert!(!should_activate_pending_manifest(
+            false,
+            true,
+            patch::Source::Active,
+            false,
+        ));
+    }
 }

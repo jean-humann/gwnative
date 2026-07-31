@@ -213,7 +213,7 @@ impl Store {
         }
     }
 
-    fn save(&self, state: &State) {
+    fn save(&self, state: &State) -> bool {
         let path = self.dir.join("state.json");
         let write = || -> Result<()> {
             fs::create_dir_all(&self.dir)?;
@@ -227,12 +227,10 @@ impl Store {
             Ok(())
         };
         if let Err(e) = write() {
-            // Not fatal, and deliberately not retried. The cost of losing the
-            // record is one redundant sync and one build that could have been
-            // refused not being; the cost of treating it as fatal is an app
-            // that will not start because of a bookkeeping file.
             note!("[generation] could not write the record: {e}");
+            return false;
         }
+        true
     }
 
     /// Artifacts that are absent, the wrong length, or the wrong content.
@@ -293,6 +291,35 @@ impl Store {
             .current
             .as_ref()
             .is_none_or(|current| current.id != offered)
+    }
+
+    /// Reconcile the recorded generation with its active manifest.
+    ///
+    /// Snapshot metadata can change without changing any of the five client
+    /// artifacts, and activation is necessarily a separate atomic rename from
+    /// this state-file update. Repeating this on the next launch closes that
+    /// crash window without rehashing the much larger client modules.
+    pub fn refresh_manifest(&self, id: &str) -> bool {
+        let manifest = match hash_file(&self.active_manifest) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                note!("[generation] could not record the active manifest ({error})");
+                return false;
+            }
+        };
+        let mut state = self.state.lock().unwrap();
+        let Some(current) = state.current.as_mut().filter(|current| current.id == id) else {
+            return false;
+        };
+        if current.manifest.as_ref() == Some(&manifest) {
+            return true;
+        }
+        let previous = current.manifest.replace(manifest);
+        if !self.save(&state) {
+            state.current.as_mut().unwrap().manifest = previous;
+            return false;
+        }
+        true
     }
 
     /// Whether this generation has already failed to reach a first frame here.
@@ -472,7 +499,7 @@ impl Store {
     /// Returns false only when a proven generation needed protection and could
     /// not be copied. A caller replacing a complete client should then keep it.
     pub fn stash(&self, root: &Path, names: &[&'static str]) -> bool {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if !state.proven {
             return true;
         }
@@ -483,7 +510,15 @@ impl Store {
         // Validate every recorded client artifact here, then measure and attach
         // the manifest while copying it below. That keeps the format migration
         // safe without ever accepting changed client bytes as a rollback target.
-        if let Err(reason) = artifacts_match(root, &current) {
+        let verified = if current.manifest.is_some() {
+            generation_matches(root, &self.active_manifest, &current)
+        } else {
+            // Records written before the active manifest joined the
+            // generation format can still migrate. Their artifact digests are
+            // the only durable evidence they carry.
+            artifacts_match(root, &current)
+        };
+        if let Err(reason) = verified {
             note!(
                 "[generation] cannot stash the current client because it no longer matches its \
                  proven record ({reason})"
@@ -508,10 +543,12 @@ impl Store {
             let _ = fs::remove_dir_all(&stash);
             return false;
         }
-        drop(state);
-        let mut state = self.state.lock().unwrap();
-        state.previous = Some(current);
-        self.save(&state);
+        let prior_previous = state.previous.replace(current);
+        if !self.save(&state) {
+            state.previous = prior_previous;
+            let _ = fs::remove_dir_all(&stash);
+            return false;
+        }
         true
     }
 
@@ -1136,6 +1173,35 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_manifest_is_never_saved_as_a_rollback_target() {
+        let temp = TempDir::new("generation-corrupt-manifest-stash");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "working");
+
+        fs::write(temp.0.join("manifest.cache"), "changed:manifest").unwrap();
+
+        assert!(!store.stash(&root, &NAMES));
+        assert!(!state.join("previous").exists());
+        assert!(store.state.lock().unwrap().previous.is_none());
+    }
+
+    #[test]
+    fn a_stash_is_not_armed_without_a_durable_record() {
+        let temp = TempDir::new("generation-undurable-stash");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "working");
+
+        fs::remove_file(state.join("state.json")).unwrap();
+        fs::create_dir(state.join("state.json")).unwrap();
+
+        assert!(!store.stash(&root, &NAMES));
+        assert!(!state.join("previous").exists());
+        assert!(store.state.lock().unwrap().previous.is_none());
+    }
+
+    #[test]
     fn a_pre_manifest_record_can_still_be_stashed_safely() {
         let temp = TempDir::new("generation-old-record-migration");
         let root = temp.0.join("web");
@@ -1351,6 +1417,37 @@ mod tests {
         // Sixteen hex characters, so it can never be mistaken for `ADOPTED`.
         assert_eq!(shipped.len(), 16);
         assert!(shipped.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn an_active_manifest_update_is_reconciled_without_rehashing_the_client() {
+        let temp = TempDir::new("generation-refresh-manifest");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "working");
+        let before = store
+            .state
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .unwrap()
+            .manifest
+            .clone();
+
+        fs::write(temp.0.join("manifest.cache"), "updated:manifest").unwrap();
+
+        assert!(store.refresh_manifest("working"));
+        let saved = store.state.lock().unwrap();
+        assert_ne!(
+            saved.current.as_ref().unwrap().manifest,
+            before,
+            "the active manifest digest is updated for the same client generation"
+        );
+        assert!(
+            saved.proven,
+            "snapshot metadata does not unprove the client"
+        );
     }
 
     /// What turns that id into a download. Until a build has been recorded here,
