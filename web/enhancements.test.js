@@ -9,7 +9,7 @@ import {
 describe('passive enhancement observer', () => {
   it('observes JSPI without requiring an Asyncify export', () => {
     let reads = 0;
-    const observe = createPassiveObserver({}, () => { reads += 1; });
+    const observe = createPassiveObserver(null, () => { reads += 1; });
     assert.equal(observe(), true);
     assert.equal(reads, 1);
   });
@@ -18,7 +18,7 @@ describe('passive enhancement observer', () => {
     let state = 1;
     let reads = 0;
     const observe = createPassiveObserver(
-      { asyncify_get_state: () => state },
+      () => state,
       () => { reads += 1; },
     );
     assert.equal(observe(), false);
@@ -39,7 +39,7 @@ describe('passive enhancement observer', () => {
   it('requires Asyncify to remain Normal across the read', () => {
     let state = 0;
     const observe = createPassiveObserver(
-      { asyncify_get_state: () => state },
+      () => state,
       () => { state = 1; },
     );
     assert.equal(observe(), false);
@@ -48,13 +48,13 @@ describe('passive enhancement observer', () => {
   it('fails closed when a state getter or companion read traps', () => {
     assert.equal(
       createPassiveObserver(
-        { asyncify_get_state: () => { throw new Error('state'); } },
+        () => { throw new Error('state'); },
         () => {},
       )(),
       false,
     );
     assert.equal(
-      createPassiveObserver({}, () => { throw new Error('read'); })(),
+      createPassiveObserver(null, () => { throw new Error('read'); })(),
       false,
     );
   });

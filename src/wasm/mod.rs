@@ -102,6 +102,17 @@ struct RuntimeModule {
     enhancement_manifest: Option<serde_json::Value>,
 }
 
+impl RuntimeModule {
+    fn unavailable(build: Option<String>, state: &'static str, enhance: bool) -> Self {
+        Self {
+            build,
+            template_save: state,
+            enhancements: if enhance { state } else { enhancements::OFF },
+            enhancement_manifest: None,
+        }
+    }
+}
+
 /// Per-runtime launch facts injected before the page chooses JSPI or Asyncify.
 pub struct Module {
     runtimes: BTreeMap<&'static str, RuntimeModule>,
@@ -130,19 +141,10 @@ pub struct Prepared {
 
 pub fn failed(enhance: bool) -> Prepared {
     let mut runtimes = BTreeMap::new();
-    for runtime in [Runtime::Jspi, Runtime::Asyncify] {
+    for runtime in Runtime::ALL {
         runtimes.insert(
             runtime.key(),
-            RuntimeModule {
-                build: None,
-                template_save: "failed",
-                enhancements: if enhance {
-                    enhancements::FAILED
-                } else {
-                    enhancements::OFF
-                },
-                enhancement_manifest: None,
-            },
+            RuntimeModule::unavailable(None, enhancements::FAILED, enhance),
         );
     }
     Prepared {
@@ -167,7 +169,7 @@ pub fn prepare(
 
     let mut derived = DerivedModules::default();
     let mut runtimes = BTreeMap::new();
-    for runtime in [Runtime::Jspi, Runtime::Asyncify] {
+    for runtime in Runtime::ALL {
         let (path, module) =
             prepare_runtime(root, derived_root, &feed, runtime, enhance, generations);
         if let Some(path) = path {
@@ -201,7 +203,7 @@ pub fn certificate_candidate(root: &Path) -> Outcome<String> {
 
     let mut runtimes = Vec::new();
     let mut layout_proofs = Vec::new();
-    for runtime in [Runtime::Jspi, Runtime::Asyncify] {
+    for runtime in Runtime::ALL {
         let prototype_runtime = prototype
             .runtimes
             .iter()
@@ -271,16 +273,7 @@ fn prepare_runtime(
             note!("[gwnative] {}: {reason}", runtime.key());
             (
                 None,
-                RuntimeModule {
-                    build: None,
-                    template_save: "failed",
-                    enhancements: if enhance {
-                        enhancements::FAILED
-                    } else {
-                        enhancements::OFF
-                    },
-                    enhancement_manifest: None,
-                },
+                RuntimeModule::unavailable(None, enhancements::FAILED, enhance),
             )
         }
     }
@@ -310,16 +303,7 @@ fn prepare_runtime_inner(
         );
         return Ok((
             None,
-            RuntimeModule {
-                build: Some(compatibility_id),
-                template_save: "uncertified",
-                enhancements: if enhance {
-                    enhancements::UNCERTIFIED
-                } else {
-                    enhancements::OFF
-                },
-                enhancement_manifest: None,
-            },
+            RuntimeModule::unavailable(Some(compatibility_id), enhancements::UNCERTIFIED, enhance),
         ));
     };
     let compatibility_id = runtime_compatibility_id(
@@ -332,16 +316,7 @@ fn prepare_runtime_inner(
     if generations.transform_disabled(runtime.key(), &compatibility_id) {
         return Ok((
             None,
-            RuntimeModule {
-                build: Some(compatibility_id),
-                template_save: "failed",
-                enhancements: if enhance {
-                    enhancements::FAILED
-                } else {
-                    enhancements::OFF
-                },
-                enhancement_manifest: None,
-            },
+            RuntimeModule::unavailable(Some(compatibility_id), enhancements::FAILED, enhance),
         ));
     }
 
@@ -597,7 +572,7 @@ mod tests {
         let feed = certificate::bundled().unwrap();
         let generations = generation::Store::open(temporary.0.join("support").join("generations"));
 
-        for runtime in [Runtime::Jspi, Runtime::Asyncify] {
+        for runtime in Runtime::ALL {
             fs::write(
                 root.join(runtime.wasm_name()),
                 format!("new {} wasm", runtime.key()),
@@ -712,8 +687,9 @@ mod tests {
                 rewrite::verify_layout(&wasm, layout).unwrap();
             }
             let output = rewrite::candidate(&wasm, selected.runtime).unwrap();
-            eprintln!("{} candidate sha256 {}", runtime.key(), digest(&output));
-            assert_eq!(digest(&output), selected.runtime.template.output_sha256);
+            let output_hash = digest(&output);
+            eprintln!("{} candidate sha256 {output_hash}", runtime.key());
+            assert_eq!(output_hash, selected.runtime.template.output_sha256);
             verified += 1;
         }
         if external {

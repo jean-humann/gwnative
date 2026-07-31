@@ -29,14 +29,11 @@ export function asyncifyStateReader(exports, runtime) {
  * both before and after the companion runs; Unwinding (1) and Rewinding (2)
  * never enter it.
  *
- * @param {WebAssembly.Exports | Record<string, any>} exports
+ * @param {(() => number) | null} state
  * @param {() => void} observe
  * @returns {() => boolean}
  */
-export function createPassiveObserver(exports, observe) {
-  const state = typeof exports?.asyncify_get_state === 'function'
-    ? () => Number(exports.asyncify_get_state())
-    : null;
+export function createPassiveObserver(state, observe) {
   return () => {
     try {
       if (state !== null && state() !== 0) return false;

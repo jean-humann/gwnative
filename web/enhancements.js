@@ -197,6 +197,24 @@ export async function installEnhancements(instance, manifestValue, selection) {
   let stopObserver = () => {};
   let disposeCursor = () => {};
   let disposeReadout = () => {};
+  const release = () => {
+    stopObserver();
+    disposeCursor();
+    disposeReadout();
+    // Page teardown is not a reason to enter an Asyncify module during
+    // unwind/rewind. Leaking these page-lifetime allocations is harmless
+    // because the instance is being discarded with the page.
+    if (!runtimeIdle()) return;
+    for (const pointer of [
+      stackAllocationPointer,
+      statePointer,
+      cursorPointer,
+      configPointer,
+      snapshotPointer,
+    ]) {
+      if (pointer) free(pointer);
+    }
+  };
   try {
     // The client's own allocator, so these are inside the memory the companion
     // is about to be instantiated over. Nothing the page allocates for itself
@@ -332,7 +350,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
     };
     window.gwCompanionRuntime = runtime;
     let kernelFailed = false;
-    const passiveObserve = createPassiveObserver(exports, () => {
+    const passiveObserve = createPassiveObserver(asyncifyState, () => {
       try {
         kernelObserve(statePointer);
       } catch (error) {
@@ -353,19 +371,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
 
     const teardown = () => {
       runtime.observerEnabled = false;
-      stopObserver();
-      disposeCursor();
-      disposeReadout();
-      // Page teardown is not a reason to enter an Asyncify module during
-      // unwind/rewind. Leaking these page-lifetime allocations is harmless
-      // because the instance is being discarded with the page.
-      if (runtimeIdle()) {
-        free(stackAllocationPointer);
-        free(statePointer);
-        if (cursorPointer) free(cursorPointer);
-        free(configPointer);
-        if (snapshotPointer) free(snapshotPointer);
-      }
+      release();
       window.gwCompanionRuntime = null;
     };
     window.addEventListener('pagehide', teardown, { once: true });
@@ -375,16 +381,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
     console.log(`[enhancement] installed for artifact family ${manifest.familyId.slice(0, 12)}`);
     return runtime;
   } catch (error) {
-    stopObserver();
-    disposeCursor();
-    disposeReadout();
-    if (runtimeIdle()) {
-      if (stackAllocationPointer) free(stackAllocationPointer);
-      if (statePointer) free(statePointer);
-      if (cursorPointer) free(cursorPointer);
-      if (configPointer) free(configPointer);
-      if (snapshotPointer) free(snapshotPointer);
-    }
+    release();
     window.gwCompanionState = Object.freeze({
       status: 'error',
       reason: error instanceof Error ? error.message : String(error),

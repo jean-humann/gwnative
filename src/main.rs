@@ -376,12 +376,7 @@ fn install_client(
     // pending manifest names the exact installed artifact generation, so
     // promote it without re-downloading or unproving the client.
     if let Ok((_, source, offered)) = &plan
-        && should_activate_pending_manifest(
-            force_sync,
-            missing.is_empty(),
-            *source,
-            generations.stale(offered),
-        )
+        && should_activate_pending_manifest(force_sync, missing.is_empty(), *source, outdated)
     {
         let failure = match client.activate_manifest(&paths::support_dir()) {
             Ok(true) => {

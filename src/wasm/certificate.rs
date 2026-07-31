@@ -48,6 +48,8 @@ pub enum Runtime {
 }
 
 impl Runtime {
+    pub const ALL: [Self; 2] = [Self::Jspi, Self::Asyncify];
+
     pub fn key(self) -> &'static str {
         match self {
             Self::Jspi => "jspi",
@@ -348,7 +350,7 @@ impl LayoutCertificate {
 pub(super) fn artifact_family_id(runtimes: &[RuntimeCertificate]) -> Outcome<String> {
     let mut digest = sha2::Sha256::new();
     digest.update(b"gwnative-artifact-family-v1\0");
-    for expected in [Runtime::Jspi, Runtime::Asyncify] {
+    for expected in Runtime::ALL {
         let mut matches = runtimes
             .iter()
             .filter(|runtime| runtime.runtime == expected);
@@ -539,15 +541,9 @@ fn refresh(cache: &Path, minimum_sequence: u64) -> Outcome<()> {
         ));
     }
     fs::create_dir_all(cache).map_err(|e| format!("{}: {e}", cache.display()))?;
-    write_atomic(&cache.join(FEED_NAME), &feed)?;
-    write_atomic(&cache.join(SIGNATURE_NAME), &signature)?;
+    super::write_atomic(&cache.join(FEED_NAME), &feed)?;
+    super::write_atomic(&cache.join(SIGNATURE_NAME), &signature)?;
     Ok(())
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Outcome<()> {
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes).map_err(|e| format!("{}: {e}", temporary.display()))?;
-    fs::rename(&temporary, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 pub fn markers_json() -> String {
