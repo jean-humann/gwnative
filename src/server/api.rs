@@ -177,21 +177,6 @@ fn e2e(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io:
     let Some(hub) = &context.e2e else {
         return text(stream, 404, "native E2E API is disabled");
     };
-    let after = || {
-        request
-            .param("after")
-            .unwrap_or_else(|| "0".into())
-            .parse::<u64>()
-            .map_err(|_| "after must be an unsigned integer")
-    };
-    let wait_ms = || {
-        request
-            .param("waitMs")
-            .unwrap_or_else(|| "0".into())
-            .parse::<u64>()
-            .map(|value| value.min(crate::e2e_api::MAX_WAIT_MS))
-            .map_err(|_| "waitMs must be an unsigned integer")
-    };
 
     match (request.path.as_str(), request.method.as_str()) {
         ("__e2e/v1", "GET") => json(stream, 200, &hub.description_json()),
@@ -199,9 +184,9 @@ fn e2e(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io:
             Ok(action) => json(stream, 200, &action),
             Err(reason) => text(stream, 400, &reason),
         },
-        ("__e2e/v1/actions", "GET") => match (after(), wait_ms()) {
-            (Ok(after), Ok(wait_ms)) => json(stream, 200, &hub.actions_json_after(after, wait_ms)),
-            (Err(reason), _) | (_, Err(reason)) => text(stream, 400, reason),
+        ("__e2e/v1/actions", "GET") => match long_poll(request, crate::e2e_api::MAX_WAIT_MS) {
+            Ok((after, wait_ms)) => json(stream, 200, &hub.actions_json_after(after, wait_ms)),
+            Err(reason) => text(stream, 400, reason),
         },
         ("__e2e/v1/events", "POST") => match hub.publish_event(&request.body) {
             Ok(sequence) => json(
@@ -213,9 +198,9 @@ fn e2e(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io:
             ),
             Err(reason) => text(stream, 400, &reason),
         },
-        ("__e2e/v1/events", "GET") => match (after(), wait_ms()) {
-            (Ok(after), Ok(wait_ms)) => json(stream, 200, &hub.events_json_after(after, wait_ms)),
-            (Err(reason), _) | (_, Err(reason)) => text(stream, 400, reason),
+        ("__e2e/v1/events", "GET") => match long_poll(request, crate::e2e_api::MAX_WAIT_MS) {
+            Ok((after, wait_ms)) => json(stream, 200, &hub.events_json_after(after, wait_ms)),
+            Err(reason) => text(stream, 400, reason),
         },
         ("__e2e/v1", _) => not_allowed(stream, "GET"),
         ("__e2e/v1/actions" | "__e2e/v1/events", _) => not_allowed(stream, "GET, POST"),
@@ -236,32 +221,17 @@ fn game_description(
 
 fn game_state(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
     match request.method.as_str() {
-        "GET" => {
-            let after = match request
-                .param("after")
-                .unwrap_or_else(|| "0".into())
-                .parse::<u64>()
-            {
-                Ok(value) => value,
-                Err(_) => return text(stream, 400, "after must be an unsigned integer"),
-            };
-            let wait_ms = match request
-                .param("waitMs")
-                .unwrap_or_else(|| "0".into())
-                .parse::<u64>()
-            {
-                Ok(value) => value.min(crate::game_api::MAX_WAIT_MS),
-                Err(_) => return text(stream, 400, "waitMs must be an unsigned integer"),
-            };
-            match context.game_api.state_json_after(after, wait_ms) {
-                Some(state) => json(stream, 200, &state),
+        "GET" => match long_poll(request, crate::game_api::MAX_WAIT_MS) {
+            Ok((after, wait_ms)) => match context.game_api.state_json_after(after, wait_ms) {
+                Some(state) => json(stream, 200, state.as_ref()),
                 None => text(
                     stream,
                     404,
                     "no newer certified game state has been published",
                 ),
-            }
-        }
+            },
+            Err(reason) => text(stream, 400, reason),
+        },
         "PUT" => match context.game_api.publish(&request.body) {
             Ok(revision) => json(
                 stream,
@@ -274,6 +244,20 @@ fn game_state(request: &Request, stream: &mut TcpStream, context: &Context) -> s
         },
         _ => not_allowed(stream, "GET, PUT"),
     }
+}
+
+fn long_poll(request: &Request, maximum_wait_ms: u64) -> Result<(u64, u64), &'static str> {
+    let after = request
+        .param("after")
+        .unwrap_or_else(|| "0".into())
+        .parse::<u64>()
+        .map_err(|_| "after must be an unsigned integer")?;
+    let wait_ms = request
+        .param("waitMs")
+        .unwrap_or_else(|| "0".into())
+        .parse::<u64>()
+        .map_err(|_| "waitMs must be an unsigned integer")?;
+    Ok((after, wait_ms.min(maximum_wait_ms)))
 }
 
 fn mod_manifest(
@@ -567,7 +551,10 @@ fn prefetch(
     // it could take. Both are reported on every poll so the page can show the
     // price before the player agrees to it — asking for 4.2 GB and then filling
     // the disk is the failure this exists to avoid.
-    let outstanding = (store.chunk_count() - store.resident_count()) as u64 * store.chunk_size();
+    let total = store.chunk_count();
+    let cached = store.resident_count();
+    let chunk_size = store.chunk_size();
+    let outstanding = (total - cached) as u64 * chunk_size;
     // Two numbers, because they answer different questions: `outstanding` is
     // what the download would write and belongs in the prose, `needed` is what
     // the volume must have and is what the refusal below compares. Taken once,
@@ -619,9 +606,6 @@ fn prefetch(
     // the check is what a full launch does before deciding whether a sweep is
     // needed — but the page should not have to know that to render.
     let (checked, verify_total, verifying, discarded) = store.verify_progress();
-    let cached = store.resident_count();
-    let total = store.chunk_count();
-    let chunk_size = store.chunk_size();
     // Built by the encoder rather than spelled out, like [`diag`] above it and
     // every other JSON body in this crate. Nothing in here is a string today,
     // so writing the braces by hand was not wrong — it was one field away from

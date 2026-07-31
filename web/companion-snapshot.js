@@ -1302,9 +1302,15 @@ function readUi(view) {
       || (parentValue !== 0xffff_ffff
         && (parentValue >= MAX_RAW_UI_FRAMES || parentValue === frameId))
       || (positionValid
-        ? !Object.values(position).every(validCoordinate)
+        ? !validCoordinate(position.left)
+          || !validCoordinate(position.bottom)
+          || !validCoordinate(position.right)
+          || !validCoordinate(position.top)
         : positionFlags !== 0
-          || Object.values(position).some((value) => value !== 0))
+          || position.left !== 0
+          || position.bottom !== 0
+          || position.right !== 0
+          || position.top !== 0)
     ) {
       return null;
     }
@@ -1594,6 +1600,66 @@ function readDialog(view) {
   });
 }
 
+const SNAPSHOT_DOMAINS = Object.freeze([
+  { key: 'party', flag: FLAGS.party, offset: 64, bytes: 632, read: readParty },
+  {
+    key: 'skillbar',
+    flag: FLAGS.skillbar,
+    offset: 696,
+    bytes: 172,
+    read: (view, state) => readSkillbar(view, state.playerId),
+  },
+  {
+    key: 'effects',
+    flag: FLAGS.effects,
+    offset: 868,
+    bytes: 1936,
+    read: (view, state) => readEffects(view, state.playerId),
+  },
+  { key: 'agents', flag: FLAGS.agents, offset: 2804, bytes: 7180, read: readMapAgents },
+  { key: 'quests', flag: FLAGS.quests, offset: 9984, bytes: 2064, read: readQuests },
+  {
+    key: 'inventory',
+    flag: FLAGS.inventory,
+    offset: 12048,
+    bytes: 33236,
+    read: readInventory,
+  },
+  { key: 'social', flag: FLAGS.social, offset: 45284, bytes: 2656, read: readSocial },
+  {
+    key: 'completion',
+    flag: FLAGS.completion,
+    offset: 47940,
+    bytes: 792,
+    read: readCompletion,
+  },
+  { key: 'camera', flag: FLAGS.camera, offset: 48732, bytes: 52, read: readCamera },
+  { key: 'trade', flag: FLAGS.trade, offset: 48784, bytes: 280, read: readTrade },
+  { key: 'ui', flag: FLAGS.ui, offset: 49064, bytes: 7188, read: readUi },
+  {
+    key: 'merchant',
+    flag: FLAGS.merchant,
+    offset: 56252,
+    bytes: 524,
+    read: readMerchant,
+  },
+  {
+    key: 'progression',
+    flag: FLAGS.progression,
+    offset: 56776,
+    bytes: 68,
+    read: readProgression,
+  },
+  {
+    key: 'skillUnlocks',
+    flag: FLAGS.skillUnlocks,
+    offset: 56844,
+    bytes: 2932,
+    read: readSkillUnlocks,
+  },
+  { key: 'dialog', flag: FLAGS.dialog, offset: 59776, bytes: 800, read: readDialog },
+]);
+
 /**
  * Decode one state snapshot.
  *
@@ -1710,125 +1776,17 @@ export function readCompanionSnapshot(buffer, pointer) {
   ) {
     return Object.freeze({ status: 'waiting', reason: 'corrupt' });
   }
-  const partyValid = (flags & FLAGS.party) !== 0;
-  const party = partyValid ? readParty(view) : null;
-  if (
-    (partyValid && party === null)
-    || (!partyValid && !wordsAreZero(view, 64, 632))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const skillbarValid = (flags & FLAGS.skillbar) !== 0;
-  const skillbar = skillbarValid ? readSkillbar(view, state.playerId) : null;
-  if (
-    (skillbarValid && skillbar === null)
-    || (!skillbarValid && !wordsAreZero(view, 696, 172))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const effectsValid = (flags & FLAGS.effects) !== 0;
-  const effects = effectsValid ? readEffects(view, state.playerId) : null;
-  if (
-    (effectsValid && effects === null)
-    || (!effectsValid && !wordsAreZero(view, 868, 1936))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const agentsValid = (flags & FLAGS.agents) !== 0;
-  const agents = agentsValid ? readMapAgents(view) : null;
-  if (
-    (agentsValid && agents === null)
-    || (!agentsValid && !wordsAreZero(view, 2804, 7180))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const questsValid = (flags & FLAGS.quests) !== 0;
-  const quests = questsValid ? readQuests(view) : null;
-  if (
-    (questsValid && quests === null)
-    || (!questsValid && !wordsAreZero(view, 9984, 2064))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const inventoryValid = (flags & FLAGS.inventory) !== 0;
-  const inventory = inventoryValid ? readInventory(view) : null;
-  if (
-    (inventoryValid && inventory === null)
-    || (!inventoryValid && !wordsAreZero(view, 12048, 33236))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const socialValid = (flags & FLAGS.social) !== 0;
-  const social = socialValid ? readSocial(view) : null;
-  if (
-    (socialValid && social === null)
-    || (!socialValid && !wordsAreZero(view, 45284, 2656))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const completionValid = (flags & FLAGS.completion) !== 0;
-  const completion = completionValid ? readCompletion(view) : null;
-  if (
-    (completionValid && completion === null)
-    || (!completionValid && !wordsAreZero(view, 47940, 792))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const cameraValid = (flags & FLAGS.camera) !== 0;
-  const camera = cameraValid ? readCamera(view) : null;
-  if (
-    (cameraValid && camera === null)
-    || (!cameraValid && !wordsAreZero(view, 48732, 52))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const tradeValid = (flags & FLAGS.trade) !== 0;
-  const trade = tradeValid ? readTrade(view) : null;
-  if (
-    (tradeValid && trade === null)
-    || (!tradeValid && !wordsAreZero(view, 48784, 280))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const uiValid = (flags & FLAGS.ui) !== 0;
-  const ui = uiValid ? readUi(view) : null;
-  if (
-    (uiValid && ui === null)
-    || (!uiValid && !wordsAreZero(view, 49064, 7188))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const merchantValid = (flags & FLAGS.merchant) !== 0;
-  const merchant = merchantValid ? readMerchant(view) : null;
-  if (
-    (merchantValid && merchant === null)
-    || (!merchantValid && !wordsAreZero(view, 56252, 524))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const progressionValid = (flags & FLAGS.progression) !== 0;
-  const progression = progressionValid ? readProgression(view) : null;
-  if (
-    (progressionValid && progression === null)
-    || (!progressionValid && !wordsAreZero(view, 56776, 68))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const skillUnlocksValid = (flags & FLAGS.skillUnlocks) !== 0;
-  const skillUnlocks = skillUnlocksValid ? readSkillUnlocks(view) : null;
-  if (
-    (skillUnlocksValid && skillUnlocks === null)
-    || (!skillUnlocksValid && !wordsAreZero(view, 56844, 2932))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
-  }
-  const dialogValid = (flags & FLAGS.dialog) !== 0;
-  const dialog = dialogValid ? readDialog(view) : null;
-  if (
-    (dialogValid && dialog === null)
-    || (!dialogValid && !wordsAreZero(view, 59776, 800))
-  ) {
-    return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+  const domains = {};
+  for (const domain of SNAPSHOT_DOMAINS) {
+    const present = (flags & domain.flag) !== 0;
+    const value = present ? domain.read(view, state) : null;
+    if (
+      (present && value === null)
+      || (!present && !wordsAreZero(view, domain.offset, domain.bytes))
+    ) {
+      return Object.freeze({ status: 'waiting', reason: 'corrupt' });
+    }
+    if (value !== null) domains[domain.key] = value;
   }
   // The nested records are read after the inexpensive header check above.
   // Close the seqlock around them as well: the writer may have started a new
@@ -1843,21 +1801,7 @@ export function readCompanionSnapshot(buffer, pointer) {
     targetValid,
     targetKind: targetValid ? agentKind(state.agentTypeBits) : 'None',
     rangeName: RANGE_NAMES[state.rangeBand] ?? 'None',
-    ...(party ? { party } : {}),
-    ...(skillbar ? { skillbar } : {}),
-    ...(effects ? { effects } : {}),
-    ...(agents ? { agents } : {}),
-    ...(quests ? { quests } : {}),
-    ...(inventory ? { inventory } : {}),
-    ...(social ? { social } : {}),
-    ...(completion ? { completion } : {}),
-    ...(camera ? { camera } : {}),
-    ...(trade ? { trade } : {}),
-    ...(ui ? { ui } : {}),
-    ...(merchant ? { merchant } : {}),
-    ...(progression ? { progression } : {}),
-    ...(skillUnlocks ? { skillUnlocks } : {}),
-    ...(dialog ? { dialog } : {}),
+    ...domains,
   });
 }
 

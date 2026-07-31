@@ -288,7 +288,7 @@ where
                 validate_profile(value)?;
                 set_once(&mut invocation.profile, value.to_owned(), option)?;
             }
-            "--new-instance" => no_inline(option, inline, || invocation.new_instance = true)?,
+            "--new-instance" => set_flag(&mut invocation.new_instance, option, inline)?,
             "--host-port" | "-p" | "--port" => {
                 let value = parse_number::<u16>(
                     take_value(&args, &mut index, option, inline)?,
@@ -327,22 +327,22 @@ where
                 )?;
                 set_once(&mut invocation.jobs, value, option)?;
             }
-            "--offline" => no_inline(option, inline, || invocation.offline = true)?,
-            "--no-update" => no_inline(option, inline, || invocation.no_update = true)?,
-            "--no-prefetch" => no_inline(option, inline, || invocation.no_prefetch = true)?,
+            "--offline" => set_flag(&mut invocation.offline, option, inline)?,
+            "--no-update" => set_flag(&mut invocation.no_update, option, inline)?,
+            "--no-prefetch" => set_flag(&mut invocation.no_prefetch, option, inline)?,
             "--no-browser" => {
-                no_inline(option, inline, || {})?;
+                no_inline(option, inline)?;
                 set_command(&mut invocation, &mut command_seen, Command::Serve, option)?;
             }
             "--debug" | "--devtools" => {
-                no_inline(option, inline, || invocation.devtools = true)?;
+                set_flag(&mut invocation.devtools, option, inline)?;
             }
             "-v" | "--verbose" => {
-                no_inline(option, inline, || invocation.verbose = true)?;
+                set_flag(&mut invocation.verbose, option, inline)?;
             }
 
             "-autologin" => {
-                no_inline(option, inline, || invocation.legacy.autologin = true)?;
+                set_flag(&mut invocation.legacy.autologin, option, inline)?;
                 translated(
                     &mut invocation,
                     option,
@@ -454,7 +454,7 @@ where
                 ));
             }
             "-mute" | "-nosound" => {
-                no_inline(option, inline, || invocation.legacy.mute = true)?;
+                set_flag(&mut invocation.legacy.mute, option, inline)?;
             }
             "-diag" => invocation.legacy.diagnostics = true,
             "-perf" => invocation.legacy.performance = true,
@@ -649,11 +649,16 @@ where
     Ok(parsed)
 }
 
-fn no_inline(option: &str, inline: Option<&str>, apply: impl FnOnce()) -> Result<(), Exit> {
+fn no_inline(option: &str, inline: Option<&str>) -> Result<(), Exit> {
     if inline.is_some() {
         return Err(value_error(option, "does not take a value"));
     }
-    apply();
+    Ok(())
+}
+
+fn set_flag(slot: &mut bool, option: &str, inline: Option<&str>) -> Result<(), Exit> {
+    no_inline(option, inline)?;
+    *slot = true;
     Ok(())
 }
 
@@ -675,26 +680,27 @@ fn validate_profile(value: &str) -> Result<(), Exit> {
 }
 
 fn translated(invocation: &mut Invocation, option: &str, message: &str) {
-    invocation.notices.push(Notice {
-        option: option.to_owned(),
-        kind: NoticeKind::Translated,
-        message: message.to_owned(),
-    });
+    notice(invocation, option, NoticeKind::Translated, message);
 }
 
 fn unsupported(invocation: &mut Invocation, option: &str, message: &str) {
-    invocation.notices.push(Notice {
-        option: option.to_owned(),
-        kind: NoticeKind::Unsupported,
-        message: message.to_owned(),
-    });
+    notice(invocation, option, NoticeKind::Unsupported, message);
 }
 
 fn no_known_effect(invocation: &mut Invocation, option: &str) {
+    notice(
+        invocation,
+        option,
+        NoticeKind::NoKnownEffect,
+        "the official Guild Wars documentation records no known usable behaviour",
+    );
+}
+
+fn notice(invocation: &mut Invocation, option: &str, kind: NoticeKind, message: &str) {
     invocation.notices.push(Notice {
         option: option.to_owned(),
-        kind: NoticeKind::NoKnownEffect,
-        message: "the official Guild Wars documentation records no known usable behaviour".into(),
+        kind,
+        message: message.to_owned(),
     });
 }
 

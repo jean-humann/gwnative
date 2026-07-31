@@ -6,7 +6,7 @@
 //! game memory or depending on build-specific offsets.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -566,7 +566,7 @@ pub struct State {
     pub dialog: Option<Dialog>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Envelope {
     api_version: u32,
@@ -575,9 +575,14 @@ struct Envelope {
     state: State,
 }
 
+struct Published {
+    revision: u64,
+    json: Arc<[u8]>,
+}
+
 pub struct Hub {
     revision: AtomicU64,
-    state: Mutex<Option<Envelope>>,
+    state: Mutex<Option<Published>>,
     changed: Condvar,
 }
 
@@ -614,33 +619,37 @@ impl Hub {
                 .unwrap_or(u64::MAX),
             state,
         };
+        let json: Arc<[u8]> = serde_json::to_vec(&envelope)
+            .map_err(|error| format!("game state could not be encoded: {error}"))?
+            .into();
         *self
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(envelope);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Published { revision, json });
         self.changed.notify_all();
         Ok(revision)
     }
 
-    pub fn state_json(&self) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    fn state_json(&self) -> Option<Arc<[u8]>> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_ref()
-            .and_then(|state| serde_json::to_vec(state).ok())
+            .map(|state| Arc::clone(&state.json))
     }
 
     /// Wait for a revision newer than `after`, then return it.
     ///
     /// A caller with no state yet gets `None` after the bounded wait. Existing
     /// callers pass zero milliseconds and retain the immediate GET contract.
-    pub fn state_json_after(&self, after: u64, wait_ms: u64) -> Option<Vec<u8>> {
+    pub fn state_json_after(&self, after: u64, wait_ms: u64) -> Option<Arc<[u8]>> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let is_newer =
-            |state: &Option<Envelope>| state.as_ref().is_some_and(|value| value.revision > after);
+            |state: &Option<Published>| state.as_ref().is_some_and(|value| value.revision > after);
         if !is_newer(&state) && wait_ms > 0 {
             state = self
                 .changed
@@ -655,7 +664,7 @@ impl Hub {
         state
             .as_ref()
             .filter(|value| value.revision > after)
-            .and_then(|value| serde_json::to_vec(value).ok())
+            .map(|value| Arc::clone(&value.json))
     }
 
     pub fn description_json(&self) -> Vec<u8> {
@@ -675,7 +684,11 @@ impl Hub {
                     "agents", "quests", "inventory", "social", "completion", "camera",
                     "trade", "ui", "dialog", "merchant", "progression", "skillUnlocks"
                 ],
-                "available": self.state_json().is_some(),
+                "available": self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_some(),
             },
             "actions": {
                 "available": false,

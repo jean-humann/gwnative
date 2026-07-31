@@ -169,6 +169,19 @@ export async function installEnhancements(instance, module, selection) {
   let disposeCursor = () => {};
   let disposeReadout = () => {};
   let companionDispatch = null;
+  const release = () => {
+    hookSlot.value = 0;
+    stopObserver();
+    disposeCursor();
+    disposeReadout();
+    if (table.get(manifest.tableSlot) === companionDispatch) {
+      table.set(manifest.tableSlot, null);
+    }
+    if (cursorPointer) free(cursorPointer);
+    if (configPointer) free(configPointer);
+    if (snapshotPointer) free(snapshotPointer);
+    if (kernelWorkspacePointer) free(kernelWorkspacePointer);
+  };
   try {
     const response = await fetch('companion-kernel.wasm');
     if (!response.ok) throw new Error('the companion module is unavailable');
@@ -315,17 +328,7 @@ export async function installEnhancements(instance, module, selection) {
     const teardown = () => {
       // Same order reversed. The global goes first, so nothing is calling the
       // tick by the time its slot is cleared and its regions are freed.
-      hookSlot.value = 0;
-      stopObserver();
-      disposeCursor();
-      disposeReadout();
-      if (table.get(manifest.tableSlot) === companionDispatch) {
-        table.set(manifest.tableSlot, null);
-      }
-      if (cursorPointer) free(cursorPointer);
-      free(configPointer);
-      if (snapshotPointer) free(snapshotPointer);
-      free(kernelWorkspacePointer);
+      release();
       window.gwCompanionRuntime = null;
     };
     window.addEventListener('pagehide', teardown, { once: true });
@@ -335,17 +338,7 @@ export async function installEnhancements(instance, module, selection) {
     console.log(`[enhancement] installed for client build ${manifest.buildId}`);
     return runtime;
   } catch (error) {
-    hookSlot.value = 0;
-    stopObserver();
-    disposeCursor();
-    disposeReadout();
-    if (table.get(manifest.tableSlot) === companionDispatch) {
-      table.set(manifest.tableSlot, null);
-    }
-    if (cursorPointer) free(cursorPointer);
-    if (configPointer) free(configPointer);
-    if (snapshotPointer) free(snapshotPointer);
-    if (kernelWorkspacePointer) free(kernelWorkspacePointer);
+    release();
     window.gwCompanionState = Object.freeze({
       status: 'error',
       reason: error instanceof Error ? error.message : String(error),

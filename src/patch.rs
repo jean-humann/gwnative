@@ -165,15 +165,16 @@ impl Client {
         Manifest::parse(&bytes)
     }
 
-    /// Chunks named by every usable manifest cached for this installation.
+    /// Chunks named by every other usable profile manifest cached here.
     ///
     /// Profiles isolate their client generation but deliberately share the
     /// content-addressed chunk directory. Pruning against only the profile
     /// being launched can therefore strand another installed generation. The
-    /// default profile and each immediate named-profile directory contribute
-    /// only when their cache belongs to this patch root and still parses under
-    /// the manifest bounds.
-    pub fn cached_profile_chunk_names(&self, base: &Path) -> HashSet<String> {
+    /// The inactive default profile and each inactive immediate named-profile
+    /// directory contribute only when their cache belongs to this patch root
+    /// and still parses under the manifest bounds. The caller already holds the
+    /// active manifest and adds its chunks directly.
+    pub fn cached_other_profile_chunk_names(&self, base: &Path, active: &Path) -> HashSet<String> {
         let mut directories = vec![base.to_owned()];
         if let Ok(entries) = fs::read_dir(base.join("profiles")) {
             directories.extend(entries.flatten().filter_map(|entry| {
@@ -186,6 +187,7 @@ impl Client {
         }
         directories
             .into_iter()
+            .filter(|directory| directory != active)
             .filter_map(|directory| read_cache(&directory, &self.root))
             .filter_map(|(_, bytes)| Manifest::parse(&bytes).ok())
             .flat_map(|manifest| manifest.chunk_names())
@@ -783,8 +785,12 @@ mod tests {
 
         let client = Client::new(PATCH_ROOT, String::new());
         assert_eq!(
-            client.cached_profile_chunk_names(&base.0),
-            HashSet::from(["a".repeat(64), "b".repeat(64)])
+            client.cached_other_profile_chunk_names(&base.0, &base.0),
+            HashSet::from(["b".repeat(64)])
+        );
+        assert_eq!(
+            client.cached_other_profile_chunk_names(&base.0, &older),
+            HashSet::from(["a".repeat(64)])
         );
     }
 

@@ -215,6 +215,7 @@ fn main() {
             manifest,
             paths.cache_dir(),
             &base_support,
+            paths.support_dir(),
             invocation.no_prefetch || maintenance,
         ),
         // Without a manifest there is no chunk list, so there is no snapshot —
@@ -427,16 +428,12 @@ fn verify_and_download_snapshot(snapshot: Option<Arc<chunks::ChunkStore>>, jobs:
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
-    download_snapshot(Some(snapshot), jobs);
+    download_snapshot(snapshot, jobs);
 }
 
-fn download_snapshot(snapshot: Option<Arc<chunks::ChunkStore>>, jobs: Option<usize>) {
+fn download_snapshot(snapshot: Arc<chunks::ChunkStore>, jobs: Option<usize>) {
     const DISK_HEADROOM: u64 = 2 * 1024 * 1024 * 1024;
 
-    let Some(snapshot) = snapshot else {
-        note!("[gwnative] the full game image is unavailable without a cached manifest");
-        std::process::exit(1);
-    };
     let total = snapshot.chunk_count();
     let resident = snapshot.resident_count();
     let outstanding = total.saturating_sub(resident) as u64 * snapshot.chunk_size();
@@ -558,15 +555,14 @@ fn load_manifest(
     offline: bool,
     no_update: bool,
 ) -> error::Result<manifest::Manifest> {
-    let dir = support_dir;
     if offline {
-        return client.cached_manifest(dir);
+        return client.cached_manifest(support_dir);
     }
     if client_sync {
-        return client.fetch_manifest(dir);
+        return client.fetch_manifest(support_dir);
     }
-    let (manifest, source) = client.manifest(dir)?;
-    if source == patch::Source::Disk && !offline && !no_update {
+    let (manifest, source) = client.manifest(support_dir)?;
+    if source == patch::Source::Disk && !no_update {
         revalidate_manifest(support_dir.to_owned());
     }
     Ok(manifest)
@@ -660,10 +656,11 @@ fn open_and_warm_snapshot(
     manifest: manifest::Manifest,
     cache_dir: &Path,
     base_support: &Path,
+    support_dir: &Path,
     no_prefetch: bool,
 ) -> Option<Arc<chunks::ChunkStore>> {
     let cache_dir = cache_dir.to_owned();
-    let protected_chunks = client.cached_profile_chunk_names(base_support);
+    let protected_chunks = client.cached_other_profile_chunk_names(base_support, support_dir);
     match chunks::ChunkStore::open(client, manifest, cache_dir, protected_chunks).map(Arc::new) {
         Ok(store) => {
             note!(
@@ -676,10 +673,8 @@ fn open_and_warm_snapshot(
             // first frame are already local.
             if !no_prefetch {
                 store.warm_boot();
-            }
-            // And on the launch that has no list to replay — the first one —
-            // stay a little ahead of wherever the client is reading instead.
-            if !no_prefetch {
+                // And on the launch that has no list to replay — the first one —
+                // stay a little ahead of wherever the client is reading instead.
                 store.start_readahead();
             }
             Some(store)

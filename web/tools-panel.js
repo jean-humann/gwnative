@@ -114,6 +114,27 @@ const setText = (element, value) => {
 };
 
 function installWidgets(overlays) {
+  const widgets = {};
+  const controls = [];
+  const stateWidgets = [];
+  const registerState = (key, label, options) => {
+    const widget = overlays.register({
+      ...options,
+      visible: false,
+      render: (body, state) => {
+        if (state?.status !== 'ready') {
+          setText(body, state?.reason ?? 'Waiting for game');
+          return;
+        }
+        options.render(body, state);
+      },
+    });
+    widgets[key] = widget;
+    controls.push([label, widget]);
+    stateWidgets.push(widget);
+    return widget;
+  };
+
   const clock = overlays.register({
     id: 'clock',
     title: 'Clock',
@@ -121,6 +142,8 @@ function installWidgets(overlays) {
     visible: false,
     render: (body, value) => setText(body, value ?? '--:--:--'),
   });
+  widgets.clock = clock;
+  controls.push(['Clock', clock]);
   const started = performance.now();
   const timer = overlays.register({
     id: 'session-timer',
@@ -129,13 +152,13 @@ function installWidgets(overlays) {
     visible: false,
     render: (body, value) => setText(body, value ?? '0:00'),
   });
-  const target = overlays.register({
+  widgets.timer = timer;
+  controls.push(['Session timer', timer]);
+  registerState('target', 'Target details', {
     id: 'target-details',
     title: 'Target',
     position: { x: 16, y: 128 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       if (!state.targetValid) return setText(body, `Map ${state.mapId} · no target`);
       setText(body, `#${state.targetId} · ${Math.round(state.distance)} · ${state.rangeName}`);
     },
@@ -147,13 +170,13 @@ function installWidgets(overlays) {
     visible: false,
     render: (body, value) => setText(body, value ?? 'Measuring…'),
   });
-  const party = overlays.register({
+  widgets.performance = performanceWidget;
+  controls.push(['Performance', performanceWidget]);
+  registerState('party', 'Party roster', {
     id: 'party-roster',
     title: 'Party',
     position: { x: 16, y: 240 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       if (!state.party) return setText(body, 'Unavailable for this client build');
       setText(
         body,
@@ -162,13 +185,11 @@ function installWidgets(overlays) {
       );
     },
   });
-  const skillbar = overlays.register({
+  registerState('skillbar', 'Player skillbar', {
     id: 'player-skillbar',
     title: 'Skillbar',
     position: { x: 16, y: 296 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       if (!state.skillbar) return setText(body, 'Unavailable for this client build');
       setText(
         body,
@@ -178,13 +199,11 @@ function installWidgets(overlays) {
       );
     },
   });
-  const effects = overlays.register({
+  registerState('effects', 'Player effects', {
     id: 'player-effects',
     title: 'Effects',
     position: { x: 16, y: 352 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       if (!state.effects) return setText(body, 'Unavailable for this client build');
       const suffix =
         state.effects.buffsTruncated || state.effects.effectsTruncated ? ' · truncated' : '';
@@ -194,13 +213,11 @@ function installWidgets(overlays) {
       );
     },
   });
-  const agents = overlays.register({
+  registerState('agents', 'Map agents', {
     id: 'map-agents',
     title: 'Map agents',
     position: { x: 16, y: 408 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       if (!state.agents) return setText(body, 'Unavailable for this client build');
       const living = state.agents.agents.filter((agent) => agent.isLiving).length;
       const suffix = state.agents.truncated ? ' · truncated' : '';
@@ -210,13 +227,11 @@ function installWidgets(overlays) {
       );
     },
   });
-  const quests = overlays.register({
+  registerState('quests', 'Quest log', {
     id: 'quest-log',
     title: 'Quests',
     position: { x: 16, y: 464 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       if (!state.quests) return setText(body, 'Unavailable for this client build');
       const active = state.quests.activeQuestId === 0
         ? 'no active quest'
@@ -232,13 +247,11 @@ function installWidgets(overlays) {
       );
     },
   });
-  const inventory = overlays.register({
+  registerState('inventory', 'Inventory', {
     id: 'inventory',
     title: 'Inventory',
     position: { x: 16, y: 520 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       if (!state.inventory) return setText(body, 'Unavailable for this client build');
       const carried = state.inventory.items.filter((item) => item.isInventoryItem).length;
       const stored = state.inventory.items.filter((item) => item.isStorageItem).length;
@@ -252,13 +265,11 @@ function installWidgets(overlays) {
       );
     },
   });
-  const completion = overlays.register({
+  registerState('completion', 'Mission and map completion', {
     id: 'completion',
     title: 'Mission and map completion',
     position: { x: 16, y: 576 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       if (!state.completion) return setText(body, 'Unavailable for this client build');
       const normal = state.completion.normalMode.completedMissions.length;
       const hard = state.completion.hardMode.completedMissions.length;
@@ -270,13 +281,11 @@ function installWidgets(overlays) {
       );
     },
   });
-  const social = overlays.register({
+  registerState('social', 'Friends and guild', {
     id: 'social',
     title: 'Friends and guild',
     position: { x: 16, y: 632 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       if (!state.social) return setText(body, 'Unavailable for this client build');
       const online = state.social.friends.entries.filter((friend) => friend.isOnline).length;
       const suffix = state.social.friends.truncated ? ' · truncated' : '';
@@ -289,13 +298,11 @@ function installWidgets(overlays) {
       );
     },
   });
-  const camera = overlays.register({
+  registerState('camera', 'Camera and render state', {
     id: 'camera',
     title: 'Camera and render state',
     position: { x: 16, y: 688 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       if (!state.camera) return setText(body, 'Unavailable for this client build');
       const pitch = Math.round((state.camera.pitch * 180) / Math.PI);
       const fieldOfView = Math.round((state.camera.renderFieldOfView * 180) / Math.PI);
@@ -306,63 +313,51 @@ function installWidgets(overlays) {
       );
     },
   });
-  const trade = overlays.register({
+  registerState('trade', 'Trade offer', {
     id: 'trade',
     title: 'Trade offer',
     position: { x: 16, y: 744 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       setText(body, formatTradeSummary(state.trade));
     },
   });
-  const ui = overlays.register({
+  registerState('ui', 'UI frame inventory', {
     id: 'ui-frames',
     title: 'UI frames',
     position: { x: 16, y: 800 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       setText(body, formatUiSummary(state.ui));
     },
   });
-  const dialog = overlays.register({
+  registerState('dialog', 'NPC dialog identity', {
     id: 'npc-dialog',
     title: 'NPC dialog identity',
     position: { x: 16, y: 856 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       setText(body, formatDialogSummary(state.dialog));
     },
   });
-  const merchant = overlays.register({
+  registerState('merchant', 'Merchant item IDs', {
     id: 'merchant-items',
     title: 'Merchant item IDs',
     position: { x: 16, y: 912 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       setText(body, formatMerchantSummary(state.merchant));
     },
   });
-  const progression = overlays.register({
+  registerState('progression', 'Character progression', {
     id: 'character-progression',
     title: 'Character progression',
     position: { x: 16, y: 968 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       setText(body, formatProgressionSummary(state.progression));
     },
   });
-  const skillUnlocks = overlays.register({
+  registerState('skillUnlocks', 'Character skill unlocks', {
     id: 'skill-unlocks',
     title: 'Character skill unlocks',
     position: { x: 16, y: 1024 },
-    visible: false,
     render: (body, state) => {
-      if (state?.status !== 'ready') return setText(body, state?.reason ?? 'Waiting for game');
       setText(body, formatSkillUnlockSummary(state.skillUnlocks));
     },
   });
@@ -389,44 +384,14 @@ function installWidgets(overlays) {
   requestAnimationFrame(frame);
 
   window.addEventListener('gwnative:state', (event) => {
-    if (target.isVisible()) target.update(event.detail);
-    if (party.isVisible()) party.update(event.detail);
-    if (skillbar.isVisible()) skillbar.update(event.detail);
-    if (effects.isVisible()) effects.update(event.detail);
-    if (agents.isVisible()) agents.update(event.detail);
-    if (quests.isVisible()) quests.update(event.detail);
-    if (inventory.isVisible()) inventory.update(event.detail);
-    if (completion.isVisible()) completion.update(event.detail);
-    if (social.isVisible()) social.update(event.detail);
-    if (camera.isVisible()) camera.update(event.detail);
-    if (trade.isVisible()) trade.update(event.detail);
-    if (ui.isVisible()) ui.update(event.detail);
-    if (dialog.isVisible()) dialog.update(event.detail);
-    if (merchant.isVisible()) merchant.update(event.detail);
-    if (progression.isVisible()) progression.update(event.detail);
-    if (skillUnlocks.isVisible()) skillUnlocks.update(event.detail);
+    for (const widget of stateWidgets) {
+      if (widget.isVisible()) widget.update(event.detail);
+    }
   });
 
   return Object.freeze({
-    clock,
-    timer,
-    target,
-    performance: performanceWidget,
-    party,
-    skillbar,
-    effects,
-    agents,
-    quests,
-    inventory,
-    completion,
-    social,
-    camera,
-    trade,
-    ui,
-    dialog,
-    merchant,
-    progression,
-    skillUnlocks,
+    ...widgets,
+    controls: Object.freeze(controls),
     dispose: () => clearInterval(interval),
   });
 }
@@ -507,27 +472,7 @@ export function installToolsPanel({
   widgetTitle.style.cssText = 'font-size:15px;color:#d9b25c';
   const widgetButtons = document.createElement('div');
   widgetButtons.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px';
-  for (const [label, widget] of [
-    ['Clock', widgets.clock],
-    ['Session timer', widgets.timer],
-    ['Target details', widgets.target],
-    ['Performance', widgets.performance],
-    ['Party roster', widgets.party],
-    ['Player skillbar', widgets.skillbar],
-    ['Player effects', widgets.effects],
-    ['Map agents', widgets.agents],
-    ['Quest log', widgets.quests],
-    ['Inventory', widgets.inventory],
-    ['Mission and map completion', widgets.completion],
-    ['Friends and guild', widgets.social],
-    ['Camera and render state', widgets.camera],
-    ['Trade offer', widgets.trade],
-    ['UI frame inventory', widgets.ui],
-    ['NPC dialog identity', widgets.dialog],
-    ['Merchant item IDs', widgets.merchant],
-    ['Character progression', widgets.progression],
-    ['Character skill unlocks', widgets.skillUnlocks],
-  ]) {
+  for (const [label, widget] of widgets.controls) {
     widgetButtons.append(
       button(document, label, () => widget.visible(!widget.isVisible())),
     );
