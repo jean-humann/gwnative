@@ -217,7 +217,7 @@ impl Client {
         }
         directories
             .into_iter()
-            .filter_map(|directory| read_cache(&directory, &self.root))
+            .filter_map(|directory| read_cache(&active_manifest_path(&directory), &self.root))
             .filter_map(|(_, bytes)| Manifest::parse(&bytes).ok())
             .flat_map(|manifest| manifest.chunk_names())
             .collect()
@@ -933,10 +933,34 @@ mod tests {
         for directory in [&older, &malformed, &foreign] {
             fs::create_dir_all(directory).unwrap();
         }
-        write_cache(&base.0, PATCH_ROOT, None, &one_chunk('a'));
-        write_cache(&older, PATCH_ROOT, None, &one_chunk('b'));
-        write_cache(&malformed, PATCH_ROOT, None, b"not a manifest");
-        write_cache(&foreign, "http://127.0.0.1:8080", None, &one_chunk('c'));
+        write_cache(
+            &active_manifest_path(&base.0),
+            PATCH_ROOT,
+            None,
+            &one_chunk('a'),
+        )
+        .unwrap();
+        write_cache(
+            &active_manifest_path(&older),
+            PATCH_ROOT,
+            None,
+            &one_chunk('b'),
+        )
+        .unwrap();
+        write_cache(
+            &active_manifest_path(&malformed),
+            PATCH_ROOT,
+            None,
+            b"not a manifest",
+        )
+        .unwrap();
+        write_cache(
+            &active_manifest_path(&foreign),
+            "http://127.0.0.1:8080",
+            None,
+            &one_chunk('c'),
+        )
+        .unwrap();
 
         let client = Client::new(PATCH_ROOT, String::new());
         assert_eq!(

@@ -362,14 +362,7 @@ fn main() {
     if headless {
         park_headless(&loopback, &token);
     }
-    run_windowed(
-        &loopback,
-        &token,
-        &module,
-        &invocation,
-        paths.support_dir(),
-        &generations,
-    );
+    run_windowed(&loopback, &token, &module, &invocation, paths.support_dir());
 }
 
 fn verify_and_download_snapshot(snapshot: Option<Arc<chunks::ChunkStore>>, jobs: Option<usize>) {
@@ -793,7 +786,6 @@ fn run_windowed(
     module: &wasm::Module,
     invocation: &cli::Invocation,
     support_dir: &Path,
-    generations: &generation::Store,
 ) {
     let mtm = MainThreadMarker::new().expect("main thread");
     let app = NSApplication::sharedApplication(mtm);
