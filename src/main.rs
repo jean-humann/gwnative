@@ -11,6 +11,7 @@
 #[macro_use]
 mod log;
 
+mod activation_cover;
 mod alert;
 mod app;
 mod cache;
@@ -565,6 +566,7 @@ fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module)
         module,
     );
     let window = window::open(mtm, &webview, paths::support_dir().join("window.json"));
+    activation_cover::install(&webview, &window, loopback.recorder.clone());
 
     // After the window, not before: two of the menu's items are requests to the
     // page, and one moves the window. The menu only has to exist before `run`.

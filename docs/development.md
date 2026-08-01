@@ -148,6 +148,11 @@ All runtime overrides are optional.
 | `GWNATIVE_PRINT_TOKEN` | Print the injected host-route token to stderr |
 | `GWNATIVE_TRACE_HTTP` | Log each loopback HTTP request |
 | `GWNATIVE_TRACE_SOCKETS` | Log socket frame sizes; value `hex` also logs at most the first 16 bytes |
+| `GWNATIVE_FRAME_AUDIT` | Value `1` enables animation-callback, draw, suspension and logical-swap correlation |
+| `GWNATIVE_PREFER_60_FPS` | Value `1` leaves WebKit's near-60-FPS preference at its default for a diagnostic comparison |
+| `GWNATIVE_PRESERVE_DRAWING_BUFFER` | Value `1` preserves WebGL pixels after presentation for an activation-flash comparison; diagnostic only |
+| `GWNATIVE_FRAME_ISOLATION` | Complete-frame presentation is enabled by default; value `0` keeps ArenaNet's official direct default-framebuffer path for recovery or comparison |
+| `GWNATIVE_ACTIVATION_COVER` | The retained native frame is enabled by default across reactivation; value `0` disables it for recovery or comparison |
 | `GWNATIVE_SIGN_IDENTITY` | Select a development or release signing identity |
 | `GWNATIVE_NOTARY_PROFILE` | Select the notarytool Keychain profile for `scripts/release` |
 | `SPARKLE_PRIVATE_KEY` | Pass the update-signing key to release scripts |
@@ -159,6 +164,9 @@ as a normal development mode.
 
 Socket hex traces are deliberately capped because early game packets can carry
 credentials. Prefer size-only tracing unless the packet header is required.
+Detailed frame auditing wraps every WebGL framebuffer-write import (draw,
+clear, or blit) and is for controlled reproduction only. See
+[Rendering diagnostics](rendering-diagnostics.md).
 
 ## Data and clean profiles
 

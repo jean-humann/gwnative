@@ -56,8 +56,12 @@ onCommand('input-reset', () => {
 //
 // Both are safe to receive out of order or more than once: they set a target
 // the gain ramps towards, so a repeat is a no-op and the last one wins.
-onCommand('audio-mute', () => window.gwAudio?.setGameAudioMuted(true));
+onCommand('audio-mute', () => {
+  window.gwFrameAudit?.deactivate();
+  window.gwAudio?.setGameAudioMuted(true);
+});
 onCommand('audio-unmute', () => {
+  window.gwFrameAudit?.activate();
   window.gwAudio?.setGameAudioMuted(false);
   // Coming back to the game is also the moment to recover a context the system
   // parked while we were away — an interruption WebKit never resumes by itself.
@@ -87,6 +91,11 @@ onCommand('guide-open', () => window.gwOpenGuide?.());
 // tell a batch that was sent because a player pressed the key from the nine
 // hundred that were sent because a second went by.
 onCommand('diagnostics-mark', () => {
+  // One structured line captures the state that rolling counters cannot: which
+  // runtime was active, whether a snapshot read was in flight, whether WebGL
+  // had been lost, and (in an audit build) whether a read interrupted a frame
+  // after drawing had begun.
+  window.gwFrameAudit?.mark();
   diagnostics.count('gw.mark');
   diagnostics.flush();
 });

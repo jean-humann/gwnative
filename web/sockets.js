@@ -24,10 +24,23 @@ export function createDns({ log }) {
 }
 
 /**
- * @param {{ log(...values: unknown[]): void }} options
+ * @param {{
+ *   log(...values: unknown[]): void,
+ *   audit?: { beginExternalCallback(kind: string): unknown, endExternalCallback(callback: unknown): void },
+ * }} options
  */
-export function createSockets({ log }) {
+export function createSockets({ log, audit }) {
   let nextId = 1;
+
+  const deliver = (kind, receiver, callback, ...args) => {
+    if (typeof callback !== 'function') return undefined;
+    const scope = audit?.beginExternalCallback(kind);
+    try {
+      return callback.apply(receiver, args);
+    } finally {
+      audit?.endExternalCallback(scope);
+    }
+  };
 
   function connect(destination) {
     const id = nextId++;
@@ -90,14 +103,14 @@ export function createSockets({ log }) {
           open = true;
           trace('open');
           for (const bytes of queued.splice(0)) ws.send(bytes);
-          socket.onopen?.();
+          deliver('socket-open', socket, socket.onopen);
         } else {
           trace('host refused:', message.message);
-          socket.onerror?.(new Error(message.message));
+          deliver('socket-error', socket, socket.onerror, new Error(message.message));
         }
         return;
       }
-      socket.onmessage?.(new Uint8Array(event.data));
+      deliver('socket-message', socket, socket.onmessage, new Uint8Array(event.data));
     };
 
     ws.onclose = (event) => {
@@ -107,7 +120,7 @@ export function createSockets({ log }) {
       if (!closed) trace(`closed by transport (code=${event.code})`);
       if (closed) return;
       closed = true;
-      socket.onclose?.();
+      deliver('socket-close', socket, socket.onclose);
     };
 
     // A transport-level error is always followed by close, which is where the

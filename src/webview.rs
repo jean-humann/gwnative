@@ -14,6 +14,7 @@
 
 use objc2::rc::Retained;
 use objc2::{MainThreadOnly, msg_send};
+use objc2_app_kit::NSColor;
 use objc2_foundation::{MainThreadMarker, NSRect, NSString, NSURL, NSURLRequest};
 use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration};
 
@@ -44,7 +45,15 @@ const DISABLED_FEATURES: [&str; 5] = [
     "BackgroundWebContentRunningBoardThrottlingEnabled",
 ];
 
-/// Turn off every feature in [`DISABLED_FEATURES`].
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| value == "1")
+}
+
+fn env_default_on(name: &str) -> bool {
+    !std::env::var(name).is_ok_and(|value| value == "0")
+}
+
+/// Turn off every applicable feature in [`DISABLED_FEATURES`].
 ///
 /// There is no supported API for any of them — the direct setter SPIs of past
 /// years (`_setPreferPageRenderingUpdatesNear60FPSEnabled:` and kin) are gone
@@ -54,10 +63,13 @@ const DISABLED_FEATURES: [&str; 5] = [
 /// responds-to check, and a key that has vanished is reported rather than
 /// crashed on: each of these degrades to WebKit's default behaviour, never to
 /// a broken app.
-fn disable_features(preferences: &objc2_web_kit::WKPreferences) {
+fn disable_features(preferences: &objc2_web_kit::WKPreferences, prefer_60_fps: bool) {
     use objc2::runtime::AnyObject;
     let class = objc2::class!(WKPreferences);
-    let mut remaining: Vec<&str> = DISABLED_FEATURES.to_vec();
+    let mut remaining: Vec<&str> = DISABLED_FEATURES
+        .into_iter()
+        .filter(|name| !prefer_60_fps || *name != "PreferPageRenderingUpdatesNear60FPSEnabled")
+        .collect();
     // (feature list class method, matching setter taking that feature kind)
     let surfaces: [(objc2::runtime::Sel, objc2::runtime::Sel); 3] = [
         (objc2::sel!(_features), objc2::sel!(_setEnabled:forFeature:)),
@@ -143,7 +155,15 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences) {
 /// the page installs a passive observer from this exact preselected layout.
 /// A later round trip could pair a refreshed certificate with the already
 /// instantiated artifact, so the immutable launch snapshot is injected here.
-fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -> String {
+fn preamble(
+    token: &str,
+    settings: &settings::Settings,
+    module: &wasm::Module,
+    frame_audit: bool,
+    prefer_60_fps: bool,
+    preserve_drawing_buffer: bool,
+    frame_isolation: bool,
+) -> String {
     let forced_runtime = std::env::var("GWNATIVE_CLIENT_RUNTIME")
         .ok()
         .filter(|value| value == "jspi" || value == "asyncify");
@@ -154,7 +174,9 @@ fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -
          window.__gwnativeTemplateSave = \"uncertified\";\nwindow.__gwnativeClientBuild = null;\n\
          window.__gwnativeUpdates = {};\nwindow.__gwnativeAutoInstall = {};\n\
          window.__gwnativeEnhancements = \"off\";\n\
-         window.__gwnativeEnhancementManifest = null;\nwindow.__gwnativeClientRuntime = {};",
+         window.__gwnativeEnhancementManifest = null;\nwindow.__gwnativeClientRuntime = {};\n\
+         window.__gwnativeFrameAuditEnabled = {};\nwindow.__gwnativePrefer60FPS = {};\n\
+         window.__gwnativePreserveDrawingBuffer = {};\nwindow.__gwnativeFrameIsolation = {};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
@@ -171,6 +193,10 @@ fn preamble(token: &str, settings: &settings::Settings, module: &wasm::Module) -
         // promise nothing could keep.
         serde_json::Value::from(crate::updater::available()),
         serde_json::Value::from(forced_runtime),
+        serde_json::Value::from(frame_audit),
+        serde_json::Value::from(prefer_60_fps),
+        serde_json::Value::from(preserve_drawing_buffer),
+        serde_json::Value::from(frame_isolation),
     )
 }
 
@@ -183,16 +209,40 @@ pub fn make(
     module: &wasm::Module,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
+    let frame_audit = env_flag("GWNATIVE_FRAME_AUDIT");
+    let prefer_60_fps = env_flag("GWNATIVE_PREFER_60_FPS");
+    let preserve_drawing_buffer = env_flag("GWNATIVE_PRESERVE_DRAWING_BUFFER");
+    let frame_isolation = env_default_on("GWNATIVE_FRAME_ISOLATION");
+    if frame_audit {
+        note!("[gwnative] detailed frame audit enabled");
+    }
+    if prefer_60_fps {
+        note!("[gwnative] WebKit's near-60-FPS preference left at its default for comparison");
+    }
+    if preserve_drawing_buffer {
+        note!("[gwnative] preserving the WebGL drawing buffer for a flash comparison");
+    }
+    if frame_isolation {
+        note!("[gwnative] complete-frame presentation enabled");
+    }
 
     // See DISABLED_FEATURES: the 60 FPS cap and the hidden-page throttling
     // ladder, both of which Chromium-based rivals never had.
     let preferences = unsafe { config.preferences() };
-    disable_features(&preferences);
+    disable_features(&preferences, prefer_60_fps);
 
     unsafe {
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
             WKUserScript::alloc(mtm),
-            &NSString::from_str(&preamble(token, settings, module)),
+            &NSString::from_str(&preamble(
+                token,
+                settings,
+                module,
+                frame_audit,
+                prefer_60_fps,
+                preserve_drawing_buffer,
+                frame_isolation,
+            )),
             WKUserScriptInjectionTime::AtDocumentStart,
             true,
         );
@@ -201,6 +251,11 @@ pub fn make(
 
     let webview =
         unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config) };
+
+    // The document itself is black. Match the WKWebView-owned native surface
+    // underneath it so an unavailable retained-frame snapshot still degrades
+    // to the game's background instead of a system-coloured flash.
+    unsafe { webview.setUnderPageBackgroundColor(Some(&NSColor::blackColor())) };
 
     // The stock WKWebView agent string has no Version/Safari token, and
     // Emscripten glue is known to branch on it.

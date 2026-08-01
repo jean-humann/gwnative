@@ -19,7 +19,10 @@ use std::time::{Duration, Instant};
 
 use objc2::MainThreadOnly;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSBackingStoreType, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask};
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
+};
 use objc2_foundation::{MainThreadMarker, NSObjectNSDelayedPerforming, NSString};
 use objc2_web_kit::WKWebView;
 
@@ -114,11 +117,29 @@ pub fn open(mtm: MainThreadMarker, webview: &WKWebView, path: PathBuf) -> Retain
     };
 
     window.setTitle(&NSString::from_str("Guild Wars"));
+    // Keep the semantic window title for the Dock, Window menu and
+    // accessibility, but do not draw a second copy in the title bar. AppKit
+    // can place that label at the leading edge, underneath the
+    // close/minimize/full-screen buttons.
+    window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    // If the retained-frame cover cannot be captured, the content view's
+    // backing surface should still reveal the same black as the game rather
+    // than a system background colour during WebKit's activation handoff.
+    window.setBackgroundColor(Some(&NSColor::blackColor()));
     // Without this the green button zooms instead of going full screen, and
     // `toggleFullScreen:` — which is how a stored `fullscreen` is restored —
     // does nothing at all.
     window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
-    window.setContentView(Some(webview));
+    // Own the WebView's container rather than making AppKit's private frame
+    // view its direct parent. The activation cover can then be a normal sibling
+    // without depending on title-bar hierarchy that changes across macOS.
+    let container = NSView::initWithFrame(NSView::alloc(mtm), webview.frame());
+    window.setContentView(Some(&container));
+    webview.setFrame(container.bounds());
+    webview.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    container.addSubview(webview);
     // Key events go to the first responder; mouse events are hit-tested and do
     // not. A window that never hands the web view first responder therefore
     // looks alive to the trackpad and deaf to the keyboard, which is exactly
