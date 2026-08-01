@@ -179,7 +179,11 @@ sharing.
 For stutter or slow frames, press **⌘⇧M while the problem is happening**, each
 time it happens, then save the report. The mark records the moment and samples
 the following ten seconds at 100 ms intervals; it cannot increase detail
-retroactively.
+retroactively. Normal reports also include complete-frame submission and
+activation-cover health, so a rendering fallback or 500 ms cover fail-safe is
+visible without enabling invasive tracing. Diagnostic builds can attach the
+more detailed structured rendering state described in
+[Rendering diagnostics](rendering-diagnostics.md).
 
 ## Recovery
 

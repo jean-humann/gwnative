@@ -17,10 +17,11 @@ const SNAPSHOT = /(^|[/\\])Gw\.snapshot$/i;
  *   chunkSize: number,
  *   resident: Uint8Array,
  *   writeBytes(data: Uint8Array, address: number): void,
+ *   audit?: { beginRead(kind: string, offset: number, bytes: number, suspends?: boolean): unknown, endRead(read: unknown, failed?: boolean): void, isSynchronousImageRead?(): boolean },
  *   log(...values: unknown[]): void,
  * }} options
  */
-export function createImageSource({ size, chunkSize, resident, writeBytes, log }) {
+export function createImageSource({ size, chunkSize, resident, writeBytes, audit, log }) {
   const handles = new Set();
   let nextHandle = 1;
   const stats = { reads: 0, bytes: 0, warmed: 0 };
@@ -33,19 +34,31 @@ export function createImageSource({ size, chunkSize, resident, writeBytes, log }
   const markResident = (i) => { resident[i >> 3] |= 1 << (i & 7); };
 
   async function fetchRange(offset, bytes) {
-    const response = await fetch('Gw.snapshot', {
-      headers: { Range: `bytes=${offset}-${offset + bytes - 1}` },
-    });
-    if (response.status !== 206) {
-      throw new Error(`snapshot read ${offset}+${bytes}: HTTP ${response.status}`);
+    const read = audit?.beginRead(
+      'read',
+      offset,
+      bytes,
+      audit?.isSynchronousImageRead?.() === true,
+    );
+    let failed = true;
+    try {
+      const response = await fetch('Gw.snapshot', {
+        headers: { Range: `bytes=${offset}-${offset + bytes - 1}` },
+      });
+      if (response.status !== 206) {
+        throw new Error(`snapshot read ${offset}+${bytes}: HTTP ${response.status}`);
+      }
+      const data = new Uint8Array(await response.arrayBuffer());
+      if (data.length !== bytes) {
+        throw new Error(`snapshot read ${offset}+${bytes}: got ${data.length}`);
+      }
+      const [first, last] = chunkRange(offset, bytes);
+      for (let i = first; i <= last; i++) markResident(i);
+      failed = false;
+      return data;
+    } finally {
+      audit?.endRead(read, failed);
     }
-    const data = new Uint8Array(await response.arrayBuffer());
-    if (data.length !== bytes) {
-      throw new Error(`snapshot read ${offset}+${bytes}: got ${data.length}`);
-    }
-    const [first, last] = chunkRange(offset, bytes);
-    for (let i = first; i <= last; i++) markResident(i);
-    return data;
   }
 
   /**
@@ -59,12 +72,21 @@ export function createImageSource({ size, chunkSize, resident, writeBytes, log }
    * at 400 MB and one whose footprint peaks at 1.7 GB on the way there.
    */
   async function warmRange(offset, bytes) {
-    const response = await fetch(`__warm?offset=${offset}&bytes=${bytes}`, {
-      headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
-    });
-    if (!response.ok) throw new Error(`snapshot warm ${offset}+${bytes}: HTTP ${response.status}`);
-    const [first, last] = chunkRange(offset, bytes);
-    for (let i = first; i <= last; i++) markResident(i);
+    const read = audit?.beginRead('warm', offset, bytes);
+    let failed = true;
+    try {
+      const response = await fetch(`__warm?offset=${offset}&bytes=${bytes}`, {
+        headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
+      });
+      if (!response.ok) {
+        throw new Error(`snapshot warm ${offset}+${bytes}: HTTP ${response.status}`);
+      }
+      const [first, last] = chunkRange(offset, bytes);
+      for (let i = first; i <= last; i++) markResident(i);
+      failed = false;
+    } finally {
+      audit?.endRead(read, failed);
+    }
   }
 
   const image = {

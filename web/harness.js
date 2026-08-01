@@ -11,6 +11,7 @@ var Module;
 const LOG_LINES = 400;
 const logBuf = [];
 let client;
+let frameAudit = null;
 
 // WKWebView has no stdout, so log lines are batched back to the host to land in
 // the terminal alongside its own. Batched because a chatty boot would otherwise
@@ -79,7 +80,9 @@ window.addEventListener('unhandledrejection', (e) => forward(`[unhandled] ${e.re
 // animation and audio from, and substituting performance.now() for it on every
 // frame is audible. Slowing the loop while a running game is covered would
 // starve that same clock, so a covered *game* freezes exactly as it does under
-// Chromium — the download is the phase that has to survive, and does.
+// Chromium — the download is the phase that has to survive, and does. A frame
+// audit can retain a transparent callback wrapper, but forwards that native
+// timestamp unchanged and is opt-in.
 //
 // The glue re-reads globalThis.requestAnimationFrame on every call rather than
 // capturing it, so both the swap in and the swap back reach the client without
@@ -90,18 +93,30 @@ const BOOT_FRAME_MS = 16;
 let bootRescueActive = true;
 {
   const raf = window.requestAnimationFrame.bind(window);
+  const invoke = (callback, timestamp) => {
+    const frame = frameAudit?.beginAnimationFrame(timestamp);
+    try {
+      return callback(timestamp);
+    } finally {
+      frameAudit?.endAnimationFrame(frame);
+    }
+  };
   window.requestAnimationFrame = (callback) => {
     if (!bootRescueActive) {
-      // First frame has been presented; hand the native function back for good.
-      window.requestAnimationFrame = raf;
-      raf(callback);
-      return 0;
+      if (!frameAudit?.enabled) {
+        // First frame has been presented; hand the native function back for
+        // good unless a diagnostic run needs callback boundaries.
+        window.requestAnimationFrame = raf;
+        raf(callback);
+        return 0;
+      }
+      return raf((timestamp) => invoke(callback, timestamp));
     }
     let taken = false;
     const run = (timestamp) => {
       if (taken) return;
       taken = true;
-      callback(timestamp);
+      invoke(callback, timestamp);
     };
     const timer = setTimeout(() => run(performance.now()), BOOT_FRAME_MS);
     raf((timestamp) => {
@@ -348,7 +363,11 @@ Module = {
   instantiateWasm(imports, success) {
     host.installGraphics({
       env: imports.env,
+      canvas: Module.canvas,
       renderScale: () => renderScale,
+      audit: frameAudit,
+      preserveDrawingBuffer: window.__gwnativePreserveDrawingBuffer === true,
+      frameIsolation: window.__gwnativeFrameIsolation === true,
       firstFrame: () => {
         performance.mark('gw.frame.first-submit');
         // The boot is survived; frame delivery goes back to stock. See the
@@ -673,7 +692,7 @@ function reportTransformFailure() {
   try {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
-      start, panel, data, compat, guide, metrics, runtime,
+      start, panel, data, compat, guide, metrics, runtime, audit,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -692,6 +711,7 @@ function reportTransformFailure() {
       import('./guide.js'),
       import('./diagnostics.js'),
       import('./client-runtime.js'),
+      import('./frame-audit.js'),
     ]);
     host = {
       ...graphics,
@@ -710,6 +730,7 @@ function reportTransformFailure() {
       ...compat,
       ...guide,
       ...runtime,
+      ...audit,
     };
     // Kept out of the host bag: `count`, `gauge` and `peak` are names the game
     // contract could plausibly want for something else.
@@ -726,6 +747,50 @@ function reportTransformFailure() {
   } catch (error) {
     log(`[err] client runtime selection failed: ${error}`);
     return fail(`The requested game runtime is unavailable: ${error}`);
+  }
+  frameAudit = host.createFrameAudit({
+    enabled: window.__gwnativeFrameAuditEnabled === true,
+    runtime: client.mode,
+    canvas: Module.canvas,
+    diagnostics: diag,
+    log,
+    page: () => ({
+      visibility: document.visibilityState,
+      devicePixelRatio: window.devicePixelRatio,
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      screenWidth: window.screen?.width ?? null,
+      screenHeight: window.screen?.height ?? null,
+      prefer60FPS: window.__gwnativePrefer60FPS === true,
+      preserveDrawingBuffer: window.__gwnativePreserveDrawingBuffer === true,
+    }),
+  });
+  window.gwFrameAudit = frameAudit;
+  if (frameAudit.enabled) {
+    // ArenaNet creates this Map lazily for background reads, then the
+    // suspending ImageWait import obtains the Promise with get().  Supplying a
+    // normal Map with get and delete wrapped lets the audit distinguish "read
+    // in flight" from "the Wasm stack is waiting for that read". Completion is
+    // observed at the delete the generated glue already performs, so the audit
+    // attaches no Promise reaction of its own.
+    const imageReads = new Map();
+    const getImageRead = imageReads.get.bind(imageReads);
+    const setImageRead = imageReads.set.bind(imageReads);
+    const deleteImageRead = imageReads.delete.bind(imageReads);
+    imageReads.get = (id) => frameAudit.trackImageWait(getImageRead(id), id);
+    imageReads.set = (id, promise) => {
+      frameAudit.imageReadQueued(id, promise);
+      setImageRead(id, promise);
+      return imageReads;
+    };
+    imageReads.delete = (id) => {
+      const deleted = deleteImageRead(id);
+      frameAudit.imageReadResolved(id);
+      return deleted;
+    };
+    Module.imageReads = imageReads;
+    Module.imageReadsSequence = 1;
+    log('frame audit: detailed callback/draw correlation enabled');
   }
   host.applyClientLimits(client, host.currentSettings(), window);
   log(
@@ -804,7 +869,10 @@ function reportTransformFailure() {
   };
 
   Module.dns = host.createDns({ log });
-  Module.socket = host.createSockets({ log });
+  Module.socket = host.createSockets({
+    log,
+    audit: frameAudit.enabled ? frameAudit : undefined,
+  });
 
   // Two namespaces the client dereferences after deciding they are missing.
   // See platform-capabilities.js — neither is implemented, both must exist.
@@ -829,10 +897,19 @@ function reportTransformFailure() {
     const source = host.createImageSource({
       ...meta,
       writeBytes: (data, address) => Module.HEAPU8.set(data, address),
+      audit: frameAudit,
       log,
     });
     imageSource = source;
     snapshotBytes = meta.size;
+    if (frameAudit.enabled) {
+      const readAsync = source.image.readAsync.bind(source.image);
+      source.image.readAsync = (handle, offset, unused, buffer, bytes) =>
+        frameAudit.tagImageRead(
+          readAsync(handle, offset, unused, buffer, bytes),
+          { offset, bytes },
+        );
+    }
     Module.image = source.image;
     window.gwStats = () => source.stats();
     log(

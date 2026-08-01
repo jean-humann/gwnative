@@ -235,6 +235,9 @@ WKWebView lacks several Chromium APIs the client assumes:
 - macOS double-clicks can be translated into the client's touch path;
 - mouse focus and application focus are pushed from AppKit;
 - graphics imports bridge OffscreenCanvas output to the visible canvas;
+- an app-owned sibling above WKWebView retains the last complete native
+  snapshot until the next logical presentation has reached WebKit's updated
+  snapshot;
 - the host constructs and monitors the client's AudioContext; and
 - filesystem sync is pulled during application termination.
 
@@ -263,14 +266,16 @@ line counts, line lengths, and file rotation are bounded. The problem-report
 layer adds environment and settings, selects the tail of the log, and redacts
 email-shaped text.
 
-See the [performance guide](performance.md) for measurement semantics.
+See the [performance guide](performance.md) for measurement semantics and
+[rendering diagnostics](rendering-diagnostics.md) for the JSPI/Asyncify frame
+suspension model and reproduction matrix.
 
 ## Module map
 
 | Area | Primary paths |
 | --- | --- |
 | Launch and lifecycle | `src/main.rs`, `src/cli.rs`, `src/app.rs`, `src/instance.rs`, `src/relaunch.rs` |
-| AppKit and WebKit | `src/window/`, `src/webview.rs`, `src/renderer.rs`, `src/menu/`, `src/commands.rs`, `src/layout.rs` |
+| AppKit and WebKit | `src/window/`, `src/webview.rs`, `src/renderer.rs`, `src/activation_cover.rs`, `src/menu/`, `src/commands.rs`, `src/layout.rs` |
 | HTTP origin | `src/server/`, `src/http/`, `src/proxy.rs`, `src/ws.rs` |
 | Network bridges | `src/net.rs`, `src/sockets.rs`, `src/transport.rs` |
 | Patching and generations | `src/patch.rs`, `src/manifest.rs`, `src/generation.rs` |
