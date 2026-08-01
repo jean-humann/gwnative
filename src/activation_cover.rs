@@ -115,16 +115,16 @@ impl CoverView {
 struct State {
     webview: Retained<WKWebView>,
     window: Retained<NSWindow>,
-    // A cover inside WKWebView still shares the remote WebKit compositor
-    // subtree whose activation handoff the cover is trying to hide.
-    // Keep an app-owned sibling above that subtree instead.
-    container: Retained<NSView>,
     // Kept explicitly even though WKUserContentController retains registered
     // handlers. The ownership rule is then local rather than an API footnote.
     _handler: Retained<PresentedHandler>,
     recorder: Arc<Recorder>,
     snapshot: Option<Retained<NSImage>>,
     cover: Option<Retained<CoverView>>,
+    // Retain the native host only while it owns a cover. Element fullscreen
+    // moves WKWebView into WebKit's fullscreen window, so this cannot be the
+    // app's initial container for the lifetime of the process.
+    cover_host: Option<Retained<NSView>>,
     app_active: bool,
     window_state: WindowState,
     armed_generation: Option<u64>,
@@ -166,6 +166,7 @@ fn remove_cover(state: &mut State) {
     if let Some(cover) = state.cover.take() {
         cover.removeFromSuperview();
     }
+    state.cover_host = None;
 }
 
 fn arm_failsafe(state: &mut State) -> (u64, u64) {
@@ -183,6 +184,36 @@ fn should_arm_visible_failsafe(
     cover_present: bool,
 ) -> bool {
     cover_present && visible_transition && window_state.is_visible()
+}
+
+struct CoverHost {
+    view: Retained<NSView>,
+    frame: NSRect,
+    window: Retained<NSWindow>,
+}
+
+/// Resolve the native surface which is visible *now*. WebKit DOM fullscreen
+/// replaces WKWebView with a placeholder in the app window and moves the live
+/// view into its own fullscreen window. That makes any parent retained during
+/// application setup stale. The current window's public content view remains a
+/// native layer above WebKit's compositor subtree in either hierarchy.
+fn current_cover_host(webview: &WKWebView) -> Option<CoverHost> {
+    let window = webview.window()?;
+    let view = window.contentView()?;
+    let frame = webview.convertRect_toView(webview.bounds(), Some(&view));
+    Some(CoverHost {
+        view,
+        frame,
+        window,
+    })
+}
+
+fn same_view(left: &NSView, right: &NSView) -> bool {
+    std::ptr::eq(std::ptr::from_ref(left), std::ptr::from_ref(right))
+}
+
+fn same_window(left: &NSWindow, right: &NSWindow) -> bool {
+    std::ptr::eq(std::ptr::from_ref(left), std::ptr::from_ref(right))
 }
 
 fn schedule_failsafe(generation: u64, failsafe: u64) {
@@ -217,26 +248,54 @@ fn prepare_activation(visible_transition: bool) {
     let failsafe = STATE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let state = slot.as_mut()?;
+        let Some(host) = current_cover_host(&state.webview) else {
+            // Reparenting has a short interval where WKWebView has no window.
+            // A cover left in the previous hierarchy cannot protect the live
+            // view and must never remain there without a release path.
+            if state.cover.is_some() {
+                remove_cover(state);
+                note!("[gwnative] activation cover removed while WebKit changes windows");
+            }
+            return None;
+        };
         if state.cover.is_some() {
-            return should_arm_visible_failsafe(state.window_state, visible_transition, true)
-                .then(|| arm_failsafe(state));
+            if state
+                .cover_host
+                .as_ref()
+                .is_some_and(|current| same_view(current, &host.view))
+            {
+                return should_arm_visible_failsafe(state.window_state, visible_transition, true)
+                    .then(|| arm_failsafe(state));
+            }
+            // A DOM fullscreen transition moved WKWebView after this cover was
+            // installed. Never leave stale pixels in the old hierarchy; the
+            // same retained snapshot is reinstalled on the current host below.
+            remove_cover(state);
         }
         if !state.window_state.can_install_cover() {
             return None;
         }
         let snapshot = state.snapshot.as_ref()?;
-        let cover = CoverView::new(mtm, state.webview.frame(), snapshot);
+        let cover = CoverView::new(mtm, host.frame, snapshot);
         cover.setImageScaling(NSImageScaling::ScaleAxesIndependently);
         cover.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
-        state.container.addSubview(&cover);
+        host.view.addSubview(&cover);
         state.cover = Some(cover);
+        state.cover_host = Some(host.view);
         state
             .recorder
             .metrics
             .count("gw.frame.activation.cover.installed", 1.0);
+        if !same_window(&host.window, &state.window) {
+            state
+                .recorder
+                .metrics
+                .count("gw.frame.activation.cover.alternate-window", 1.0);
+            note!("[gwnative] activation cover installed in WebKit's current fullscreen window");
+        }
         note!("[gwnative] activation cover installed before visibility");
         should_arm_visible_failsafe(state.window_state, visible_transition, true)
             .then(|| arm_failsafe(state))
@@ -578,15 +637,13 @@ pub fn install(webview: &WKWebView, window: &NSWindow, recorder: Arc<Recorder>) 
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    // `window::open` has already installed WKWebView inside an app-owned
-    // container. A cover added there is a native sibling above WebKit's remote
-    // layer tree without relying on AppKit's private title/frame hierarchy.
-    // SAFETY: main thread, and `webview` is retained by the caller and already
-    // installed as this window's live content view.
-    let Some(container) = (unsafe { webview.superview() }) else {
-        note!("[gwnative] activation cover unavailable: WKWebView has no parent view");
+    // `window::open` has installed WKWebView in a live native content view.
+    // Resolve rather than retain it here: WebKit DOM fullscreen reparents the
+    // view into a different window and leaves a placeholder in the original.
+    if current_cover_host(webview).is_none() {
+        note!("[gwnative] activation cover unavailable: WKWebView has no content host");
         return;
-    };
+    }
 
     let handler = PresentedHandler::new(mtm);
     // SAFETY: main thread, a non-empty unique handler name, and the handler is
@@ -604,11 +661,11 @@ pub fn install(webview: &WKWebView, window: &NSWindow, recorder: Arc<Recorder>) 
         *slot.borrow_mut() = Some(State {
             webview: webview.retain(),
             window: window.retain(),
-            container,
             _handler: handler,
             recorder,
             snapshot: None,
             cover: None,
+            cover_host: None,
             app_active: true,
             window_state: WindowState::Visible,
             armed_generation: None,

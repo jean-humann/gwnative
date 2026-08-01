@@ -130,9 +130,10 @@ pub fn open(mtm: MainThreadMarker, webview: &WKWebView, path: PathBuf) -> Retain
     // `toggleFullScreen:` — which is how a stored `fullscreen` is restored —
     // does nothing at all.
     window.setCollectionBehavior(NSWindowCollectionBehavior::FullScreenPrimary);
-    // Own the WebView's container rather than making AppKit's private frame
-    // view its direct parent. The activation cover can then be a normal sibling
-    // without depending on title-bar hierarchy that changes across macOS.
+    // Own the WebView's normal-window container rather than making AppKit's
+    // private frame view its direct parent. The activation cover can then use
+    // this public content view normally and resolve WebKit's current content
+    // view if element fullscreen temporarily moves the live WebView elsewhere.
     let container = NSView::initWithFrame(NSView::alloc(mtm), webview.frame());
     window.setContentView(Some(&container));
     webview.setFrame(container.bounds());

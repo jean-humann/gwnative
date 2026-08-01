@@ -12,6 +12,10 @@ const RENDERBUFFER_BINDING = 0x8ca7;
 const TEXTURE_BINDING_2D = 0x8069;
 const PIXEL_UNPACK_BUFFER = 0x88ec;
 const PIXEL_UNPACK_BUFFER_BINDING = 0x88ef;
+const READ_BUFFER = 0x0c02;
+const DRAW_BUFFER0 = 0x8825;
+const BACK = 0x0405;
+const COLOR_ATTACHMENT0 = 0x8ce0;
 const RED_BITS = 0x0d52;
 const GREEN_BITS = 0x0d53;
 const BLUE_BITS = 0x0d54;
@@ -59,7 +63,15 @@ function fakeWebGL({
     drawingBufferHeight: 360,
     calls,
     getContextAttributes: () => ({ alpha, antialias, depth, stencil }),
-    getParameter: (name) => parameters.get(name) ?? null,
+    getParameter(name) {
+      if (name === READ_BUFFER) {
+        return parameters.get(READ_FRAMEBUFFER_BINDING) === null ? BACK : COLOR_ATTACHMENT0;
+      }
+      if (name === DRAW_BUFFER0) {
+        return parameters.get(DRAW_FRAMEBUFFER_BINDING) === null ? BACK : COLOR_ATTACHMENT0;
+      }
+      return parameters.get(name) ?? null;
+    },
     createFramebuffer: () => object('framebuffer'),
     createTexture: () => object('texture'),
     createRenderbuffer: () => object('renderbuffer'),
@@ -144,6 +156,12 @@ function fixture({ install = true, scissorImports = false, ...options } = {}) {
         target,
         gl.getParameter(DRAW_FRAMEBUFFER_BINDING),
       ]);
+    },
+    glGetFloatv(pname) {
+      return gl.getParameter(pname);
+    },
+    glGetIntegerv(pname) {
+      return gl.getParameter(pname);
     },
     emscripten_set_canvas_element_size(_target, width, height) {
       gl.drawingBufferWidth = width;
@@ -236,6 +254,24 @@ describe('explicit presentation barrier', () => {
     assert.match(logs.join('\n'), /unsupported default-framebuffer import glDeleteFramebuffers/);
   });
 
+  it('rejects future generic state-getter variants until they are translated', () => {
+    const { canvas, env } = fixture({ install: false });
+    env.glGetBooleanv = () => {};
+    const originalBind = env.glBindFramebuffer;
+    const logs = [];
+
+    const barrier = installPresentationBarrier({
+      enabled: true,
+      env,
+      canvas,
+      log: (...values) => logs.push(values.join(' ')),
+    });
+
+    assert.equal(barrier, null);
+    assert.equal(env.glBindFramebuffer, originalBind);
+    assert.match(logs.join('\n'), /unsupported default-framebuffer import glGetBooleanv/);
+  });
+
   it('redirects only logical framebuffer zero after context creation', () => {
     const { barrier, env, gl, gameFramebuffers } = fixture();
     assert.equal(env.eglCreateContext(), 3);
@@ -257,6 +293,30 @@ describe('explicit presentation barrier', () => {
     assert.equal(barrier.active, true);
     assert.equal(gl.getParameter(DRAW_FRAMEBUFFER_BINDING), privateFramebuffer);
     assert.equal(gl.getParameter(READ_FRAMEBUFFER_BINDING), privateFramebuffer);
+  });
+
+  it('answers generic state queries from each logical read and draw framebuffer', () => {
+    const { env, gl, gameFramebuffers } = fixture();
+    env.eglCreateContext();
+    const privateFramebuffer = gl.getParameter(DRAW_FRAMEBUFFER_BINDING);
+
+    assert.equal(env.glGetIntegerv(READ_BUFFER), BACK);
+    assert.equal(env.glGetFloatv(DRAW_BUFFER0), BACK);
+    assert.equal(gl.getParameter(READ_FRAMEBUFFER_BINDING), privateFramebuffer);
+    assert.equal(gl.getParameter(DRAW_FRAMEBUFFER_BINDING), privateFramebuffer);
+
+    env.glBindFramebuffer(READ_FRAMEBUFFER, 7);
+    assert.equal(env.glGetIntegerv(READ_BUFFER), COLOR_ATTACHMENT0);
+    assert.equal(env.glGetFloatv(DRAW_BUFFER0), BACK);
+    assert.equal(gl.getParameter(READ_FRAMEBUFFER_BINDING), gameFramebuffers.get(7));
+    assert.equal(gl.getParameter(DRAW_FRAMEBUFFER_BINDING), privateFramebuffer);
+
+    env.glBindFramebuffer(READ_FRAMEBUFFER, 0);
+    env.glBindFramebuffer(DRAW_FRAMEBUFFER, 8);
+    assert.equal(env.glGetIntegerv(READ_BUFFER), BACK);
+    assert.equal(env.glGetFloatv(DRAW_BUFFER0), COLOR_ATTACHMENT0);
+    assert.equal(gl.getParameter(READ_FRAMEBUFFER_BINDING), privateFramebuffer);
+    assert.equal(gl.getParameter(DRAW_FRAMEBUFFER_BINDING), gameFramebuffers.get(8));
   });
 
   it('matches an opaque default framebuffer with an RGB private attachment', () => {

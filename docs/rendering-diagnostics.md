@@ -381,6 +381,16 @@ draw/read-buffer selector, declines isolation before wrapping an import.
 That may return a future build to direct rendering, but cannot stop the client
 from playing or silently apply incomplete framebuffer semantics.
 
+Generic state getters need a separate guard because their imported function
+name does not reveal the runtime `pname`. The currently published
+`glGetIntegerv` and `glGetFloatv` imports temporarily expose the real default
+buffer independently for each logical-zero read/draw binding, perform the
+query, and restore the private or game-owned bindings before Wasm resumes.
+This preserves default-only values such as `BACK` as well as nonzero-FBO values
+such as `COLOR_ATTACHMENT0`, while leaving unrelated state queries unchanged.
+A future generic getter variant is rejected before wrapping until it has the
+same treatment; the barrier then fails open to direct rendering.
+
 The implementation has crossed the initial runtime gate on both exact official
 artifacts. On macOS 26, forced Asyncify created a complete 2560×1536 private
 target with `antialias:false`, depth and stencil, retained 120 Hz logical
@@ -391,8 +401,9 @@ already private, returning from that partial callback could no longer expose
 those draws to the browser compositor. Focused tests also cover the initial
 logical-zero binding, independent read/draw bindings, nonzero game FBOs,
 changed and same-size canvas resets, context restoration, incomplete targets,
-unsupported future imports, a bypassed raw framebuffer bind, the first-commit
-watchdog, and a throwing blit.
+default-dependent generic queries with split read/draw bindings, unsupported
+future getter variants and framebuffer imports, a bypassed raw framebuffer
+bind, the first-commit watchdog, and a throwing blit.
 
 A separate stock-path probe now proves that this is observable outside WebGL,
 not merely a theoretical eligible buffer. It first lets WebKit present a
@@ -550,9 +561,14 @@ The Dock-click flash still crosses a different boundary. A private framebuffer
 preserves the last *complete* game frame, but AppKit can expose the WKWebView
 before a JavaScript `DidBecomeActive` command runs. The activation cover
 above closes that native interval without conflating it with the mid-frame
-offscreen barrier. The cover is an app-owned sibling above WKWebView rather than
-a child inside WebKit's remote compositor subtree; this keeps the layer being
-used to hide the handoff outside the layer tree being handed off. Its snapshot
+offscreen barrier. The cover's native host is resolved from the live WKWebView
+every time it is installed. In the normal window this is the app-owned content
+view. In DOM element fullscreen, where WebKit replaces the original view with a
+placeholder and moves the live WKWebView into its own window, it is that
+window's public content view. In both cases the cover is above, rather than
+inside, WebKit's remote compositor subtree. An
+`gw.frame.activation.cover.alternate-window` counter makes the fullscreen path
+observable without relying on a private AppKit or WebKit class. Its snapshot
 contract has been tested in real WKWebView on both macOS 26 and macOS 27: with
 committed red still visible and partial green hidden, an
 `afterScreenUpdates:false` native snapshot retained red (subject to
@@ -583,11 +599,25 @@ failure or fail-safe counter. This proves a late minimized snapshot is ready
 before the window is exposed again instead of being discarded as a stale app
 activation.
 
+Element fullscreen is disabled by default in WKWebView, so the production game
+does not currently enter WebKit's alternate-window hierarchy. A macOS 27
+integration build enabled the public `isElementFullscreenEnabled` preference
+solely for this test, then entered fullscreen from a trusted key event. WebKit
+moved the live view and resized the isolated frame from 2560×1364 to 4096×2572.
+The next activation installed the retained cover in WebKit's current fullscreen
+window, incremented `gw.frame.activation.cover.alternate-window`, and released
+it after a fresh presentation. A later activation with no new static-login
+frame exercised the 500 ms fail-safe instead, proving that this hierarchy also
+cannot strand the cover. Exiting fullscreen restored the renderer to
+2560×1364. The opt-in used to make the otherwise unreachable WebKit path
+testable is not part of the shipped configuration.
+
 Normal diagnostics keep the mechanism auditable without enabling detailed
 frame wrappers. They count retained-frame captures, cover installations,
 fresh-frame releases, snapshot failures and 500 ms fail-safe removals under
-`gw.frame.activation.cover.*`, including capture/release total and maximum
-latency. The cover is default-on and click-through; setting
+`gw.frame.activation.cover.*`, including alternate-window installations and
+capture/release total and maximum latency. The cover is default-on and
+click-through; setting
 `GWNATIVE_ACTIVATION_COVER=0` remains an emergency comparison switch. Both the
 cover and the framebuffer barrier fail open to the official client rather than
 blocking play.

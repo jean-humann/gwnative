@@ -67,6 +67,16 @@ const SUPPORTED_FRAMEBUFFER_IMPORTS = new Set([
   'glIsFramebuffer',
 ]);
 
+// These generic getters can expose framebuffer-dependent state for arbitrary
+// pnames without adding a new import. They therefore need the same logical-zero
+// translation as explicit framebuffer APIs. Reject any newly imported getter
+// variant until it receives that treatment too.
+const SUPPORTED_GENERIC_STATE_GETTERS = new Set([
+  'glGetFloatv',
+  'glGetIntegerv',
+]);
+const GENERIC_STATE_GETTER = /^glGet(?:Boolean|Double|Fixed|Float|Integer(?:64)?)(?:i_v|v)$/;
+
 const hasUnsupportedDefaultFramebufferSemantics = (name) =>
   // Binding, creation, identity, completeness, and the translated
   // Texture2D attachment operation are understood. Any other core or
@@ -74,7 +84,10 @@ const hasUnsupportedDefaultFramebufferSemantics = (name) =>
   (name.includes('Framebuffer') && !SUPPORTED_FRAMEBUFFER_IMPORTS.has(name))
   // These select default-only BACK versus FBO-only COLOR_ATTACHMENT enums,
   // even though their names do not contain "Framebuffer".
-  || /^gl(?:DrawBuffers|ReadBuffer)/.test(name);
+  || /^gl(?:DrawBuffers|ReadBuffer)/.test(name)
+  // A future generic getter can ask a new framebuffer-dependent question
+  // without changing any of the current `glGetIntegerv`/`glGetFloatv` imports.
+  || (GENERIC_STATE_GETTER.test(name) && !SUPPORTED_GENERIC_STATE_GETTERS.has(name));
 
 /** Restore independent WebGL2 read/draw bindings without assuming they match. */
 function restoreFramebuffers(gl, draw, read) {
@@ -416,6 +429,30 @@ export function installPresentationBarrier({ enabled = false, env, canvas, log }
     rememberRawBindings();
     return result;
   };
+
+  // Generic state getters take a runtime pname, so import-name validation
+  // cannot tell whether a future call asks about READ_BUFFER, DRAW_BUFFERi,
+  // implementation read format/type, attachment bit depth, or some unrelated
+  // state. Temporarily expose the real default buffer for each side whose
+  // logical binding is zero. Unrelated queries are unchanged; nonzero game
+  // FBOs retain their own query semantics; and the private binding is restored
+  // before Wasm resumes.
+  for (const name of SUPPORTED_GENERIC_STATE_GETTERS) {
+    const getter = env[name];
+    if (typeof getter !== 'function') continue;
+    env[name] = (...args) => {
+      if (!active) return getter(...args);
+      const previousDraw = gl.getParameter(DRAW_FRAMEBUFFER_BINDING);
+      const previousRead = gl.getParameter(READ_FRAMEBUFFER_BINDING);
+      try {
+        if (logicalRead === 0) gl.bindFramebuffer(READ_FRAMEBUFFER, null);
+        if (logicalDraw === 0) gl.bindFramebuffer(DRAW_FRAMEBUFFER, null);
+        return getter(...args);
+      } finally {
+        restoreFramebuffers(gl, previousDraw, previousRead);
+      }
+    };
+  }
 
   if (tracksScissor) {
     env.glEnable = (capability) => {
