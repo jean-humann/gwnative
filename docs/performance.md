@@ -105,6 +105,13 @@ scripts/fps-e2e \
   --output-dir /tmp/gwnative-fps
 ```
 
+On a fresh automation host with no readable profile Keychain item, set both
+`GWNATIVE_E2E_ACCOUNT` and `GWNATIVE_E2E_PASSWORD` on the runner process. The
+runner removes them before launching gwnative and transfers one bounded value
+through an inherited anonymous pipe. They never appear in the child argv or
+environment, loopback protocol, logs, or resulting JSON artifact. An ordinary
+gwnative launch has no credential-pipe path.
+
 On a system WebKit without JSPI, use `--runtimes auto asyncify`; the automatic
 cell proves the product selected Asyncify, and the forced cell proves the same
 artifact explicitly. On a JSPI-capable WebKit, the default matrix exercises

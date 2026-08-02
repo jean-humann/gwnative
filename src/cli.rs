@@ -9,6 +9,9 @@
 
 use std::ffi::OsString;
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
+use std::os::fd::FromRawFd;
 use std::path::PathBuf;
 
 /// The operation this invocation performs.
@@ -63,6 +66,68 @@ impl Drop for Secret {
     fn drop(&mut self) {
         self.0.fill(0);
     }
+}
+
+const MAX_E2E_CREDENTIAL_BYTES: u64 = 8 * 1024;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct E2eCredentials {
+    username: String,
+    password: String,
+}
+
+/// Take invocation-only E2E credentials from an inherited anonymous pipe.
+///
+/// The descriptor number is not secret. The runner removes the source values
+/// from the child environment, and the payload never enters argv, a file, the
+/// loopback API, or test output. Normal launches cannot opt into this path.
+pub fn take_e2e_credentials(invocation: &mut Invocation) -> Result<(), String> {
+    let Some(raw_fd) = std::env::var_os("GWNATIVE_E2E_CREDENTIAL_FD") else {
+        return Ok(());
+    };
+    if std::env::var_os("GWNATIVE_E2E").is_none() {
+        return Err("the credential pipe is available only to the E2E runner".into());
+    }
+    if invocation.command != Command::Run {
+        return Err("the credential pipe can be used only for a game launch".into());
+    }
+    if invocation.legacy.email.is_some() || invocation.legacy.password.is_some() {
+        return Err("the credential pipe cannot be combined with credential arguments".into());
+    }
+    let fd = raw_fd
+        .to_str()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|fd| (3..=1_024).contains(fd))
+        .ok_or_else(|| "the credential pipe descriptor is invalid".to_owned())?;
+    // SAFETY: the E2E runner created this owned descriptor specifically for
+    // the child, and passes it exactly once. File closes it after this read.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let mut payload = Vec::new();
+    file.take(MAX_E2E_CREDENTIAL_BYTES + 1)
+        .read_to_end(&mut payload)
+        .map_err(|error| format!("the credential pipe could not be read: {error}"))?;
+    apply_e2e_credentials(invocation, payload)
+}
+
+fn apply_e2e_credentials(invocation: &mut Invocation, mut payload: Vec<u8>) -> Result<(), String> {
+    if payload.len() as u64 > MAX_E2E_CREDENTIAL_BYTES {
+        payload.fill(0);
+        return Err("the credential pipe payload exceeds its bound".into());
+    }
+    let decoded = serde_json::from_slice::<E2eCredentials>(&payload);
+    payload.fill(0);
+    let credentials = decoded.map_err(|_| "the credential pipe payload is invalid".to_owned())?;
+    if credentials.username.is_empty()
+        || credentials.password.is_empty()
+        || credentials.username.len() > 4_096
+        || credentials.password.len() > 4_096
+    {
+        return Err("the credential pipe fields are outside their bounds".into());
+    }
+    invocation.legacy.email = Some(credentials.username);
+    invocation.legacy.password = Some(Secret(credentials.password.into_bytes()));
+    Ok(())
 }
 
 /// The classic options that can be carried into the web client or native host.
@@ -838,6 +903,33 @@ mod tests {
         let debug = format!("{parsed:?}");
         assert!(!debug.contains("hunter2"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn e2e_pipe_credentials_are_bounded_complete_and_redacted() {
+        let mut invocation = Invocation::default();
+        apply_e2e_credentials(
+            &mut invocation,
+            br#"{"username":"player@example.test","password":"pipe-secret"}"#.to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            invocation.legacy.email.as_deref(),
+            Some("player@example.test")
+        );
+        assert_eq!(
+            invocation.legacy.password.as_ref().and_then(Secret::expose),
+            Some("pipe-secret")
+        );
+        assert!(!format!("{invocation:?}").contains("pipe-secret"));
+
+        for payload in [
+            br#"{"username":"player@example.test"}"#.to_vec(),
+            br#"{"username":"","password":"secret"}"#.to_vec(),
+            vec![b'x'; MAX_E2E_CREDENTIAL_BYTES as usize + 1],
+        ] {
+            assert!(apply_e2e_credentials(&mut Invocation::default(), payload).is_err());
+        }
     }
 
     #[test]

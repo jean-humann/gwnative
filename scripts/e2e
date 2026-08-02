@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Run the signed native app through its event-driven test control plane.
 
-The application—not this runner—reads the selected profile's Keychain item.
-The runner receives only presence milestones and the short-lived loopback
-capability. It performs no screen capture, OCR, focus polling, coordinate
-clicking, arbitrary JavaScript evaluation or credential read.
+The application normally reads the selected profile's Keychain item. A fresh
+automation host may instead supply both GWNATIVE_E2E_ACCOUNT and
+GWNATIVE_E2E_PASSWORD: this runner removes them from the child environment and
+passes one bounded JSON value through an inherited anonymous pipe. Credentials
+never enter argv, a file, loopback events, or benchmark artifacts. The runner
+performs no screen capture, OCR, focus polling, coordinate clicking, or
+arbitrary JavaScript evaluation.
 """
 
 from __future__ import annotations
@@ -840,6 +843,24 @@ def main() -> int:
         raise Failure("--refresh-hz must be between 1 and 1000")
     if args.minimum_agents < 0:
         raise Failure("--minimum-agents cannot be negative")
+    credential_account = os.environ.pop("GWNATIVE_E2E_ACCOUNT", None)
+    credential_password = os.environ.pop("GWNATIVE_E2E_PASSWORD", None)
+    if (credential_account is None) != (credential_password is None):
+        raise Failure(
+            "GWNATIVE_E2E_ACCOUNT and GWNATIVE_E2E_PASSWORD must be supplied together"
+        )
+    credential_payload = None
+    if credential_account is not None:
+        if not credential_account or not credential_password:
+            raise Failure("E2E credential fields cannot be empty")
+        credential_payload = json.dumps(
+            {"username": credential_account, "password": credential_password},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(credential_payload) > 8 * 1024:
+            raise Failure("E2E credentials exceed the 8 KiB pipe bound")
+    credential_account = None
+    credential_password = None
     for name, value in [
         ("--minimum-fps", args.minimum_fps),
         ("--maximum-p95-ms", args.maximum_p95_ms),
@@ -911,15 +932,27 @@ def main() -> int:
             if args.fps <= 0:
                 raise Failure("--fps must be a positive integer")
             command.extend(["-fps", str(args.fps)])
-        process = subprocess.Popen(
-            command,
-            cwd=ROOT,
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
+        credential_fd = None
+        if credential_payload is not None:
+            credential_fd, credential_writer = os.pipe()
+            with os.fdopen(credential_writer, "wb") as pipe:
+                pipe.write(credential_payload)
+            credential_payload = None
+            environment["GWNATIVE_E2E_CREDENTIAL_FD"] = str(credential_fd)
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                pass_fds=(() if credential_fd is None else (credential_fd,)),
+            )
+        finally:
+            if credential_fd is not None:
+                os.close(credential_fd)
         inhibitor = subprocess.Popen(
             ["caffeinate", "-dims", "-w", str(process.pid)],
             stdout=subprocess.DEVNULL,

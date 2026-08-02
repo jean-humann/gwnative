@@ -74,7 +74,7 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 fn main() {
     // Before anything is opened, downloaded or locked: a question about this
     // executable deserves an answer and not a launch.
-    let invocation = match cli::parse(std::env::args_os().skip(1)) {
+    let mut invocation = match cli::parse(std::env::args_os().skip(1)) {
         Ok(invocation) => invocation,
         Err(exit) => {
             let out: &mut dyn std::io::Write = if exit.failed {
@@ -86,6 +86,10 @@ fn main() {
             std::process::exit(i32::from(exit.failed) * 2);
         }
     };
+    if let Err(reason) = cli::take_e2e_credentials(&mut invocation) {
+        note!("[gwnative] E2E credentials unavailable: {reason}");
+        std::process::exit(2);
+    }
     for notice in &invocation.notices {
         note!(
             "[gwnative] {}: {} ({:?})",
