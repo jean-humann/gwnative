@@ -76,7 +76,9 @@ window.addEventListener('unhandledrejection', (e) => forward(`[unhandled] ${e.re
 // is not survived until there is something on screen to come back to. The
 // signed E2E run keeps it for exactly two more callbacks so an occluded test
 // window can prove login readiness before its first native action brings it
-// forward.
+// forward. During E2E it remains armed through authenticated pregame, because
+// networking and selector construction use the same loop, then retires before
+// any gameplay or cadence sample is accepted.
 //
 // After that, stock behaviour, deliberately: the timestamp
 // requestAnimationFrame hands its callback is the clock the client drives
@@ -374,7 +376,6 @@ const reportAfterClientFrames = (kind) => {
       log(`[e2e] ${kind}: frame 1 committed; waiting for frame 2`);
       requestAnimationFrame(() => {
         log(`[e2e] ${kind}: frame 2 committed; reporting readiness`);
-        if (kind === 'login-ready') bootRescueActive = false;
         void window.gwE2E?.report(kind).catch(() => {});
       });
     });
@@ -401,6 +402,12 @@ const reportCredentialStatus = (status) => {
   credentialStatusReported = true;
   void window.gwE2E?.report('credential-status', { status }).catch(() => {});
 };
+
+window.addEventListener('gwnative:state', (event) => {
+  if (window.__gwnativeE2E === true && event.detail?.status === 'ready') {
+    bootRescueActive = false;
+  }
+});
 
 const STARTUP_LABELS = {
   connecting: 'Starting Guild Wars',

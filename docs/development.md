@@ -160,9 +160,10 @@ Wars client. The runner:
    and the build library by semantic DOM name;
 4. verifies the token boundary and both versioned API descriptions;
 5. waits for launch milestones over a bounded long-poll channel;
-6. waits for a successful account-token response, then for authenticated
-   socket receive traffic to settle across a bounded run of client frames,
-   before activating the selected character;
+6. waits for a successful account-token response, then requires the certified
+   Guild Wars `Selector` to be visible and its `Play` frame and parent to be
+   created on two consecutive client frames, then uses one bounded left/right
+   pair to commit the `-character` preview before activating Play;
 7. sends only a finite set of named AppKit actions: activate, forward/backward,
    left/right, next target, interact, cancel, and skill 1; and
 8. when the installed client has a certified state layout, requires two stable
@@ -174,7 +175,12 @@ Wars client. The runner:
    trainer-visible, character-learned, and account-unlocked skill sets, and
    confirms bidirectional movement through newer revisions; and
 9. optionally records a bounded observer-only logical-frame sample after
-   checking the expected map and minimum certified agent population.
+   checking the expected map and minimum certified agent population. With
+   `--benchmark-only`, this deliberately depends only on those core scene
+   domains; the ordinary E2E path still validates every optional domain first.
+   The sampler first brings the signed window forward and requires a real
+   WebKit animation frame, so a locked display fails instead of reporting
+   timer-generated FPS.
 
 ```sh
 scripts/e2e

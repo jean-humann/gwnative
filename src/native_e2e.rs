@@ -123,6 +123,16 @@ fn drain(dispatcher: Rc<Dispatcher>) {
 }
 
 fn deliver(dispatcher: Rc<Dispatcher>, action: Action) {
+    if action.action == "focus-window" {
+        activate(&dispatcher.window);
+        dispatcher
+            .window
+            .makeFirstResponder(Some(&dispatcher.webview));
+        publish(&dispatcher.hub, &action, true, "");
+        dispatcher.busy.set(false);
+        drain(dispatcher);
+        return;
+    }
     let key = match action.action.as_str() {
         "activate" => Key {
             characters: "\r",

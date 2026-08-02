@@ -48,12 +48,20 @@ describes the implemented input fallbacks.
 ### Authenticated frame-cadence E2E
 
 `scripts/e2e` can take a bounded sample at the actual `eglSwapBuffers` boundary
-after the signed app has authenticated, entered a character, and validated the
-complete passive game-state API. The sampler issues no rendering or timer-query
-command, does not enable the expensive draw-call audit, and never sees Keychain
-values. Its JSON
+after the signed app has authenticated, entered a character, and certified the
+stable map, player, and agent population used to identify the scene. Matrix
+cells use `--benchmark-only`, so an unavailable optional domain such as guild
+detail cannot suppress an otherwise valid cadence sample. A normal full E2E
+run still validates every passive domain before sampling. The sampler issues
+no rendering or timer-query command, does not enable the expensive draw-call
+audit, and never sees Keychain values. Its JSON
 contains logical FPS, interval p50/p95/p99/max, drawing-buffer dimensions,
 runtime, context-loss evidence, and certified scene metadata.
+
+Before sampling, the runner brings the signed window forward and waits for a
+native WebKit animation frame. A locked or sleeping macOS display therefore
+fails the benchmark explicitly; the authenticated pregame timer rescue is
+never counted as rendering performance.
 
 ```mermaid
 flowchart LR

@@ -383,9 +383,8 @@ def wait_for_ready_state(
     revision: int,
     timeout: float,
 ) -> dict[str, object] | None:
-    """Require stable ready state, retaining the latest diagnostic state."""
+    """Require two matching reads, without waiting for an unrelated mutation."""
     deadline = time.monotonic() + timeout
-    candidate: tuple[object, object] | None = None
     latest: dict[str, object] | None = None
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
@@ -397,12 +396,24 @@ def wait_for_ready_state(
         revision = int(envelope["revision"])
         state = envelope.get("state", {})
         if state.get("status") != "ready":
-            candidate = None
             continue
         identity = (state.get("mapId"), state.get("playerId"))
-        if candidate == identity:
-            return envelope
-        candidate = identity
+        confirmation = game_state_after(origin, token, 0, 0)
+        if confirmation is None:
+            revision = 0
+            continue
+        confirmed_state = confirmation.get("state", {})
+        confirmed_identity = (
+            confirmed_state.get("mapId"),
+            confirmed_state.get("playerId"),
+        )
+        latest = confirmation
+        revision = int(confirmation["revision"])
+        if confirmed_state.get("status") == "ready" and confirmed_identity == identity:
+            return confirmation
+        # Re-read the current state immediately. Waiting after the mismatching
+        # revision would again depend on unrelated gameplay state changing.
+        revision = 0
     return latest
 
 
@@ -503,6 +514,160 @@ def terminate(process: subprocess.Popen[str]) -> None:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+
+
+def certified_performance_scene(
+    state: dict[str, object],
+    expected_map_id: int | None,
+    minimum_agents: int,
+) -> tuple[int, int, int]:
+    """Validate only the certified state a passive cadence sample depends on."""
+    map_id = state.get("mapId")
+    player_id = state.get("playerId")
+    agents = state.get("agents")
+    map_agents = agents.get("agents") if isinstance(agents, dict) else None
+    agent_total = agents.get("total") if isinstance(agents, dict) else None
+    if (
+        state.get("status") != "ready"
+        or not isinstance(map_id, int)
+        or not isinstance(player_id, int)
+        or not isinstance(map_agents, list)
+        or not map_agents
+        or len(map_agents) > 128
+        or not isinstance(agent_total, int)
+        or not len(map_agents) <= agent_total <= 4_095
+        or agents.get("truncated") not in (True, False)
+        or (agents.get("truncated") and len(map_agents) != 128)
+        or (not agents.get("truncated") and agent_total != len(map_agents))
+        or any(not isinstance(agent, dict) for agent in map_agents)
+        or any(not isinstance(agent.get("agentId"), int) for agent in map_agents)
+        or [agent.get("agentId") for agent in map_agents]
+        != sorted({agent.get("agentId") for agent in map_agents})
+        or not any(
+            agent.get("agentId") == player_id and agent.get("isLiving") is True
+            for agent in map_agents
+        )
+    ):
+        raise Failure("certified performance scene is incomplete")
+    if expected_map_id is not None and map_id != expected_map_id:
+        raise Failure(
+            f"performance scene is on map {map_id}, expected {expected_map_id}"
+        )
+    if agent_total < minimum_agents:
+        raise Failure(
+            f"performance scene has {agent_total} certified agents, expected at least "
+            f"{minimum_agents}"
+        )
+    return map_id, agent_total, len(map_agents)
+
+
+def run_performance_sample(
+    args: argparse.Namespace,
+    stream: EventStream,
+    origin: str,
+    token: str,
+    state: dict[str, object],
+) -> None:
+    map_id, agent_total, captured_agents = certified_performance_scene(
+        state,
+        args.expect_map_id,
+        args.minimum_agents,
+    )
+    focus = submit_action(origin, token, "focus-window")
+    stream.wait_for_action(focus, 5)
+    focused_frame = stream.wait_for_action_event(
+        focus,
+        "window-frame-ready",
+        5,
+    )
+    if focused_frame is None:
+        raise Failure("WebKit produced no native frame after focusing the test window")
+    requested_ms = round(args.benchmark_seconds * 1_000)
+    sample_sequence = submit_action(
+        origin,
+        token,
+        "sample-performance",
+        requested_ms,
+    )
+    sample_event = stream.wait_for_action_event(
+        sample_sequence,
+        "performance-sample",
+        args.benchmark_seconds + 10,
+    )
+    if sample_event is None:
+        raise Failure("logical-frame performance sample did not arrive")
+    stream.wait_for_action(sample_sequence, 5)
+    sample = sample_event.get("detail", {})
+    frames = sample.get("frames")
+    logical_fps = sample.get("framesPerSecond")
+    intervals = sample.get("intervalMs", {})
+    p95_ms = intervals.get("p95") if isinstance(intervals, dict) else None
+    webgl = sample.get("webgl", {})
+    audit = sample.get("audit", {})
+    if (
+        not isinstance(frames, int)
+        or frames < 2
+        or not isinstance(logical_fps, (int, float))
+        or not isinstance(p95_ms, (int, float))
+        or not isinstance(webgl, dict)
+        or webgl.get("lost") is not False
+        or not isinstance(audit, dict)
+        or audit.get("contextLost") != 0
+    ):
+        raise Failure(
+            "performance sample is incomplete or lost its WebGL context "
+            f"(frames={frames!r}, fps={logical_fps!r}, p95={p95_ms!r}, "
+            f"webglLost={webgl.get('lost')!r}, audit={audit!r})"
+        )
+    if args.runtime != "auto" and sample.get("runtime") != args.runtime:
+        raise Failure(
+            f"performance sample used {sample.get('runtime')}, expected {args.runtime}"
+        )
+    if args.minimum_fps is not None and logical_fps < args.minimum_fps:
+        raise Failure(
+            f"logical FPS {logical_fps:.3f} is below {args.minimum_fps:.3f}"
+        )
+    if args.maximum_p95_ms is not None and p95_ms > args.maximum_p95_ms:
+        raise Failure(
+            f"p95 interval {p95_ms:.3f} ms exceeds {args.maximum_p95_ms:.3f} ms"
+        )
+    budget_ratio = None
+    if args.refresh_hz is not None:
+        budget_ratio = p95_ms / (1_000 / args.refresh_hz)
+    report = {
+        "schemaVersion": 1,
+        "configuration": {
+            "requestedRuntime": args.runtime,
+            "frameIsolation": args.frame_isolation or "default",
+            "clientFrameLimit": args.fps,
+            "refreshHz": args.refresh_hz,
+        },
+        "scene": {
+            "mapId": map_id,
+            "instanceType": state.get("instanceType"),
+            "agents": agent_total,
+            "capturedAgents": captured_agents,
+            "playerId": state.get("playerId"),
+        },
+        "sample": sample,
+        "derived": {
+            "p95FrameBudgetRatio": (
+                round(budget_ratio, 4) if budget_ratio is not None else None
+            ),
+        },
+    }
+    if args.benchmark_output is not None:
+        args.benchmark_output.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(f"[e2e] performance artifact {args.benchmark_output}")
+    print(
+        "[e2e] logical-frame performance PASS "
+        f"(runtime={sample.get('runtime')}, frames={frames}, "
+        f"fps={logical_fps:.3f}, p95={p95_ms:.3f}ms, "
+        f"agents={agent_total}, map={map_id}, gpu-timing=not-sampled)"
+    )
 
 
 def main() -> int:
@@ -708,6 +873,7 @@ def main() -> int:
             }
             expected_actions = {
                 "activate",
+                "focus-window",
                 "move-forward",
                 "move-backward",
                 "turn-left",
@@ -886,8 +1052,22 @@ def main() -> int:
                 if character_selection_ready is not None:
                     print(
                         "[e2e] authentication committed and character selection "
-                        "settled; activating the selected character"
+                        "is ready; activating the selected character"
                     )
+                    previous_character = submit_action(
+                        origin,
+                        token,
+                        "turn-left",
+                        50,
+                    )
+                    stream.wait_for_action(previous_character, 5)
+                    selected_character = submit_action(
+                        origin,
+                        token,
+                        "turn-right",
+                        50,
+                    )
+                    stream.wait_for_action(selected_character, 5)
                     character = submit_action(origin, token, "activate")
                     stream.wait_for_action(character, 5)
                     game_connection = stream.wait_for_action_connection(
@@ -895,15 +1075,8 @@ def main() -> int:
                         30,
                     )
                     if game_connection is None:
-                        print(
-                            "[e2e] character activation opened no connection; "
-                            "retrying once"
-                        )
-                        character = submit_action(origin, token, "activate")
-                        stream.wait_for_action(character, 5)
-                        game_connection = stream.wait_for_action_connection(
-                            character,
-                            30,
+                        raise Failure(
+                            "certified Play activation opened no game connection"
                         )
                     current = game_state_after(origin, token, 0, 0)
                     revision = int((current or {}).get("revision", 0))
@@ -955,11 +1128,14 @@ def main() -> int:
                             "no post-action socket traffic observed"
                         )
                 if login_committed is None:
-                    print("[e2e] the client never committed the authenticated account")
+                    print(
+                        "[e2e] ArenaNet authentication did not commit; "
+                        "no character action was sent"
+                    )
                 elif character_selection_ready is None:
                     print(
-                        "[e2e] authenticated socket traffic never settled at "
-                        "character selection; Play was not sent"
+                        "[e2e] certified Selector/Play readiness did not arrive; "
+                        "Play was not sent"
                     )
                 elif game_connection is None:
                     print("[e2e] character activation opened no attributable game connection")
@@ -972,6 +1148,11 @@ def main() -> int:
                 )
                 print("[e2e] INCONCLUSIVE (gameplay telemetry unavailable)")
                 return 2
+
+            if args.benchmark_only:
+                run_performance_sample(args, stream, origin, token, ready["state"])
+                print("[e2e] PASS (benchmark-only)")
+                return 0
 
             ready = wait_for_complete_gameplay_state(
                 origin,
@@ -1833,107 +2014,7 @@ def main() -> int:
             )
 
             if args.benchmark_seconds is not None:
-                map_id = state.get("mapId")
-                agent_total = agents.get("total") if isinstance(agents, dict) else None
-                if args.expect_map_id is not None and map_id != args.expect_map_id:
-                    raise Failure(
-                        "performance scene is on map "
-                        f"{map_id}, expected {args.expect_map_id}"
-                    )
-                if not isinstance(agent_total, int) or agent_total < args.minimum_agents:
-                    raise Failure(
-                        "performance scene has "
-                        f"{agent_total!r} certified agents, expected at least "
-                        f"{args.minimum_agents}"
-                    )
-                requested_ms = round(args.benchmark_seconds * 1_000)
-                sample_sequence = submit_action(
-                    origin,
-                    token,
-                    "sample-performance",
-                    requested_ms,
-                )
-                sample_event = stream.wait_for_action_event(
-                    sample_sequence,
-                    "performance-sample",
-                    args.benchmark_seconds + 10,
-                )
-                if sample_event is None:
-                    raise Failure("logical-frame performance sample did not arrive")
-                stream.wait_for_action(sample_sequence, 5)
-                sample = sample_event.get("detail", {})
-                frames = sample.get("frames")
-                logical_fps = sample.get("framesPerSecond")
-                intervals = sample.get("intervalMs", {})
-                p95_ms = intervals.get("p95") if isinstance(intervals, dict) else None
-                webgl = sample.get("webgl", {})
-                audit = sample.get("audit", {})
-                if (
-                    not isinstance(frames, int)
-                    or frames < 2
-                    or not isinstance(logical_fps, (int, float))
-                    or not isinstance(p95_ms, (int, float))
-                    or not isinstance(webgl, dict)
-                    or webgl.get("lost") is not False
-                    or not isinstance(audit, dict)
-                    or audit.get("contextLost") != 0
-                ):
-                    raise Failure("performance sample is incomplete or lost its WebGL context")
-                if args.runtime != "auto" and sample.get("runtime") != args.runtime:
-                    raise Failure(
-                        f"performance sample used {sample.get('runtime')}, "
-                        f"expected {args.runtime}"
-                    )
-                if args.minimum_fps is not None and logical_fps < args.minimum_fps:
-                    raise Failure(
-                        f"logical FPS {logical_fps:.3f} is below {args.minimum_fps:.3f}"
-                    )
-                if args.maximum_p95_ms is not None and p95_ms > args.maximum_p95_ms:
-                    raise Failure(
-                        f"p95 interval {p95_ms:.3f} ms exceeds "
-                        f"{args.maximum_p95_ms:.3f} ms"
-                    )
-                budget_ratio = None
-                if args.refresh_hz is not None:
-                    budget_ratio = p95_ms / (1_000 / args.refresh_hz)
-                report = {
-                    "schemaVersion": 1,
-                    "configuration": {
-                        "requestedRuntime": args.runtime,
-                        "frameIsolation": args.frame_isolation or "default",
-                        "clientFrameLimit": args.fps,
-                        "refreshHz": args.refresh_hz,
-                    },
-                    "scene": {
-                        "mapId": map_id,
-                        "instanceType": state.get("instanceType"),
-                        "agents": agent_total,
-                        "capturedAgents": len(map_agents),
-                        "playerId": state.get("playerId"),
-                    },
-                    "sample": sample,
-                    "derived": {
-                        "p95FrameBudgetRatio": (
-                            round(budget_ratio, 4) if budget_ratio is not None else None
-                        ),
-                    },
-                }
-                if args.benchmark_output is not None:
-                    args.benchmark_output.write_text(
-                        json.dumps(report, indent=2, sort_keys=True) + "\n",
-                        encoding="utf-8",
-                    )
-                    print(f"[e2e] performance artifact {args.benchmark_output}")
-                print(
-                    "[e2e] logical-frame performance PASS "
-                    f"(runtime={sample.get('runtime')}, frames={frames}, "
-                    f"fps={logical_fps:.3f}, p95={p95_ms:.3f}ms, "
-                    f"agents={agent_total}, map={map_id}, "
-                    "gpu-timing=not-sampled)"
-                )
-                if args.benchmark_only:
-                    print("[e2e] PASS (benchmark-only)")
-                    return 0
+                run_performance_sample(args, stream, origin, token, state)
 
             before = position(ready)
             revision = int(ready["revision"])

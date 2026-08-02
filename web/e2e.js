@@ -85,6 +85,7 @@ const wait = (milliseconds) =>
 
 const NATIVE_ACTION_CODES = Object.freeze({
   activate: 'enter',
+  'focus-window': 'focus-window',
   'move-forward': 'arrow-up',
   'move-backward': 'arrow-down',
   'turn-left': 'arrow-left',
@@ -325,8 +326,18 @@ export function installE2EBridge({
     }).catch(() => {});
   });
 
+  let characterSelectionState = 'unavailable';
   const characterSelection = createCharacterSelectionMilestone({
     afterFrame: window.requestAnimationFrame.bind(window),
+    selectorReady: () => {
+      const state = window.gwCompanionRuntime?.characterSelectionState?.()
+        ?? 'unavailable';
+      if (state !== characterSelectionState) {
+        characterSelectionState = state;
+        log(`[e2e] character selection: ${state}`);
+      }
+      return state === 'ready';
+    },
     report: () => report('character-selection-ready'),
   });
 
@@ -359,16 +370,32 @@ export function installE2EBridge({
               code: NATIVE_ACTION_CODES[action.action],
               action: action.action,
             };
-            preparedNativeActions.push(prepared);
+            // focus-window deliberately emits no key event. Queuing it here
+            // would make the next real native key fail correlation.
+            const observesNativeKey = action.action !== 'focus-window';
+            if (observesNativeKey) preparedNativeActions.push(prepared);
             try {
               await report('action-prepared', {
                 actionSequence: action.sequence,
                 action: action.action,
                 target,
               });
+              if (action.action === 'focus-window') {
+                // The native host brings the NSWindow forward after the
+                // preparation acknowledgement. A native animation frame is
+                // the semantic proof that WebKit resumed; a timer would let a
+                // hidden or sleeping view produce a meaningless FPS sample.
+                window.requestAnimationFrame(() => {
+                  void report('window-frame-ready', {
+                    actionSequence: action.sequence,
+                  }).catch(() => {});
+                });
+              }
             } catch (error) {
-              const index = preparedNativeActions.indexOf(prepared);
-              if (index >= 0) preparedNativeActions.splice(index, 1);
+              if (observesNativeKey) {
+                const index = preparedNativeActions.indexOf(prepared);
+                if (index >= 0) preparedNativeActions.splice(index, 1);
+              }
               throw error;
             }
             continue;
@@ -433,9 +460,6 @@ export function installE2EBridge({
   });
 
   const traffic = (direction, socketId, bytes, role = 'other') => {
-    if (direction === 'receive' && role === 'authentication') {
-      characterSelection.receive();
-    }
     if (
       trafficAction <= 0
       || !['send', 'receive'].includes(direction)
@@ -476,43 +500,50 @@ export function installE2EBridge({
 }
 
 /**
- * Turn the authenticated network transition into a selector-ready milestone.
+ * Turn the authenticated transition into a semantic selector-ready milestone.
  *
- * The WebGate token response precedes the Auth socket's character-list
- * response. Each receive restarts a short run of client frames; completing it
- * proves the response stream has gone quiet and the canvas had frames in which
- * to consume it. A ready game cancels the milestone for clients that enter a
- * character without presenting the selector.
+ * The WebGate token response only starts polling. Two consecutive client
+ * frames must independently prove that the certified Guild Wars `Selector`
+ * is visible and its `Play` frame and parent are created. A ready game
+ * cancels the poll for clients that enter a character without a selector.
  */
 export function createCharacterSelectionMilestone({
   afterFrame,
+  selectorReady,
   report,
-  settleFrames = 12,
+  settleFrames = 2,
 }) {
   let authenticated = false;
   let finished = false;
-  let receiveGeneration = 0;
+  let polling = false;
+  let readyFrames = 0;
 
-  const settle = (generation, frames) => {
+  const poll = () => {
+    if (!authenticated || finished || polling) return;
+    polling = true;
     afterFrame(() => {
-      if (finished || generation !== receiveGeneration) return;
-      if (frames > 1) {
-        settle(generation, frames - 1);
-        return;
+      polling = false;
+      if (finished) return;
+      let ready = false;
+      try {
+        ready = selectorReady() === true;
+      } catch {
+        ready = false;
       }
-      finished = true;
-      void Promise.resolve().then(report).catch(() => {});
+      readyFrames = ready ? readyFrames + 1 : 0;
+      if (readyFrames >= settleFrames) {
+        finished = true;
+        void Promise.resolve().then(report).catch(() => {});
+      } else {
+        poll();
+      }
     });
   };
 
   return Object.freeze({
     authenticationCommitted() {
       authenticated = true;
-    },
-    receive() {
-      if (!authenticated || finished) return;
-      receiveGeneration += 1;
-      settle(receiveGeneration, settleFrames);
+      poll();
     },
     gameReady() {
       finished = true;

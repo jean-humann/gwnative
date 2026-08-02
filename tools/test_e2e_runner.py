@@ -102,7 +102,42 @@ class EventStreamTests(unittest.TestCase):
 
 
 class GameStateTests(unittest.TestCase):
-    def test_ready_state_requires_two_matching_revisions(self) -> None:
+    def test_performance_scene_uses_only_core_certified_domains(self) -> None:
+        state = {
+            "status": "ready",
+            "mapId": 449,
+            "playerId": 4,
+            "agents": {
+                "truncated": False,
+                "total": 2,
+                "agents": [
+                    {"agentId": 4, "isLiving": True},
+                    {"agentId": 9, "isLiving": True},
+                ],
+            },
+        }
+        self.assertEqual(
+            RUNNER.certified_performance_scene(state, 449, 2),
+            (449, 2, 2),
+        )
+
+    def test_performance_scene_rejects_wrong_or_sparse_scenes(self) -> None:
+        state = {
+            "status": "ready",
+            "mapId": 449,
+            "playerId": 4,
+            "agents": {
+                "truncated": False,
+                "total": 1,
+                "agents": [{"agentId": 4, "isLiving": True}],
+            },
+        }
+        with self.assertRaisesRegex(RUNNER.Failure, "expected 55"):
+            RUNNER.certified_performance_scene(state, 55, 1)
+        with self.assertRaisesRegex(RUNNER.Failure, "expected at least 2"):
+            RUNNER.certified_performance_scene(state, 449, 2)
+
+    def test_ready_state_requires_two_matching_reads_without_a_new_revision(self) -> None:
         states = iter(
             [
                 {
@@ -114,7 +149,7 @@ class GameStateTests(unittest.TestCase):
                     "state": {"status": "ready", "mapId": 55, "playerId": 4},
                 },
                 {
-                    "revision": 3,
+                    "revision": 2,
                     "state": {"status": "ready", "mapId": 55, "playerId": 4},
                 },
             ]
@@ -125,7 +160,7 @@ class GameStateTests(unittest.TestCase):
             ready = RUNNER.wait_for_ready_state("", "", 0, 1)
         finally:
             RUNNER.game_state_after = original
-        self.assertEqual(ready["revision"], 3)
+        self.assertEqual(ready["revision"], 2)
 
     def test_gameplay_state_waits_for_two_complete_revisions(self) -> None:
         complete = {

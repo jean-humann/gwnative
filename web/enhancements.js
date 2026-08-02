@@ -10,7 +10,7 @@ import { createCursorConsumer } from './enhancement-cursor.js';
 import { createTargetReadout } from './enhancement-readout.js';
 import { readCompanionSnapshot } from './companion-snapshot.js';
 import { decodeCompanionManifest } from './companion-manifest.js';
-import { probeLayout } from './layout-probe.js';
+import { characterSelectionState, probeLayout } from './layout-probe.js';
 import * as diagnostics from './diagnostics.js';
 import {
   asyncifyStateReader,
@@ -303,6 +303,10 @@ export async function installEnhancements(instance, manifestValue, selection) {
           throw new Error('layout probing is available only during E2E certification');
         }
         return probeLayout(exports.memory.buffer, manifest.layoutWords);
+      },
+      characterSelectionState() {
+        if (window.__gwnativeE2E !== true) return 'unavailable';
+        return characterSelectionState(exports.memory.buffer, manifest.layoutWords);
       },
       // Presentation state only: no pixels and no pointer leave this module.
       get cursor() {

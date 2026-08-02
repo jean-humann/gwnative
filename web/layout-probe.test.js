@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { probeLayout } from './layout-probe.js';
+import {
+  characterSelectionReady,
+  frameLabelHash,
+  probeLayout,
+} from './layout-probe.js';
 
 const words = () => {
   const layout = Array(232).fill(0);
@@ -163,6 +167,39 @@ function fixture(delta) {
   return buffer;
 }
 
+function characterSelectorFixture() {
+  const layout = Array(232).fill(0);
+  Object.assign(layout, {
+    182: 0x100,
+    183: 0x1c8,
+    188: 0xbc,
+    195: 0x128,
+    196: 0x134,
+    197: 0x18c,
+  });
+  const buffer = new ArrayBuffer(0x2000);
+  const view = new DataView(buffer);
+  const frameBuffer = 0x200;
+  const root = 0x1000;
+  const selector = 0x1200;
+  const play = 0x1400;
+  view.setUint32(0x100, frameBuffer, true);
+  view.setUint32(0x104, 3, true);
+  view.setUint32(0x108, 3, true);
+  for (const [id, address, parent, label] of [
+    [0, root, 0, 'Game'],
+    [1, selector, root, 'Selector'],
+    [2, play, selector, 'Play'],
+  ]) {
+    view.setUint32(frameBuffer + id * 4, address, true);
+    view.setUint32(address + 0xbc, id, true);
+    view.setUint32(address + 0x128, parent ? parent + 0x128 : 0, true);
+    view.setUint32(address + 0x134, frameLabelHash(label), true);
+    view.setUint32(address + 0x18c, 0x4, true);
+  }
+  return { buffer, layout, view, root, selector, play };
+}
+
 describe('bounded layout probe', () => {
   it('returns only the common aligned live-memory delta', () => {
     assert.deepEqual(probeLayout(fixture(0x30), words(), 0x40), {
@@ -274,5 +311,30 @@ describe('bounded layout probe', () => {
     assert.equal(completion.completionRecordsValid, false);
     assert.equal('words' in completion, false);
     assert.equal('buffer' in completion, false);
+  });
+});
+
+describe('certified character selector probe', () => {
+  it('matches Guild Wars frame labels case-insensitively', () => {
+    assert.equal(frameLabelHash('Game'), 140452905);
+    assert.equal(frameLabelHash('selector'), frameLabelHash('Selector'));
+  });
+
+  it('requires a visible selector and created Play control', () => {
+    const { buffer, layout, view, selector, play } = characterSelectorFixture();
+    assert.equal(characterSelectionReady(buffer, layout), true);
+    view.setUint32(play + 0x18c, 0x8, true);
+    assert.equal(characterSelectionReady(buffer, layout), false);
+    view.setUint32(play + 0x18c, 0x14, true);
+    assert.equal(characterSelectionReady(buffer, layout), true);
+    view.setUint32(play + 0x18c, 0x4, true);
+    view.setUint32(selector + 0x18c, 0x204, true);
+    assert.equal(characterSelectionReady(buffer, layout), false);
+  });
+
+  it('fails closed on a corrupt certified frame tree', () => {
+    const { buffer, layout, view, play } = characterSelectorFixture();
+    view.setUint32(play + 0xbc, 1, true);
+    assert.equal(characterSelectionReady(buffer, layout), false);
   });
 });

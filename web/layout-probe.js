@@ -7,6 +7,25 @@
 const WORD = 4;
 const MAX_RADIUS = 4096;
 const MAX_CANDIDATES = 16;
+const MAX_UI_FRAMES = 2048;
+const MAX_UI_CAPACITY = 4096;
+const UI_FRAME_CREATED = 0x4;
+const UI_FRAME_DESTROYING = 0x8;
+const UI_FRAME_HIDDEN = 0x200;
+const UI_LAYOUT = Object.freeze({
+  frameArray: 182,
+  frameSize: 183,
+  frameId: 188,
+  parentRelation: 195,
+  frameHash: 196,
+  frameState: 197,
+});
+const FRAME_HASH_MIX = Object.freeze([
+  0x92b9a528, 0x25d4fc88, 0xedcbefb8, 0x51063a80,
+  0x91341c61, 0x0261229d, 0x726f48ed, 0xce1c088c,
+  0x76253eb5, 0x31e3a0de, 0xa2aad215, 0xca7d6d27,
+  0xa5f98970, 0x0541c365, 0x3c14ff04, 0x5056af4f,
+]);
 const QUEST_LAYOUT = Object.freeze({
   gameWorldContext: 26,
   activeQuest: 76,
@@ -106,6 +125,110 @@ function reader(buffer) {
   };
   return { contains, u8, u16, u32, f32, pointer };
 }
+
+/** Guild Wars' case-insensitive `StrHashI(label, -1)` frame-label hash. */
+export function frameLabelHash(label) {
+  let hash = 0x325d1eae;
+  let first = 0xe2c15c9d;
+  let second = 0x2170a28a;
+  for (const character of String(label)) {
+    let code = character.codePointAt(0) & 0xffff;
+    if (code >= 0x61 && code <= 0x7a) code -= 0x20;
+    first = (code ^ (first << 3)) >>> 0;
+    second = (FRAME_HASH_MIX[first & 0xf] + second) >>> 0;
+    hash = (((second + first) >>> 0) ^ hash) >>> 0;
+  }
+  return hash;
+}
+
+const SELECTOR_HASH = frameLabelHash('Selector');
+const PLAY_HASH = frameLabelHash('Play');
+
+/**
+ * Prove that the visible character selector and its Play control are created.
+ *
+ * This E2E-only reader uses only fields already covered by the signed passive
+ * layout. It returns one boolean, never frame contents or character names.
+ */
+export function characterSelectionState(buffer, layoutWords) {
+  if (
+    !(buffer instanceof ArrayBuffer)
+    || !Array.isArray(layoutWords)
+    || layoutWords.length !== 232
+    || layoutWords[UI_LAYOUT.frameSize] !== 0x1c8
+  ) return 'layout-invalid';
+
+  const read = reader(buffer);
+  const array = layoutWords[UI_LAYOUT.frameArray];
+  if (!Number.isInteger(array) || array % WORD !== 0 || !read.contains(array, 12)) {
+    return 'layout-invalid';
+  }
+  const frameBuffer = read.u32(array);
+  const capacity = read.u32(array + 4);
+  const size = read.u32(array + 8);
+  if (
+    frameBuffer === null
+    || capacity === null
+    || size === null
+    || size > capacity
+    || size > MAX_UI_FRAMES
+    || capacity > MAX_UI_CAPACITY
+    || frameBuffer % WORD !== 0
+    || !read.contains(frameBuffer, size * WORD)
+  ) return 'layout-invalid';
+
+  const frames = new Map();
+  for (let frameId = 0; frameId < size; frameId += 1) {
+    const address = read.u32(frameBuffer + frameId * WORD);
+    if (address === null) return 'layout-invalid';
+    if (address === 0 || address === 0xffff_ffff) continue;
+    if (
+      address % WORD !== 0
+      || !read.contains(address, layoutWords[UI_LAYOUT.frameSize])
+      || read.u32(address + layoutWords[UI_LAYOUT.frameId]) !== frameId
+    ) return 'layout-invalid';
+    const relation = read.u32(address + layoutWords[UI_LAYOUT.parentRelation]);
+    const hash = read.u32(address + layoutWords[UI_LAYOUT.frameHash]);
+    const state = read.u32(address + layoutWords[UI_LAYOUT.frameState]);
+    if (relation === null || hash === null || state === null) return 'layout-invalid';
+    let parentId = null;
+    if (relation !== 0) {
+      const parent = relation - layoutWords[UI_LAYOUT.parentRelation];
+      if (parent < 0 || parent % WORD !== 0) return 'layout-invalid';
+      parentId = read.u32(parent + layoutWords[UI_LAYOUT.frameId]);
+      if (
+        parentId === null
+        || parentId >= size
+        || read.u32(frameBuffer + parentId * WORD) !== parent
+      ) return 'layout-invalid';
+    }
+    frames.set(frameId, { parentId, hash, state });
+  }
+
+  const selector = [...frames.values()].find((frame) => frame.hash === SELECTOR_HASH);
+  const play = [...frames.values()].find((frame) => frame.hash === PLAY_HASH);
+  if (!selector) return 'selector-missing';
+  if ((selector.state & UI_FRAME_HIDDEN) !== 0) return 'selector-hidden';
+  if (
+    (selector.state & UI_FRAME_CREATED) === 0
+    || (selector.state & UI_FRAME_DESTROYING) !== 0
+  ) return 'selector-not-created';
+  if (!play) return 'play-missing';
+  if (
+    (play.state & UI_FRAME_CREATED) === 0
+    || (play.state & UI_FRAME_DESTROYING) !== 0
+  ) return 'play-not-created';
+  const playParent = frames.get(play.parentId);
+  if (
+    !playParent
+    || (playParent.state & UI_FRAME_CREATED) === 0
+    || (playParent.state & UI_FRAME_DESTROYING) !== 0
+  ) return 'play-parent-not-created';
+  return 'ready';
+}
+
+export const characterSelectionReady = (buffer, layoutWords) =>
+  characterSelectionState(buffer, layoutWords) === 'ready';
 
 function contextAt(read, layout, delta) {
   const contexts = read.pointer(layout[0] + delta, 28);

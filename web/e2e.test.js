@@ -30,26 +30,26 @@ class MemoryStorage {
 }
 
 describe('end-to-end helpers', () => {
-  it('reports character selection only after authenticated traffic settles', async () => {
+  it('reports character selection only after two certified ready frames', async () => {
     const frames = [];
+    const readiness = [false, true, true];
     let reports = 0;
     const milestone = createCharacterSelectionMilestone({
       afterFrame: (callback) => frames.push(callback),
+      selectorReady: () => readiness.shift(),
       report: async () => {
         reports += 1;
       },
       settleFrames: 2,
     });
 
-    milestone.receive();
     assert.equal(frames.length, 0);
     milestone.authenticationCommitted();
-    milestone.receive();
-    frames.shift()();
-    milestone.receive();
+    assert.equal(frames.length, 1);
     frames.shift()();
     assert.equal(reports, 0);
     frames.shift()();
+    assert.equal(reports, 0);
     frames.shift()();
     await Promise.resolve();
     assert.equal(reports, 1);
@@ -60,13 +60,13 @@ describe('end-to-end helpers', () => {
     let reports = 0;
     const milestone = createCharacterSelectionMilestone({
       afterFrame: (callback) => frames.push(callback),
+      selectorReady: () => true,
       report: () => {
         reports += 1;
       },
       settleFrames: 1,
     });
     milestone.authenticationCommitted();
-    milestone.receive();
     milestone.gameReady();
     frames.shift()();
     assert.equal(reports, 0);
@@ -167,9 +167,17 @@ describe('end-to-end helpers', () => {
       ),
       'canvas',
     );
+    assert.equal(
+      prepareNativeE2EAction(
+        { sequence: 4, action: 'focus-window', durationMs: 0 },
+        { window, canvas },
+      ),
+      'canvas',
+    );
+    assert.equal(focused, 'canvas');
     assert.throws(
       () => prepareNativeE2EAction(
-        { sequence: 4, action: 'type-password', durationMs: 40 },
+        { sequence: 5, action: 'type-password', durationMs: 40 },
         { window, canvas },
       ),
       /allowed vocabulary/,

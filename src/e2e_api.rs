@@ -95,6 +95,10 @@ impl Hub {
                     "description": "press and release Enter on the game input target",
                 },
                 {
+                    "name": "focus-window",
+                    "description": "bring the signed game window forward without sending input",
+                },
+                {
                     "name": "move-forward",
                     "description": "hold Arrow Up on the game canvas",
                     "minimumDurationMs": 50,
@@ -165,11 +169,11 @@ impl Hub {
         let request: ActionRequest = serde_json::from_slice(bytes)
             .map_err(|error| format!("invalid E2E action: {error}"))?;
         let duration_ms = match request.action.as_str() {
-            "activate" => {
+            "activate" | "focus-window" => {
                 if request.duration_ms.is_some() {
-                    return Err("activate does not accept a duration".into());
+                    return Err("tapped native actions do not accept a duration".into());
                 }
-                40
+                if request.action == "activate" { 40 } else { 0 }
             }
             "move-forward" | "move-backward" | "turn-left" | "turn-right" => {
                 let duration = request.duration_ms.unwrap_or(500);
@@ -390,6 +394,10 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
         "credential-status" => {
             exact_keys(object, &["status"])?;
             enum_text_field(object, "status", &["available", "unavailable", "error"])
+        }
+        "window-frame-ready" => {
+            exact_keys(object, &["actionSequence"])?;
+            positive_u64_field(object, "actionSequence")
         }
         "credentials-offered" => {
             exact_keys(object, &["accountSet", "passwordSet"])?;
@@ -723,8 +731,9 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             positive_u64_field(object, "actionSequence")?;
             match object.get("action").and_then(Value::as_str) {
                 Some(
-                    "activate" | "move-forward" | "move-backward" | "turn-left" | "turn-right"
-                    | "target-next" | "interact" | "cancel" | "skill-1" | "probe-secure-input",
+                    "activate" | "focus-window" | "move-forward" | "move-backward" | "turn-left"
+                    | "turn-right" | "target-next" | "interact" | "cancel" | "skill-1"
+                    | "probe-secure-input",
                 ) => {}
                 _ => return Err("prepared E2E action names an unknown action".into()),
             }
@@ -788,9 +797,9 @@ fn action_result(object: &Map<String, Value>) -> Result<(), String> {
     positive_u64_field(object, "actionSequence")?;
     match object.get("action").and_then(Value::as_str) {
         Some(
-            "activate" | "move-forward" | "move-backward" | "turn-left" | "turn-right"
-            | "target-next" | "interact" | "cancel" | "skill-1" | "probe-secure-input" | "test-ui"
-            | "probe-layout" | "sample-performance",
+            "activate" | "focus-window" | "move-forward" | "move-backward" | "turn-left"
+            | "turn-right" | "target-next" | "interact" | "cancel" | "skill-1"
+            | "probe-secure-input" | "test-ui" | "probe-layout" | "sample-performance",
         ) => {}
         _ => return Err("E2E action result names an unknown action".into()),
     }
@@ -948,6 +957,10 @@ mod tests {
                 .unwrap();
         assert_eq!(first["sequence"], 1);
         assert_eq!(first["durationMs"], 40);
+        let focus: Value =
+            serde_json::from_slice(&hub.submit_action(br#"{"action":"focus-window"}"#).unwrap())
+                .unwrap();
+        assert_eq!(focus["durationMs"], 0);
         assert!(
             hub.submit_action(br#"{"action":"click","x":1,"y":2}"#)
                 .is_err()
@@ -1001,30 +1014,40 @@ mod tests {
     }
 
     #[test]
-    fn only_gameplay_actions_enter_the_native_queue() {
+    fn only_native_actions_enter_the_native_queue() {
         let hub = Hub::default();
         hub.submit_action(br#"{"action":"test-ui"}"#).unwrap();
         hub.submit_action(br#"{"action":"probe-layout"}"#).unwrap();
         hub.submit_action(br#"{"action":"sample-performance","durationMs":1000}"#)
             .unwrap();
+        hub.submit_action(br#"{"action":"focus-window"}"#).unwrap();
         hub.submit_action(br#"{"action":"activate"}"#).unwrap();
         hub.submit_action(br#"{"action":"move-forward","durationMs":250}"#)
             .unwrap();
 
         assert!(hub.take_native_action().is_none());
         hub.publish_event(
-            br#"{"kind":"action-prepared","detail":{"actionSequence":4,"action":"activate","target":"password-proxy"}}"#,
+            br#"{"kind":"action-prepared","detail":{"actionSequence":4,"action":"focus-window","target":"canvas"}}"#,
         )
         .unwrap();
         hub.publish_event(
-            br#"{"kind":"action-prepared","detail":{"actionSequence":5,"action":"move-forward","target":"canvas"}}"#,
+            br#"{"kind":"action-prepared","detail":{"actionSequence":5,"action":"activate","target":"password-proxy"}}"#,
         )
         .unwrap();
+        hub.publish_event(
+            br#"{"kind":"action-prepared","detail":{"actionSequence":6,"action":"move-forward","target":"canvas"}}"#,
+        )
+        .unwrap();
+        let focus = hub.take_native_action().unwrap();
         let first = hub.take_native_action().unwrap();
         let second = hub.take_native_action().unwrap();
+        assert_eq!(focus.action, "focus-window");
+        assert_eq!(focus.sequence, 4);
+        assert_eq!(focus.duration_ms, 0);
         assert_eq!(first.action, "activate");
-        assert_eq!(first.sequence, 4);
+        assert_eq!(first.sequence, 5);
         assert_eq!(second.action, "move-forward");
+        assert_eq!(second.sequence, 6);
         assert_eq!(second.duration_ms, 250);
         assert!(hub.take_native_action().is_none());
     }
@@ -1057,6 +1080,8 @@ mod tests {
             hub.publish_event(br#"{"kind":"character-selection-ready","detail":{}}"#)
                 .is_ok()
         );
+        let frame_ready = br#"{"kind":"window-frame-ready","detail":{"actionSequence":1}}"#;
+        assert!(hub.publish_event(frame_ready).is_ok());
         assert!(
             hub.publish_event(
                 br#"{"kind":"credentials-offered","detail":{"accountSet":true,"passwordSet":true,"password":"never"}}"#,
