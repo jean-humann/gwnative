@@ -722,6 +722,7 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
                     "frames",
                     "framesPerSecond",
                     "intervalMs",
+                    "callbackToSwapMs",
                     "canvas",
                     "webgl",
                     "audit",
@@ -747,6 +748,22 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             u32_field(intervals, "samples")?;
             for name in ["mean", "p50", "p95", "p99", "max"] {
                 bounded_number_field(intervals, name, 0.0, 120_000.0, true)?;
+            }
+
+            let callback = object
+                .get("callbackToSwapMs")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    "performance callback-to-swap timing must be an object".to_owned()
+                })?;
+            exact_keys(
+                callback,
+                &["samples", "unsampled", "mean", "p50", "p95", "p99", "max"],
+            )?;
+            u32_field(callback, "samples")?;
+            u32_field(callback, "unsampled")?;
+            for name in ["mean", "p50", "p95", "p99", "max"] {
+                bounded_number_field(callback, name, 0.0, 120_000.0, true)?;
             }
 
             let canvas = object
@@ -1245,6 +1262,15 @@ mod tests {
                 "p95": 17.2,
                 "p99": 20.0,
                 "max": 24.0,
+            },
+            "callbackToSwapMs": {
+                "samples": 601,
+                "unsampled": 0,
+                "mean": 7.0,
+                "p50": 6.8,
+                "p95": 8.5,
+                "p99": 10.0,
+                "max": 12.0,
             },
             "canvas": {
                 "width": 2560,
