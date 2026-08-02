@@ -1942,12 +1942,10 @@ unsafe fn collect_social(layout: Layout, game: u32) -> Option<SocialSource> {
     {
         return None;
     }
-    let guild_context = unsafe {
-        pointer(
-            offset(game, layout.game_guild_context)?,
-            layout.guild_context_roster.checked_add(16)?,
-        )?
-    };
+    let guild_bytes = layout.guild_context_roster.checked_add(16)?;
+    let guild_context = offset(game, layout.game_guild_context)
+        .and_then(|address| unsafe { pointer(address, guild_bytes) })
+        .unwrap_or(0);
     Some(SocialSource {
         friend_list: layout.friend_list_address,
         guild_context,
@@ -2763,10 +2761,10 @@ unsafe fn publish_social(
 ) -> bool {
     let friend_bytes = layout.friend_list_player_status.checked_add(4);
     let guild_bytes = layout.guild_context_roster.checked_add(16);
-    let mut valid = source.friend_list != 0
+    let mut friends_valid = source.friend_list != 0
         && source.friend_list & 3 == 0
-        && friend_bytes.is_some_and(|bytes| contains(source.friend_list, bytes))
-        && source.guild_context != 0
+        && friend_bytes.is_some_and(|bytes| contains(source.friend_list, bytes));
+    let mut guild_valid = source.guild_context != 0
         && source.guild_context & 3 == 0
         && guild_bytes.is_some_and(|bytes| contains(source.guild_context, bytes));
     let mut social_flags = 0u32;
@@ -2788,7 +2786,7 @@ unsafe fn publish_social(
     let mut guild_roster_total = 0u32;
     let mut guild_cape = [0u32; 7];
 
-    if valid {
+    if friends_valid {
         let status = offset(source.friend_list, layout.friend_list_player_status)
             .and_then(|address| unsafe { read_u32(address) });
         let friends = offset(source.friend_list, layout.friend_list_number_friend)
@@ -2807,17 +2805,17 @@ unsafe fn publish_social(
             number_ignores = ignores;
             number_partners = partners;
             number_traders = traders;
-            valid &= player_status <= 4
+            friends_valid &= player_status <= 4
                 && number_friends <= MAX_RAW_FRIENDS
                 && number_ignores <= MAX_RAW_FRIENDS
                 && number_partners <= MAX_RAW_FRIENDS
                 && number_traders <= MAX_RAW_FRIENDS;
         } else {
-            valid = false;
+            friends_valid = false;
         }
     }
 
-    if valid {
+    if friends_valid {
         let list = offset(source.friend_list, layout.friend_list_friends)
             .and_then(|address| unsafe {
                 read_array(address, 4, MAX_RAW_FRIENDS, MAX_RAW_FRIENDS)
@@ -2826,18 +2824,18 @@ unsafe fn publish_social(
             let mut observed = [0u32; 5];
             for slot in 0..list.size {
                 let Some(entry) = indexed(list.buffer, slot, 4) else {
-                    valid = false;
+                    friends_valid = false;
                     break;
                 };
                 let Some(address) = (unsafe { read_u32(entry) }) else {
-                    valid = false;
+                    friends_valid = false;
                     break;
                 };
                 if address == 0 {
                     continue;
                 }
                 let Some(friend) = (unsafe { read_friend(layout, address, slot) }) else {
-                    valid = false;
+                    friends_valid = false;
                     break;
                 };
                 observed[friend.friend_type as usize] += 1;
@@ -2852,16 +2850,16 @@ unsafe fn publish_social(
                     friend_count += 1;
                 }
             }
-            valid &= observed[1] == number_friends
+            friends_valid &= observed[1] == number_friends
                 && observed[2] == number_ignores
                 && observed[3] == number_partners
                 && observed[4] == number_traders;
         } else {
-            valid = false;
+            friends_valid = false;
         }
     }
 
-    if valid {
+    if guild_valid {
         let player_index = offset(source.guild_context, layout.guild_context_player_index)
             .and_then(|address| unsafe { read_u32(address) });
         let player_rank = offset(source.guild_context, layout.guild_context_player_rank)
@@ -2869,13 +2867,13 @@ unsafe fn publish_social(
         if let (Some(index), Some(rank)) = (player_index, player_rank) {
             guild_index = index;
             player_guild_rank = rank;
-            valid &= guild_index < MAX_GUILDS;
+            guild_valid &= guild_index < MAX_GUILDS;
         } else {
-            valid = false;
+            guild_valid = false;
         }
     }
 
-    if valid && guild_index != 0 {
+    if guild_valid && guild_index != 0 {
         let guilds = offset(source.guild_context, layout.guild_context_guilds)
             .and_then(|address| unsafe { read_array(address, 4, MAX_GUILDS, 256) });
         let guild_address = guilds.and_then(|guilds| {
@@ -2927,7 +2925,7 @@ unsafe fn publish_social(
                 .unwrap_or(0);
             let record_index = offset(guild, layout.guild_index)
                 .and_then(|address| unsafe { read_u32(address) });
-            valid &= context_key == record_key
+            guild_valid &= context_key == record_key
                 && context_key.iter().any(|word| *word != 0)
                 && record_index == Some(guild_index);
             for index in 0..7u32 {
@@ -2939,16 +2937,16 @@ unsafe fn publish_social(
                 .unwrap_or(0);
             }
         } else {
-            valid = false;
+            guild_valid = false;
         }
 
-        if valid {
+        if guild_valid {
             let roster = offset(source.guild_context, layout.guild_context_roster)
                 .and_then(|address| unsafe {
                     read_array(address, 4, MAX_GUILD_ROSTER, 256)
                 });
             if let Some(roster) = roster {
-                valid &= layout.guild_player_stride >= 0x40
+                guild_valid &= layout.guild_player_stride >= 0x40
                     && layout.guild_player_stride <= 0x400
                     && layout.guild_player_stride & 3 == 0
                     && layout.guild_player_name_pointer
@@ -2958,7 +2956,7 @@ unsafe fn publish_social(
                     let value = indexed(roster.buffer, index, 4)
                         .and_then(|entry| unsafe { read_u32(entry) });
                     let Some(address) = value else {
-                        valid = false;
+                        guild_valid = false;
                         break;
                     };
                     if address == 0 {
@@ -2967,28 +2965,41 @@ unsafe fn publish_social(
                     if address & 3 != 0
                         || !contains(address, layout.guild_player_stride)
                     {
-                        valid = false;
+                        guild_valid = false;
                         break;
                     }
                     guild_roster_total += 1;
                 }
             } else {
-                valid = false;
+                guild_valid = false;
             }
         }
-        if valid {
+        if guild_valid {
             social_flags |= 1 << 1;
         }
-    } else if valid {
+    } else if guild_valid {
         // GuildContext keeps other fields alive across transitions. Index zero
         // is the authoritative "no guild" signal, so publish no stale rank.
         player_guild_rank = 0;
     }
 
-    if valid && friend_total > friend_count as u32 {
+    if friends_valid && friend_total > friend_count as u32 {
         social_flags |= 1;
     }
-    if !valid {
+    if !guild_valid {
+        social_flags &= !(1 << 1);
+        guild_index = 0;
+        player_guild_rank = 0;
+        guild_rank = 0;
+        guild_features = 0;
+        guild_rating = 0;
+        guild_faction = 0;
+        guild_faction_point = 0;
+        guild_qualifier_point = 0;
+        guild_roster_total = 0;
+        guild_cape = [0; 7];
+    }
+    if !friends_valid {
         social_flags = 0;
         player_status = 0;
         friend_count = 0;
@@ -3022,7 +3033,7 @@ unsafe fn publish_social(
         write_volatile(&mut (*snapshot).player_status, player_status);
         write_volatile(
             &mut (*snapshot).friend_count,
-            if valid { friend_count as u32 } else { 0 },
+            if friends_valid { friend_count as u32 } else { 0 },
         );
         write_volatile(&mut (*snapshot).friend_total, friend_total);
         write_volatile(&mut (*snapshot).number_friends, number_friends);
@@ -3051,7 +3062,7 @@ unsafe fn publish_social(
             write_volatile(&mut (*snapshot).guild_cape[index], guild_cape[index]);
         }
     }
-    valid
+    friends_valid
 }
 
 unsafe fn publish_completion(

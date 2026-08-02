@@ -751,6 +751,17 @@ assert.deepEqual(closedTrade.trade, {
   partner: { gold: 0, itemsTruncated: false, items: [] },
 });
 
+// Guild detail is optional. A stale or unsupported guild index must fail
+// closed for the guild record without discarding independently validated
+// friend telemetry.
+u32(guildContext + 0x60, 3);
+observe(runtime);
+const invalidGuild = readCompanionSnapshot(memory.buffer, snapshot);
+assert.equal(invalidGuild.status, 'ready');
+assert.equal(invalidGuild.social.guild, null);
+assert.equal(invalidGuild.social.friends.total, 1);
+assert.equal(invalidGuild.social.friends.entries[0].typeName, 'Friend');
+
 // Index zero is the authoritative no-guild state even when the context keeps
 // stale rank and roster fields alive across a transition.
 u32(guildContext + 0x60, 0);
