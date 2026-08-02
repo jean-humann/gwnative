@@ -176,6 +176,26 @@ describe('end-to-end helpers', () => {
     );
   });
 
+  it('uses an isolated password proxy for the fixed secure-input probe', () => {
+    let focused = '';
+    const canvas = { focus: () => { focused = 'canvas'; } };
+    const secureInput = {
+      value: 'must be cleared',
+      focus: () => { focused = 'secure'; },
+    };
+    const window = { Module: { canvas } };
+
+    assert.equal(
+      prepareNativeE2EAction(
+        { sequence: 1, action: 'probe-secure-input', durationMs: 40 },
+        { window, canvas, secureInput },
+      ),
+      'password-proxy',
+    );
+    assert.equal(secureInput.value, '');
+    assert.equal(focused, 'secure');
+  });
+
   it('runs app UI checks without dispatching game input', async () => {
     let checks = 0;
     const window = {

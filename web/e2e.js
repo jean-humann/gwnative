@@ -93,6 +93,7 @@ const NATIVE_ACTION_CODES = Object.freeze({
   interact: 'space',
   cancel: 'escape',
   'skill-1': 'digit-1',
+  'probe-secure-input': 'digit-1',
 });
 
 const EVENT_CODES = Object.freeze({
@@ -120,7 +121,7 @@ const targetName = (window, canvas, candidate) => {
  * This does not dispatch input. Its acknowledgement is what lets the host send
  * the trusted AppKit event without racing the page's action long poll.
  */
-export function prepareNativeE2EAction(action, { window, canvas }) {
+export function prepareNativeE2EAction(action, { window, canvas, secureInput = null }) {
   assert(Number.isSafeInteger(action?.sequence) && action.sequence > 0,
     'E2E action has no valid sequence');
   assert(
@@ -128,9 +129,15 @@ export function prepareNativeE2EAction(action, { window, canvas }) {
     'E2E native action is not in the allowed vocabulary',
   );
   const activeInput = window.Module?.oskActiveInput;
-  const target = action.action === 'activate' && activeInput ? activeInput : canvas;
+  const target = action.action === 'probe-secure-input'
+    ? secureInput
+    : action.action === 'activate' && activeInput ? activeInput : canvas;
+  assert(target, 'secure-input probe is not installed');
+  if (action.action === 'probe-secure-input') target.value = '';
   target.focus?.();
-  return targetName(window, canvas, target);
+  return action.action === 'probe-secure-input'
+    ? 'password-proxy'
+    : targetName(window, canvas, target);
 }
 
 /**
@@ -216,6 +223,22 @@ export function installE2EBridge({
   const socketActions = new Map();
   const preparedNativeActions = [];
   let activeNativeAction = null;
+
+  // A real password field is deliberately used here. macOS treats it
+  // differently from ordinary text input, so a DOM-only test cannot catch the
+  // secure-input regression this probe exists for. The host can send only the
+  // fixed digit below; no API accepts text or credentials, and only the
+  // resulting length crosses the test boundary.
+  const secureContainer = window.document.createElement('div');
+  secureContainer.className = 'osk-container';
+  const secureInput = window.document.createElement('input');
+  secureInput.type = 'password';
+  secureInput.tabIndex = -1;
+  secureInput.autocomplete = 'off';
+  secureInput.className = 'osk-input';
+  secureInput.setAttribute('aria-hidden', 'true');
+  secureContainer.append(secureInput);
+  window.document.body.append(secureContainer);
   const nativeKey = (kind, event) => {
     if (!event.isTrusted) return;
     const code = EVENT_CODES[event.code] ?? 'other';
@@ -251,6 +274,18 @@ export function installE2EBridge({
     return response.json();
   };
 
+  secureInput.addEventListener('input', () => {
+    const action = activeNativeAction;
+    if (action?.action !== 'probe-secure-input') return;
+    const length = secureInput.value.length;
+    secureInput.value = '';
+    canvas.focus?.();
+    void report('secure-input-observed', {
+      actionSequence: action.sequence,
+      length,
+    }).catch(() => {});
+  });
+
   const characterSelection = createCharacterSelectionMilestone({
     afterFrame: window.requestAnimationFrame.bind(window),
     report: () => report('character-selection-ready'),
@@ -275,10 +310,15 @@ export function installE2EBridge({
           // page focuses the client's finite input target and acknowledges it
           // before AppKit is woken, then only observes resulting socket traffic.
           if (action.action !== 'test-ui' && action.action !== 'probe-layout') {
-            const target = prepareNativeE2EAction(action, { window, canvas });
+            const target = prepareNativeE2EAction(action, {
+              window,
+              canvas,
+              secureInput,
+            });
             const prepared = {
               sequence: action.sequence,
               code: NATIVE_ACTION_CODES[action.action],
+              action: action.action,
             };
             preparedNativeActions.push(prepared);
             try {
@@ -343,6 +383,7 @@ export function installE2EBridge({
     window.removeEventListener('gwnative:state', gameState);
     window.removeEventListener('keydown', nativeKeyDown, true);
     window.removeEventListener('keyup', nativeKeyUp, true);
+    secureContainer.remove();
   };
   window.addEventListener('pagehide', stop, { once: true });
   void report('bridge-ready').catch((error) => {

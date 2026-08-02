@@ -143,7 +143,7 @@ fn deliver(dispatcher: Rc<Dispatcher>, action: Action) {
             code: ESCAPE_KEY_CODE,
             modifiers: NSEventModifierFlags::empty(),
         },
-        "skill-1" => Key {
+        "skill-1" | "probe-secure-input" => Key {
             characters: "1",
             code: ONE_KEY_CODE,
             modifiers: NSEventModifierFlags::empty(),

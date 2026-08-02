@@ -568,6 +568,7 @@ def main() -> int:
                 "interact",
                 "cancel",
                 "skill-1",
+                "probe-secure-input",
                 "test-ui",
                 "probe-layout",
             }
@@ -624,6 +625,17 @@ def main() -> int:
             else:
                 raise Failure(f"unexpected credential status: {credential_status}")
             print("[e2e] token gates and event-driven API contracts PASS")
+
+            secure_probe = submit_action(origin, token, "probe-secure-input")
+            stream.wait_for_action(secure_probe, 5)
+            secure_input = stream.wait_for_action_event(
+                secure_probe,
+                "secure-input-observed",
+                1,
+            )
+            if (secure_input or {}).get("detail", {}).get("length") != 1:
+                raise Failure("WebKit did not accept native input in a secure field")
+            print("[e2e] native WebKit secure-input path PASS")
 
             if args.no_gameplay:
                 ui = submit_action(origin, token, "test-ui")

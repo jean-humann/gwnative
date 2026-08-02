@@ -135,6 +135,10 @@ impl Hub {
                     "description": "press and release the first skill key",
                 },
                 {
+                    "name": "probe-secure-input",
+                    "description": "insert one fixed sentinel into an isolated secure field",
+                },
+                {
                     "name": "test-ui",
                     "description": "exercise the app-owned panels and widgets",
                 },
@@ -170,7 +174,7 @@ impl Hub {
                 }
                 duration
             }
-            "target-next" | "interact" | "cancel" | "skill-1" => {
+            "target-next" | "interact" | "cancel" | "skill-1" | "probe-secure-input" => {
                 if request.duration_ms.is_some() {
                     return Err("tapped gameplay actions do not accept a duration".into());
                 }
@@ -437,7 +441,7 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             match object.get("action").and_then(Value::as_str) {
                 Some(
                     "activate" | "move-forward" | "move-backward" | "turn-left" | "turn-right"
-                    | "target-next" | "interact" | "cancel" | "skill-1",
+                    | "target-next" | "interact" | "cancel" | "skill-1" | "probe-secure-input",
                 ) => {}
                 _ => return Err("prepared E2E action names an unknown action".into()),
             }
@@ -463,6 +467,14 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
                 ],
             )?;
             u32_field(object, "keyCode")
+        }
+        "secure-input-observed" => {
+            exact_keys(object, &["actionSequence", "length"])?;
+            positive_u64_field(object, "actionSequence")?;
+            match object.get("length").and_then(Value::as_u64) {
+                Some(1) => Ok(()),
+                _ => Err("secure-input probe did not insert its fixed sentinel".into()),
+            }
         }
         "action-complete" => {
             exact_keys(
@@ -494,7 +506,8 @@ fn action_result(object: &Map<String, Value>) -> Result<(), String> {
     match object.get("action").and_then(Value::as_str) {
         Some(
             "activate" | "move-forward" | "move-backward" | "turn-left" | "turn-right"
-            | "target-next" | "interact" | "cancel" | "skill-1" | "test-ui" | "probe-layout",
+            | "target-next" | "interact" | "cancel" | "skill-1" | "probe-secure-input" | "test-ui"
+            | "probe-layout",
         ) => {}
         _ => return Err("E2E action result names an unknown action".into()),
     }
@@ -611,6 +624,10 @@ mod tests {
         );
         assert!(hub.submit_action(br#"{"action":"target-next"}"#).is_ok());
         assert!(
+            hub.submit_action(br#"{"action":"probe-secure-input"}"#)
+                .is_ok()
+        );
+        assert!(
             hub.submit_action(br#"{"action":"skill-1","durationMs":40}"#)
                 .is_err()
         );
@@ -703,6 +720,24 @@ mod tests {
         assert!(
             hub.publish_event(br#"{"kind":"javascript","detail":{}}"#)
                 .is_err()
+        );
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"secure-input-observed","detail":{"actionSequence":1,"length":1}}"#,
+            )
+            .is_ok()
+        );
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"secure-input-observed","detail":{"actionSequence":1,"length":2}}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"secure-input-observed","detail":{"actionSequence":1,"length":1,"value":"never"}}"#,
+            )
+            .is_err()
         );
         assert!(
             hub.publish_event(
