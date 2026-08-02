@@ -120,10 +120,12 @@ both `jspi` and `asyncify`.
 Before sampling, the E2E-only client API applies the fixed High graphics preset,
 travels to Kamadan America-English District 2 (District 1 is the bounded
 fallback), identifies the two Xunlai agents by their certified numeric agent
-fields, and invokes the game's own `InteractNPC` action for the stable left-hand
-anchor. The runner supplies no map, region, language, agent identity, graphics
-value, pointer, or coordinate. It receives only the verified final scene and
-rejects a player farther than 180 game units from the anchor.
+fields and their unique close-pair geometry, and invokes the game's own
+six-way interaction dispatcher for the stable left-hand anchor. Unlike a raw
+world-action packet, this is the client path that approaches an out-of-range
+NPC before interacting. The runner supplies no map, region, language, agent
+identity, graphics value, pointer, or coordinate. It receives only the verified
+final scene and rejects a player farther than 180 game units from the anchor.
 
 The normal `/__game/v1` API remains read-only. This command path exists only in
 a disposable benchmark launch (`GWNATIVE_E2E=1` plus the runner-owned
@@ -137,7 +139,7 @@ flowchart LR
     P -->|"one queued finite command"| S["Guild Wars logical swap"]
     S --> C{"Closed client command"}
     C -->|"travel 449 / America / English / district 2 or 1"| U["Certified UI dispatcher"]
-    C -->|"InteractNPC / certified Xunlai agent ID"| U
+    C -->|"NPC interaction + client pathing / certified Xunlai agent ID"| U
     C -->|"fixed non-persistent High preset"| G["Certified preference setters"]
     U --> V["Read-only companion verification"]
     G --> V

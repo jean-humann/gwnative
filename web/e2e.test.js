@@ -276,6 +276,15 @@ describe('end-to-end helpers', () => {
         x: -7_671,
         y: 14_159,
       },
+      {
+        agentId: 45,
+        isLiving: true,
+        playerNumber: 5052,
+        level: 24,
+        allegiance: 6,
+        x: -4_422,
+        y: 10_452,
+      },
     ];
     const state = {
       status: 'ready',

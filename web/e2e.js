@@ -123,6 +123,8 @@ const XUNLAI_AGENT_PLAYER_NUMBER = 5052;
 const XUNLAI_AGENT_LEVEL = 24;
 const XUNLAI_AGENT_ALLEGIANCE = 6;
 const XUNLAI_DISTANCE = 180;
+const XUNLAI_PAIR_MAX_DISTANCE = 600;
+const XUNLAI_PAIR_SEPARATION_RATIO = 4;
 
 const gameState = (window) => window.gwCompanionState?.status === 'ready'
   ? window.gwCompanionState
@@ -182,8 +184,8 @@ const travelToBenchmarkDistrict = async (window, sleep) => {
   }
 };
 
-const xunlaiAnchor = (state) => {
-  const matches = (state.agents?.agents ?? []).filter((agent) => (
+const xunlaiMatches = (state) =>
+  (state.agents?.agents ?? []).filter((agent) => (
     agent.isLiving
     && agent.playerNumber === XUNLAI_AGENT_PLAYER_NUMBER
     && agent.level === XUNLAI_AGENT_LEVEL
@@ -191,20 +193,67 @@ const xunlaiAnchor = (state) => {
     && Number.isFinite(agent.x)
     && Number.isFinite(agent.y)
   ));
-  if (matches.length !== 2) return null;
-  return [...matches].sort((a, b) => a.x - b.x || a.agentId - b.agentId)[0];
+
+const xunlaiAnchor = (state) => {
+  const matches = xunlaiMatches(state);
+  const pairs = [];
+  for (let left = 0; left < matches.length; left += 1) {
+    for (let right = left + 1; right < matches.length; right += 1) {
+      pairs.push({
+        agents: [matches[left], matches[right]],
+        distance: Math.hypot(
+          matches[left].x - matches[right].x,
+          matches[left].y - matches[right].y,
+        ),
+      });
+    }
+  }
+  pairs.sort((a, b) => a.distance - b.distance
+    || a.agents[0].agentId - b.agents[0].agentId
+    || a.agents[1].agentId - b.agents[1].agentId);
+  const closest = pairs[0];
+  const runnerUp = pairs[1];
+  if (
+    !closest
+    || closest.distance > XUNLAI_PAIR_MAX_DISTANCE
+    || (runnerUp && runnerUp.distance < closest.distance * XUNLAI_PAIR_SEPARATION_RATIO)
+  ) return null;
+  return [...closest.agents].sort((a, b) => a.x - b.x || a.agentId - b.agentId)[0];
+};
+
+const xunlaiDiagnostic = (state) => {
+  const captured = state?.agents?.agents ?? [];
+  const numbered = captured.filter(
+    (agent) => agent.playerNumber === XUNLAI_AGENT_PLAYER_NUMBER,
+  );
+  const living = numbered.filter((agent) => agent.isLiving);
+  const leveled = living.filter((agent) => agent.level === XUNLAI_AGENT_LEVEL);
+  const allied = leveled.filter((agent) => agent.allegiance === XUNLAI_AGENT_ALLEGIANCE);
+  const points = allied
+    .map((agent) => `${agent.agentId}@${Math.round(agent.x)},${Math.round(agent.y)}`)
+    .join(';');
+  return `captured=${captured.length}/${state?.agents?.total ?? 0},`
+    + ` number=${numbered.length}, living=${living.length},`
+    + ` level=${leveled.length}, matches=${points || 'none'}`;
 };
 
 const positionAtXunlai = async (window, sleep) => {
-  const state = await waitFor(
-    () => {
-      const candidate = gameState(window);
-      return candidate && xunlaiAnchor(candidate) ? candidate : null;
-    },
-    sleep,
-    10_000,
-    'the certified Kamadan Xunlai anchor is unavailable',
-  );
+  let state;
+  try {
+    state = await waitFor(
+      () => {
+        const candidate = gameState(window);
+        return candidate && xunlaiAnchor(candidate) ? candidate : null;
+      },
+      sleep,
+      10_000,
+      'the certified Kamadan Xunlai anchor is unavailable',
+    );
+  } catch {
+    throw new Error(
+      `the certified Kamadan Xunlai anchor is unavailable (${xunlaiDiagnostic(gameState(window))})`,
+    );
+  }
   const anchor = xunlaiAnchor(state);
   assert(anchor, 'the certified Kamadan Xunlai anchor disappeared');
   const initialDistance = Math.hypot(anchor.x - state.playerX, anchor.y - state.playerY);

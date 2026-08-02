@@ -29,7 +29,6 @@ const CARRIER_MODULE: &str = "env";
 const CARRIER_NAME: &str = "__syscall_newfstatat";
 const BENCHMARK_EXPORT: &str = "__gwnative_e2e_benchmark_command";
 const TRAVEL_UI_MESSAGE: i32 = 0x1000_0183;
-const WORLD_ACTION_UI_MESSAGE: i32 = 0x3000_0020;
 const PREFERENCE_ENUM_UI_MESSAGE: i32 = 0x1000_0140;
 const PREFERENCE_FLAG_UI_MESSAGE: i32 = 0x1000_0141;
 const KAMADAN_MAP_ID: i32 = 449;
@@ -44,6 +43,8 @@ const HIGH_FLAG_PREFERENCES: &[u32] = &[82, 84, 97, 98, 100];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct BenchmarkTargets {
     dispatcher: u32,
+    interaction_dispatcher: u32,
+    interaction_agent_validator: u32,
     enum_setter: u32,
     flag_setter: u32,
     number_setter: u32,
@@ -693,6 +694,8 @@ fn benchmark_targets(input: &[u8], import_count: u32) -> Outcome<BenchmarkTarget
         return Err("benchmark API: function and code sections disagree".to_owned());
     }
     let dispatcher = benchmark_ui_dispatcher(&bodies)?;
+    let (interaction_dispatcher, interaction_agent_validator) =
+        interaction_dispatcher(&bodies, &parameter_counts, import_count)?;
     let (enum_setter, enum_values) = preference_setter(
         &bodies,
         &parameter_counts,
@@ -757,6 +760,8 @@ fn benchmark_targets(input: &[u8], import_count: u32) -> Outcome<BenchmarkTarget
     }
     Ok(BenchmarkTargets {
         dispatcher,
+        interaction_dispatcher,
+        interaction_agent_validator,
         enum_setter,
         flag_setter,
         number_setter,
@@ -837,6 +842,109 @@ fn asyncify_storage_proof(operators: &[Operator<'_>], base: u32) -> bool {
     })
 }
 
+fn interaction_switch(operators: &[Operator<'_>]) -> bool {
+    operators.iter().any(
+        |operator| matches!(operator, Operator::BrTable { targets } if targets.len() == 6),
+    ) && operators
+        .iter()
+        .any(|operator| matches!(operator, Operator::I32Const { value: 6 }))
+        && operators
+            .iter()
+            .any(|operator| matches!(operator, Operator::I32LtS))
+        && [0, 1, 2].iter().all(|wanted| {
+            operators.iter().any(
+                |operator| matches!(operator, Operator::LocalGet { local_index } if local_index == wanted),
+            )
+        })
+}
+
+fn interaction_dispatcher(
+    bodies: &[Vec<u8>],
+    parameter_counts: &[usize],
+    import_count: u32,
+) -> Outcome<(u32, u32)> {
+    let mut matches = Vec::new();
+    for (local, body) in bodies.iter().enumerate() {
+        if parameter_counts.get(local) != Some(&3) {
+            continue;
+        }
+        let operators = function_operators(body)?;
+        let switches = operators
+            .iter()
+            .filter(
+                |operator| matches!(operator, Operator::BrTable { targets } if targets.len() == 6),
+            )
+            .count();
+        let direct_switch = operators.windows(2).any(|window| {
+            matches!(
+                window,
+                [
+                    Operator::LocalGet { local_index: 0 },
+                    Operator::BrTable { targets },
+                ] if targets.len() == 6
+            )
+        });
+        let bounded_type = operators.windows(3).any(|window| {
+            matches!(
+                window,
+                [
+                    Operator::LocalGet { local_index: 0 },
+                    Operator::I32Const { value: 6 },
+                    Operator::I32LtS,
+                ]
+            )
+        });
+        let validator = operators.windows(3).find_map(|window| match window {
+            [
+                Operator::LocalGet { local_index: 1 },
+                Operator::Call { function_index },
+                Operator::BrIf { relative_depth: 0 },
+            ] => Some(*function_index),
+            _ => None,
+        });
+        let Some(validator) = validator else {
+            continue;
+        };
+        let distinct_calls = operators
+            .iter()
+            .filter_map(|operator| match operator {
+                Operator::Call { function_index } => Some(*function_index),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if switches == 1
+            && direct_switch
+            && bounded_type
+            && distinct_calls >= 10
+            && restores_stack_pointer(&operators)
+            && operators.windows(2).any(|window| {
+                matches!(
+                    window,
+                    [
+                        Operator::LocalGet { local_index: 2 },
+                        Operator::BrIf { relative_depth: 0 }
+                    ]
+                )
+            })
+        {
+            let function = import_count
+                .checked_add(u32::try_from(local).map_err(|_| {
+                    "benchmark API: interaction dispatcher index overflow".to_owned()
+                })?)
+                .ok_or_else(|| "benchmark API: interaction dispatcher index overflow".to_owned())?;
+            matches.push((function, validator));
+        }
+    }
+    match matches.as_slice() {
+        [target] => Ok(*target),
+        [] => Err("benchmark API: no interaction dispatcher was found".to_owned()),
+        _ => Err(format!(
+            "benchmark API: interaction dispatcher is ambiguous: {matches:?}"
+        )),
+    }
+}
+
 fn certify_asyncify_benchmark_targets(
     input: &[u8],
     import_count: u32,
@@ -850,6 +958,30 @@ fn certify_asyncify_benchmark_targets(
     }
     if benchmark_ui_dispatcher(&bodies)? != targets.dispatcher {
         return Err("benchmark API: paired runtimes disagree on the UI dispatcher".to_owned());
+    }
+    let interaction_local = targets
+        .interaction_dispatcher
+        .checked_sub(import_count)
+        .and_then(|local| usize::try_from(local).ok())
+        .ok_or_else(|| {
+            "benchmark API: paired interaction dispatcher index is invalid".to_owned()
+        })?;
+    let interaction = bodies
+        .get(interaction_local)
+        .ok_or_else(|| "benchmark API: paired interaction dispatcher is missing".to_owned())?;
+    let interaction_operators = function_operators(interaction)?;
+    if parameter_counts.get(interaction_local) != Some(&3)
+        || !asyncify_state_guard(&interaction_operators)
+        || !interaction_switch(&interaction_operators)
+        || !restores_stack_pointer(&interaction_operators)
+        || !interaction_operators.iter().any(|operator| {
+            matches!(operator, Operator::Call { function_index } if *function_index == targets.interaction_agent_validator)
+        })
+    {
+        return Err(
+            "benchmark API: paired Asyncify interaction dispatcher failed correspondence"
+                .to_owned(),
+        );
     }
     for (name, function, message, base) in [
         (
@@ -1289,7 +1421,9 @@ fn benchmark_wrapper(targets: BenchmarkTargets) -> Vec<u8> {
     body.push(0x0b); // end district guard
     body.push(0x0b); // end travel command
 
-    // command 1: InteractNPC with one bounded, certified agent ID.
+    // command 1: use the game's own interaction dispatcher so an out-of-range
+    // NPC is approached before interaction. A packet-only world action cannot
+    // provide that pathing behavior.
     instruction_local_get(&mut body, 0);
     instruction_i32_const(&mut body, 1);
     body.push(0x46); // i32.eq
@@ -1302,12 +1436,11 @@ fn benchmark_wrapper(targets: BenchmarkTargets) -> Vec<u8> {
     body.push(0x49); // i32.lt_u
     body.push(0x71); // i32.and
     body.extend_from_slice(&[0x04, 0x40]); // if
-    allocate_stack(&mut body, 12);
-    store_i32(&mut body, 2, 0, Some(INTERACT_NPC_ACTION));
-    store_i32(&mut body, 2, 4, None); // certified agent ID
-    store_i32(&mut body, 2, 8, Some(0));
-    call_ui(&mut body, WORLD_ACTION_UI_MESSAGE, targets.dispatcher);
-    restore_stack(&mut body, 12);
+    instruction_i32_const(&mut body, INTERACT_NPC_ACTION);
+    instruction_local_get(&mut body, 1); // certified agent ID
+    instruction_i32_const(&mut body, 0); // do not emit a party call target
+    body.push(0x10);
+    body.extend_from_slice(&uleb(u64::from(targets.interaction_dispatcher)));
     instruction_i32_const(&mut body, 1);
     body.extend_from_slice(&[0x21, 0x03]); // result = accepted
     body.push(0x0b); // end agent guard
