@@ -125,6 +125,8 @@ const XUNLAI_AGENT_ALLEGIANCE = 6;
 const XUNLAI_DISTANCE = 180;
 const XUNLAI_PAIR_MAX_DISTANCE = 600;
 const XUNLAI_PAIR_SEPARATION_RATIO = 4;
+const XUNLAI_INTERACTION_ATTEMPTS = 5;
+const XUNLAI_POLLS_PER_ATTEMPT = 50;
 
 const gameState = (window) => window.gwCompanionState?.status === 'ready'
   ? window.gwCompanionState
@@ -258,21 +260,26 @@ const positionAtXunlai = async (window, sleep) => {
   assert(anchor, 'the certified Kamadan Xunlai anchor disappeared');
   const initialDistance = Math.hypot(anchor.x - state.playerX, anchor.y - state.playerY);
   if (initialDistance <= XUNLAI_DISTANCE) return { state, anchor, distance: initialDistance };
-  await window.gwCompanionRuntime.benchmarkSceneCommand(
-    'interact-xunlai',
-    anchor.agentId,
-  );
-  return waitFor(
-    () => {
+  let lastDistance = initialDistance;
+  for (let attempt = 0; attempt < XUNLAI_INTERACTION_ATTEMPTS; attempt += 1) {
+    await window.gwCompanionRuntime.benchmarkSceneCommand(
+      'interact-xunlai',
+      anchor.agentId,
+    );
+    for (let poll = 0; poll < XUNLAI_POLLS_PER_ATTEMPT; poll += 1) {
       const next = gameState(window);
       const nextAnchor = next && xunlaiAnchor(next);
-      if (!nextAnchor || nextAnchor.agentId !== anchor.agentId) return null;
-      const distance = Math.hypot(nextAnchor.x - next.playerX, nextAnchor.y - next.playerY);
-      return distance <= XUNLAI_DISTANCE ? { state: next, anchor: nextAnchor, distance } : null;
-    },
-    sleep,
-    25_000,
-    'the in-client InteractNPC command did not reach the Xunlai anchor',
+      if (nextAnchor?.agentId === anchor.agentId) {
+        lastDistance = Math.hypot(nextAnchor.x - next.playerX, nextAnchor.y - next.playerY);
+        if (lastDistance <= XUNLAI_DISTANCE) {
+          return { state: next, anchor: nextAnchor, distance: lastDistance };
+        }
+      }
+      await sleep(100);
+    }
+  }
+  throw new Error(
+    `the in-client InteractNPC command did not reach the Xunlai anchor (distance=${lastDistance.toFixed(1)})`,
   );
 };
 

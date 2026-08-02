@@ -305,8 +305,10 @@ describe('end-to-end helpers', () => {
           }
           if (command === 'interact-xunlai') {
             assert.equal(argument, 44);
-            state.playerX = agents[1].x;
-            state.playerY = agents[1].y;
+            if (commands.filter(([name]) => name === 'interact-xunlai').length === 2) {
+              state.playerX = agents[1].x;
+              state.playerY = agents[1].y;
+            }
           }
         },
       },
@@ -320,6 +322,7 @@ describe('end-to-end helpers', () => {
     assert.deepEqual(commands, [
       ['high-graphics', 0],
       ['travel-america', 2],
+      ['interact-xunlai', 44],
       ['interact-xunlai', 44],
     ]);
     assert.deepEqual(result.benchmarkScene, {
