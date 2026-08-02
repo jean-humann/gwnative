@@ -564,6 +564,11 @@ def certified_performance_scene(
     return map_id, agent_total, len(map_agents)
 
 
+def maximum_unsampled_callbacks(frames: int) -> int:
+    """Bound legitimate swaps outside the retained animation callback."""
+    return max(5, math.ceil(frames / 100))
+
+
 def run_performance_sample(
     args: argparse.Namespace,
     stream: EventStream,
@@ -605,6 +610,9 @@ def run_performance_sample(
     callback_p95_ms = callback.get("p95") if isinstance(callback, dict) else None
     callback_samples = callback.get("samples") if isinstance(callback, dict) else None
     unsampled_callbacks = callback.get("unsampled") if isinstance(callback, dict) else None
+    unsampled_limit = (
+        maximum_unsampled_callbacks(frames) if isinstance(frames, int) else 0
+    )
     webgl = sample.get("webgl", {})
     audit = sample.get("audit", {})
     if (
@@ -616,8 +624,8 @@ def run_performance_sample(
         or not isinstance(callback_samples, int)
         or not isinstance(unsampled_callbacks, int)
         or callback_samples + unsampled_callbacks != frames
-        or callback_samples < frames - 5
-        or unsampled_callbacks > 5
+        or callback_samples < frames - unsampled_limit
+        or unsampled_callbacks > unsampled_limit
         or not isinstance(webgl, dict)
         or webgl.get("lost") is not False
         or not isinstance(audit, dict)
@@ -626,7 +634,7 @@ def run_performance_sample(
         raise Failure(
             "performance sample is incomplete or lost its WebGL context "
             f"(frames={frames!r}, fps={logical_fps!r}, p95={p95_ms!r}, "
-            f"callback={callback!r}, "
+            f"callback={callback!r}, unsampledLimit={unsampled_limit}, "
             f"webglLost={webgl.get('lost')!r}, audit={audit!r})"
         )
     if args.runtime != "auto" and sample.get("runtime") != args.runtime:

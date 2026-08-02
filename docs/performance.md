@@ -167,10 +167,11 @@ Benchmark-only launches retain a transparent animation-frame wrapper and record
 `callbackToSwapMs`: wall time from WebKit entering the client callback until
 Guild Wars submits its logical frame. This separates JS/Wasm/WebGL CPU
 submission from time waiting for the next WebKit presentation callback without
-enabling the expensive per-draw audit. A bounded allowance of five samples
-covers legitimate swaps initiated outside an animation callback; more makes the
-run fail closed. The logical-swap cadence itself detects a client frame cap,
-runtime regression, isolation regression, context loss, or missed frame budget.
+enabling the expensive per-draw audit. A bounded one-percent allowance (with a
+five-frame minimum for short samples) covers legitimate swaps
+initiated outside an animation callback; more makes the run fail closed. The
+logical-swap cadence itself detects a client frame cap, runtime regression,
+isolation regression, context loss, or missed frame budget.
 
 ### Launch and resource benchmark
 

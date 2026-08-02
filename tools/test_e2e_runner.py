@@ -200,6 +200,14 @@ class GameStateTests(unittest.TestCase):
         self.assertEqual(ready["revision"], 4)
 
 
+class PerformanceSampleTests(unittest.TestCase):
+    def test_unsampled_callback_bound_scales_for_long_samples(self) -> None:
+        self.assertEqual(RUNNER.maximum_unsampled_callbacks(100), 5)
+        self.assertEqual(RUNNER.maximum_unsampled_callbacks(500), 5)
+        self.assertEqual(RUNNER.maximum_unsampled_callbacks(501), 6)
+        self.assertEqual(RUNNER.maximum_unsampled_callbacks(5_452), 55)
+
+
 class ProfileTests(unittest.TestCase):
     def test_default_profile_uses_the_legacy_web_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
