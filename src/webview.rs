@@ -53,6 +53,25 @@ fn env_default_on(name: &str) -> bool {
     !std::env::var(name).is_ok_and(|value| value == "0")
 }
 
+#[derive(Clone, Copy)]
+struct FrameOptions {
+    audit: bool,
+    prefer_60_fps: bool,
+    preserve_drawing_buffer: bool,
+    isolation: bool,
+}
+
+impl FrameOptions {
+    fn from_environment() -> Self {
+        Self {
+            audit: env_flag("GWNATIVE_FRAME_AUDIT"),
+            prefer_60_fps: env_flag("GWNATIVE_PREFER_60_FPS"),
+            preserve_drawing_buffer: env_flag("GWNATIVE_PRESERVE_DRAWING_BUFFER"),
+            isolation: env_default_on("GWNATIVE_FRAME_ISOLATION"),
+        }
+    }
+}
+
 /// Turn off every applicable feature in [`DISABLED_FEATURES`].
 ///
 /// There is no supported API for any of them — the direct setter SPIs of past
@@ -159,10 +178,7 @@ fn preamble(
     token: &str,
     settings: &settings::Settings,
     module: &wasm::Module,
-    frame_audit: bool,
-    prefer_60_fps: bool,
-    preserve_drawing_buffer: bool,
-    frame_isolation: bool,
+    frame: FrameOptions,
     invocation: &cli::Invocation,
 ) -> String {
     let forced_runtime = std::env::var("GWNATIVE_CLIENT_RUNTIME")
@@ -195,10 +211,10 @@ fn preamble(
         // promise nothing could keep.
         serde_json::Value::from(crate::updater::available()),
         serde_json::Value::from(forced_runtime),
-        serde_json::Value::from(frame_audit),
-        serde_json::Value::from(prefer_60_fps),
-        serde_json::Value::from(preserve_drawing_buffer),
-        serde_json::Value::from(frame_isolation),
+        serde_json::Value::from(frame.audit),
+        serde_json::Value::from(frame.prefer_60_fps),
+        serde_json::Value::from(frame.preserve_drawing_buffer),
+        serde_json::Value::from(frame.isolation),
         invocation.client_json(),
     )
 }
@@ -213,27 +229,24 @@ pub fn make(
     invocation: &cli::Invocation,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
-    let frame_audit = env_flag("GWNATIVE_FRAME_AUDIT");
-    let prefer_60_fps = env_flag("GWNATIVE_PREFER_60_FPS");
-    let preserve_drawing_buffer = env_flag("GWNATIVE_PRESERVE_DRAWING_BUFFER");
-    let frame_isolation = env_default_on("GWNATIVE_FRAME_ISOLATION");
-    if frame_audit {
+    let frame_options = FrameOptions::from_environment();
+    if frame_options.audit {
         note!("[gwnative] detailed frame audit enabled");
     }
-    if prefer_60_fps {
+    if frame_options.prefer_60_fps {
         note!("[gwnative] WebKit's near-60-FPS preference left at its default for comparison");
     }
-    if preserve_drawing_buffer {
+    if frame_options.preserve_drawing_buffer {
         note!("[gwnative] preserving the WebGL drawing buffer for a flash comparison");
     }
-    if frame_isolation {
+    if frame_options.isolation {
         note!("[gwnative] complete-frame presentation enabled");
     }
 
     // See DISABLED_FEATURES: the 60 FPS cap and the hidden-page throttling
     // ladder, both of which Chromium-based rivals never had.
     let preferences = unsafe { config.preferences() };
-    disable_features(&preferences, prefer_60_fps);
+    disable_features(&preferences, frame_options.prefer_60_fps);
 
     unsafe {
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
@@ -242,10 +255,7 @@ pub fn make(
                 token,
                 settings,
                 module,
-                frame_audit,
-                prefer_60_fps,
-                preserve_drawing_buffer,
-                frame_isolation,
+                frame_options,
                 invocation,
             )),
             WKUserScriptInjectionTime::AtDocumentStart,
