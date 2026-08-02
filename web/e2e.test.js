@@ -347,6 +347,9 @@ describe('end-to-end helpers', () => {
       frames: 121,
       framesPerSecond: 120,
       intervalMs: { samples: 120, mean: 8.333, p50: 8.333, p95: 8.5, p99: 9, max: 9 },
+      callbackToSwapMs: {
+        samples: 121, unsampled: 0, mean: 5, p50: 5, p95: 6, p99: 7, max: 7,
+      },
       canvas: { width: 2560, height: 1364, css: { width: 1280, height: 682 } },
       webgl: {
         type: 'WebGL2RenderingContext',
@@ -388,6 +391,7 @@ describe('end-to-end helpers', () => {
         frames: 121,
         framesPerSecond: 120,
         intervalMs: sampled.intervalMs,
+        callbackToSwapMs: sampled.callbackToSwapMs,
         canvas: {
           width: 2560,
           height: 1364,

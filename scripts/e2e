@@ -601,6 +601,8 @@ def run_performance_sample(
     logical_fps = sample.get("framesPerSecond")
     intervals = sample.get("intervalMs", {})
     p95_ms = intervals.get("p95") if isinstance(intervals, dict) else None
+    callback = sample.get("callbackToSwapMs", {})
+    callback_p95_ms = callback.get("p95") if isinstance(callback, dict) else None
     webgl = sample.get("webgl", {})
     audit = sample.get("audit", {})
     if (
@@ -608,6 +610,9 @@ def run_performance_sample(
         or frames < 2
         or not isinstance(logical_fps, (int, float))
         or not isinstance(p95_ms, (int, float))
+        or not isinstance(callback_p95_ms, (int, float))
+        or callback.get("samples") != frames
+        or callback.get("unsampled") != 0
         or not isinstance(webgl, dict)
         or webgl.get("lost") is not False
         or not isinstance(audit, dict)
@@ -616,6 +621,7 @@ def run_performance_sample(
         raise Failure(
             "performance sample is incomplete or lost its WebGL context "
             f"(frames={frames!r}, fps={logical_fps!r}, p95={p95_ms!r}, "
+            f"callbackP95={callback_p95_ms!r}, "
             f"webglLost={webgl.get('lost')!r}, audit={audit!r})"
         )
     if args.runtime != "auto" and sample.get("runtime") != args.runtime:
@@ -674,6 +680,7 @@ def run_performance_sample(
         "[e2e] logical-frame performance PASS "
         f"(runtime={sample.get('runtime')}, frames={frames}, "
         f"fps={logical_fps:.3f}, p95={p95_ms:.3f}ms, "
+        f"callback-to-swap-p95={callback_p95_ms:.3f}ms, "
         f"agents={agent_total}, map={map_id}, gpu-timing=not-sampled)"
     )
 

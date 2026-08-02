@@ -386,6 +386,7 @@ export async function executeE2EAction(action, {
         frames: sampled.frames,
         framesPerSecond: sampled.framesPerSecond,
         intervalMs: sampled.intervalMs,
+        callbackToSwapMs: sampled.callbackToSwapMs,
         canvas: {
           width: sampled.canvas?.width ?? null,
           height: sampled.canvas?.height ?? null,

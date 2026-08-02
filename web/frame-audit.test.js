@@ -398,7 +398,9 @@ describe('frame audit', () => {
     const finish = audit.beginPerformanceSample();
     for (const interval of [0, 8, 9, 8, 17]) {
       now += interval;
+      const frame = audit.beginAnimationFrame(now);
       audit.swap(true);
+      audit.endAnimationFrame(frame);
     }
     now = 150;
 
@@ -414,6 +416,15 @@ describe('frame audit', () => {
         p95: 17,
         p99: 17,
         max: 17,
+      },
+      callbackToSwapMs: {
+        samples: 5,
+        unsampled: 0,
+        mean: 0,
+        p50: 0,
+        p95: 0,
+        p99: 0,
+        max: 0,
       },
       canvas: {
         width: 1600,

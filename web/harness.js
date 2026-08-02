@@ -102,6 +102,7 @@ const requestedFps = Number.isInteger(launchOptions.fps) && launchOptions.fps > 
   ? launchOptions.fps
   : 0;
 const requestedFrameMs = requestedFps ? 1000 / requestedFps : 0;
+const benchmarkFrames = window.__gwnativeE2EBenchmark === true;
 const BOOT_FRAME_MS = 16;
 let bootRescueActive = true;
 let makeFrameCadence = null;
@@ -118,7 +119,7 @@ const frameCadences = new WeakMap();
   };
   window.requestAnimationFrame = (callback) => {
     if (!bootRescueActive) {
-      if (!requestedFrameMs && !frameAudit?.enabled) {
+      if (!requestedFrameMs && !frameAudit?.enabled && !benchmarkFrames) {
         // First frame has been presented; hand the native function back for
         // good unless a compatibility cap or diagnostic run needs callback
         // boundaries.

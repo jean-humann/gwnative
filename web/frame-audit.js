@@ -231,7 +231,7 @@ export function createFrameAudit(options = {}) {
   };
 
   const beginAnimationFrame = (timestamp) => {
-    if (!enabled) return null;
+    if (!enabled && !performanceSample) return null;
     const activeFrameSuspensions = [...pendingSuspensions]
       .filter((suspension) => suspension.frame && !suspension.ended);
     if (activeFrameSuspensions.length > 0) {
@@ -262,11 +262,11 @@ export function createFrameAudit(options = {}) {
   };
 
   const endAnimationFrame = (frame) => {
-    if (!enabled || !frame) return;
+    if (!frame) return;
     const position = stack.lastIndexOf(frame);
     if (position !== -1) stack.splice(position, 1);
     frame.browserEnded = true;
-    reportInterruptedFrame(frame);
+    if (enabled) reportInterruptedFrame(frame);
   };
 
   const beginExternalCallback = (kind) => {
@@ -333,6 +333,12 @@ export function createFrameAudit(options = {}) {
         performanceSample.overflow = true;
       } else {
         performanceSample.timestamps.push(now);
+      }
+      const frame = currentBrowserFrame();
+      if (frame) {
+        performanceSample.callbackToSwap.push(Math.max(0, now - frame.started));
+      } else {
+        performanceSample.unsampledCallbacks++;
       }
     }
     lastSwapAt = now;
@@ -677,6 +683,8 @@ export function createFrameAudit(options = {}) {
     const sample = {
       started: clock(),
       timestamps: [],
+      callbackToSwap: [],
+      unsampledCallbacks: 0,
       overflow: false,
       before,
     };
@@ -697,6 +705,11 @@ export function createFrameAudit(options = {}) {
         .sort((left, right) => left - right);
       const total = intervals.reduce((sum, interval) => sum + interval, 0);
       const mean = intervals.length ? total / intervals.length : null;
+      const callbackToSwap = [...sample.callbackToSwap]
+        .filter((elapsed) => Number.isFinite(elapsed) && elapsed >= 0)
+        .sort((left, right) => left - right);
+      const callbackTotal = callbackToSwap.reduce((sum, elapsed) => sum + elapsed, 0);
+      const callbackMean = callbackToSwap.length ? callbackTotal / callbackToSwap.length : null;
       const delta = (name) => Math.max(
         0,
         (after.totals[name] ?? 0) - (sample.before.totals[name] ?? 0),
@@ -713,6 +726,15 @@ export function createFrameAudit(options = {}) {
           p95: percentile(intervals, 0.95),
           p99: percentile(intervals, 0.99),
           max: intervals.length ? round(intervals.at(-1)) : null,
+        }),
+        callbackToSwapMs: Object.freeze({
+          samples: callbackToSwap.length,
+          unsampled: sample.unsampledCallbacks,
+          mean: round(callbackMean),
+          p50: percentile(callbackToSwap, 0.5),
+          p95: percentile(callbackToSwap, 0.95),
+          p99: percentile(callbackToSwap, 0.99),
+          max: callbackToSwap.length ? round(callbackToSwap.at(-1)) : null,
         }),
         canvas: after.canvas,
         webgl: after.webgl,

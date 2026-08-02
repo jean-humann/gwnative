@@ -196,6 +196,7 @@ fn preamble(
         .ok()
         .filter(|value| value == "jspi" || value == "asyncify");
     let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
+    let e2e_benchmark = e2e && std::env::var_os("GWNATIVE_E2E_BENCHMARK_API").is_some();
     let mut launch_settings = settings.clone();
     if let Some(render_scale) = frame.render_scale {
         launch_settings.render_scale = render_scale;
@@ -210,7 +211,8 @@ fn preamble(
          window.__gwnativeEnhancementManifest = null;\nwindow.__gwnativeClientRuntime = {};\n\
          window.__gwnativeFrameAuditEnabled = {};\nwindow.__gwnativePrefer60FPS = {};\n\
          window.__gwnativePreserveDrawingBuffer = {};\nwindow.__gwnativeFrameIsolation = {};\n\
-         window.__gwnativeLaunch = {};\nwindow.__gwnativeE2E = {e2e};",
+         window.__gwnativeLaunch = {};\nwindow.__gwnativeE2E = {e2e};\n\
+         window.__gwnativeE2EBenchmark = {e2e_benchmark};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),

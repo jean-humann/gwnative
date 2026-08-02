@@ -163,8 +163,13 @@ view therefore cannot produce a plausible-looking FPS result.
 WebGL GPU timer queries are intentionally not inserted into the live game
 context. Every artifact records `gpuTiming: not-sampled`; correlate it with an
 external GPU/process trace when distinguishing shader load from CPU submission.
-The logical-swap cadence itself is sufficient to detect a client frame cap,
-runtime regression, isolation regression, context loss, or missed frame budget.
+Benchmark-only launches retain a transparent animation-frame wrapper and record
+`callbackToSwapMs`: wall time from WebKit entering the client callback until
+Guild Wars submits its logical frame. This separates JS/Wasm/WebGL CPU
+submission from time waiting for the next WebKit presentation callback without
+enabling the expensive per-draw audit. The logical-swap cadence itself detects
+a client frame cap, runtime regression, isolation regression, context loss, or
+missed frame budget.
 
 ### Launch and resource benchmark
 
