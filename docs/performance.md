@@ -119,7 +119,8 @@ both `jspi` and `asyncify`.
 
 Before sampling, the E2E-only client API applies the fixed High graphics preset,
 travels to Kamadan America-English District 2 (District 1 is the bounded
-fallback), identifies the two Xunlai agents by their certified numeric agent
+fallback when District 2 fails to load or has fewer than 80 agents), identifies
+the two Xunlai agents by their certified numeric agent
 fields and their unique close-pair geometry, and invokes the game's own
 six-way interaction dispatcher for the stable left-hand anchor. Unlike a raw
 world-action packet, this is the client path that approaches an out-of-range
@@ -140,7 +141,7 @@ flowchart LR
     R["Benchmark runner"] -->|"prepare-benchmark-scene"| P["E2E page bridge"]
     P -->|"one queued finite command"| S["Guild Wars logical swap"]
     S --> C{"Closed client command"}
-    C -->|"travel 449 / America / English / district 2 or 1"| U["Certified UI dispatcher"]
+    C -->|"travel 449 / America / English / populated district 2 or 1"| U["Certified UI dispatcher"]
     C -->|"NPC interaction + client pathing / certified Xunlai agent ID"| U
     C -->|"fixed non-persistent High preset"| G["Certified preference setters"]
     U --> V["Read-only companion verification"]

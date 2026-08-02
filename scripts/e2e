@@ -705,7 +705,7 @@ def prepare_benchmark_scene(
 ) -> dict[str, object]:
     """Use the finite in-client API to normalize district and position."""
     sequence = submit_action(origin, token, "prepare-benchmark-scene")
-    event = stream.wait_for_action_event(sequence, "benchmark-scene", 70)
+    event = stream.wait_for_action_event(sequence, "benchmark-scene", 80)
     if event is None:
         raise Failure("the in-client benchmark scene API produced no result")
     stream.wait_for_action(sequence, 5)

@@ -29,6 +29,68 @@ class MemoryStorage {
   }
 }
 
+function benchmarkSceneHarness({ district2Agents = 111 } = {}) {
+  let placement = { mapId: 449, district: 3, language: 0, instanceType: 0 };
+  const agents = [
+    {
+      agentId: 43,
+      isLiving: true,
+      playerNumber: 5052,
+      level: 24,
+      allegiance: 6,
+      x: -7_412,
+      y: 14_475,
+    },
+    {
+      agentId: 44,
+      isLiving: true,
+      playerNumber: 5052,
+      level: 24,
+      allegiance: 6,
+      x: -7_671,
+      y: 14_159,
+    },
+    {
+      agentId: 45,
+      isLiving: true,
+      playerNumber: 5052,
+      level: 24,
+      allegiance: 6,
+      x: -4_422,
+      y: 10_452,
+    },
+  ];
+  const state = {
+    status: 'ready',
+    playerX: -9_167,
+    playerY: 13_147,
+    agents: { total: 111, agents },
+  };
+  const commands = [];
+  const window = {
+    Module: {},
+    gwCompanionState: state,
+    gwCompanionRuntime: {
+      benchmarkSceneState: () => placement,
+      async benchmarkSceneCommand(command, argument) {
+        commands.push([command, argument]);
+        if (command === 'travel-america') {
+          placement = { mapId: 449, district: argument, language: 0, instanceType: 0 };
+          state.agents.total = argument === 2 ? district2Agents : 111;
+        }
+        if (command === 'interact-xunlai') {
+          assert.equal(argument, 44);
+          if (commands.filter(([name]) => name === 'interact-xunlai').length === 2) {
+            state.playerX = agents[1].x;
+            state.playerY = agents[1].y;
+          }
+        }
+      },
+    },
+  };
+  return { commands, window };
+}
+
 describe('end-to-end helpers', () => {
   it('reports character selection only after two certified ready frames', async () => {
     const frames = [];
@@ -256,63 +318,7 @@ describe('end-to-end helpers', () => {
   });
 
   it('normalizes graphics, district, and Xunlai position through the finite client API', async () => {
-    let placement = { mapId: 449, district: 3, language: 0, instanceType: 0 };
-    const agents = [
-      {
-        agentId: 43,
-        isLiving: true,
-        playerNumber: 5052,
-        level: 24,
-        allegiance: 6,
-        x: -7_412,
-        y: 14_475,
-      },
-      {
-        agentId: 44,
-        isLiving: true,
-        playerNumber: 5052,
-        level: 24,
-        allegiance: 6,
-        x: -7_671,
-        y: 14_159,
-      },
-      {
-        agentId: 45,
-        isLiving: true,
-        playerNumber: 5052,
-        level: 24,
-        allegiance: 6,
-        x: -4_422,
-        y: 10_452,
-      },
-    ];
-    const state = {
-      status: 'ready',
-      playerX: -9_167,
-      playerY: 13_147,
-      agents: { total: 111, agents },
-    };
-    const commands = [];
-    const window = {
-      Module: {},
-      gwCompanionState: state,
-      gwCompanionRuntime: {
-        benchmarkSceneState: () => placement,
-        async benchmarkSceneCommand(command, argument) {
-          commands.push([command, argument]);
-          if (command === 'travel-america') {
-            placement = { mapId: 449, district: argument, language: 0, instanceType: 0 };
-          }
-          if (command === 'interact-xunlai') {
-            assert.equal(argument, 44);
-            if (commands.filter(([name]) => name === 'interact-xunlai').length === 2) {
-              state.playerX = agents[1].x;
-              state.playerY = agents[1].y;
-            }
-          }
-        },
-      },
-    };
+    const { commands, window } = benchmarkSceneHarness();
 
     const result = await executeE2EAction(
       { sequence: 9, action: 'prepare-benchmark-scene', durationMs: 0 },
@@ -338,6 +344,24 @@ describe('end-to-end helpers', () => {
       agentCount: 111,
       graphicsPreset: 'high',
     });
+  });
+
+  it('falls back to District 1 when District 2 is too quiet', async () => {
+    const { commands, window } = benchmarkSceneHarness({ district2Agents: 24 });
+    const result = await executeE2EAction(
+      { sequence: 10, action: 'prepare-benchmark-scene', durationMs: 0 },
+      { window, canvas: {}, sleep: async () => {} },
+    );
+
+    assert.deepEqual(commands, [
+      ['high-graphics', 0],
+      ['travel-america', 2],
+      ['travel-america', 1],
+      ['interact-xunlai', 44],
+      ['interact-xunlai', 44],
+    ]);
+    assert.equal(result.benchmarkScene.district, 1);
+    assert.equal(result.benchmarkScene.agentCount, 111);
   });
 
   it('runs a bounded logical-frame sample without exposing a script hook', async () => {

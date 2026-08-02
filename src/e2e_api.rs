@@ -156,7 +156,7 @@ impl Hub {
                 },
                 {
                     "name": "prepare-benchmark-scene",
-                    "description": "select Kamadan America-English District 2/1 and move to the certified Xunlai anchor",
+                    "description": "select a populated Kamadan America-English District 2/1 and move to the certified Xunlai anchor",
                 },
                 {
                     "name": "sample-performance",

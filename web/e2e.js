@@ -127,6 +127,8 @@ const XUNLAI_PAIR_MAX_DISTANCE = 600;
 const XUNLAI_PAIR_SEPARATION_RATIO = 4;
 const XUNLAI_INTERACTION_ATTEMPTS = 5;
 const XUNLAI_POLLS_PER_ATTEMPT = 50;
+const BENCHMARK_MIN_AGENT_COUNT = 80;
+const BENCHMARK_POPULATION_POLLS = 20;
 
 const gameState = (window) => window.gwCompanionState?.status === 'ready'
   ? window.gwCompanionState
@@ -142,48 +144,54 @@ const waitFor = async (predicate, sleep, timeout, message) => {
   throw new Error(message);
 };
 
-const travelToBenchmarkDistrict = async (window, sleep) => {
+const loadBenchmarkDistrict = async (window, sleep, district) => {
   const runtime = window.gwCompanionRuntime;
   const placement = () => runtime?.benchmarkSceneState?.();
   // Always issue the America packet. Language 0 is shared by America and
   // Europe-English, so map/language/district alone cannot distinguish them
   // when the saved character happens to start in Europe-English District 2.
-  const desired = 2;
-  await runtime.benchmarkSceneCommand('travel-america', desired);
-  try {
-    return await waitFor(
-      () => {
-        const state = placement();
-        return state?.mapId === KAMADAN_MAP_ID
-          && state.language === ENGLISH_LANGUAGE_ID
-          && state.district === desired
-          && state.instanceType === 0
-          && gameState(window)
-          ? state
-          : null;
-      },
-      sleep,
-      20_000,
-      `Kamadan America-English District ${desired} did not load`,
-    );
-  } catch (error) {
-    await runtime.benchmarkSceneCommand('travel-america', 1);
-    return waitFor(
-      () => {
-        const state = placement();
-        return state?.mapId === KAMADAN_MAP_ID
-          && state.language === ENGLISH_LANGUAGE_ID
-          && state.district === 1
-          && state.instanceType === 0
-          && gameState(window)
-          ? state
-          : null;
-      },
-      sleep,
-      20_000,
-      'Kamadan America-English District 1 fallback did not load',
-    );
+  await runtime.benchmarkSceneCommand('travel-america', district);
+  return waitFor(
+    () => {
+      const state = placement();
+      return state?.mapId === KAMADAN_MAP_ID
+        && state.language === ENGLISH_LANGUAGE_ID
+        && state.district === district
+        && state.instanceType === 0
+        && gameState(window)
+        ? state
+        : null;
+    },
+    sleep,
+    20_000,
+    `Kamadan America-English District ${district} did not load`,
+  );
+};
+
+const waitForBenchmarkPopulation = async (window, sleep) => {
+  for (let poll = 0; poll < BENCHMARK_POPULATION_POLLS; poll += 1) {
+    const total = gameState(window)?.agents?.total;
+    if (Number.isSafeInteger(total) && total >= BENCHMARK_MIN_AGENT_COUNT) return true;
+    await sleep(100);
   }
+  return false;
+};
+
+const travelToBenchmarkDistrict = async (window, sleep) => {
+  let preferred = null;
+  try {
+    preferred = await loadBenchmarkDistrict(window, sleep, 2);
+  } catch {
+    // District 1 remains the bounded fallback if District 2 cannot load.
+  }
+  if (preferred && await waitForBenchmarkPopulation(window, sleep)) return preferred;
+
+  const fallback = await loadBenchmarkDistrict(window, sleep, 1);
+  assert(
+    await waitForBenchmarkPopulation(window, sleep),
+    `neither Kamadan America-English district has ${BENCHMARK_MIN_AGENT_COUNT} agents`,
+  );
+  return fallback;
 };
 
 const xunlaiMatches = (state) =>
