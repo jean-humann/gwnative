@@ -303,6 +303,16 @@ describe('settings panel', () => {
     assert.equal(image.group, 'data');
   });
 
+  it('does not present render scale as part of the game graphics preset', () => {
+    const scale = panel.CONTROLS.find((control) => control.key === 'renderScale');
+    assert.match(scale.note, /Separate from the game’s graphics preset/);
+    assert.match(scale.note, /four times as many pixels/);
+    assert.deepEqual(
+      scale.choices.map((choice) => choice.label),
+      ['1× — fastest', '1.5× — balanced', '2× — Retina sharpness'],
+    );
+  });
+
   // The sentence used to name the render scale and the gestures whatever had
   // changed, which has been wrong since the tools arrived: turning the game
   // cursor off and being told the render scale needs a restart reads as the

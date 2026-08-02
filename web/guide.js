@@ -59,10 +59,12 @@ export const GUIDE = [
     heading: 'Settings',
     body: [
       'Press ⌘, at any time, including before the game has finished starting.',
-      'Render scale is the one that costs frames. 2× draws one game pixel per display ' +
-        'pixel on a Retina screen and is the sharpest; 1× is the fastest. It and ' +
-        'Double-click are read when the app starts, so the panel offers to restart ' +
-        'rather than pretending they took effect.',
+      'Render scale is separate from the game’s Low–Ultra graphics preset. 2× draws ' +
+        'one game pixel per display pixel on a Retina screen and is the sharpest, but ' +
+        'it draws four times as many pixels as 1×. A busy scene can therefore run below ' +
+        'the display’s full refresh rate even on Ultra; choose 1× for speed or 1.5× for ' +
+        'the middle ground. Render scale and Double-click are read when the app starts, ' +
+        'so the panel offers to restart rather than pretending they took effect.',
       'Diagnostics overlay shows what the app is doing, as it does it. It is worth ' +
         'turning on only when something is wrong and worth turning off again afterwards.',
     ],

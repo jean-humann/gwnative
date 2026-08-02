@@ -61,6 +61,13 @@ describe('user guide', () => {
     }
   });
 
+  it('distinguishes render scale from game graphics quality', () => {
+    const body = text();
+    assert.match(body, /separate from the game’s Low–Ultra graphics preset/);
+    assert.match(body, /four times as many pixels/);
+    assert.match(body, /full refresh rate/);
+  });
+
   // Account state is remote, but saved login credentials really are local in
   // Keychain. The guide must distinguish the two rather than promise there is
   // no account-related data on the Mac.

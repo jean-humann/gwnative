@@ -216,6 +216,29 @@ The 48.6 MiB memory difference is consistent with the larger drawing buffer and
 GPU allocation. The CPU gap depends on scene complexity. `2×` remains the
 Retina-native default; the setting exposes the trade-off.
 
+#### Crowded Kamadan control
+
+A live control on 2026-08-01 used the M3 Pro above on macOS 27.0 build
+`26A5388g`, a 120 Hz built-in display, the same 1280×714 window, Ultra game
+graphics, 2× render scale (a 2560×1364 drawing buffer), Loume Loves Ecto, and
+America — English — District 2. The character and login screens reached 120
+FPS, proving that the host and WKWebView have no 80 FPS presentation ceiling.
+
+| Presentation path | Logical frames | Mean interval | Mean cadence | GPU helper CPU | WebContent CPU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Complete-frame isolation | 1,166 | 16.44 ms | 60.8 Hz | about 97% | about 66% |
+| ArenaNet direct framebuffer | 1,256 | 16.09 ms | 62.1 Hz | about 91% | about 61% |
+
+The two 20-second windows used the same character, district, window and
+settings; a district transfer did not preserve the exact camera heading, so
+this is a product control rather than a shader microbenchmark. The direct run
+was only about 1.3 logical frames per second faster and did not approach 120.
+The limiting workload is the crowded Ultra scene at the Retina-sized drawing
+buffer; the observed load sits primarily in WebKit's GPU and WebContent
+processes, not JSPI, Asyncify, or a gwnative frame limiter. Lower render scale
+is the available quality/performance trade-off; disabling complete-frame
+isolation would restore the partial-frame flash without solving this workload.
+
 ## Updating measurements
 
 1. Use alternating runs, not one application's morning against another's

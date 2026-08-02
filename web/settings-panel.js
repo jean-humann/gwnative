@@ -87,12 +87,13 @@ export const CONTROLS = [
     key: 'renderScale',
     group: 'general',
     label: 'Render scale',
-    note: 'Lower is faster. 2× is one game pixel per display pixel on a Retina screen.',
+    note: 'Separate from the game’s graphics preset. 2× is Retina-sharp but draws four '
+      + 'times as many pixels as 1×, so busy scenes may not reach the display’s full rate.',
     live: false,
     choices: [
-      { value: 1, label: '1×' },
-      { value: 1.5, label: '1.5×' },
-      { value: 2, label: '2×' },
+      { value: 1, label: '1× — fastest' },
+      { value: 1.5, label: '1.5× — balanced' },
+      { value: 2, label: '2× — Retina sharpness' },
     ],
   },
   // Every label here used to describe the *mechanism* — "Double-tap to drag",
