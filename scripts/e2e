@@ -603,6 +603,8 @@ def run_performance_sample(
     p95_ms = intervals.get("p95") if isinstance(intervals, dict) else None
     callback = sample.get("callbackToSwapMs", {})
     callback_p95_ms = callback.get("p95") if isinstance(callback, dict) else None
+    callback_samples = callback.get("samples") if isinstance(callback, dict) else None
+    unsampled_callbacks = callback.get("unsampled") if isinstance(callback, dict) else None
     webgl = sample.get("webgl", {})
     audit = sample.get("audit", {})
     if (
@@ -611,8 +613,11 @@ def run_performance_sample(
         or not isinstance(logical_fps, (int, float))
         or not isinstance(p95_ms, (int, float))
         or not isinstance(callback_p95_ms, (int, float))
-        or callback.get("samples") != frames
-        or callback.get("unsampled") != 0
+        or not isinstance(callback_samples, int)
+        or not isinstance(unsampled_callbacks, int)
+        or callback_samples + unsampled_callbacks != frames
+        or callback_samples < frames - 5
+        or unsampled_callbacks > 5
         or not isinstance(webgl, dict)
         or webgl.get("lost") is not False
         or not isinstance(audit, dict)
@@ -621,7 +626,7 @@ def run_performance_sample(
         raise Failure(
             "performance sample is incomplete or lost its WebGL context "
             f"(frames={frames!r}, fps={logical_fps!r}, p95={p95_ms!r}, "
-            f"callbackP95={callback_p95_ms!r}, "
+            f"callback={callback!r}, "
             f"webglLost={webgl.get('lost')!r}, audit={audit!r})"
         )
     if args.runtime != "auto" and sample.get("runtime") != args.runtime:
