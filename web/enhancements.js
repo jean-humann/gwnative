@@ -8,10 +8,7 @@
 
 import { createCursorConsumer } from './enhancement-cursor.js';
 import { createTargetReadout } from './enhancement-readout.js';
-import {
-  readCompanionSnapshot,
-  COMPANION_SNAPSHOT_BYTES,
-} from './companion-snapshot.js';
+import { readCompanionSnapshot } from './companion-snapshot.js';
 import { decodeCompanionManifest } from './companion-manifest.js';
 import { probeLayout } from './layout-probe.js';
 import * as diagnostics from './diagnostics.js';
@@ -210,11 +207,11 @@ export async function installEnhancements(instance, manifestValue, selection) {
     // is about to be instantiated over. Nothing the page allocates for itself
     // would be visible from there at all.
     if (observeState) {
-      snapshotPointer = Number(exports.malloc(COMPANION_SNAPSHOT_BYTES));
+      snapshotPointer = Number(exports.malloc(manifest.snapshotBytes));
     }
     configPointer = Number(exports.malloc(manifest.configBytes));
     if (selection.nativeCursor) {
-      cursorPointer = Number(exports.malloc(COMPANION_CURSOR_BYTES));
+      cursorPointer = Number(exports.malloc(manifest.cursorSnapshotBytes));
     }
     statePointer = Number(exports.malloc(runtimeBytes));
     // Fifteen spare bytes let us align the stack base without losing the
@@ -259,11 +256,11 @@ export async function installEnhancements(instance, manifestValue, selection) {
       statePointer,
       runtimeBytes,
       snapshotPointer,
-      observeState ? COMPANION_SNAPSHOT_BYTES : 0,
+      observeState ? manifest.snapshotBytes : 0,
       configPointer,
       manifest.configBytes,
       cursorPointer,
-      selection.nativeCursor ? COMPANION_CURSOR_BYTES : 0,
+      selection.nativeCursor ? manifest.cursorSnapshotBytes : 0,
       featureFlags,
     );
     if (initStatus !== 1) {
