@@ -389,4 +389,72 @@ describe('frame audit', () => {
     assert.equal(lines.length, 1);
     assert.match(lines[0], /^\[frame-audit\] \{"runtime":"jspi"/);
   });
+
+  it('samples logical swaps without enabling detailed draw hooks', () => {
+    let now = 100;
+    const canvas = fakeCanvas();
+    const audit = createFrameAudit({ runtime: 'jspi', canvas, clock: () => now });
+    audit.contextCreated();
+    const finish = audit.beginPerformanceSample();
+    for (const interval of [0, 8, 9, 8, 17]) {
+      now += interval;
+      audit.swap(true);
+    }
+    now = 150;
+
+    assert.deepEqual(finish(), {
+      runtime: 'jspi',
+      durationMs: 50,
+      frames: 5,
+      framesPerSecond: 100,
+      intervalMs: {
+        samples: 4,
+        mean: 10.5,
+        p50: 8,
+        p95: 17,
+        p99: 17,
+        max: 17,
+      },
+      canvas: {
+        width: 1600,
+        height: 900,
+        css: { width: 800, height: 450 },
+      },
+      webgl: {
+        type: 'WebGL2RenderingContext',
+        lost: false,
+        drawingBufferWidth: 1600,
+        drawingBufferHeight: 900,
+        attributes: { alpha: false, antialias: true },
+      },
+      audit: {
+        contextLost: 0,
+        contextRestored: 0,
+        framesInterruptedAfterDraw: 0,
+        callbacksDoingWorkDuringSuspension: 0,
+        outsideWorkDuringSuspension: 0,
+      },
+    });
+  });
+
+  it('allows only one bounded performance sample at a time', () => {
+    const audit = createFrameAudit();
+    const finish = audit.beginPerformanceSample();
+    assert.throws(() => audit.beginPerformanceSample(), /already running/);
+    finish();
+    assert.throws(() => finish(), /no longer active/);
+  });
+
+  it('keeps a multi-second stall in the sampled frame distribution', () => {
+    let now = 0;
+    const audit = createFrameAudit({ clock: () => now });
+    const finish = audit.beginPerformanceSample();
+    audit.swap(true);
+    now = 2_000;
+    audit.swap(true);
+    const sample = finish();
+    assert.equal(sample.framesPerSecond, 1);
+    assert.equal(sample.intervalMs.p95, 2_000);
+    assert.equal(sample.intervalMs.max, 2_000);
+  });
 });

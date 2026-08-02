@@ -45,6 +45,77 @@ describes the implemented input fallbacks.
 
 ## Benchmark harness
 
+### Authenticated frame-cadence E2E
+
+`scripts/e2e` can take a bounded sample at the actual `eglSwapBuffers` boundary
+after the signed app has authenticated, entered a character, and validated the
+complete passive game-state API. The sampler issues no rendering or timer-query
+command, does not enable the expensive draw-call audit, and never sees Keychain
+values. Its JSON
+contains logical FPS, interval p50/p95/p99/max, drawing-buffer dimensions,
+runtime, context-loss evidence, and certified scene metadata.
+
+```mermaid
+flowchart LR
+    A["Signed app + saved profile"] --> B["Official autologin and character selection"]
+    B --> C["Certified game state ready"]
+    C --> D{"Map and minimum-agent checks"}
+    D -->|"mismatch"| E["Refuse invalid sample"]
+    D -->|"match"| F["Bounded logical-swap observer"]
+    F --> G["Strict 2 KiB test event"]
+    G --> H["JSON artifact + optional thresholds"]
+```
+
+One controlled cell is:
+
+```sh
+scripts/e2e \
+  --profile codex-e2e \
+  --character "Character Name" \
+  --runtime asyncify \
+  --frame-isolation on \
+  --benchmark-seconds 20 \
+  --expect-map-id 449 \
+  --minimum-agents 80 \
+  --refresh-hz 120 \
+  --benchmark-output /tmp/asyncify-isolation-on.json
+```
+
+The full comparison alternates both official runtimes and both presentation
+paths, relaunching the signed application for every cell:
+
+```sh
+scripts/fps-e2e \
+  --profile codex-e2e \
+  --character "Character Name" \
+  --seconds 20 \
+  --expect-map-id 449 \
+  --minimum-agents 80 \
+  --refresh-hz 120 \
+  --output-dir /tmp/gwnative-fps
+```
+
+On a system WebKit without JSPI, use `--runtimes auto asyncify`; the automatic
+cell proves the product selected Asyncify, and the forced cell proves the same
+artifact explicitly. On a JSPI-capable WebKit, the default matrix exercises
+both `jspi` and `asyncify`.
+
+The passive API currently certifies map identity and agent population, not the
+district label. The runner therefore cannot safely switch to or claim America
+District 1/2. Position the saved character in the intended district first;
+`--expect-map-id` plus `--minimum-agents` then prevents an empty or different
+scene from being accepted as the crowded control. Adding coordinate automation
+or a new game-write hook solely for district selection would weaken the E2E
+trust boundary.
+
+WebGL GPU timer queries are intentionally not inserted into the live game
+context. Every artifact records `gpuTiming: not-sampled`; correlate it with an
+external GPU/process trace when distinguishing shader load from CPU submission.
+The logical-swap cadence itself is sufficient to detect a client frame cap,
+runtime regression, isolation regression, context loss, or missed frame budget.
+
+### Launch and resource benchmark
+
 `scripts/benchmark` compares this project with a configurable Electron reference
 checkout.
 

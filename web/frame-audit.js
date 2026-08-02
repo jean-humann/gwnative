@@ -11,6 +11,13 @@
 const round = (value) => Number.isFinite(value) ? Number(value.toFixed(3)) : null;
 const MAX_EVENT_LOGS = 20;
 const MAX_RECENT_EVENTS = 8;
+const MAX_SAMPLE_FRAMES = 20_000;
+
+const percentile = (sorted, fraction) => {
+  if (sorted.length === 0) return null;
+  const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1);
+  return round(sorted[index]);
+};
 
 const contextAttributes = (context) => {
   try {
@@ -105,6 +112,7 @@ export function createFrameAudit(options = {}) {
   let loggedSuspensionResumes = 0;
   let loggedOverlappingWork = 0;
   let resumedFrame = null;
+  let performanceSample = null;
   const activation = {
     lastFrameAgeMs: null,
     lastToFirstSwapMs: null,
@@ -320,6 +328,13 @@ export function createFrameAudit(options = {}) {
     if (!ok) return undefined;
     markOutsideWorkDuringSuspension(currentBrowserFrame(), 'swap');
     const now = clock();
+    if (performanceSample) {
+      if (performanceSample.timestamps.length >= MAX_SAMPLE_FRAMES) {
+        performanceSample.overflow = true;
+      } else {
+        performanceSample.timestamps.push(now);
+      }
+    }
     lastSwapAt = now;
     if (awaitingActivationSwap && lastActivatedAt !== null) {
       const elapsed = Math.max(0, now - lastActivatedAt);
@@ -656,6 +671,62 @@ export function createFrameAudit(options = {}) {
     };
   };
 
+  const beginPerformanceSample = () => {
+    if (performanceSample) throw new Error('a frame performance sample is already running');
+    const before = snapshot();
+    const sample = {
+      started: clock(),
+      timestamps: [],
+      overflow: false,
+      before,
+    };
+    performanceSample = sample;
+    return () => {
+      if (performanceSample !== sample) {
+        throw new Error('frame performance sample is no longer active');
+      }
+      const ended = clock();
+      performanceSample = null;
+      if (sample.overflow) throw new Error('frame performance sample exceeded its bound');
+      const after = snapshot();
+      const duration = Math.max(0, ended - sample.started);
+      const intervals = sample.timestamps
+        .slice(1)
+        .map((timestamp, index) => timestamp - sample.timestamps[index])
+        .filter((interval) => interval > 0 && interval <= 120_000)
+        .sort((left, right) => left - right);
+      const total = intervals.reduce((sum, interval) => sum + interval, 0);
+      const mean = intervals.length ? total / intervals.length : null;
+      const delta = (name) => Math.max(
+        0,
+        (after.totals[name] ?? 0) - (sample.before.totals[name] ?? 0),
+      );
+      return Object.freeze({
+        runtime,
+        durationMs: round(duration),
+        frames: sample.timestamps.length,
+        framesPerSecond: duration ? round(sample.timestamps.length * 1_000 / duration) : 0,
+        intervalMs: Object.freeze({
+          samples: intervals.length,
+          mean: round(mean),
+          p50: percentile(intervals, 0.5),
+          p95: percentile(intervals, 0.95),
+          p99: percentile(intervals, 0.99),
+          max: intervals.length ? round(intervals.at(-1)) : null,
+        }),
+        canvas: after.canvas,
+        webgl: after.webgl,
+        audit: Object.freeze({
+          contextLost: delta('contextLost'),
+          contextRestored: delta('contextRestored'),
+          framesInterruptedAfterDraw: delta('framesInterruptedAfterDraw'),
+          callbacksDoingWorkDuringSuspension: delta('callbacksDoingWorkDuringSuspension'),
+          outsideWorkDuringSuspension: delta('outsideWorkDuringSuspension'),
+        }),
+      });
+    };
+  };
+
   const mark = () => {
     const state = snapshot();
     log('[frame-audit]', JSON.stringify(state));
@@ -682,5 +753,6 @@ export function createFrameAudit(options = {}) {
     deactivate,
     snapshot,
     mark,
+    beginPerformanceSample,
   });
 }

@@ -247,6 +247,79 @@ describe('end-to-end helpers', () => {
     );
   });
 
+  it('runs a bounded logical-frame sample without exposing a script hook', async () => {
+    const sampled = {
+      runtime: 'jspi',
+      durationMs: 1_001,
+      frames: 121,
+      framesPerSecond: 120,
+      intervalMs: { samples: 120, mean: 8.333, p50: 8.333, p95: 8.5, p99: 9, max: 9 },
+      canvas: { width: 2560, height: 1364, css: { width: 1280, height: 682 } },
+      webgl: {
+        type: 'WebGL2RenderingContext',
+        lost: false,
+        drawingBufferWidth: 2560,
+        drawingBufferHeight: 1364,
+        attributes: { alpha: false },
+      },
+      audit: {
+        contextLost: 0,
+        contextRestored: 0,
+        framesInterruptedAfterDraw: 0,
+        callbacksDoingWorkDuringSuspension: 0,
+        outsideWorkDuringSuspension: 0,
+      },
+    };
+    let slept = 0;
+    const window = {
+      Module: {},
+      gwFrameAudit: { beginPerformanceSample: () => () => sampled },
+    };
+    const result = await executeE2EAction(
+      { sequence: 7, action: 'sample-performance', durationMs: 1_000 },
+      {
+        window,
+        canvas: {},
+        sleep: async (duration) => { slept = duration; },
+      },
+    );
+    assert.equal(slept, 1_000);
+    assert.deepEqual(result, {
+      target: 'app-ui',
+      activeTarget: 'canvas',
+      performanceSample: {
+        actionSequence: 7,
+        requestedDurationMs: 1_000,
+        runtime: 'jspi',
+        durationMs: 1_001,
+        frames: 121,
+        framesPerSecond: 120,
+        intervalMs: sampled.intervalMs,
+        canvas: {
+          width: 2560,
+          height: 1364,
+          cssWidth: 1280,
+          cssHeight: 682,
+        },
+        webgl: {
+          type: 'WebGL2RenderingContext',
+          lost: false,
+          drawingBufferWidth: 2560,
+          drawingBufferHeight: 1364,
+        },
+        audit: sampled.audit,
+        gpuTiming: 'not-sampled',
+      },
+    });
+    await assert.rejects(
+      executeE2EAction(
+        { sequence: 8, action: 'sample-performance', durationMs: 999 },
+        { window, canvas: {}, sleep: async () => {} },
+      ),
+      /outside its bound/,
+    );
+  });
+
   it('keeps the action channel dormant in normal launches', () => {
     let fetched = 0;
     const window = {

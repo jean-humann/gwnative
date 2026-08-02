@@ -33,6 +33,13 @@ TOKEN = re.compile(r"session token ([A-Za-z0-9_-]+)")
 ORIGIN = re.compile(r" at (http://127\.0\.0\.1:\d+)/index\.html")
 EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 LONG_POLL_MS = 15_000
+CLIENT_ARTIFACTS = (
+    "Gw.jspi.js",
+    "Gw.jspi.wasm",
+    "Gw.js",
+    "Gw.wasm",
+    "version.json",
+)
 
 
 class Failure(RuntimeError):
@@ -511,6 +518,58 @@ def main() -> int:
         help="exercise the optional client frame-rate ceiling",
     )
     parser.add_argument(
+        "--runtime",
+        choices=("auto", "jspi", "asyncify"),
+        default="auto",
+        help="select the client runtime for a compatibility or performance run",
+    )
+    parser.add_argument(
+        "--frame-isolation",
+        choices=("on", "off"),
+        help="select complete-frame isolation for a controlled comparison",
+    )
+    parser.add_argument(
+        "--benchmark-seconds",
+        type=float,
+        help="sample logical frame cadence for 1 to 60 seconds in certified gameplay",
+    )
+    parser.add_argument(
+        "--benchmark-output",
+        type=Path,
+        help="write the performance sample and certified scene metadata as JSON",
+    )
+    parser.add_argument(
+        "--benchmark-only",
+        action="store_true",
+        help="stop after the sample so matrix cells do not move the character",
+    )
+    parser.add_argument(
+        "--refresh-hz",
+        type=float,
+        help="record the display target and report the p95 frame-budget ratio",
+    )
+    parser.add_argument(
+        "--expect-map-id",
+        type=int,
+        help="refuse to benchmark outside this certified map",
+    )
+    parser.add_argument(
+        "--minimum-agents",
+        type=int,
+        default=0,
+        help="refuse to benchmark a scene with fewer certified agents",
+    )
+    parser.add_argument(
+        "--minimum-fps",
+        type=float,
+        help="fail when sampled logical FPS is below this threshold",
+    )
+    parser.add_argument(
+        "--maximum-p95-ms",
+        type=float,
+        help="fail when the sampled p95 logical-frame interval exceeds this threshold",
+    )
+    parser.add_argument(
         "--character",
         help=(
             "pass the selected character through the official client argument "
@@ -541,11 +600,33 @@ def main() -> int:
         raise Failure("the native E2E runner requires macOS")
     if args.auth_timeout <= 0:
         raise Failure("--auth-timeout must be positive")
+    if args.benchmark_seconds is not None and not 1 <= args.benchmark_seconds <= 60:
+        raise Failure("--benchmark-seconds must be between 1 and 60")
+    if args.benchmark_output is not None and args.benchmark_seconds is None:
+        raise Failure("--benchmark-output requires --benchmark-seconds")
+    if args.benchmark_only and args.benchmark_seconds is None:
+        raise Failure("--benchmark-only requires --benchmark-seconds")
+    if args.refresh_hz is not None and not 1 <= args.refresh_hz <= 1_000:
+        raise Failure("--refresh-hz must be between 1 and 1000")
+    if args.minimum_agents < 0:
+        raise Failure("--minimum-agents cannot be negative")
+    for name, value in [
+        ("--minimum-fps", args.minimum_fps),
+        ("--maximum-p95-ms", args.maximum_p95_ms),
+    ]:
+        if value is not None and value <= 0:
+            raise Failure(f"{name} must be positive")
 
     run(["cargo", "build"])
     support_web = profile_web_root(args.profile)
-    if not (support_web / "Gw.jspi.wasm").is_file():
-        raise Failure(f"the installed client is missing from {support_web}")
+    missing_artifacts = [
+        name for name in CLIENT_ARTIFACTS if not (support_web / name).is_file()
+    ]
+    if missing_artifacts:
+        raise Failure(
+            f"the installed client is missing {', '.join(missing_artifacts)} "
+            f"from {support_web}"
+        )
 
     with tempfile.TemporaryDirectory(prefix="gwnative-e2e-") as temporary:
         scratch = Path(temporary)
@@ -557,7 +638,7 @@ def main() -> int:
         # The source tree intentionally does not version ArenaNet's artifacts
         # and can retain an older ignored copy. Overlay the installed client
         # onto the current page shell in a disposable root.
-        for name in ("Gw.jspi.js", "Gw.jspi.wasm", "version.json"):
+        for name in CLIENT_ARTIFACTS:
             source = support_web / name
             if not source.is_file():
                 raise Failure(f"the installed client is missing {source}")
@@ -567,6 +648,12 @@ def main() -> int:
         environment["GWNATIVE_E2E"] = "1"
         environment["GWNATIVE_PRINT_TOKEN"] = "1"
         environment["GWNATIVE_WEB_ROOT"] = str(web_root)
+        if args.runtime != "auto":
+            environment["GWNATIVE_CLIENT_RUNTIME"] = args.runtime
+        if args.frame_isolation is not None:
+            environment["GWNATIVE_FRAME_ISOLATION"] = (
+                "1" if args.frame_isolation == "on" else "0"
+            )
         # WKWebView suspends its animation-frame-driven client when macOS puts
         # the display to sleep. Mark the machine active before launch, then
         # hold display/system idle sleep only for this app process.
@@ -632,6 +719,7 @@ def main() -> int:
                 "probe-secure-input",
                 "test-ui",
                 "probe-layout",
+                "sample-performance",
             }
             if action_names != expected_actions:
                 raise Failure(f"unexpected E2E action vocabulary: {sorted(action_names)}")
@@ -1743,6 +1831,109 @@ def main() -> int:
                 f"learned-skills={len(learned_skills)}, "
                 f"account-unlocked-skills={len(account_skills)})"
             )
+
+            if args.benchmark_seconds is not None:
+                map_id = state.get("mapId")
+                agent_total = agents.get("total") if isinstance(agents, dict) else None
+                if args.expect_map_id is not None and map_id != args.expect_map_id:
+                    raise Failure(
+                        "performance scene is on map "
+                        f"{map_id}, expected {args.expect_map_id}"
+                    )
+                if not isinstance(agent_total, int) or agent_total < args.minimum_agents:
+                    raise Failure(
+                        "performance scene has "
+                        f"{agent_total!r} certified agents, expected at least "
+                        f"{args.minimum_agents}"
+                    )
+                requested_ms = round(args.benchmark_seconds * 1_000)
+                sample_sequence = submit_action(
+                    origin,
+                    token,
+                    "sample-performance",
+                    requested_ms,
+                )
+                sample_event = stream.wait_for_action_event(
+                    sample_sequence,
+                    "performance-sample",
+                    args.benchmark_seconds + 10,
+                )
+                if sample_event is None:
+                    raise Failure("logical-frame performance sample did not arrive")
+                stream.wait_for_action(sample_sequence, 5)
+                sample = sample_event.get("detail", {})
+                frames = sample.get("frames")
+                logical_fps = sample.get("framesPerSecond")
+                intervals = sample.get("intervalMs", {})
+                p95_ms = intervals.get("p95") if isinstance(intervals, dict) else None
+                webgl = sample.get("webgl", {})
+                audit = sample.get("audit", {})
+                if (
+                    not isinstance(frames, int)
+                    or frames < 2
+                    or not isinstance(logical_fps, (int, float))
+                    or not isinstance(p95_ms, (int, float))
+                    or not isinstance(webgl, dict)
+                    or webgl.get("lost") is not False
+                    or not isinstance(audit, dict)
+                    or audit.get("contextLost") != 0
+                ):
+                    raise Failure("performance sample is incomplete or lost its WebGL context")
+                if args.runtime != "auto" and sample.get("runtime") != args.runtime:
+                    raise Failure(
+                        f"performance sample used {sample.get('runtime')}, "
+                        f"expected {args.runtime}"
+                    )
+                if args.minimum_fps is not None and logical_fps < args.minimum_fps:
+                    raise Failure(
+                        f"logical FPS {logical_fps:.3f} is below {args.minimum_fps:.3f}"
+                    )
+                if args.maximum_p95_ms is not None and p95_ms > args.maximum_p95_ms:
+                    raise Failure(
+                        f"p95 interval {p95_ms:.3f} ms exceeds "
+                        f"{args.maximum_p95_ms:.3f} ms"
+                    )
+                budget_ratio = None
+                if args.refresh_hz is not None:
+                    budget_ratio = p95_ms / (1_000 / args.refresh_hz)
+                report = {
+                    "schemaVersion": 1,
+                    "configuration": {
+                        "requestedRuntime": args.runtime,
+                        "frameIsolation": args.frame_isolation or "default",
+                        "clientFrameLimit": args.fps,
+                        "refreshHz": args.refresh_hz,
+                    },
+                    "scene": {
+                        "mapId": map_id,
+                        "instanceType": state.get("instanceType"),
+                        "agents": agent_total,
+                        "capturedAgents": len(map_agents),
+                        "playerId": state.get("playerId"),
+                    },
+                    "sample": sample,
+                    "derived": {
+                        "p95FrameBudgetRatio": (
+                            round(budget_ratio, 4) if budget_ratio is not None else None
+                        ),
+                    },
+                }
+                if args.benchmark_output is not None:
+                    args.benchmark_output.write_text(
+                        json.dumps(report, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    print(f"[e2e] performance artifact {args.benchmark_output}")
+                print(
+                    "[e2e] logical-frame performance PASS "
+                    f"(runtime={sample.get('runtime')}, frames={frames}, "
+                    f"fps={logical_fps:.3f}, p95={p95_ms:.3f}ms, "
+                    f"agents={agent_total}, map={map_id}, "
+                    "gpu-timing=not-sampled)"
+                )
+                if args.benchmark_only:
+                    print("[e2e] PASS (benchmark-only)")
+                    return 0
 
             before = position(ready)
             revision = int(ready["revision"])

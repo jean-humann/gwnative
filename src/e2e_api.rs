@@ -146,6 +146,12 @@ impl Hub {
                     "name": "probe-layout",
                     "description": "scan only the bounded certified layout window and return matching deltas",
                 },
+                {
+                    "name": "sample-performance",
+                    "description": "observe logical frame cadence without issuing WebGL commands",
+                    "minimumDurationMs": 1000,
+                    "maximumDurationMs": 60000,
+                },
             ],
             "prohibited": ["javascript", "coordinates", "text", "credentials"],
         }))
@@ -186,6 +192,15 @@ impl Hub {
                 }
                 0
             }
+            "sample-performance" => {
+                let duration = request.duration_ms.unwrap_or(10_000);
+                if !(1_000..=60_000).contains(&duration) {
+                    return Err(
+                        "performance sample duration must be between 1000 and 60000 ms".into(),
+                    );
+                }
+                duration
+            }
             _ => return Err("E2E action is not in the allowed vocabulary".into()),
         };
 
@@ -203,7 +218,10 @@ impl Hub {
         // with the command that caused it. It executes only bounded page-owned
         // checks; native gameplay actions have a second, host-owned queue.
         inner.page_actions.push_back(action.clone());
-        if !matches!(action.action.as_str(), "test-ui" | "probe-layout") {
+        if !matches!(
+            action.action.as_str(),
+            "test-ui" | "probe-layout" | "sample-performance"
+        ) {
             inner.native_actions.push_back(action.clone());
         }
         self.actions_changed.notify_all();
@@ -607,6 +625,99 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             }
             Ok(())
         }
+        "performance-sample" => {
+            exact_keys(
+                object,
+                &[
+                    "actionSequence",
+                    "requestedDurationMs",
+                    "runtime",
+                    "durationMs",
+                    "frames",
+                    "framesPerSecond",
+                    "intervalMs",
+                    "canvas",
+                    "webgl",
+                    "audit",
+                    "gpuTiming",
+                ],
+            )?;
+            positive_u64_field(object, "actionSequence")?;
+            match object.get("requestedDurationMs").and_then(Value::as_u64) {
+                Some(1_000..=60_000) => {}
+                _ => return Err("performance sample request duration is outside its bound".into()),
+            }
+            enum_text_field(object, "runtime", &["jspi", "asyncify"])?;
+            bounded_number_field(object, "durationMs", 0.0, 120_000.0, false)?;
+            u32_field(object, "frames")?;
+            bounded_number_field(object, "framesPerSecond", 0.0, 1_000.0, false)?;
+            enum_text_field(object, "gpuTiming", &["not-sampled"])?;
+
+            let intervals = object
+                .get("intervalMs")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "performance sample intervals must be an object".to_owned())?;
+            exact_keys(intervals, &["samples", "mean", "p50", "p95", "p99", "max"])?;
+            u32_field(intervals, "samples")?;
+            for name in ["mean", "p50", "p95", "p99", "max"] {
+                bounded_number_field(intervals, name, 0.0, 120_000.0, true)?;
+            }
+
+            let canvas = object
+                .get("canvas")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "performance sample canvas must be an object".to_owned())?;
+            exact_keys(canvas, &["width", "height", "cssWidth", "cssHeight"])?;
+            for name in ["width", "height"] {
+                nullable_u32_field(canvas, name, 32_768)?;
+            }
+            for name in ["cssWidth", "cssHeight"] {
+                bounded_number_field(canvas, name, 0.0, 32_768.0, true)?;
+            }
+
+            let webgl = object
+                .get("webgl")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "performance sample WebGL state must be an object".to_owned())?;
+            exact_keys(
+                webgl,
+                &["type", "lost", "drawingBufferWidth", "drawingBufferHeight"],
+            )?;
+            nullable_enum_text_field(
+                webgl,
+                "type",
+                &["WebGLRenderingContext", "WebGL2RenderingContext"],
+            )?;
+            nullable_bool_field(webgl, "lost")?;
+            for name in ["drawingBufferWidth", "drawingBufferHeight"] {
+                nullable_u32_field(webgl, name, 32_768)?;
+            }
+
+            let audit = object
+                .get("audit")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "performance sample audit must be an object".to_owned())?;
+            exact_keys(
+                audit,
+                &[
+                    "contextLost",
+                    "contextRestored",
+                    "framesInterruptedAfterDraw",
+                    "callbacksDoingWorkDuringSuspension",
+                    "outsideWorkDuringSuspension",
+                ],
+            )?;
+            for name in [
+                "contextLost",
+                "contextRestored",
+                "framesInterruptedAfterDraw",
+                "callbacksDoingWorkDuringSuspension",
+                "outsideWorkDuringSuspension",
+            ] {
+                u32_field(audit, name)?;
+            }
+            Ok(())
+        }
         "action-prepared" => {
             exact_keys(object, &["actionSequence", "action", "target"])?;
             positive_u64_field(object, "actionSequence")?;
@@ -679,7 +790,7 @@ fn action_result(object: &Map<String, Value>) -> Result<(), String> {
         Some(
             "activate" | "move-forward" | "move-backward" | "turn-left" | "turn-right"
             | "target-next" | "interact" | "cancel" | "skill-1" | "probe-secure-input" | "test-ui"
-            | "probe-layout",
+            | "probe-layout" | "sample-performance",
         ) => {}
         _ => return Err("E2E action result names an unknown action".into()),
     }
@@ -740,6 +851,43 @@ fn u32_field(object: &Map<String, Value>, name: &str) -> Result<(), String> {
         .ok_or_else(|| format!("E2E event {name} must be an unsigned 32-bit integer"))
 }
 
+fn nullable_u32_field(object: &Map<String, Value>, name: &str, maximum: u64) -> Result<(), String> {
+    match object.get(name) {
+        Some(Value::Null) => Ok(()),
+        Some(value) if value.as_u64().is_some_and(|number| number <= maximum) => Ok(()),
+        _ => Err(format!(
+            "E2E event {name} must be a bounded integer or null"
+        )),
+    }
+}
+
+fn bounded_number_field(
+    object: &Map<String, Value>,
+    name: &str,
+    minimum: f64,
+    maximum: f64,
+    nullable: bool,
+) -> Result<(), String> {
+    match object.get(name) {
+        Some(Value::Null) if nullable => Ok(()),
+        Some(value)
+            if value.as_f64().is_some_and(|number| {
+                number.is_finite() && (minimum..=maximum).contains(&number)
+            }) =>
+        {
+            Ok(())
+        }
+        _ => Err(format!("E2E event {name} must be a bounded number")),
+    }
+}
+
+fn nullable_bool_field(object: &Map<String, Value>, name: &str) -> Result<(), String> {
+    match object.get(name) {
+        Some(Value::Null | Value::Bool(_)) => Ok(()),
+        _ => Err(format!("E2E event {name} must be boolean or null")),
+    }
+}
+
 fn positive_u64_field(object: &Map<String, Value>, name: &str) -> Result<(), String> {
     object
         .get(name)
@@ -769,6 +917,20 @@ fn enum_text_field(
         .filter(|value| allowed.contains(value))
         .map(|_| ())
         .ok_or_else(|| format!("E2E event {name} is not a recognised state"))
+}
+
+fn nullable_enum_text_field(
+    object: &Map<String, Value>,
+    name: &str,
+    allowed: &[&str],
+) -> Result<(), String> {
+    match object.get(name) {
+        Some(Value::Null) => Ok(()),
+        Some(Value::String(value)) if allowed.contains(&value.as_str()) => Ok(()),
+        _ => Err(format!(
+            "E2E event {name} is not a recognised state or null"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -803,6 +965,16 @@ mod tests {
             hub.submit_action(br#"{"action":"skill-1","durationMs":40}"#)
                 .is_err()
         );
+        let sample: Value = serde_json::from_slice(
+            &hub.submit_action(br#"{"action":"sample-performance"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sample["durationMs"], 10_000);
+        assert!(
+            hub.submit_action(br#"{"action":"sample-performance","durationMs":999}"#)
+                .is_err()
+        );
     }
 
     #[test]
@@ -833,23 +1005,25 @@ mod tests {
         let hub = Hub::default();
         hub.submit_action(br#"{"action":"test-ui"}"#).unwrap();
         hub.submit_action(br#"{"action":"probe-layout"}"#).unwrap();
+        hub.submit_action(br#"{"action":"sample-performance","durationMs":1000}"#)
+            .unwrap();
         hub.submit_action(br#"{"action":"activate"}"#).unwrap();
         hub.submit_action(br#"{"action":"move-forward","durationMs":250}"#)
             .unwrap();
 
         assert!(hub.take_native_action().is_none());
         hub.publish_event(
-            br#"{"kind":"action-prepared","detail":{"actionSequence":3,"action":"activate","target":"password-proxy"}}"#,
+            br#"{"kind":"action-prepared","detail":{"actionSequence":4,"action":"activate","target":"password-proxy"}}"#,
         )
         .unwrap();
         hub.publish_event(
-            br#"{"kind":"action-prepared","detail":{"actionSequence":4,"action":"move-forward","target":"canvas"}}"#,
+            br#"{"kind":"action-prepared","detail":{"actionSequence":5,"action":"move-forward","target":"canvas"}}"#,
         )
         .unwrap();
         let first = hub.take_native_action().unwrap();
         let second = hub.take_native_action().unwrap();
         assert_eq!(first.action, "activate");
-        assert_eq!(first.sequence, 3);
+        assert_eq!(first.sequence, 4);
         assert_eq!(second.action, "move-forward");
         assert_eq!(second.duration_ms, 250);
         assert!(hub.take_native_action().is_none());
@@ -935,6 +1109,66 @@ mod tests {
                 br#"{"kind":"login-response","detail":{"status":200,"bytes":69,"body":"never"}}"#,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn performance_events_are_bounded_and_carry_no_frame_pixels() {
+        let hub = Hub::default();
+        let detail = serde_json::json!({
+            "actionSequence": 1,
+            "requestedDurationMs": 10_000,
+            "runtime": "jspi",
+            "durationMs": 10_001.25,
+            "frames": 601,
+            "framesPerSecond": 60.0,
+            "intervalMs": {
+                "samples": 600,
+                "mean": 16.667,
+                "p50": 16.6,
+                "p95": 17.2,
+                "p99": 20.0,
+                "max": 24.0,
+            },
+            "canvas": {
+                "width": 2560,
+                "height": 1364,
+                "cssWidth": 1280.0,
+                "cssHeight": 682.0,
+            },
+            "webgl": {
+                "type": "WebGL2RenderingContext",
+                "lost": false,
+                "drawingBufferWidth": 2560,
+                "drawingBufferHeight": 1364,
+            },
+            "audit": {
+                "contextLost": 0,
+                "contextRestored": 0,
+                "framesInterruptedAfterDraw": 0,
+                "callbacksDoingWorkDuringSuspension": 0,
+                "outsideWorkDuringSuspension": 0,
+            },
+            "gpuTiming": "not-sampled",
+        });
+        let valid = serde_json::to_vec(&serde_json::json!({
+            "kind": "performance-sample",
+            "detail": detail,
+        }))
+        .unwrap();
+        assert!(hub.publish_event(&valid).is_ok());
+
+        let mut invalid = serde_json::from_slice::<Value>(&valid).unwrap();
+        invalid["detail"]["framesPerSecond"] = Value::from(1_001);
+        assert!(
+            hub.publish_event(&serde_json::to_vec(&invalid).unwrap())
+                .is_err()
+        );
+        invalid["detail"]["framesPerSecond"] = Value::from(60);
+        invalid["detail"]["pixels"] = Value::String("never".into());
+        assert!(
+            hub.publish_event(&serde_json::to_vec(&invalid).unwrap())
+                .is_err()
         );
     }
 

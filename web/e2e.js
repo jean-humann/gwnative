@@ -108,6 +108,8 @@ const EVENT_CODES = Object.freeze({
   Digit1: 'digit-1',
 });
 
+const PAGE_ACTIONS = new Set(['test-ui', 'probe-layout', 'sample-performance']);
+
 const targetName = (window, canvas, candidate) => {
   if (!candidate || candidate === canvas) return 'canvas';
   const kind = Object.entries(window.Module?.oskInput ?? {})
@@ -152,22 +154,59 @@ export function prepareNativeE2EAction(action, { window, canvas, secureInput = n
  * @param {{
  *   window: Window,
  *   canvas: HTMLCanvasElement,
+ *   sleep?: (milliseconds: number) => Promise<void>,
  * }} options
- * @returns {Promise<{
- *   target: 'app-ui',
- *   activeTarget: 'canvas' | `${string}-proxy`,
- * }>}
  */
 export async function executeE2EAction(action, {
   window,
   canvas,
+  sleep = wait,
 }) {
   assert(Number.isSafeInteger(action?.sequence) && action.sequence > 0,
     'E2E action has no valid sequence');
-  assert(
-    action.action === 'test-ui' || action.action === 'probe-layout',
-    'gameplay actions are native-only',
-  );
+  assert(PAGE_ACTIONS.has(action.action), 'gameplay actions are native-only');
+  if (action.action === 'sample-performance') {
+    assert(
+      Number.isSafeInteger(action.durationMs)
+        && action.durationMs >= 1_000
+        && action.durationMs <= 60_000,
+      'performance sample duration is outside its bound',
+    );
+    assert(
+      typeof window.gwFrameAudit?.beginPerformanceSample === 'function',
+      'frame performance sampler is not installed',
+    );
+    const finish = window.gwFrameAudit.beginPerformanceSample();
+    await sleep(action.durationMs);
+    const sampled = finish();
+    return {
+      target: 'app-ui',
+      activeTarget: targetName(window, canvas, window.Module?.oskActiveInput),
+      performanceSample: {
+        actionSequence: action.sequence,
+        requestedDurationMs: action.durationMs,
+        runtime: sampled.runtime,
+        durationMs: sampled.durationMs,
+        frames: sampled.frames,
+        framesPerSecond: sampled.framesPerSecond,
+        intervalMs: sampled.intervalMs,
+        canvas: {
+          width: sampled.canvas?.width ?? null,
+          height: sampled.canvas?.height ?? null,
+          cssWidth: sampled.canvas?.css?.width ?? null,
+          cssHeight: sampled.canvas?.css?.height ?? null,
+        },
+        webgl: {
+          type: sampled.webgl?.type ?? null,
+          lost: sampled.webgl?.lost ?? null,
+          drawingBufferWidth: sampled.webgl?.drawingBufferWidth ?? null,
+          drawingBufferHeight: sampled.webgl?.drawingBufferHeight ?? null,
+        },
+        audit: sampled.audit,
+        gpuTiming: 'not-sampled',
+      },
+    };
+  }
   assert(action.durationMs === 0, 'page-owned E2E action duration is outside its bound');
   let layoutProbe;
   if (action.action === 'test-ui') {
@@ -309,7 +348,7 @@ export function installE2EBridge({
           // Native gameplay delivery has its own copy of this command. The
           // page focuses the client's finite input target and acknowledges it
           // before AppKit is woken, then only observes resulting socket traffic.
-          if (action.action !== 'test-ui' && action.action !== 'probe-layout') {
+          if (!PAGE_ACTIONS.has(action.action)) {
             const target = prepareNativeE2EAction(action, {
               window,
               canvas,
@@ -340,6 +379,9 @@ export function installE2EBridge({
             const result = await executeE2EAction(action, { window, canvas });
             ({ target, activeTarget } = result);
             if (result.layoutProbe) await report('layout-probe', result.layoutProbe);
+            if (result.performanceSample) {
+              await report('performance-sample', result.performanceSample);
+            }
             await report('action-complete', {
               actionSequence: action.sequence,
               action: action.action,

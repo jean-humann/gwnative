@@ -172,13 +172,20 @@ Wars client. The runner:
    UI-frame identity/state/geometry, bounded merchant item IDs, and character
    level/experience/faction/skill-point progression, plus distinct bounded
    trainer-visible, character-learned, and account-unlocked skill sets, and
-   confirms bidirectional movement through newer revisions.
+   confirms bidirectional movement through newer revisions; and
+9. optionally records a bounded observer-only logical-frame sample after
+   checking the expected map and minimum certified agent population.
 
 ```sh
 scripts/e2e
 scripts/e2e --character "Character Name"
 scripts/e2e --profile codex-e2e
 scripts/e2e --no-gameplay
+scripts/e2e --character "Character Name" --benchmark-seconds 20 \
+  --expect-map-id 449 --minimum-agents 80 \
+  --benchmark-output /tmp/gwnative-fps.json
+scripts/fps-e2e --character "Character Name" --expect-map-id 449 \
+  --minimum-agents 80 --output-dir /tmp/gwnative-fps-matrix
 ```
 
 The session token is captured and redacted. Credential values never leave the
