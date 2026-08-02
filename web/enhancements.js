@@ -10,7 +10,13 @@ import { createCursorConsumer } from './enhancement-cursor.js';
 import { createTargetReadout } from './enhancement-readout.js';
 import { readCompanionSnapshot } from './companion-snapshot.js';
 import { decodeCompanionManifest } from './companion-manifest.js';
-import { characterSelectionState, probeLayout } from './layout-probe.js';
+import { executeBenchmarkCommand } from './benchmark-command.js';
+import {
+  benchmarkUiState,
+  benchmarkSceneState,
+  characterSelectionState,
+  probeLayout,
+} from './layout-probe.js';
 import * as diagnostics from './diagnostics.js';
 import {
   asyncifyStateReader,
@@ -104,8 +110,16 @@ function observeSnapshots(runtime, cursor, readout, observeState, observeGame) {
  * @param {unknown} manifestValue
  * @param {{ nativeCursor: boolean, targetReadout: boolean,
  *           runtime: 'jspi' | 'asyncify', stateApi?: boolean }} selection
+ * @param {WebAssembly.Exports | Record<string, unknown> | undefined} runtimeExports
+ * @param {((callback: () => unknown) => Promise<void>) | undefined} queueCommand
  */
-export async function installEnhancements(instance, manifestValue, selection) {
+export async function installEnhancements(
+  instance,
+  manifestValue,
+  selection,
+  runtimeExports = undefined,
+  queueCommand = undefined,
+) {
   const observeState = selection.targetReadout || selection.stateApi === true;
   const featureFlags =
     (selection.nativeCursor ? FEATURE_NATIVE_CURSOR : 0)
@@ -113,7 +127,10 @@ export async function installEnhancements(instance, manifestValue, selection) {
   if (featureFlags === 0) return null;
 
   const manifest = decodeCompanionManifest(manifestValue);
-  const exports = instance?.exports;
+  // Emscripten wraps every Asyncify export before handing control to the
+  // runtime. Use that wrapped view when the harness can provide it; JSPI's
+  // synchronous benchmark command and ordinary exports remain equivalent.
+  const exports = runtimeExports ?? instance?.exports;
   // Every one of these is something the transform or Emscripten is supposed to
   // have left behind. Checked together, and before anything is allocated, so
   // that a client this page cannot drive is a state rather than a half-install.
@@ -137,6 +154,7 @@ export async function installEnhancements(instance, manifestValue, selection) {
   }
 
   const free = /** @type {(pointer: number) => void} */ (exports.free);
+  const benchmarkCommand = exports?.__gwnative_e2e_benchmark_command;
   const asyncifyState = asyncifyStateReader(exports, selection.runtime);
   const runtimeIdle = () => asyncifyState === null || asyncifyState() === 0;
   if (!runtimeIdle()) throw new Error('the client is currently unwinding or rewinding');
@@ -303,6 +321,24 @@ export async function installEnhancements(instance, manifestValue, selection) {
           throw new Error('layout probing is available only during E2E certification');
         }
         return probeLayout(exports.memory.buffer, manifest.layoutWords);
+      },
+      benchmarkUiState() {
+        if (window.__gwnativeE2E !== true) {
+          throw new Error('benchmark UI probing is available only during E2E certification');
+        }
+        return benchmarkUiState(exports.memory.buffer, manifest.layoutWords);
+      },
+      benchmarkSceneState() {
+        if (window.__gwnativeE2E !== true) return null;
+        return benchmarkSceneState(exports.memory.buffer, manifest.layoutWords);
+      },
+      async benchmarkSceneCommand(command, argument) {
+        await executeBenchmarkCommand(command, argument, {
+          enabled: window.__gwnativeE2E === true,
+          benchmarkCommand,
+          queueCommand,
+          runtimeIdle,
+        });
       },
       characterSelectionState() {
         if (window.__gwnativeE2E !== true) return 'unavailable';

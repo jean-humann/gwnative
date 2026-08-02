@@ -12,6 +12,7 @@ use std::ops::Range;
 
 use wasmparser::{
     BinaryReader, FunctionBody, GlobalSectionReader, ImportSectionReader, Operator, TypeRef,
+    TypeSectionReader,
 };
 
 use super::certificate::{
@@ -20,12 +21,43 @@ use super::certificate::{
 };
 use super::codec::{
     Section, WASM_HEADER, encode_code, encode_index_vector, encode_section, parse_code,
-    parse_index_vector, section_by_id, sleb, split_sections, uleb,
+    parse_index_vector, read_uleb, section_by_id, sleb, split_sections, uleb,
 };
 use super::{Outcome, digest};
 
 const CARRIER_MODULE: &str = "env";
 const CARRIER_NAME: &str = "__syscall_newfstatat";
+const BENCHMARK_EXPORT: &str = "__gwnative_e2e_benchmark_command";
+const TRAVEL_UI_MESSAGE: i32 = 0x1000_0183;
+const WORLD_ACTION_UI_MESSAGE: i32 = 0x3000_0020;
+const PREFERENCE_ENUM_UI_MESSAGE: i32 = 0x1000_0140;
+const PREFERENCE_FLAG_UI_MESSAGE: i32 = 0x1000_0141;
+const KAMADAN_MAP_ID: i32 = 449;
+const AMERICA_REGION_ID: i32 = 0;
+const ENGLISH_LANGUAGE_ID: i32 = 0;
+const INTERACT_NPC_ACTION: i32 = 2;
+const MAX_AGENT_ID_EXCLUSIVE: i32 = 4096;
+const HIGH_ENUM_PREFERENCES: &[(u32, i32)] = &[(1, 4), (2, 3), (3, 3), (4, 4), (5, 4), (7, 0)];
+const HIGH_NUMBER_PREFERENCES: &[(u32, i32)] = &[(21, 2), (22, 1)];
+const HIGH_FLAG_PREFERENCES: &[u32] = &[82, 84, 97, 98, 100];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct BenchmarkTargets {
+    dispatcher: u32,
+    enum_setter: u32,
+    flag_setter: u32,
+    number_setter: u32,
+    enum_values: u32,
+    flag_values: u32,
+    number_values: u32,
+    flag_bound: i32,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum BenchmarkRuntime {
+    Jspi,
+    Asyncify,
+}
 
 #[derive(Clone, Debug)]
 struct Patch {
@@ -590,6 +622,789 @@ pub(super) fn rewrite(input: &[u8], certificate: &RuntimeCertificate) -> Outcome
     Ok(output)
 }
 
+/// Add the E2E runner's finite in-client scene command.
+///
+/// This is deliberately a wrapper rather than an export of the discovered
+/// dispatcher. JavaScript can request only command 0 (travel to map 449,
+/// America/English, district 1 or 2), command 1 (interact with one bounded
+/// agent ID), or command 2 (apply the fixed high-quality benchmark preset).
+/// The normal player module never receives the extra export.
+pub(super) fn add_benchmark_api(
+    input: &[u8],
+    import_count: u32,
+    targets: BenchmarkTargets,
+    runtime: BenchmarkRuntime,
+) -> Outcome<Vec<u8>> {
+    match runtime {
+        BenchmarkRuntime::Jspi if benchmark_targets(input, import_count)? != targets => {
+            return Err("benchmark API: JSPI targets changed after paired proof".to_owned());
+        }
+        BenchmarkRuntime::Asyncify => {
+            certify_asyncify_benchmark_targets(input, import_count, targets)?;
+        }
+        BenchmarkRuntime::Jspi => {}
+    }
+    let sections = split_sections(input)?;
+    let function_types = parse_index_vector(section_by_id(&sections, 3)?)?;
+    let bodies = parse_code(section_by_id(&sections, 10)?)?;
+    if function_types.len() != bodies.len() {
+        return Err("benchmark API: function and code sections disagree".to_owned());
+    }
+    let type_index = append_benchmark_type_index(section_by_id(&sections, 1)?)?;
+    let function_index = import_count
+        .checked_add(
+            u32::try_from(bodies.len())
+                .map_err(|_| "benchmark API: too many functions".to_owned())?,
+        )
+        .ok_or_else(|| "benchmark API: function index overflow".to_owned())?;
+    let wrapper = benchmark_wrapper(targets);
+
+    let mut output = WASM_HEADER.to_vec();
+    for section in &sections {
+        let body = match section.id {
+            1 => append_benchmark_type(&section.body)?,
+            3 => {
+                let mut next = function_types.clone();
+                next.push(type_index);
+                encode_index_vector(&next)
+            }
+            7 => append_function_export(&section.body, BENCHMARK_EXPORT, function_index)?,
+            10 => {
+                let mut next = bodies.clone();
+                next.push(wrapper.clone());
+                encode_code(&next)
+            }
+            _ => section.body.clone(),
+        };
+        output.extend_from_slice(&encode_section(&Section {
+            id: section.id,
+            body,
+        }));
+    }
+    verify_benchmark_api(input, &output, function_index, &wrapper)?;
+    Ok(output)
+}
+
+fn benchmark_targets(input: &[u8], import_count: u32) -> Outcome<BenchmarkTargets> {
+    let sections = split_sections(input)?;
+    let bodies = parse_code(section_by_id(&sections, 10)?)?;
+    let parameter_counts = function_parameter_counts(&sections)?;
+    if parameter_counts.len() != bodies.len() {
+        return Err("benchmark API: function and code sections disagree".to_owned());
+    }
+    let dispatcher = benchmark_ui_dispatcher(&bodies)?;
+    let (enum_setter, enum_values) = preference_setter(
+        &bodies,
+        &parameter_counts,
+        import_count,
+        dispatcher,
+        PREFERENCE_ENUM_UI_MESSAGE,
+        enum_preference_guard,
+        "enum",
+    )?;
+    let (flag_setter, flag_values) = preference_setter(
+        &bodies,
+        &parameter_counts,
+        import_count,
+        dispatcher,
+        PREFERENCE_FLAG_UI_MESSAGE,
+        |operators| {
+            local_zero_bound(operators).is_some_and(|bound| {
+                bound > HIGH_FLAG_PREFERENCES.last().copied().unwrap_or_default() as i32
+                    && bound < 512
+            })
+        },
+        "flag",
+    )?;
+    let (number_setter, number_values) =
+        number_preference_setter(&bodies, &parameter_counts, import_count, dispatcher)?;
+    let flag_body = bodies
+        .get((flag_setter - import_count) as usize)
+        .ok_or_else(|| "benchmark API: flag setter index is outside the code section".to_owned())?;
+    let flag_bound = local_zero_bound(&function_operators(flag_body)?)
+        .ok_or_else(|| "benchmark API: flag setter has no certified bound".to_owned())?;
+    for (name, base, last) in [
+        (
+            "enum",
+            enum_values,
+            HIGH_ENUM_PREFERENCES
+                .last()
+                .map(|preference| preference.0)
+                .unwrap_or_default(),
+        ),
+        (
+            "flag",
+            flag_values,
+            HIGH_FLAG_PREFERENCES.last().copied().unwrap_or_default(),
+        ),
+        (
+            "number",
+            number_values,
+            HIGH_NUMBER_PREFERENCES
+                .last()
+                .map(|preference| preference.0)
+                .unwrap_or_default(),
+        ),
+    ] {
+        if base
+            .checked_add(last * 4)
+            .is_none_or(|address| address > i32::MAX as u32)
+        {
+            return Err(format!(
+                "benchmark API: {name} preference values are outside i32 memory"
+            ));
+        }
+    }
+    Ok(BenchmarkTargets {
+        dispatcher,
+        enum_setter,
+        flag_setter,
+        number_setter,
+        enum_values,
+        flag_values,
+        number_values,
+        flag_bound,
+    })
+}
+
+/// Locate the compact JSPI implementation, then prove that Asyncify retained
+/// the same functions, signatures, UI messages, and preference storage at the
+/// same source-level indices. This avoids guessing through Asyncify's expanded
+/// state-machine bodies while still adapting to a new paired ArenaNet build.
+pub(super) fn benchmark_target_pair(
+    jspi: &[u8],
+    jspi_import_count: u32,
+    asyncify: &[u8],
+    asyncify_import_count: u32,
+) -> Outcome<BenchmarkTargets> {
+    if jspi_import_count != asyncify_import_count {
+        return Err("benchmark API: paired runtimes have different function imports".to_owned());
+    }
+    let targets = benchmark_targets(jspi, jspi_import_count)?;
+    certify_asyncify_benchmark_targets(asyncify, asyncify_import_count, targets)?;
+    Ok(targets)
+}
+
+fn function_parameter_counts(sections: &[Section]) -> Outcome<Vec<usize>> {
+    let function_types = parse_index_vector(section_by_id(sections, 3)?)?;
+    let types = TypeSectionReader::new(BinaryReader::new(section_by_id(sections, 1)?, 0))
+        .map_err(|error| format!("benchmark API: cannot read types: {error}"))?
+        .into_iter_err_on_gc_types()
+        .map(|function| {
+            function
+                .map(|function| function.params().len())
+                .map_err(|error| format!("benchmark API: cannot read function type: {error}"))
+        })
+        .collect::<Outcome<Vec<_>>>()?;
+    function_types
+        .iter()
+        .map(|type_index| {
+            types
+                .get(*type_index as usize)
+                .copied()
+                .ok_or_else(|| "benchmark API: function references a missing type".to_owned())
+        })
+        .collect()
+}
+
+fn asyncify_state_guard(operators: &[Operator<'_>]) -> bool {
+    operators.windows(4).any(|window| {
+        matches!(
+            window,
+            [
+                Operator::GlobalGet { global_index },
+                Operator::I32Const { value: 0 },
+                Operator::I32Eq,
+                Operator::If { .. },
+            ] if *global_index != 0
+        )
+    })
+}
+
+fn asyncify_storage_proof(operators: &[Operator<'_>], base: u32) -> bool {
+    let base_value = i32::try_from(base).ok();
+    base_value.is_some_and(|base_value| {
+        asyncify_state_guard(operators)
+            && operators.iter().any(
+                |operator| matches!(operator, Operator::I32Load { memarg } if memarg.offset == u64::from(base)),
+            )
+            && operators
+                .iter()
+                .any(|operator| matches!(operator, Operator::I32Const { value } if *value == base_value))
+            && operators.iter().any(
+                |operator| matches!(operator, Operator::I32Store { memarg } if memarg.offset == 0),
+            )
+    })
+}
+
+fn certify_asyncify_benchmark_targets(
+    input: &[u8],
+    import_count: u32,
+    targets: BenchmarkTargets,
+) -> Outcome<()> {
+    let sections = split_sections(input)?;
+    let bodies = parse_code(section_by_id(&sections, 10)?)?;
+    let parameter_counts = function_parameter_counts(&sections)?;
+    if parameter_counts.len() != bodies.len() {
+        return Err("benchmark API: Asyncify function and code sections disagree".to_owned());
+    }
+    if benchmark_ui_dispatcher(&bodies)? != targets.dispatcher {
+        return Err("benchmark API: paired runtimes disagree on the UI dispatcher".to_owned());
+    }
+    for (name, function, message, base) in [
+        (
+            "enum",
+            targets.enum_setter,
+            PREFERENCE_ENUM_UI_MESSAGE,
+            targets.enum_values,
+        ),
+        (
+            "flag",
+            targets.flag_setter,
+            PREFERENCE_FLAG_UI_MESSAGE,
+            targets.flag_values,
+        ),
+    ] {
+        let local = function
+            .checked_sub(import_count)
+            .and_then(|local| usize::try_from(local).ok())
+            .ok_or_else(|| format!("benchmark API: paired {name} setter index is invalid"))?;
+        let body = bodies
+            .get(local)
+            .ok_or_else(|| format!("benchmark API: paired {name} setter is missing"))?;
+        let operators = function_operators(body)?;
+        if parameter_counts.get(local) != Some(&3)
+            || ui_message_calls(&operators, message, targets.dispatcher) != 1
+            || !restores_stack_pointer(&operators)
+            || !asyncify_storage_proof(&operators, base)
+        {
+            return Err(format!(
+                "benchmark API: paired Asyncify {name} setter failed correspondence"
+            ));
+        }
+        if name == "enum"
+            && !operators
+                .windows(2)
+                .any(|window| matches!(window, [Operator::I32Const { value: 2 }, Operator::I32Shl]))
+        {
+            return Err("benchmark API: paired Asyncify enum indexing changed".to_owned());
+        }
+        if name == "flag"
+            && (!operators.iter().any(
+                |operator| matches!(operator, Operator::I32Const { value } if *value == targets.flag_bound),
+            ) || !operators
+                .iter()
+                .any(|operator| matches!(operator, Operator::I32LtU)))
+        {
+            return Err("benchmark API: paired Asyncify flag bound changed".to_owned());
+        }
+    }
+    let number_local = targets
+        .number_setter
+        .checked_sub(import_count)
+        .and_then(|local| usize::try_from(local).ok())
+        .ok_or_else(|| "benchmark API: paired number setter index is invalid".to_owned())?;
+    let number = bodies
+        .get(number_local)
+        .ok_or_else(|| "benchmark API: paired number setter is missing".to_owned())?;
+    let number_operators = function_operators(number)?;
+    if parameter_counts.get(number_local) != Some(&3)
+        || !restores_stack_pointer(&number_operators)
+        || !asyncify_storage_proof(&number_operators, targets.number_values)
+        || !number_operators
+            .iter()
+            .any(|operator| matches!(operator, Operator::CallIndirect { .. }))
+    {
+        return Err(
+            "benchmark API: paired Asyncify number setter failed correspondence".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn function_operators(body: &[u8]) -> Outcome<Vec<Operator<'_>>> {
+    FunctionBody::new(BinaryReader::new(body, 0))
+        .get_operators_reader()
+        .map_err(|error| format!("benchmark API: cannot read function: {error}"))?
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("benchmark API: cannot read operator: {error}"))
+}
+
+fn benchmark_ui_dispatcher(bodies: &[Vec<u8>]) -> Outcome<u32> {
+    let mut targets = HashMap::<u32, usize>::new();
+    for body in bodies {
+        let operators = function_operators(body)?;
+        for (index, operator) in operators.iter().enumerate() {
+            if !matches!(
+                operator,
+                Operator::I32Const {
+                    value: TRAVEL_UI_MESSAGE
+                }
+            ) {
+                continue;
+            }
+            let direct = operators.get(index + 1..index + 4).and_then(|tail| {
+                if matches!(tail[0], Operator::LocalGet { .. })
+                    && matches!(tail[1], Operator::I32Const { value: 0 })
+                    && let Operator::Call { function_index } = tail[2]
+                {
+                    return Some(function_index);
+                }
+                None
+            });
+            let adjusted = operators.get(index + 1..index + 6).and_then(|tail| {
+                if matches!(tail[0], Operator::LocalGet { .. })
+                    && matches!(tail[1], Operator::I32Const { .. })
+                    && matches!(tail[2], Operator::I32Add)
+                    && matches!(tail[3], Operator::I32Const { value: 0 })
+                    && let Operator::Call { function_index } = tail[4]
+                {
+                    return Some(function_index);
+                }
+                None
+            });
+            if let Some(target) = direct.or(adjusted) {
+                *targets.entry(target).or_default() += 1;
+            }
+        }
+    }
+    let matches = targets
+        .iter()
+        .filter(|(_, occurrences)| **occurrences >= 3)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [(target, _)] => Ok(**target),
+        [] => Err("benchmark API: no repeated kTravel dispatcher was found".to_owned()),
+        _ => Err("benchmark API: kTravel resolves to multiple dispatchers".to_owned()),
+    }
+}
+
+fn ui_message_calls(operators: &[Operator<'_>], message: i32, target: u32) -> usize {
+    operators
+        .iter()
+        .enumerate()
+        .filter(|(index, operator)| {
+            matches!(operator, Operator::I32Const { value } if *value == message)
+                && operators[index + 1..operators.len().min(index + 9)]
+                    .iter()
+                    .any(|tail| matches!(tail, Operator::Call { function_index } if *function_index == target))
+        })
+        .count()
+}
+
+fn local_zero_bound(operators: &[Operator<'_>]) -> Option<i32> {
+    operators.windows(3).find_map(|window| match window {
+        [
+            Operator::LocalGet { local_index: 0 },
+            Operator::I32Const { value },
+            Operator::I32LtU,
+        ] => Some(*value),
+        _ => None,
+    })
+}
+
+fn enum_preference_guard(operators: &[Operator<'_>]) -> bool {
+    operators.windows(8).any(|window| {
+        matches!(
+            window,
+            [
+                Operator::LocalGet { local_index: 0 },
+                Operator::I32Const { value: 2 },
+                Operator::I32Shl,
+                Operator::LocalTee { .. },
+                Operator::I32Load { .. },
+                Operator::LocalGet { local_index: 1 },
+                Operator::I32Eq,
+                Operator::BrIf { relative_depth: 0 },
+            ]
+        )
+    })
+}
+
+fn indexed_value_base(operators: &[Operator<'_>]) -> Option<u32> {
+    operators.windows(5).find_map(|window| match window {
+        [
+            Operator::LocalGet { local_index: 0 },
+            Operator::I32Const { value: 2 },
+            Operator::I32Shl,
+            Operator::LocalTee { .. },
+            Operator::I32Load { memarg },
+        ] if memarg.offset > 1_000_000 && memarg.offset <= u64::from(u32::MAX) => {
+            Some(memarg.offset as u32)
+        }
+        _ => None,
+    })
+}
+
+fn restores_stack_pointer(operators: &[Operator<'_>]) -> bool {
+    operators
+        .iter()
+        .any(|operator| matches!(operator, Operator::GlobalGet { global_index: 0 }))
+        && operators
+            .iter()
+            .any(|operator| matches!(operator, Operator::GlobalSet { global_index: 0 }))
+}
+
+fn preference_setter(
+    bodies: &[Vec<u8>],
+    parameter_counts: &[usize],
+    import_count: u32,
+    dispatcher: u32,
+    message: i32,
+    valid_guard: impl Fn(&[Operator<'_>]) -> bool,
+    kind: &str,
+) -> Outcome<(u32, u32)> {
+    let mut matches = Vec::new();
+    for (local_index, body) in bodies.iter().enumerate() {
+        let operators = function_operators(body)?;
+        if parameter_counts.get(local_index) != Some(&3)
+            || ui_message_calls(&operators, message, dispatcher) != 1
+            || !valid_guard(&operators)
+            || !restores_stack_pointer(&operators)
+            || !operators
+                .iter()
+                .any(|operator| matches!(operator, Operator::LocalGet { local_index: 2 }))
+        {
+            continue;
+        }
+        if let Some(values) = indexed_value_base(&operators) {
+            let function = import_count
+                .checked_add(u32::try_from(local_index).map_err(|_| {
+                    format!("benchmark API: {kind} preference function index overflow")
+                })?)
+                .ok_or_else(|| {
+                    format!("benchmark API: {kind} preference function index overflow")
+                })?;
+            matches.push((function, values));
+        }
+    }
+    match matches.as_slice() {
+        [target] => Ok(*target),
+        [] => Err(format!(
+            "benchmark API: no {kind} preference setter was found"
+        )),
+        _ => Err(format!(
+            "benchmark API: {kind} preference setter is ambiguous: {matches:?}"
+        )),
+    }
+}
+
+fn number_preference_setter(
+    bodies: &[Vec<u8>],
+    parameter_counts: &[usize],
+    import_count: u32,
+    dispatcher: u32,
+) -> Outcome<(u32, u32)> {
+    let mut initializers = Vec::new();
+    for body in bodies {
+        let operators = function_operators(body)?;
+        if ui_message_calls(&operators, PREFERENCE_ENUM_UI_MESSAGE, dispatcher) >= 3
+            && ui_message_calls(&operators, PREFERENCE_FLAG_UI_MESSAGE, dispatcher) >= 10
+        {
+            initializers.push(operators);
+        }
+    }
+    let [initializer] = initializers.as_slice() else {
+        return Err("benchmark API: preference initializer is not unique".to_owned());
+    };
+    let mut calls = HashMap::<u32, usize>::new();
+    for operator in initializer {
+        if let Operator::Call { function_index } = operator {
+            *calls.entry(*function_index).or_default() += 1;
+        }
+    }
+    let mut matches = Vec::new();
+    for (target, count) in calls {
+        if count < 20 || target < import_count {
+            continue;
+        }
+        let Some(body) = bodies.get((target - import_count) as usize) else {
+            continue;
+        };
+        if parameter_counts.get((target - import_count) as usize) != Some(&3) {
+            continue;
+        }
+        let operators = function_operators(body)?;
+        if operators.len() < 100
+            || !restores_stack_pointer(&operators)
+            || !operators
+                .iter()
+                .any(|operator| matches!(operator, Operator::CallIndirect { .. }))
+            || !operators
+                .iter()
+                .any(|operator| matches!(operator, Operator::LocalGet { local_index: 2 }))
+        {
+            continue;
+        }
+        if let Some(values) = indexed_value_base(&operators) {
+            matches.push((target, values));
+        }
+    }
+    match matches.as_slice() {
+        [target] => Ok(*target),
+        [] => Err("benchmark API: no number preference setter was found".to_owned()),
+        _ => Err("benchmark API: number preference setter is ambiguous".to_owned()),
+    }
+}
+
+fn append_benchmark_type_index(body: &[u8]) -> Outcome<u32> {
+    let mut cursor = 0;
+    let count = read_uleb(body, &mut cursor)?;
+    if cursor > body.len() {
+        return Err("benchmark API: malformed type section".to_owned());
+    }
+    Ok(count)
+}
+
+fn append_benchmark_type(body: &[u8]) -> Outcome<Vec<u8>> {
+    let mut cursor = 0;
+    let count = read_uleb(body, &mut cursor)?;
+    let mut output = uleb(u64::from(
+        count
+            .checked_add(1)
+            .ok_or("benchmark API: too many types")?,
+    ));
+    output.extend_from_slice(&body[cursor..]);
+    // One implicit recursion group containing (func (param i32 i32) (result i32)).
+    output.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f]);
+    Ok(output)
+}
+
+fn append_function_export(body: &[u8], name: &str, target: u32) -> Outcome<Vec<u8>> {
+    let reader = wasmparser::ExportSectionReader::new(BinaryReader::new(body, 0))
+        .map_err(|error| format!("benchmark API: cannot read exports: {error}"))?;
+    for export in reader {
+        let export =
+            export.map_err(|error| format!("benchmark API: cannot read export: {error}"))?;
+        if export.name == name {
+            return Err("benchmark API: export already exists".to_owned());
+        }
+    }
+    let mut cursor = 0;
+    let count = read_uleb(body, &mut cursor)?;
+    let mut output = uleb(u64::from(
+        count
+            .checked_add(1)
+            .ok_or("benchmark API: too many exports")?,
+    ));
+    output.extend_from_slice(&body[cursor..]);
+    output.extend_from_slice(&uleb(name.len() as u64));
+    output.extend_from_slice(name.as_bytes());
+    output.push(0); // function export
+    output.extend_from_slice(&uleb(u64::from(target)));
+    Ok(output)
+}
+
+fn instruction_i32_const(body: &mut Vec<u8>, value: i32) {
+    body.push(0x41);
+    body.extend_from_slice(&sleb(i64::from(value)));
+}
+
+fn instruction_local_get(body: &mut Vec<u8>, local: u32) {
+    body.push(0x20);
+    body.extend_from_slice(&uleb(u64::from(local)));
+}
+
+fn store_i32(body: &mut Vec<u8>, local: u32, offset: u32, value: Option<i32>) {
+    instruction_local_get(body, local);
+    match value {
+        Some(value) => instruction_i32_const(body, value),
+        None => instruction_local_get(body, 1),
+    }
+    body.push(0x36);
+    body.extend_from_slice(&uleb(2));
+    body.extend_from_slice(&uleb(u64::from(offset)));
+}
+
+fn allocate_stack(body: &mut Vec<u8>, bytes: i32) {
+    body.extend_from_slice(&[0x23, 0x00]); // global.get 0
+    instruction_i32_const(body, bytes);
+    body.push(0x6b); // i32.sub
+    body.extend_from_slice(&[0x22, 0x02]); // local.tee 2
+    body.extend_from_slice(&[0x24, 0x00]); // global.set 0
+}
+
+fn restore_stack(body: &mut Vec<u8>, bytes: i32) {
+    instruction_local_get(body, 2);
+    instruction_i32_const(body, bytes);
+    body.push(0x6a); // i32.add
+    body.extend_from_slice(&[0x24, 0x00]); // global.set 0
+}
+
+fn call_ui(body: &mut Vec<u8>, message: i32, target: u32) {
+    instruction_i32_const(body, message);
+    instruction_local_get(body, 2);
+    instruction_i32_const(body, 0);
+    body.push(0x10);
+    body.extend_from_slice(&uleb(u64::from(target)));
+}
+
+fn call_preference_setter(body: &mut Vec<u8>, target: u32, preference: i32, value: i32) {
+    instruction_i32_const(body, preference);
+    instruction_i32_const(body, value);
+    instruction_i32_const(body, 0); // do not persist the disposable benchmark preset
+    body.push(0x10);
+    body.extend_from_slice(&uleb(u64::from(target)));
+}
+
+fn check_preference(body: &mut Vec<u8>, base: u32, preference: u32, expected: i32) {
+    instruction_i32_const(body, (base + preference * 4) as i32);
+    body.push(0x28); // i32.load
+    body.extend_from_slice(&uleb(2));
+    body.extend_from_slice(&uleb(0));
+    instruction_i32_const(body, expected);
+    body.push(0x46); // i32.eq
+    body.push(0x71); // i32.and with the accumulated result
+}
+
+fn benchmark_wrapper(targets: BenchmarkTargets) -> Vec<u8> {
+    // Two i32 parameters (command, argument), then private i32 locals for the
+    // temporary packet pointer and the fail-closed command result.
+    let mut body = vec![0x01, 0x02, 0x7f];
+    instruction_i32_const(&mut body, 0);
+    body.extend_from_slice(&[0x21, 0x03]); // local.set result
+
+    // command 0: fixed Kamadan/America/English travel, district argument 1/2.
+    instruction_local_get(&mut body, 0);
+    body.push(0x45); // i32.eqz
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    instruction_local_get(&mut body, 1);
+    instruction_i32_const(&mut body, 1);
+    body.push(0x46); // i32.eq
+    instruction_local_get(&mut body, 1);
+    instruction_i32_const(&mut body, 2);
+    body.push(0x46); // i32.eq
+    body.push(0x72); // i32.or
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    allocate_stack(&mut body, 16);
+    store_i32(&mut body, 2, 0, Some(KAMADAN_MAP_ID));
+    store_i32(&mut body, 2, 4, Some(AMERICA_REGION_ID));
+    store_i32(&mut body, 2, 8, Some(ENGLISH_LANGUAGE_ID));
+    store_i32(&mut body, 2, 12, None); // district argument
+    call_ui(&mut body, TRAVEL_UI_MESSAGE, targets.dispatcher);
+    restore_stack(&mut body, 16);
+    instruction_i32_const(&mut body, 1);
+    body.extend_from_slice(&[0x21, 0x03]); // result = accepted
+    body.push(0x0b); // end district guard
+    body.push(0x0b); // end travel command
+
+    // command 1: InteractNPC with one bounded, certified agent ID.
+    instruction_local_get(&mut body, 0);
+    instruction_i32_const(&mut body, 1);
+    body.push(0x46); // i32.eq
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    instruction_local_get(&mut body, 1);
+    body.push(0x45); // i32.eqz
+    body.push(0x45); // i32.eqz (argument != 0)
+    instruction_local_get(&mut body, 1);
+    instruction_i32_const(&mut body, MAX_AGENT_ID_EXCLUSIVE);
+    body.push(0x49); // i32.lt_u
+    body.push(0x71); // i32.and
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    allocate_stack(&mut body, 12);
+    store_i32(&mut body, 2, 0, Some(INTERACT_NPC_ACTION));
+    store_i32(&mut body, 2, 4, None); // certified agent ID
+    store_i32(&mut body, 2, 8, Some(0));
+    call_ui(&mut body, WORLD_ACTION_UI_MESSAGE, targets.dispatcher);
+    restore_stack(&mut body, 12);
+    instruction_i32_const(&mut body, 1);
+    body.extend_from_slice(&[0x21, 0x03]); // result = accepted
+    body.push(0x0b); // end agent guard
+    body.push(0x0b); // end interact command
+
+    // command 2: fixed, non-persistent high-quality benchmark preset. These
+    // are Guild Wars' own preference setters, located from their bounds,
+    // storage arrays and UI notifications rather than build-specific indices.
+    instruction_local_get(&mut body, 0);
+    instruction_i32_const(&mut body, 2);
+    body.push(0x46); // i32.eq
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    instruction_local_get(&mut body, 1);
+    body.push(0x45); // argument == 0
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    for &(preference, value) in HIGH_ENUM_PREFERENCES {
+        call_preference_setter(&mut body, targets.enum_setter, preference as i32, value);
+    }
+    for &(preference, value) in HIGH_NUMBER_PREFERENCES {
+        call_preference_setter(&mut body, targets.number_setter, preference as i32, value);
+    }
+    for &preference in HIGH_FLAG_PREFERENCES {
+        call_preference_setter(&mut body, targets.flag_setter, preference as i32, 1);
+    }
+
+    // Read the setters' independently discovered value arrays. Returning one
+    // is proof that the complete preset landed; unsupported future layouts
+    // fail transformation before this wrapper can exist.
+    instruction_i32_const(&mut body, 1);
+    for &(preference, value) in HIGH_ENUM_PREFERENCES {
+        check_preference(&mut body, targets.enum_values, preference, value);
+    }
+    for &(preference, value) in HIGH_NUMBER_PREFERENCES {
+        check_preference(&mut body, targets.number_values, preference, value);
+    }
+    for &preference in HIGH_FLAG_PREFERENCES {
+        check_preference(&mut body, targets.flag_values, preference, 1);
+    }
+    body.extend_from_slice(&[0x21, 0x03]); // local.set result
+    body.push(0x0b); // end argument guard
+    body.push(0x0b); // end preset command
+    instruction_local_get(&mut body, 3);
+    body.push(0x0b); // function end
+    body
+}
+
+fn verify_benchmark_api(
+    input: &[u8],
+    output: &[u8],
+    function_index: u32,
+    wrapper: &[u8],
+) -> Outcome<()> {
+    wasmparser::validate(output)
+        .map_err(|error| format!("benchmark API: invalid output: {error}"))?;
+    let before = split_sections(input)?;
+    let after = split_sections(output)?;
+    if before.len() != after.len()
+        || before
+            .iter()
+            .zip(&after)
+            .any(|(left, right)| left.id != right.id)
+    {
+        return Err("benchmark API: section order changed".to_owned());
+    }
+    for (left, right) in before.iter().zip(&after) {
+        if !matches!(left.id, 1 | 3 | 7 | 10) && left.body != right.body {
+            return Err(format!(
+                "benchmark API: unauthorized mutation of section {}",
+                left.id
+            ));
+        }
+    }
+    let after_bodies = parse_code(section_by_id(&after, 10)?)?;
+    if after_bodies.len() != parse_code(section_by_id(&before, 10)?)?.len() + 1
+        || after_bodies.last().map(Vec::as_slice) != Some(wrapper)
+    {
+        return Err("benchmark API: wrapper body changed".to_owned());
+    }
+    let exports =
+        wasmparser::ExportSectionReader::new(BinaryReader::new(section_by_id(&after, 7)?, 0))
+            .map_err(|error| format!("benchmark API: cannot verify exports: {error}"))?;
+    let matches = exports
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("benchmark API: cannot verify export: {error}"))?
+        .into_iter()
+        .filter(|export| export.name == BENCHMARK_EXPORT)
+        .collect::<Vec<_>>();
+    if matches.len() != 1
+        || matches[0].kind != wasmparser::ExternalKind::Func
+        || matches[0].index != function_index
+    {
+        return Err("benchmark API: exported wrapper does not match its proof".to_owned());
+    }
+    Ok(())
+}
+
 pub(super) fn recertify(
     input: &[u8],
     glue: &[u8],
@@ -623,6 +1438,18 @@ pub(super) fn candidate(input: &[u8], certificate: &RuntimeCertificate) -> Outco
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn function_import_count(input: &[u8]) -> u32 {
+        let sections = split_sections(input).unwrap();
+        ImportSectionReader::new(BinaryReader::new(section_by_id(&sections, 2).unwrap(), 0))
+            .unwrap()
+            .into_imports()
+            .map(|import| import.unwrap())
+            .filter(|import| matches!(import.ty, TypeRef::Func(_) | TypeRef::FuncExact(_)))
+            .count()
+            .try_into()
+            .unwrap()
+    }
 
     fn module_with_function_imports(imports: &[(&str, &str)]) -> Vec<u8> {
         let mut body = uleb(imports.len() as u64);
@@ -737,5 +1564,44 @@ mod tests {
             certify_caller(&[changed], &bridge, &site).is_err(),
             "the same function index and target-call count do not certify new semantics"
         );
+    }
+
+    /// Exercise the semantic benchmark locator against locally downloaded
+    /// ArenaNet artifacts without making the ordinary unit suite depend on
+    /// proprietary files. CI/review runs opt in with explicit paths.
+    #[test]
+    #[ignore = "requires official ArenaNet artifacts"]
+    fn external_benchmark_artifacts_accept_finite_api() {
+        let load = |variable| {
+            let path = std::env::var(variable)
+                .unwrap_or_else(|_| panic!("set {variable} to an official Wasm artifact"));
+            std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("cannot read {variable}={path}: {error}"))
+        };
+        let jspi = load("GWNATIVE_TEST_JSPI_WASM");
+        let asyncify = load("GWNATIVE_TEST_ASYNCIFY_WASM");
+        let jspi_imports = function_import_count(&jspi);
+        let asyncify_imports = function_import_count(&asyncify);
+        let targets =
+            benchmark_target_pair(&jspi, jspi_imports, &asyncify, asyncify_imports).unwrap();
+        for (name, input, imports, runtime) in [
+            (
+                "JSPI",
+                jspi.as_slice(),
+                jspi_imports,
+                BenchmarkRuntime::Jspi,
+            ),
+            (
+                "Asyncify",
+                asyncify.as_slice(),
+                asyncify_imports,
+                BenchmarkRuntime::Asyncify,
+            ),
+        ] {
+            let output = add_benchmark_api(input, imports, targets, runtime)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            wasmparser::validate(&output)
+                .unwrap_or_else(|error| panic!("{name}: invalid output: {error}"));
+        }
     }
 }

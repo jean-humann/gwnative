@@ -296,6 +296,7 @@ fn main() {
     }
     let settings = Arc::new(settings::Store::open(settings_path));
     let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
+    let benchmark_api = e2e && std::env::var_os("GWNATIVE_E2E_BENCHMARK_API").is_some();
     let e2e_plain_client = e2e && std::env::var_os("GWNATIVE_E2E_PLAIN_CLIENT").is_some();
     let e2e_original_client = e2e && std::env::var_os("GWNATIVE_E2E_ORIGINAL_CLIENT").is_some();
 
@@ -318,6 +319,7 @@ fn main() {
         paths.derived_dir(),
         &paths::certificate_dir(),
         enhance,
+        benchmark_api,
         &generations,
     ) {
         Ok(prepared) => prepared,

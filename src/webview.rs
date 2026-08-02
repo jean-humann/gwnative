@@ -59,15 +59,26 @@ struct FrameOptions {
     prefer_60_fps: bool,
     preserve_drawing_buffer: bool,
     isolation: bool,
+    render_scale: Option<f64>,
+}
+
+fn benchmark_render_scale(value: Option<&str>) -> Option<f64> {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| matches!(*value, 1.0 | 1.5 | 2.0))
 }
 
 impl FrameOptions {
     fn from_environment() -> Self {
+        let render_scale = std::env::var_os("GWNATIVE_E2E")
+            .and_then(|_| std::env::var("GWNATIVE_E2E_RENDER_SCALE").ok())
+            .and_then(|value| benchmark_render_scale(Some(&value)));
         Self {
             audit: env_flag("GWNATIVE_FRAME_AUDIT"),
             prefer_60_fps: env_flag("GWNATIVE_PREFER_60_FPS"),
             preserve_drawing_buffer: env_flag("GWNATIVE_PRESERVE_DRAWING_BUFFER"),
             isolation: env_default_on("GWNATIVE_FRAME_ISOLATION"),
+            render_scale,
         }
     }
 }
@@ -185,6 +196,10 @@ fn preamble(
         .ok()
         .filter(|value| value == "jspi" || value == "asyncify");
     let e2e = std::env::var_os("GWNATIVE_E2E").is_some();
+    let mut launch_settings = settings.clone();
+    if let Some(render_scale) = frame.render_scale {
+        launch_settings.render_scale = render_scale;
+    }
     format!(
         "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
@@ -199,7 +214,7 @@ fn preamble(
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
-        serde_json::to_string(settings).unwrap_or_else(|_| "{}".to_owned()),
+        serde_json::to_string(&launch_settings).unwrap_or_else(|_| "{}".to_owned()),
         module.runtimes_json(),
         // The same question the Help menu asks itself before offering "Check for
         // Updates…", answered once and injected so the settings panel does not
@@ -242,6 +257,9 @@ pub fn make(
     }
     if frame_options.isolation {
         note!("[gwnative] complete-frame presentation enabled");
+    }
+    if let Some(render_scale) = frame_options.render_scale {
+        note!("[gwnative] E2E render scale override: {render_scale}");
     }
 
     // See DISABLED_FEATURES: the 60 FPS cap and the hidden-page throttling
@@ -288,4 +306,19 @@ pub fn make(
     unsafe { webview.loadRequest(&request) };
 
     webview
+}
+
+#[cfg(test)]
+mod tests {
+    use super::benchmark_render_scale;
+
+    #[test]
+    fn benchmark_scale_is_finite_and_matches_the_product_choices() {
+        assert_eq!(benchmark_render_scale(Some("1")), Some(1.0));
+        assert_eq!(benchmark_render_scale(Some("1.5")), Some(1.5));
+        assert_eq!(benchmark_render_scale(Some("2")), Some(2.0));
+        for value in [None, Some("0"), Some("1.25"), Some("NaN"), Some("fast")] {
+            assert_eq!(benchmark_render_scale(value), None);
+        }
+    }
 }

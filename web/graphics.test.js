@@ -158,4 +158,25 @@ describe('graphics bridge', () => {
       delete globalThis.webkit;
     }
   });
+
+  it('runs the finite E2E command only after Guild Wars reaches its logical swap', () => {
+    const order = [];
+    const env = {
+      eglCreateContext: () => 1,
+      eglSwapBuffers: () => {
+        order.push('swap');
+        return 1;
+      },
+    };
+    installGraphics({
+      env,
+      renderScale: () => 1,
+      firstFrame() {},
+      command: () => order.push('command'),
+      log() {},
+    });
+
+    assert.equal(env.eglSwapBuffers(), 1);
+    assert.deepEqual(order, ['swap', 'command']);
+  });
 });

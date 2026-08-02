@@ -109,7 +109,146 @@ const EVENT_CODES = Object.freeze({
   Digit1: 'digit-1',
 });
 
-const PAGE_ACTIONS = new Set(['test-ui', 'probe-layout', 'sample-performance']);
+const PAGE_ACTIONS = new Set([
+  'test-ui',
+  'probe-layout',
+  'probe-benchmark-ui',
+  'prepare-benchmark-scene',
+  'sample-performance',
+]);
+
+const KAMADAN_MAP_ID = 449;
+const ENGLISH_LANGUAGE_ID = 0;
+const XUNLAI_AGENT_PLAYER_NUMBER = 5052;
+const XUNLAI_AGENT_LEVEL = 24;
+const XUNLAI_AGENT_ALLEGIANCE = 6;
+const XUNLAI_DISTANCE = 180;
+
+const gameState = (window) => window.gwCompanionState?.status === 'ready'
+  ? window.gwCompanionState
+  : null;
+
+const waitFor = async (predicate, sleep, timeout, message) => {
+  const deadline = performance.now() + timeout;
+  while (performance.now() < deadline) {
+    const result = predicate();
+    if (result) return result;
+    await sleep(100);
+  }
+  throw new Error(message);
+};
+
+const travelToBenchmarkDistrict = async (window, sleep) => {
+  const runtime = window.gwCompanionRuntime;
+  const placement = () => runtime?.benchmarkSceneState?.();
+  // Always issue the America packet. Language 0 is shared by America and
+  // Europe-English, so map/language/district alone cannot distinguish them
+  // when the saved character happens to start in Europe-English District 2.
+  const desired = 2;
+  await runtime.benchmarkSceneCommand('travel-america', desired);
+  try {
+    return await waitFor(
+      () => {
+        const state = placement();
+        return state?.mapId === KAMADAN_MAP_ID
+          && state.language === ENGLISH_LANGUAGE_ID
+          && state.district === desired
+          && state.instanceType === 0
+          && gameState(window)
+          ? state
+          : null;
+      },
+      sleep,
+      20_000,
+      `Kamadan America-English District ${desired} did not load`,
+    );
+  } catch (error) {
+    await runtime.benchmarkSceneCommand('travel-america', 1);
+    return waitFor(
+      () => {
+        const state = placement();
+        return state?.mapId === KAMADAN_MAP_ID
+          && state.language === ENGLISH_LANGUAGE_ID
+          && state.district === 1
+          && state.instanceType === 0
+          && gameState(window)
+          ? state
+          : null;
+      },
+      sleep,
+      20_000,
+      'Kamadan America-English District 1 fallback did not load',
+    );
+  }
+};
+
+const xunlaiAnchor = (state) => {
+  const matches = (state.agents?.agents ?? []).filter((agent) => (
+    agent.isLiving
+    && agent.playerNumber === XUNLAI_AGENT_PLAYER_NUMBER
+    && agent.level === XUNLAI_AGENT_LEVEL
+    && agent.allegiance === XUNLAI_AGENT_ALLEGIANCE
+    && Number.isFinite(agent.x)
+    && Number.isFinite(agent.y)
+  ));
+  if (matches.length !== 2) return null;
+  return [...matches].sort((a, b) => a.x - b.x || a.agentId - b.agentId)[0];
+};
+
+const positionAtXunlai = async (window, sleep) => {
+  const state = await waitFor(
+    () => {
+      const candidate = gameState(window);
+      return candidate && xunlaiAnchor(candidate) ? candidate : null;
+    },
+    sleep,
+    10_000,
+    'the certified Kamadan Xunlai anchor is unavailable',
+  );
+  const anchor = xunlaiAnchor(state);
+  assert(anchor, 'the certified Kamadan Xunlai anchor disappeared');
+  const initialDistance = Math.hypot(anchor.x - state.playerX, anchor.y - state.playerY);
+  if (initialDistance <= XUNLAI_DISTANCE) return { state, anchor, distance: initialDistance };
+  await window.gwCompanionRuntime.benchmarkSceneCommand(
+    'interact-xunlai',
+    anchor.agentId,
+  );
+  return waitFor(
+    () => {
+      const next = gameState(window);
+      const nextAnchor = next && xunlaiAnchor(next);
+      if (!nextAnchor || nextAnchor.agentId !== anchor.agentId) return null;
+      const distance = Math.hypot(nextAnchor.x - next.playerX, nextAnchor.y - next.playerY);
+      return distance <= XUNLAI_DISTANCE ? { state: next, anchor: nextAnchor, distance } : null;
+    },
+    sleep,
+    25_000,
+    'the in-client InteractNPC command did not reach the Xunlai anchor',
+  );
+};
+
+const prepareBenchmarkScene = async (window, sleep) => {
+  assert(
+    typeof window.gwCompanionRuntime?.benchmarkSceneState === 'function'
+      && typeof window.gwCompanionRuntime?.benchmarkSceneCommand === 'function',
+    'certified benchmark scene API is unavailable',
+  );
+  await window.gwCompanionRuntime.benchmarkSceneCommand('high-graphics', 0);
+  const placement = await travelToBenchmarkDistrict(window, sleep);
+  const positioned = await positionAtXunlai(window, sleep);
+  return Object.freeze({
+    mapId: placement.mapId,
+    district: placement.district,
+    language: placement.language,
+    playerX: positioned.state.playerX,
+    playerY: positioned.state.playerY,
+    anchorX: positioned.anchor.x,
+    anchorY: positioned.anchor.y,
+    anchorDistance: positioned.distance,
+    agentCount: positioned.state.agents?.total ?? 0,
+    graphicsPreset: 'high',
+  });
+};
 
 const targetName = (window, canvas, candidate) => {
   if (!candidate || candidate === canvas) return 'canvas';
@@ -210,20 +349,38 @@ export async function executeE2EAction(action, {
   }
   assert(action.durationMs === 0, 'page-owned E2E action duration is outside its bound');
   let layoutProbe;
+  let benchmarkUi;
+  let benchmarkScene;
   if (action.action === 'test-ui') {
     assert(typeof window.gwRunAppE2E === 'function', 'app UI test is not installed');
     await window.gwRunAppE2E();
-  } else {
+  } else if (action.action === 'probe-layout') {
     assert(
       typeof window.gwCompanionRuntime?.probeLayout === 'function',
       'companion layout probe is not installed',
     );
     layoutProbe = window.gwCompanionRuntime.probeLayout();
+  } else if (action.action === 'probe-benchmark-ui') {
+    assert(
+      typeof window.gwCompanionRuntime?.benchmarkUiState === 'function',
+      'benchmark UI probe is not installed',
+    );
+    benchmarkUi = {
+      actionSequence: action.sequence,
+      ...window.gwCompanionRuntime.benchmarkUiState(),
+    };
+  } else if (action.action === 'prepare-benchmark-scene') {
+    benchmarkScene = {
+      actionSequence: action.sequence,
+      ...await prepareBenchmarkScene(window, sleep),
+    };
   }
   return {
     target: 'app-ui',
     activeTarget: targetName(window, canvas, window.Module?.oskActiveInput),
     ...(layoutProbe ? { layoutProbe } : {}),
+    ...(benchmarkUi ? { benchmarkUi } : {}),
+    ...(benchmarkScene ? { benchmarkScene } : {}),
   };
 }
 
@@ -360,21 +517,22 @@ export function installE2EBridge({
           // page focuses the client's finite input target and acknowledges it
           // before AppKit is woken, then only observes resulting socket traffic.
           if (!PAGE_ACTIONS.has(action.action)) {
-            const target = prepareNativeE2EAction(action, {
-              window,
-              canvas,
-              secureInput,
-            });
-            const prepared = {
-              sequence: action.sequence,
-              code: NATIVE_ACTION_CODES[action.action],
-              action: action.action,
-            };
-            // focus-window deliberately emits no key event. Queuing it here
-            // would make the next real native key fail correlation.
-            const observesNativeKey = action.action !== 'focus-window';
-            if (observesNativeKey) preparedNativeActions.push(prepared);
+            let target = 'canvas';
             try {
+              target = prepareNativeE2EAction(action, {
+                window,
+                canvas,
+                secureInput,
+              });
+              const prepared = {
+                sequence: action.sequence,
+                code: NATIVE_ACTION_CODES[action.action],
+                action: action.action,
+              };
+              // focus-window deliberately emits no key event. Queuing it here
+              // would make the next real native key fail correlation.
+              const observesNativeKey = action.action !== 'focus-window';
+              if (observesNativeKey) preparedNativeActions.push(prepared);
               await report('action-prepared', {
                 actionSequence: action.sequence,
                 action: action.action,
@@ -392,11 +550,17 @@ export function installE2EBridge({
                 });
               }
             } catch (error) {
-              if (observesNativeKey) {
-                const index = preparedNativeActions.indexOf(prepared);
-                if (index >= 0) preparedNativeActions.splice(index, 1);
-              }
-              throw error;
+              const index = preparedNativeActions.findIndex(
+                (candidate) => candidate.sequence === action.sequence,
+              );
+              if (index >= 0) preparedNativeActions.splice(index, 1);
+              await report('action-fail', {
+                actionSequence: action.sequence,
+                action: action.action,
+                target,
+                activeTarget: targetName(window, canvas, window.Module?.oskActiveInput),
+                message: cleanMessage(error instanceof Error ? error.message : error),
+              });
             }
             continue;
           }
@@ -406,6 +570,8 @@ export function installE2EBridge({
             const result = await executeE2EAction(action, { window, canvas });
             ({ target, activeTarget } = result);
             if (result.layoutProbe) await report('layout-probe', result.layoutProbe);
+            if (result.benchmarkUi) await report('benchmark-ui', result.benchmarkUi);
+            if (result.benchmarkScene) await report('benchmark-scene', result.benchmarkScene);
             if (result.performanceSample) {
               await report('performance-sample', result.performanceSample);
             }

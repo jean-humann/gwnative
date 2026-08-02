@@ -224,7 +224,9 @@ fn activate(window: &NSWindow) {
     window.orderFrontRegardless();
     window.makeKeyAndOrderFront(None);
     if let Some(mtm) = MainThreadMarker::new() {
-        NSApplication::sharedApplication(mtm).activate();
+        let application = NSApplication::sharedApplication(mtm);
+        application.unhide(None);
+        application.activate();
     }
     NSRunningApplication::currentApplication()
         .activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);

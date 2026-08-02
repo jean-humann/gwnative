@@ -151,6 +151,14 @@ impl Hub {
                     "description": "scan only the bounded certified layout window and return matching deltas",
                 },
                 {
+                    "name": "probe-benchmark-ui",
+                    "description": "verify the visible certified District selector frame",
+                },
+                {
+                    "name": "prepare-benchmark-scene",
+                    "description": "select Kamadan America-English District 2/1 and move to the certified Xunlai anchor",
+                },
+                {
                     "name": "sample-performance",
                     "description": "observe logical frame cadence without issuing WebGL commands",
                     "minimumDurationMs": 1000,
@@ -190,7 +198,7 @@ impl Hub {
                 }
                 40
             }
-            "test-ui" | "probe-layout" => {
+            "test-ui" | "probe-layout" | "probe-benchmark-ui" | "prepare-benchmark-scene" => {
                 if request.duration_ms.is_some() {
                     return Err("page-owned E2E actions do not accept a duration".into());
                 }
@@ -224,7 +232,11 @@ impl Hub {
         inner.page_actions.push_back(action.clone());
         if !matches!(
             action.action.as_str(),
-            "test-ui" | "probe-layout" | "sample-performance"
+            "test-ui"
+                | "probe-layout"
+                | "probe-benchmark-ui"
+                | "prepare-benchmark-scene"
+                | "sample-performance"
         ) {
             inner.native_actions.push_back(action.clone());
         }
@@ -295,8 +307,32 @@ impl Hub {
         validate_event(&request.kind, &request.detail)?;
         let wake_native = request.kind == "action-prepared";
         let focus_window = request.kind == "first-frame";
+        let failed_action = (request.kind == "action-fail").then(|| {
+            (
+                request.detail["actionSequence"]
+                    .as_u64()
+                    .expect("validated failed action sequence"),
+                request.detail["action"]
+                    .as_str()
+                    .expect("validated failed action name"),
+            )
+        });
 
         let mut inner = lock(&self.inner);
+        if let Some((sequence, action)) = failed_action {
+            let was_prepared = inner
+                .prepared_native_actions
+                .iter()
+                .any(|prepared| *prepared == sequence);
+            if !was_prepared
+                && inner
+                    .native_actions
+                    .front()
+                    .is_some_and(|queued| queued.sequence == sequence && queued.action == action)
+            {
+                inner.native_actions.pop_front();
+            }
+        }
         if wake_native {
             let prepared_sequence = request.detail["actionSequence"]
                 .as_u64()
@@ -633,6 +669,48 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             }
             Ok(())
         }
+        "benchmark-ui" => {
+            exact_keys(object, &["actionSequence", "districtPresent"])?;
+            positive_u64_field(object, "actionSequence")?;
+            bool_field(object, "districtPresent")
+        }
+        "benchmark-scene" => {
+            exact_keys(
+                object,
+                &[
+                    "actionSequence",
+                    "mapId",
+                    "district",
+                    "language",
+                    "playerX",
+                    "playerY",
+                    "anchorX",
+                    "anchorY",
+                    "anchorDistance",
+                    "agentCount",
+                    "graphicsPreset",
+                ],
+            )?;
+            positive_u64_field(object, "actionSequence")?;
+            match object.get("mapId").and_then(Value::as_u64) {
+                Some(449) => {}
+                _ => return Err("benchmark scene is not Kamadan".into()),
+            }
+            match object.get("district").and_then(Value::as_u64) {
+                Some(1 | 2) => {}
+                _ => return Err("benchmark scene is not America district 1 or 2".into()),
+            }
+            match object.get("language").and_then(Value::as_u64) {
+                Some(0) => {}
+                _ => return Err("benchmark scene is not English".into()),
+            }
+            for name in ["playerX", "playerY", "anchorX", "anchorY"] {
+                bounded_number_field(object, name, -1_000_000.0, 1_000_000.0, false)?;
+            }
+            bounded_number_field(object, "anchorDistance", 0.0, 180.0, false)?;
+            u32_field(object, "agentCount")?;
+            enum_text_field(object, "graphicsPreset", &["high"])
+        }
         "performance-sample" => {
             exact_keys(
                 object,
@@ -797,9 +875,22 @@ fn action_result(object: &Map<String, Value>) -> Result<(), String> {
     positive_u64_field(object, "actionSequence")?;
     match object.get("action").and_then(Value::as_str) {
         Some(
-            "activate" | "focus-window" | "move-forward" | "move-backward" | "turn-left"
-            | "turn-right" | "target-next" | "interact" | "cancel" | "skill-1"
-            | "probe-secure-input" | "test-ui" | "probe-layout" | "sample-performance",
+            "activate"
+            | "focus-window"
+            | "move-forward"
+            | "move-backward"
+            | "turn-left"
+            | "turn-right"
+            | "target-next"
+            | "interact"
+            | "cancel"
+            | "skill-1"
+            | "probe-secure-input"
+            | "test-ui"
+            | "probe-layout"
+            | "probe-benchmark-ui"
+            | "prepare-benchmark-scene"
+            | "sample-performance",
         ) => {}
         _ => return Err("E2E action result names an unknown action".into()),
     }

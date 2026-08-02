@@ -434,6 +434,41 @@ let recovery;
 // for it does not return undefined — it aborts.
 let gameInstance;
 let gameImports;
+let pendingBenchmarkCommand = null;
+
+function queueBenchmarkCommand(callback) {
+  if (window.__gwnativeE2E !== true || typeof callback !== 'function') {
+    return Promise.reject(new Error('the benchmark command queue is unavailable'));
+  }
+  if (pendingBenchmarkCommand) {
+    return Promise.reject(new Error('a benchmark command is already queued'));
+  }
+  return new Promise((resolve, reject) => {
+    const pending = { callback, resolve, reject, timer: 0 };
+    pending.timer = setTimeout(() => {
+      if (pendingBenchmarkCommand !== pending) return;
+      pendingBenchmarkCommand = null;
+      reject(new Error('no game frame consumed the benchmark command'));
+    }, 2_000);
+    pendingBenchmarkCommand = pending;
+  });
+}
+
+function consumeBenchmarkCommand() {
+  const pending = pendingBenchmarkCommand;
+  if (!pending) return;
+  pendingBenchmarkCommand = null;
+  clearTimeout(pending.timer);
+  try {
+    const result = pending.callback();
+    if (result && typeof result.then === 'function') {
+      throw new Error('the finite benchmark command attempted to suspend');
+    }
+    pending.resolve(result);
+  } catch (error) {
+    pending.reject(error);
+  }
+}
 
 Module = {
   canvas: document.getElementById('canvas'),
@@ -451,6 +486,7 @@ Module = {
       audit: frameAudit,
       preserveDrawingBuffer: window.__gwnativePreserveDrawingBuffer === true,
       frameIsolation: window.__gwnativeFrameIsolation === true,
+      command: consumeBenchmarkCommand,
       firstFrame: () => {
         performance.mark('gw.frame.first-submit');
         // The boot is survived; frame delivery goes back to stock. See the
@@ -776,7 +812,13 @@ function installTools() {
   const instance = gameInstance;
   const manifest = window.__gwnativeEnhancementManifest;
   void import('./enhancements.js')
-    .then(({ installEnhancements }) => installEnhancements(instance, manifest, selection))
+    .then(({ installEnhancements }) => installEnhancements(
+      instance,
+      manifest,
+      selection,
+      globalThis.wasmExports,
+      queueBenchmarkCommand,
+    ))
     .catch((error) => log('[warn] enhancements:', error?.message ?? error));
 }
 

@@ -42,6 +42,7 @@ const notifyActivationCover = (presented) => {
  *   firstFrame(): void,
  *   preserveDrawingBuffer?: boolean,
  *   frameIsolation?: boolean,
+ *   command?: () => void,
  *   audit?: { enabled?: boolean, draw(): void, swap(ok: unknown): number | undefined, contextCreated(): void },
  *   log(...values: unknown[]): void,
  * }} options
@@ -53,6 +54,7 @@ export function installGraphics({
   firstFrame,
   preserveDrawingBuffer = false,
   frameIsolation = false,
+  command,
   audit,
   log,
 }) {
@@ -185,6 +187,10 @@ export function installGraphics({
         }
         previous = now;
       }
+      // The E2E-only finite client command must run while Guild Wars is on its
+      // own render stack. Direct WebKit calls lack the game's property context.
+      // This hook is absent in normal launches and consumes at most one command.
+      command?.();
       return ok;
     };
   }

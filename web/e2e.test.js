@@ -255,6 +255,79 @@ describe('end-to-end helpers', () => {
     );
   });
 
+  it('normalizes graphics, district, and Xunlai position through the finite client API', async () => {
+    let placement = { mapId: 449, district: 3, language: 0, instanceType: 0 };
+    const agents = [
+      {
+        agentId: 43,
+        isLiving: true,
+        playerNumber: 5052,
+        level: 24,
+        allegiance: 6,
+        x: -7_412,
+        y: 14_475,
+      },
+      {
+        agentId: 44,
+        isLiving: true,
+        playerNumber: 5052,
+        level: 24,
+        allegiance: 6,
+        x: -7_671,
+        y: 14_159,
+      },
+    ];
+    const state = {
+      status: 'ready',
+      playerX: -9_167,
+      playerY: 13_147,
+      agents: { total: 111, agents },
+    };
+    const commands = [];
+    const window = {
+      Module: {},
+      gwCompanionState: state,
+      gwCompanionRuntime: {
+        benchmarkSceneState: () => placement,
+        async benchmarkSceneCommand(command, argument) {
+          commands.push([command, argument]);
+          if (command === 'travel-america') {
+            placement = { mapId: 449, district: argument, language: 0, instanceType: 0 };
+          }
+          if (command === 'interact-xunlai') {
+            assert.equal(argument, 44);
+            state.playerX = agents[1].x;
+            state.playerY = agents[1].y;
+          }
+        },
+      },
+    };
+
+    const result = await executeE2EAction(
+      { sequence: 9, action: 'prepare-benchmark-scene', durationMs: 0 },
+      { window, canvas: {}, sleep: async () => {} },
+    );
+
+    assert.deepEqual(commands, [
+      ['high-graphics', 0],
+      ['travel-america', 2],
+      ['interact-xunlai', 44],
+    ]);
+    assert.deepEqual(result.benchmarkScene, {
+      actionSequence: 9,
+      mapId: 449,
+      district: 2,
+      language: 0,
+      playerX: -7_671,
+      playerY: 14_159,
+      anchorX: -7_671,
+      anchorY: 14_159,
+      anchorDistance: 0,
+      agentCount: 111,
+      graphicsPreset: 'high',
+    });
+  });
+
   it('runs a bounded logical-frame sample without exposing a script hook', async () => {
     const sampled = {
       runtime: 'jspi',

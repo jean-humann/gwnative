@@ -54,6 +54,11 @@ into its page. `serve` prints the address and token for diagnostics:
 | `PUT /__game/v1/state` | Internal page-to-host publisher; not an external game write |
 | Any `/__game/v1/actions` request | 409; no write action is certified |
 
+Performance certification has a separate finite control plane documented in
+[Performance](performance.md). It is created only for a disposable E2E launch,
+cannot accept arbitrary values or coordinates, and does not change the public
+read-only contract above.
+
 Example read:
 
 ```sh

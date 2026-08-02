@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  benchmarkSceneState,
+  benchmarkUiState,
   characterSelectionReady,
   frameLabelHash,
   probeLayout,
@@ -336,5 +338,39 @@ describe('certified character selector probe', () => {
     const { buffer, layout, view, play } = characterSelectorFixture();
     view.setUint32(play + 0xbc, 1, true);
     assert.equal(characterSelectionReady(buffer, layout), false);
+  });
+});
+
+describe('certified benchmark scene probes', () => {
+  it('reads the bounded placement fields adjacent to the certified map ID', () => {
+    const layout = words();
+    const buffer = fixture(0);
+    const view = new DataView(buffer);
+    view.setUint32(0x3200 + 0x234 - 12, 2, true);
+    view.setUint32(0x3200 + 0x234 - 8, 0, true);
+    assert.deepEqual(benchmarkSceneState(buffer, layout), {
+      mapId: 42,
+      district: 2,
+      language: 0,
+      instanceType: 0,
+    });
+    view.setUint32(0x3200 + 0x234 - 8, 12, true);
+    assert.equal(benchmarkSceneState(buffer, layout), null);
+  });
+
+  it('requires exactly one visible District selector', () => {
+    const { buffer, layout, view } = characterSelectorFixture();
+    const frameBuffer = 0x200;
+    const district = 0x1600;
+    view.setUint32(0x104, 4, true);
+    view.setUint32(0x108, 4, true);
+    view.setUint32(frameBuffer + 3 * 4, district, true);
+    view.setUint32(district + 0xbc, 3, true);
+    view.setUint32(district + 0x128, 0x1000 + 0x128, true);
+    view.setUint32(district + 0x134, frameLabelHash('District'), true);
+    view.setUint32(district + 0x18c, 0x4, true);
+    assert.deepEqual(benchmarkUiState(buffer, layout), { districtPresent: true });
+    view.setUint32(district + 0x18c, 0x204, true);
+    assert.deepEqual(benchmarkUiState(buffer, layout), { districtPresent: false });
   });
 });

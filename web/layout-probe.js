@@ -143,25 +143,20 @@ export function frameLabelHash(label) {
 
 const SELECTOR_HASH = frameLabelHash('Selector');
 const PLAY_HASH = frameLabelHash('Play');
+const DISTRICT_HASH = frameLabelHash('District');
 
-/**
- * Prove that the visible character selector and its Play control are created.
- *
- * This E2E-only reader uses only fields already covered by the signed passive
- * layout. It returns one boolean, never frame contents or character names.
- */
-export function characterSelectionState(buffer, layoutWords) {
+function readUiFrames(buffer, layoutWords) {
   if (
     !(buffer instanceof ArrayBuffer)
     || !Array.isArray(layoutWords)
     || layoutWords.length !== 232
     || layoutWords[UI_LAYOUT.frameSize] !== 0x1c8
-  ) return 'layout-invalid';
+  ) return null;
 
   const read = reader(buffer);
   const array = layoutWords[UI_LAYOUT.frameArray];
   if (!Number.isInteger(array) || array % WORD !== 0 || !read.contains(array, 12)) {
-    return 'layout-invalid';
+    return null;
   }
   const frameBuffer = read.u32(array);
   const capacity = read.u32(array + 4);
@@ -175,35 +170,47 @@ export function characterSelectionState(buffer, layoutWords) {
     || capacity > MAX_UI_CAPACITY
     || frameBuffer % WORD !== 0
     || !read.contains(frameBuffer, size * WORD)
-  ) return 'layout-invalid';
+  ) return null;
 
   const frames = new Map();
   for (let frameId = 0; frameId < size; frameId += 1) {
     const address = read.u32(frameBuffer + frameId * WORD);
-    if (address === null) return 'layout-invalid';
+    if (address === null) return null;
     if (address === 0 || address === 0xffff_ffff) continue;
     if (
       address % WORD !== 0
       || !read.contains(address, layoutWords[UI_LAYOUT.frameSize])
       || read.u32(address + layoutWords[UI_LAYOUT.frameId]) !== frameId
-    ) return 'layout-invalid';
+    ) return null;
     const relation = read.u32(address + layoutWords[UI_LAYOUT.parentRelation]);
     const hash = read.u32(address + layoutWords[UI_LAYOUT.frameHash]);
     const state = read.u32(address + layoutWords[UI_LAYOUT.frameState]);
-    if (relation === null || hash === null || state === null) return 'layout-invalid';
+    if (relation === null || hash === null || state === null) return null;
     let parentId = null;
     if (relation !== 0) {
       const parent = relation - layoutWords[UI_LAYOUT.parentRelation];
-      if (parent < 0 || parent % WORD !== 0) return 'layout-invalid';
+      if (parent < 0 || parent % WORD !== 0) return null;
       parentId = read.u32(parent + layoutWords[UI_LAYOUT.frameId]);
       if (
         parentId === null
         || parentId >= size
         || read.u32(frameBuffer + parentId * WORD) !== parent
-      ) return 'layout-invalid';
+      ) return null;
     }
     frames.set(frameId, { parentId, hash, state });
   }
+  return frames;
+}
+
+/**
+ * Prove that the visible character selector and its Play control are created.
+ *
+ * This E2E-only reader uses only fields already covered by the signed passive
+ * layout. It returns one boolean, never frame contents or character names.
+ */
+export function characterSelectionState(buffer, layoutWords) {
+  const frames = readUiFrames(buffer, layoutWords);
+  if (!frames) return 'layout-invalid';
 
   const selector = [...frames.values()].find((frame) => frame.hash === SELECTOR_HASH);
   const play = [...frames.values()].find((frame) => frame.hash === PLAY_HASH);
@@ -229,6 +236,59 @@ export function characterSelectionState(buffer, layoutWords) {
 
 export const characterSelectionReady = (buffer, layoutWords) =>
   characterSelectionState(buffer, layoutWords) === 'ready';
+
+/**
+ * Read only the map placement fields needed to verify the fixed benchmark
+ * travel command. District and language are adjacent members of the same
+ * certified CharacterContext as current_map_id; no pointer or label leaves
+ * the page.
+ */
+export function benchmarkSceneState(buffer, layoutWords) {
+  if (
+    !(buffer instanceof ArrayBuffer)
+    || !Array.isArray(layoutWords)
+    || layoutWords.length !== 232
+  ) return null;
+  const read = reader(buffer);
+  const contexts = read.pointer(layoutWords[0], 28);
+  const game = contexts === null
+    ? null
+    : read.pointer(contexts + layoutWords[4] * WORD, 0x50);
+  const character = game === null
+    ? null
+    : read.pointer(game + layoutWords[5], 0x2b0);
+  const currentMapOffset = layoutWords[8];
+  if (character === null || currentMapOffset < 12) return null;
+  const mapId = read.u32(character + currentMapOffset);
+  const district = read.u32(character + currentMapOffset - 12);
+  const language = read.u32(character + currentMapOffset - 8);
+  const instanceType = read.u32(character + layoutWords[9]);
+  if (
+    mapId === null
+    || mapId > 2_000
+    || district === null
+    || district > 1_000
+    || language === null
+    || language > 11
+    || instanceType === null
+    || instanceType > 2
+  ) return null;
+  return Object.freeze({ mapId, district, language, instanceType });
+}
+
+/** Prove that one visible District selector exists in the certified frame tree. */
+export function benchmarkUiState(buffer, layoutWords) {
+  const frames = readUiFrames(buffer, layoutWords);
+  if (!frames) return { districtPresent: false };
+  const district = [...frames.values()].filter((frame) => frame.hash === DISTRICT_HASH);
+  const visible = (frame) => (
+    (frame.state & UI_FRAME_CREATED) !== 0
+    && (frame.state & (UI_FRAME_DESTROYING | UI_FRAME_HIDDEN)) === 0
+  );
+  return {
+    districtPresent: district.length === 1 && visible(district[0]),
+  };
+}
 
 function contextAt(read, layout, delta) {
   const contexts = read.pointer(layout[0] + delta, 28);

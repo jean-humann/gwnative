@@ -82,6 +82,8 @@ scripts/e2e \
   --character "Character Name" \
   --runtime asyncify \
   --frame-isolation on \
+  --render-scale 1.5 \
+  --fps 120 \
   --benchmark-seconds 20 \
   --expect-map-id 449 \
   --minimum-agents 80 \
@@ -108,13 +110,44 @@ cell proves the product selected Asyncify, and the forced cell proves the same
 artifact explicitly. On a JSPI-capable WebKit, the default matrix exercises
 both `jspi` and `asyncify`.
 
-The passive API currently certifies map identity and agent population, not the
-district label. The runner therefore cannot safely switch to or claim America
-District 1/2. Position the saved character in the intended district first;
-`--expect-map-id` plus `--minimum-agents` then prevents an empty or different
-scene from being accepted as the crowded control. Adding coordinate automation
-or a new game-write hook solely for district selection would weaken the E2E
-trust boundary.
+Before sampling, the E2E-only client API applies the fixed High graphics preset,
+travels to Kamadan America-English District 2 (District 1 is the bounded
+fallback), identifies the two Xunlai agents by their certified numeric agent
+fields, and invokes the game's own `InteractNPC` action for the stable left-hand
+anchor. The runner supplies no map, region, language, agent identity, graphics
+value, pointer, or coordinate. It receives only the verified final scene and
+rejects a player farther than 180 game units from the anchor.
+
+The normal `/__game/v1` API remains read-only. This command path exists only in
+a disposable benchmark launch (`GWNATIVE_E2E=1` plus the runner-owned
+`GWNATIVE_E2E_BENCHMARK_API=1`), exposes three finite commands, and is appended
+only to that launch's derived Wasm. Ordinary UI and login E2E runs therefore do
+not depend on paired benchmark certification:
+
+```mermaid
+flowchart LR
+    R["Benchmark runner"] -->|"prepare-benchmark-scene"| P["E2E page bridge"]
+    P -->|"one queued finite command"| S["Guild Wars logical swap"]
+    S --> C{"Closed client command"}
+    C -->|"travel 449 / America / English / district 2 or 1"| U["Certified UI dispatcher"]
+    C -->|"InteractNPC / certified Xunlai agent ID"| U
+    C -->|"fixed non-persistent High preset"| G["Certified preference setters"]
+    U --> V["Read-only companion verification"]
+    G --> V
+    V -->|"exact district, language, position, population, preset"| R
+```
+
+The target locator first proves the compact JSPI functions from their exact
+signatures, bounds, storage arrays, and UI notifications. Asyncify is then
+accepted only when the paired artifact retains those source-level function
+indices, types, dispatcher/messages, storage addresses, bounds, and generated
+state guards. No ArenaNet build number, function number, body offset, or memory
+address is embedded in the runner. If any proof changes, benchmark preparation
+fails closed; the ordinary player client and read-only API are unaffected.
+
+The sample also requires two focused native frames containing the certified
+Guild Wars gameplay UI. A suspended, locked, hidden, or non-presenting WebKit
+view therefore cannot produce a plausible-looking FPS result.
 
 WebGL GPU timer queries are intentionally not inserted into the live game
 context. Every artifact records `gpuTiming: not-sampled`; correlate it with an

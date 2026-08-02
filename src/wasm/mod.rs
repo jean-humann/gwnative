@@ -66,6 +66,7 @@ fn runtime_compatibility_id(
 }
 
 const STAMP: &str = "derived.json";
+const BENCHMARK_API_ABI: u32 = 2;
 
 pub const COMPANION_KERNEL: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/companion-kernel.wasm"));
@@ -162,16 +163,29 @@ pub fn prepare(
     derived_root: &Path,
     certificate_cache: &Path,
     enhance: bool,
+    benchmark_api: bool,
     generations: &generation::Store,
 ) -> Outcome<Prepared> {
     let feed = certificate::load(certificate_cache)?;
     certificate::spawn_refresh(certificate_cache.to_path_buf(), feed.sequence);
+    let benchmark_targets = if benchmark_api {
+        Some(benchmark_targets(root, &feed)?)
+    } else {
+        None
+    };
 
     let mut derived = DerivedModules::default();
     let mut runtimes = BTreeMap::new();
     for runtime in Runtime::ALL {
-        let (path, module) =
-            prepare_runtime(root, derived_root, &feed, runtime, enhance, generations);
+        let (path, module) = prepare_runtime(
+            root,
+            derived_root,
+            &feed,
+            runtime,
+            enhance,
+            benchmark_targets,
+            generations,
+        );
         if let Some(path) = path {
             derived.insert(runtime, path);
         }
@@ -181,6 +195,27 @@ pub fn prepare(
         derived,
         module: Module { runtimes },
     })
+}
+
+fn benchmark_targets(root: &Path, feed: &CertificateFeed) -> Outcome<rewrite::BenchmarkTargets> {
+    let load = |runtime: Runtime| -> Outcome<(Vec<u8>, u32)> {
+        let wasm_path = root.join(runtime.wasm_name());
+        let glue_path = root.join(runtime.glue_name());
+        let wasm = fs::read(&wasm_path).map_err(|e| format!("{}: {e}", wasm_path.display()))?;
+        let glue = fs::read(&glue_path).map_err(|e| format!("{}: {e}", glue_path.display()))?;
+        let selected = feed
+            .select(runtime, &digest(&wasm), &digest(&glue))
+            .ok_or_else(|| {
+                format!(
+                    "{} benchmark API requires a certified artifact pair",
+                    runtime.key()
+                )
+            })?;
+        Ok((wasm, selected.runtime.template.import_count))
+    };
+    let (jspi, jspi_imports) = load(Runtime::Jspi)?;
+    let (asyncify, asyncify_imports) = load(Runtime::Asyncify)?;
+    rewrite::benchmark_target_pair(&jspi, jspi_imports, &asyncify, asyncify_imports)
 }
 
 /// Build an unsigned, fail-closed candidate from a new official artifact pair.
@@ -282,9 +317,18 @@ fn prepare_runtime(
     feed: &CertificateFeed,
     runtime: Runtime,
     enhance: bool,
+    benchmark_targets: Option<rewrite::BenchmarkTargets>,
     generations: &generation::Store,
 ) -> (Option<PathBuf>, RuntimeModule) {
-    match prepare_runtime_inner(root, cache_root, feed, runtime, enhance, generations) {
+    match prepare_runtime_inner(
+        root,
+        cache_root,
+        feed,
+        runtime,
+        enhance,
+        benchmark_targets,
+        generations,
+    ) {
         Ok(result) => result,
         Err(reason) => {
             note!("[gwnative] {}: {reason}", runtime.key());
@@ -302,6 +346,7 @@ fn prepare_runtime_inner(
     feed: &CertificateFeed,
     runtime: Runtime,
     enhance: bool,
+    benchmark_targets: Option<rewrite::BenchmarkTargets>,
     generations: &generation::Store,
 ) -> Outcome<(Option<PathBuf>, RuntimeModule)> {
     let wasm_path = root.join(runtime.wasm_name());
@@ -337,7 +382,7 @@ fn prepare_runtime_inner(
         ));
     }
 
-    let derived = derive(cache_root, runtime, &input, &selected)?;
+    let derived = derive(cache_root, runtime, &input, &selected, benchmark_targets)?;
     let (enhancement_state, manifest) = if !enhance {
         (enhancements::OFF, None)
     } else if !selected.runtime.passive_enhancements {
@@ -372,6 +417,7 @@ fn derive(
     runtime: Runtime,
     input: &[u8],
     selected: &Selected<'_>,
+    benchmark_targets: Option<rewrite::BenchmarkTargets>,
 ) -> Outcome<PathBuf> {
     let certificate = selected.runtime;
     let dir = cache_root
@@ -379,27 +425,44 @@ fn derive(
         .join(&certificate.wasm_sha256)
         .join(certificate::TRANSFORM_ABI.to_string());
     let path = dir.join(runtime.wasm_name());
-    if stamped(&dir, &path, certificate) {
-        prune_derived(cache_root, runtime, certificate);
-        return Ok(path);
+    if !stamped(&dir, &path, certificate) {
+        let output = rewrite::rewrite(input, certificate)?;
+        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        write_atomic(&path, &output)?;
+        write_atomic(
+            &dir.join(STAMP),
+            serde_json::json!({
+                "inputSha256": certificate.wasm_sha256,
+                "glueSha256": certificate.glue_sha256,
+                "transformAbi": certificate::TRANSFORM_ABI,
+                "outputSha256": certificate.template.output_sha256,
+            })
+            .to_string()
+            .as_bytes(),
+        )?;
     }
-
-    let output = rewrite::rewrite(input, certificate)?;
-    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    write_atomic(&path, &output)?;
-    write_atomic(
-        &dir.join(STAMP),
-        serde_json::json!({
-            "inputSha256": certificate.wasm_sha256,
-            "glueSha256": certificate.glue_sha256,
-            "transformAbi": certificate::TRANSFORM_ABI,
-            "outputSha256": certificate.template.output_sha256,
-        })
-        .to_string()
-        .as_bytes(),
-    )?;
     prune_derived(cache_root, runtime, certificate);
-    Ok(path)
+    let Some(benchmark_targets) = benchmark_targets else {
+        return Ok(path);
+    };
+
+    let benchmark_dir = dir.join(format!("benchmark-{BENCHMARK_API_ABI}"));
+    let benchmark_path = benchmark_dir.join(runtime.wasm_name());
+    let transformed = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let benchmark_runtime = match runtime {
+        Runtime::Jspi => rewrite::BenchmarkRuntime::Jspi,
+        Runtime::Asyncify => rewrite::BenchmarkRuntime::Asyncify,
+    };
+    let transformed = rewrite::add_benchmark_api(
+        &transformed,
+        certificate.template.import_count,
+        benchmark_targets,
+        benchmark_runtime,
+    )?;
+    fs::create_dir_all(&benchmark_dir).map_err(|e| format!("{}: {e}", benchmark_dir.display()))?;
+    write_atomic(&benchmark_path, &transformed)?;
+    prune_sibling_directories(&dir, &format!("benchmark-{BENCHMARK_API_ABI}"));
+    Ok(benchmark_path)
 }
 
 /// Keep only the active artifact and transform ABI for each runtime.
@@ -635,6 +698,7 @@ mod tests {
                 &feed,
                 runtime,
                 true,
+                None,
                 &generations,
             );
             assert!(
@@ -685,6 +749,7 @@ mod tests {
             &feed,
             runtime,
             true,
+            None,
             &generations,
         );
         assert!(derived.is_none());
@@ -757,6 +822,7 @@ mod tests {
         feed.validate().unwrap();
         let temporary = crate::scratch::TempDir::new("dual-runtime-derive");
         let generations = generation::Store::open(temporary.0.join("support").join("generations"));
+        let targets = benchmark_targets(Path::new(&root), &feed).unwrap();
         for runtime in Runtime::ALL {
             let (derived, module) = prepare_runtime(
                 Path::new(&root),
@@ -764,6 +830,7 @@ mod tests {
                 &feed,
                 runtime,
                 true,
+                Some(targets),
                 &generations,
             );
             assert!(derived.is_some());

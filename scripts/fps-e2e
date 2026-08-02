@@ -20,6 +20,15 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=20)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--refresh-hz", type=float)
+    parser.add_argument(
+        "--fps",
+        type=int,
+        help=(
+            "Guild Wars frame ceiling; defaults to the rounded --refresh-hz "
+            "because the client otherwise retains ArenaNet's 90 FPS default"
+        ),
+    )
+    parser.add_argument("--render-scale", type=float, choices=(1.0, 1.5, 2.0))
     parser.add_argument("--expect-map-id", type=int)
     parser.add_argument("--minimum-agents", type=int, default=0)
     parser.add_argument("--minimum-fps", type=float)
@@ -39,6 +48,13 @@ def main() -> int:
     args = parser.parse_args()
     if not 1 <= args.seconds <= 60:
         parser.error("--seconds must be between 1 and 60")
+    if args.fps is not None and args.fps <= 0:
+        parser.error("--fps must be positive")
+    client_fps = args.fps
+    if client_fps is None and args.refresh_hz is not None:
+        client_fps = round(args.refresh_hz)
+    if client_fps is not None and not 1 <= client_fps <= 1_000:
+        parser.error("the effective frame ceiling must be between 1 and 1000")
 
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         parser.error("--output-dir must be absent or empty")
@@ -66,6 +82,10 @@ def main() -> int:
             ]
             if args.profile:
                 command.extend(["--profile", args.profile])
+            if args.render_scale is not None:
+                command.extend(["--render-scale", str(args.render_scale)])
+            if client_fps is not None:
+                command.extend(["--fps", str(client_fps)])
             for option, value in [
                 ("--refresh-hz", args.refresh_hz),
                 ("--expect-map-id", args.expect_map_id),
@@ -87,6 +107,7 @@ def main() -> int:
     manifest = {
         "schemaVersion": 1,
         "secondsPerCell": args.seconds,
+        "clientFrameLimit": client_fps,
         "cells": cells,
     }
     (args.output_dir / "matrix.json").write_text(
