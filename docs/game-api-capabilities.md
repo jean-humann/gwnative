@@ -26,6 +26,16 @@ manager code is not a browser runtime and is not imported. GWoNmac is useful
 architecture research, but its GPL-3.0 implementation is not copied into this
 GPL-2.0 project.
 
+The upstreams also do not define a portable mod ABI to inherit. The current
+`gw_in_browser` tree has no `.gwmod` format or loader; GWoNmac explicitly keeps
+one fixed passive companion and no generic plugin loader; and GWToolbox's
+`refactor/wasm-compatibility` branch remains a native C++/GWCA application. A
+generic loader would therefore invent an unsigned executable format and a
+second compatibility surface before there is a consumer. It is excluded from
+this train. If a real interoperable format appears later, its specification,
+publisher identity, runtime ABI, and recovery behavior require a separate
+design and threat-model review.
+
 ## Runtime boundary
 
 ```mermaid
@@ -155,17 +165,16 @@ unit only when it actually consumes that unit's public contract.
 
 1. Profiles, paths, Keychain scoping, and instance ownership.
 2. Cache maintenance, image verification, and recovery.
-3. `.gwmod` validation and loading.
-4. Minimal companion core plus map/player/target read-only API.
-5. Tools shell, overlay, hotkeys, and build library.
-6. Authenticated E2E transport and bounded event synchronization.
-7. Trusted AppKit input bridge.
-8. Login, character-entry, and secure-input synchronization.
-9. Per-domain ABI and capability registry.
-10. Party, skillbar, and effects domain.
-11. Agents, quests, and objectives domain.
-12. Performance sampler and benchmark-only scene controls.
-13. Passive observer demand scheduling, change-only publication, and cadence
+3. Minimal companion core plus map/player/target read-only API.
+4. Tools shell, overlay, hotkeys, and build library.
+5. Authenticated E2E transport and bounded event synchronization.
+6. Trusted AppKit input bridge.
+7. Login, character-entry, and secure-input synchronization.
+8. Per-domain ABI and capability registry.
+9. Party, skillbar, and effects domain.
+10. Agents, quests, and objectives domain.
+11. Performance sampler and benchmark-only scene controls.
+12. Passive observer demand scheduling, change-only publication, and cadence
     enforcement.
 
 The tools shell and E2E transport are sibling branches from the companion
