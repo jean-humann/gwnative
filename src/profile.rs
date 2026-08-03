@@ -218,7 +218,8 @@ fn preferred_port(id: &str) -> u16 {
     PROFILE_PORT_FIRST + (hash % u32::from(PROFILE_PORT_COUNT)) as u16
 }
 
-fn valid_id(id: &str) -> bool {
+/// Whether a profile ID is safe to use as its on-disk directory component.
+pub fn valid_id(id: &str) -> bool {
     (1..=64).contains(&id.len())
         && id != "."
         && id != ".."

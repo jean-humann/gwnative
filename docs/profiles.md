@@ -48,7 +48,7 @@ directory automatically.
 | Writable web root and client artifacts | Base support directory | `profiles/<id>/` | No |
 | Derived certified modules | Base support directory | `profiles/<id>/` | No |
 | Saved login | Keychain account `login` | Keychain account `login:<id>` | No |
-| IndexedDB and local storage | Origin on port `38112` | Origin on stable hashed port | No |
+| IndexedDB and local storage | Origin on port `38112` | Origin on assigned persisted port | No |
 | Game-image chunks | `chunks/` | `chunks/` | Yes |
 
 `--host-port` deliberately overrides the persisted assignment. It is a

@@ -588,13 +588,7 @@ fn no_inline(option: &str, inline: Option<&str>, apply: impl FnOnce()) -> Result
 }
 
 fn validate_profile(value: &str) -> Result<(), Exit> {
-    let valid = (1..=64).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        && value != "."
-        && value != "..";
-    if valid {
+    if crate::profile::valid_id(value) {
         Ok(())
     } else {
         Err(value_error(
