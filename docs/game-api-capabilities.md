@@ -168,6 +168,13 @@ unit only when it actually consumes that unit's public contract.
 13. Passive observer demand scheduling, change-only publication, and cadence
     enforcement.
 
+The tools shell and E2E transport are sibling branches from the companion
+core. Native input and auth synchronization form a short chain from the E2E
+transport. The domain ABI is also based on the companion core; it does not gain
+a dependency on UI tooling or login automation. The later benchmark unit is
+the first place that intentionally combines the authenticated E2E contract
+with the agents/quests domain.
+
 Inventory/economy, social/progression, and UI/camera domains follow only when a
 product consumer exists. Steam authentication is rebased and manually tested
 after the core train because it crosses credential and launch contracts but is
