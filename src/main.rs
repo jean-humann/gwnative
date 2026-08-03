@@ -33,6 +33,7 @@ mod net;
 mod notify;
 mod patch;
 mod paths;
+mod profile;
 mod proxy;
 mod qos;
 mod relaunch;
@@ -69,8 +70,8 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 fn main() {
     // Before anything is opened, downloaded or locked: a question about this
     // executable deserves an answer and not a launch.
-    let command = match cli::parse(std::env::args_os().skip(1)) {
-        Ok(command) => command,
+    let invocation = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(invocation) => invocation,
         Err(exit) => {
             let out: &mut dyn std::io::Write = if exit.failed {
                 &mut std::io::stderr()
@@ -81,8 +82,14 @@ fn main() {
             std::process::exit(i32::from(exit.failed) * 2);
         }
     };
+    if invocation.verbose {
+        server::enable_tracing();
+        sockets::enable_tracing();
+    }
+    let command = invocation.command;
     if command == cli::Command::Certify {
-        match wasm::certificate_candidate(&paths::web_root()) {
+        let root = invocation.web_root.clone().unwrap_or_else(paths::web_root);
+        match wasm::certificate_candidate(&root) {
             Ok(candidate) => println!("{candidate}"),
             Err(reason) => {
                 eprintln!("{reason}");
@@ -91,6 +98,34 @@ fn main() {
         }
         return;
     }
+    let base_support = paths::base_support_dir();
+    if command == cli::Command::Profiles {
+        let profiles = match profile::list(&base_support) {
+            Ok(profiles) => profiles,
+            Err(reason) => {
+                note!("[gwnative] {reason}");
+                std::process::exit(2);
+            }
+        };
+        for profile in profiles {
+            println!(
+                "{}\t{}\t{}\t{}",
+                profile.id,
+                profile.display_name,
+                profile.color,
+                profile.port()
+            );
+        }
+        return;
+    }
+    let profile = match profile::select(&base_support, invocation.profile.as_deref()) {
+        Ok(profile) => profile,
+        Err(reason) => {
+            note!("[gwnative] {reason}");
+            std::process::exit(2);
+        }
+    };
+    let paths = paths::Layout::new(&invocation, &profile);
     let force_sync = command == cli::Command::Sync;
     let headless = command == cli::Command::Serve;
     // The two commands above are the runs with a terminal attached. Everything
@@ -99,19 +134,49 @@ fn main() {
 
     // Held for as long as the process lives; the kernel takes it back if the
     // process does not.
-    let _instance = hold_the_only_instance(windowed);
+    let _instance = hold_the_only_instance(windowed, &paths, invocation.new_instance);
+
+    // A packaged or named-development profile uses a writable seeded shell.
+    // Only refresh it after instance exclusion: a second launch must not modify
+    // files the already-running process is serving before it is rejected.
+    if let Err(error) = paths.prepare_web_root() {
+        note!(
+            "[gwnative] could not lay out {}: {error}",
+            paths.web_root().display()
+        );
+    }
+
+    // Profiles share the content-addressed game-data cache even though their
+    // client manifests are isolated. Hold this before any active manifest can
+    // be promoted, and keep it for the store's lifetime.
+    let cache_lease = cache::prepare(paths.cache_dir()).unwrap_or_else(|reason| {
+        alert::fatal(
+            windowed,
+            "Guild Wars game data is busy",
+            &format!("The shared game-data cache could not be locked safely.\n\n{reason}"),
+        )
+    });
+    cache::finish_maintenance(&cache_lease, paths.cache_dir()).unwrap_or_else(|reason| {
+        alert::fatal(
+            windowed,
+            "Guild Wars game data could not be maintained",
+            &reason.to_string(),
+        )
+    });
 
     // Before the client can ask for the login, so the reason it will not get one
     // is on screen ahead of the dialog rather than after it.
     keychain::check_identity();
 
-    let root = paths::web_root();
+    let root = paths.web_root().to_owned();
     // One client and one manifest, for everything below that needs either.
-    let client = patch::Client::from_env();
-    let manifest = load_manifest(&client, force_sync);
+    let client = patch::Client::from_env().with_offline(invocation.offline);
+    let manifest = load_manifest(&client, force_sync, paths.support_dir(), invocation.offline);
     let revalidate = manifest
         .as_ref()
-        .is_ok_and(|(_, source)| !matches!(source, patch::Source::Service));
+        .is_ok_and(|(_, source)| !matches!(source, patch::Source::Service))
+        && !invocation.offline
+        && !invocation.no_update;
 
     let generations = install_client(
         &root,
@@ -121,6 +186,7 @@ fn main() {
             .map(|(manifest, source)| (manifest, *source)),
         force_sync,
         windowed,
+        paths.support_dir(),
     );
     if force_sync {
         return;
@@ -129,14 +195,20 @@ fn main() {
     // being installed above; refreshing that file concurrently could otherwise
     // promote a newer manifest over the artifacts fetched from the older one.
     if revalidate {
-        revalidate_manifest();
+        revalidate_manifest(paths.support_dir().to_owned());
     }
     // Snapshot chunks must come from the manifest promoted with the client that
     // is actually on disk. `manifest` may be a newer pending offer whose client
     // download failed, or one that rollback just refused.
-    let active_manifest = client.active_manifest(&paths::support_dir());
+    let active_manifest = client.active_manifest(paths.support_dir());
     let snapshot = match active_manifest {
-        Ok(manifest) => open_and_warm_snapshot(client, manifest),
+        Ok(manifest) => open_and_warm_snapshot(
+            client,
+            manifest,
+            paths.cache_dir(),
+            cache_lease,
+            invocation.no_prefetch,
+        ),
         // Without a manifest there is no chunk list, so there is no snapshot —
         // the same outcome as failing to open one, reported the same way.
         Err(e) => {
@@ -147,7 +219,7 @@ fn main() {
 
     // Started before the window so that whatever the shell costs to build is
     // in the record too.
-    let recorder = diagnostics::Recorder::open(diagnostics::default_log_dir());
+    let recorder = diagnostics::Recorder::open(paths.support_dir().join("diagnostics"));
     // First line in the file, so a log sent on by a player says which Mac and
     // which build it came from without anybody having to write back and ask.
     recorder.session();
@@ -167,8 +239,23 @@ fn main() {
     // first frame, so asking the page to fetch them later would mean booting
     // once at the wrong scale and correcting it in front of the player. Which
     // client module to derive is settled here too — see below.
-    let settings = Arc::new(settings::Store::open(
-        paths::support_dir().join("settings.json"),
+    let settings_path = paths.support_dir().join("settings.json");
+    let profile_settings = Arc::new(settings::Store::open(settings_path));
+    let legacy_update_settings = if profile.is_default() {
+        profile_settings.get()
+    } else {
+        settings::Store::open(base_support.join("settings.json")).get()
+    };
+    // Application updates replace one bundle, not one profile. Sparkle's own
+    // preferences are app-global too, so a small global record owns update
+    // intent and cadence. The old default settings file seeds it once.
+    let update_settings = Arc::new(settings::UpdateStore::open(
+        base_support.join("updates.json"),
+        &legacy_update_settings,
+    ));
+    let settings = Arc::new(settings::ScopedStore::new(
+        profile_settings,
+        update_settings,
     ));
 
     // Derive the client that can save a template, if this is a build we have
@@ -187,7 +274,7 @@ fn main() {
         module,
     } = match wasm::prepare(
         &root,
-        &paths::derived_dir(),
+        paths.derived_dir(),
         &paths::certificate_dir(),
         enhance,
         &generations,
@@ -201,15 +288,17 @@ fn main() {
     module.logs();
 
     let token = session_token();
-    let loopback = match server::spawn(
-        root.clone(),
+    let loopback = match server::spawn(server::Config {
+        root: root.clone(),
         snapshot,
         recorder,
         derived_wasm,
         settings,
         generations,
-        token.clone(),
-    ) {
+        token: token.clone(),
+        port: paths.port(),
+        credential_account: profile.keychain_account(),
+    }) {
         Ok(loopback) => loopback,
         // Nothing downstream has an answer to this: the client is a page, and
         // without an origin to serve it from there is no client. `force_sync`
@@ -237,7 +326,14 @@ fn main() {
     if headless {
         park_headless(&loopback, &token);
     }
-    run_windowed(&loopback, &token, &module);
+    run_windowed(
+        &loopback,
+        &token,
+        &module,
+        &invocation,
+        paths.support_dir(),
+        profile.website_data_store_id(),
+    );
 }
 
 /// Take the single-instance lock, or hand the running app the foreground.
@@ -247,8 +343,26 @@ fn main() {
 /// one that is already open, not like nothing happening; raising it by pid
 /// rather than bundle id works in development too, where there is no bundle to
 /// identify.
-fn hold_the_only_instance(windowed: bool) -> instance::Instance {
-    let lock_path = paths::support_dir().join("gwnative.lock");
+fn hold_the_only_instance(
+    windowed: bool,
+    paths: &paths::Layout,
+    new_instance: bool,
+) -> (instance::Instance, Option<instance::Instance>) {
+    let profile_path = paths.support_dir().join("gwnative.lock");
+    if new_instance {
+        return (acquire_instance(windowed, &profile_path), None);
+    }
+
+    let global_path = paths::base_support_dir().join("gwnative.lock");
+    if profile_path == global_path {
+        return (acquire_instance(windowed, &global_path), None);
+    }
+    let global = acquire_instance(windowed, &global_path);
+    let profile = acquire_instance(windowed, &profile_path);
+    (profile, Some(global))
+}
+
+fn acquire_instance(windowed: bool, lock_path: &Path) -> instance::Instance {
     // A relaunch is started by the app it replaces, so for a moment there
     // really are two — and this is the one that has to wait for the other.
     let patience = if relaunch::is_successor() {
@@ -256,12 +370,12 @@ fn hold_the_only_instance(windowed: bool) -> instance::Instance {
     } else {
         std::time::Duration::ZERO
     };
-    match instance::acquire(&lock_path, patience) {
+    match instance::acquire(lock_path, patience) {
         Ok(held) => held,
         Err(reason) => {
             note!("[gwnative] {reason}");
             if windowed
-                && let Some(pid) = instance::holder(&lock_path)
+                && let Some(pid) = instance::holder(lock_path)
                 && let Some(mtm) = MainThreadMarker::new()
             {
                 let _ = mtm;
@@ -290,14 +404,21 @@ fn hold_the_only_instance(windowed: bool) -> instance::Instance {
 fn load_manifest(
     client: &patch::Client,
     force_sync: bool,
+    support_dir: &Path,
+    offline: bool,
 ) -> error::Result<(manifest::Manifest, patch::Source)> {
-    let dir = paths::support_dir();
+    let dir = support_dir;
+    if offline {
+        return client
+            .cached_manifest(dir)
+            .map(|manifest| (manifest, patch::Source::Active));
+    }
     if force_sync {
         return client
-            .fetch_manifest(&dir)
+            .fetch_manifest(dir)
             .map(|manifest| (manifest, patch::Source::Service));
     }
-    client.manifest(&dir)
+    client.manifest(dir)
 }
 
 /// Make the web root hold a client this build can run, and return the record
@@ -319,10 +440,9 @@ fn install_client(
     manifest: Result<(&manifest::Manifest, patch::Source), &error::Error>,
     force_sync: bool,
     windowed: bool,
+    support_dir: &Path,
 ) -> Arc<generation::Store> {
-    let generations = Arc::new(generation::Store::open(
-        paths::support_dir().join("generations"),
-    ));
+    let generations = Arc::new(generation::Store::open(support_dir.join("generations")));
     match generations.recover(root) {
         generation::Recovery::None => {}
         generation::Recovery::InstallationRestored => note!(
@@ -379,7 +499,7 @@ fn install_client(
     if let Ok((_, source, offered)) = &plan
         && should_activate_pending_manifest(force_sync, missing.is_empty(), *source, outdated)
     {
-        let failure = match client.activate_manifest(&paths::support_dir()) {
+        let failure = match client.activate_manifest(support_dir) {
             Ok(true) => {
                 if !generations.refresh_manifest(offered) {
                     note!(
@@ -400,7 +520,7 @@ fn install_client(
         // promoted is deferred. If there is no matching active copy,
         // continuing would start the shell with an incoherent game image.
         let active_matches = client
-            .active_manifest(&paths::support_dir())
+            .active_manifest(support_dir)
             .and_then(|active| generation::identify(&active, &names))
             .is_ok_and(|active| active == *offered);
         if active_matches {
@@ -434,15 +554,15 @@ fn install_client(
     }
 
     let failure = match &plan {
-        Ok((manifest, _, offered)) => sync(
+        Ok((manifest, _, offered)) => ClientSync {
             root,
-            &missing,
-            &generations,
+            generations: &generations,
             client,
             manifest,
             offered,
-            force_sync,
-        )
+            support_dir,
+        }
+        .run(&missing, force_sync)
         .err()
         .map(|e| e.to_string()),
         Err(e) => Some(e.clone()),
@@ -490,14 +610,12 @@ fn should_activate_pending_manifest(
 fn open_and_warm_snapshot(
     client: patch::Client,
     manifest: manifest::Manifest,
+    cache_dir: &Path,
+    cache_lease: cache::Lease,
+    no_prefetch: bool,
 ) -> Option<Arc<chunks::ChunkStore>> {
-    let cache_dir = cache::default_cache_dir();
-    // Before the store opens, which is the only moment this is safe: from here
-    // on the directory has a readahead thread, a prefetch thread and up to
-    // forty-eight fetches holding descriptors into it. See `cache::request_clear`
-    // for why the deletion is a launch behind the button that asks for it.
-    cache::take_clear_request(&cache_dir);
-    match chunks::ChunkStore::open(client, manifest, cache_dir).map(Arc::new) {
+    let cache_dir = cache_dir.to_owned();
+    match chunks::ChunkStore::open(client, manifest, cache_dir, cache_lease).map(Arc::new) {
         Ok(store) => {
             note!(
                 "[gwnative] snapshot: {:.1} GB in {} KiB chunks, on demand",
@@ -507,10 +625,14 @@ fn open_and_warm_snapshot(
             // Pull what the last boot needed while the window is still being
             // built. By the time the client asks, the chunks that gate the
             // first frame are already local.
-            store.warm_boot();
+            if !no_prefetch {
+                store.warm_boot();
+            }
             // And on the launch that has no list to replay — the first one —
             // stay a little ahead of wherever the client is reading instead.
-            store.start_readahead();
+            if !no_prefetch {
+                store.start_readahead();
+            }
             Some(store)
         }
         Err(e) => {
@@ -539,7 +661,14 @@ fn park_headless(loopback: &server::Loopback, token: &str) -> ! {
 
 /// Build the window and hand the thread to AppKit. Returns once the app has
 /// terminated.
-fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module) {
+fn run_windowed(
+    loopback: &server::Loopback,
+    token: &str,
+    module: &wasm::Module,
+    invocation: &cli::Invocation,
+    support_dir: &Path,
+    website_data_store_id: Option<&str>,
+) {
     let mtm = MainThreadMarker::new().expect("main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -551,21 +680,31 @@ fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module)
     // with and the updater is allowed to change two of them: on the first
     // launch after Sparkle shipped, the profile's opt-in is what seeds it, and
     // afterwards the updater's own answer is what the panel has to show.
-    updater::start(mtm, &loopback.settings);
+    let automatic_updates_allowed = invocation.automatic_updates_allowed();
+    if automatic_updates_allowed {
+        updater::start(mtm, &loopback.settings);
+    } else {
+        note!("[gwnative] automatic application update checks disabled for this launch");
+    }
 
     // The frame the web view is created at does not matter: `window::open`
     // resizes the window to the remembered one before it is ever shown, and the
     // content view follows.
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
+    let url = format!("http://{}/index.html", loopback.addr);
     let webview = webview::make(
         mtm,
         frame,
-        &format!("http://{}/index.html", loopback.addr),
-        token,
+        webview::Origin {
+            url: &url,
+            token,
+            website_data_store_id,
+        },
         &loopback.settings.get(),
         module,
+        invocation,
     );
-    let window = window::open(mtm, &webview, paths::support_dir().join("window.json"));
+    let window = window::open(mtm, &webview, support_dir.join("window.json"));
     activation_cover::install(&webview, &window, loopback.recorder.clone());
 
     // After the window, not before: two of the menu's items are requests to the
@@ -589,7 +728,9 @@ fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module)
     // item uses, and off this thread — the request takes up to five seconds and
     // the page is loading. A no-op unless the player asked to be told; see
     // [`release::due`].
-    menu::check_for_updates_at_launch(&loopback.settings);
+    if automatic_updates_allowed {
+        menu::check_for_updates_at_launch(&loopback.settings);
+    }
 
     window.makeKeyAndOrderFront(None);
     app.activate();
@@ -611,11 +752,11 @@ fn run_windowed(loopback: &server::Loopback, token: &str, module: &wasm::Module)
 /// keeps a socket busy until the patch client's request timeout and then goes
 /// away, which is the correct amount of fuss to make about a check nobody is
 /// waiting on.
-fn revalidate_manifest() {
-    std::thread::spawn(|| {
+fn revalidate_manifest(support_dir: std::path::PathBuf) {
+    std::thread::spawn(move || {
         qos::set(qos::Class::Utility);
         let client = patch::Client::from_env();
-        match client.revalidate(&paths::support_dir()) {
+        match client.revalidate(&support_dir) {
             // The next launch opens on this pending offer, sees it names a build
             // that is not the one on disk, and installs the matching artifact
             // set before promoting the manifest. See [`patch::Client::revalidate`].
@@ -639,77 +780,88 @@ fn revalidate_manifest() {
 /// naming that build is how the caller decided this was worth calling, and the
 /// rejection check below needs the same name while declining still costs
 /// nothing. Nothing here fetches a manifest — see [`load_manifest`].
-fn sync(
-    root: &Path,
-    unsound: &[&'static str],
-    generations: &generation::Store,
-    client: &patch::Client,
-    manifest: &manifest::Manifest,
-    offered: &str,
-    force: bool,
-) -> error::Result<()> {
-    if unsound.is_empty() {
-        note!("[gwnative] installing client generation {offered}");
-    } else {
-        note!(
-            "[gwnative] fetching client artifacts: {}",
-            unsound.join(", ")
-        );
-    }
-    let names = patch::artifacts();
+struct ClientSync<'a> {
+    root: &'a Path,
+    generations: &'a generation::Store,
+    client: &'a patch::Client,
+    manifest: &'a manifest::Manifest,
+    offered: &'a str,
+    support_dir: &'a Path,
+}
 
-    if generations.rejected(offered) && !force {
+impl ClientSync<'_> {
+    fn run(self, unsound: &[&'static str], force: bool) -> error::Result<()> {
+        let Self {
+            root,
+            generations,
+            client,
+            manifest,
+            offered,
+            support_dir,
+        } = self;
         if unsound.is_empty() {
+            note!("[gwnative] installing client generation {offered}");
+        } else {
             note!(
-                "[gwnative] the service still offers client generation {offered}, which never reached \
-                 a first frame here; keeping the one on disk"
+                "[gwnative] fetching client artifacts: {}",
+                unsound.join(", ")
             );
-            return Ok(());
         }
-        // The alternative to a build that did not work is no client at all, so
-        // it gets another try — loudly, because if it fails the same way the
-        // line above is the one that explains why nothing changed.
-        note!(
-            "[gwnative] client generation {offered} never reached a first frame here, but the client \
-             on disk is incomplete, so there is nothing else to run"
-        );
-    }
+        let names = patch::artifacts();
 
-    if !generations.stash(root, &names) && unsound.is_empty() {
-        return Err(std::io::Error::other(
-            "the working client could not be preserved before replacement",
-        )
-        .into());
-    }
-    let fetched = match patch::sync_with(client, manifest, root) {
-        Ok(fetched) => fetched,
-        Err(error) => {
-            // Promotion has its own best-effort restore, but a failure in that
-            // restore is exactly when the durable, verified generation stash
-            // matters. Keep its record until the whole pair is back in place.
+        if generations.rejected(offered) && !force {
+            if unsound.is_empty() {
+                note!(
+                    "[gwnative] the service still offers client generation {offered}, which never reached \
+                 a first frame here; keeping the one on disk"
+                );
+                return Ok(());
+            }
+            // The alternative to a build that did not work is no client at all, so
+            // it gets another try — loudly, because if it fails the same way the
+            // line above is the one that explains why nothing changed.
+            note!(
+                "[gwnative] client generation {offered} never reached a first frame here, but the client \
+             on disk is incomplete, so there is nothing else to run"
+            );
+        }
+
+        if !generations.stash(root, &names) && unsound.is_empty() {
+            return Err(std::io::Error::other(
+                "the working client could not be preserved before replacement",
+            )
+            .into());
+        }
+        let fetched = match patch::sync_with(client, manifest, root) {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                // Promotion has its own best-effort restore, but a failure in that
+                // restore is exactly when the durable, verified generation stash
+                // matters. Keep its record until the whole pair is back in place.
+                if matches!(
+                    generations.recover(root),
+                    generation::Recovery::InstallationRestored
+                ) {
+                    note!("[gwnative] restored the proven client after sync failed");
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = client.activate_manifest(support_dir) {
             if matches!(
                 generations.recover(root),
                 generation::Recovery::InstallationRestored
             ) {
-                note!("[gwnative] restored the proven client after sync failed");
+                note!("[gwnative] restored the proven client after manifest activation failed");
             }
             return Err(error);
         }
-    };
-    if let Err(error) = client.activate_manifest(&paths::support_dir()) {
-        if matches!(
-            generations.recover(root),
-            generation::Recovery::InstallationRestored
-        ) {
-            note!("[gwnative] restored the proven client after manifest activation failed");
+        for (name, bytes) in fetched {
+            note!("[gwnative]   {name} ({bytes} bytes)");
         }
-        return Err(error);
+        generations.record(offered, root, &names);
+        Ok(())
     }
-    for (name, bytes) in fetched {
-        note!("[gwnative]   {name} ({bytes} bytes)");
-    }
-    generations.record(offered, root, &names);
-    Ok(())
 }
 
 /// A fresh random secret per launch, shared with the page and nothing else.

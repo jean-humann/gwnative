@@ -66,6 +66,14 @@ fn open(hashes: &str, size: u64, cache_dir: PathBuf) -> ChunkStore {
         .as_bytes(),
     )
     .expect("the synthetic manifest should parse");
-    ChunkStore::open(Client::new("", String::new()), manifest, cache_dir)
-        .expect("the store should open over an empty cache")
+    let cache_lease = crate::cache::prepare(&cache_dir).expect("the cache should lock");
+    crate::cache::finish_maintenance(&cache_lease, &cache_dir)
+        .expect("the cache maintenance should finish");
+    ChunkStore::open(
+        Client::new("", String::new()),
+        manifest,
+        cache_dir,
+        cache_lease,
+    )
+    .expect("the store should open over an empty cache")
 }

@@ -168,8 +168,12 @@ Core invariants:
 - at most 48 network fetches run concurrently;
 - speculative boot, readahead, and full-download work shares a 32-permit subset
   so demand reads always have capacity;
-- up to 2,048 verified chunk descriptors are held open for cheap `pread`; and
-- manifest activation prunes chunks the current image cannot reference.
+- up to 2,048 verified chunk descriptors are held open for cheap `pread`;
+- every live profile holds a shared cache lease, while clear and orphan cleanup
+  require the exclusive maintenance lease; and
+- obsolete content chunks are retained because another profile may still use an
+  older manifest. **Clear game data** is currently the explicit reclamation
+  path; it waits until every live cache lease has been released.
 
 Quick Start records the chunks touched before first frame and replays that list
 on the next launch. A built-in list covers the first launch. Readahead follows

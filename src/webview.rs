@@ -13,12 +13,14 @@
 //! declared by hand — that one carries its argument.
 
 use objc2::rc::Retained;
-use objc2::{MainThreadOnly, msg_send};
+use objc2::{AnyThread, MainThreadOnly, msg_send};
 use objc2_app_kit::NSColor;
-use objc2_foundation::{MainThreadMarker, NSRect, NSString, NSURL, NSURLRequest};
-use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration};
+use objc2_foundation::{MainThreadMarker, NSRect, NSString, NSURL, NSURLRequest, NSUUID};
+use objc2_web_kit::{
+    WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+};
 
-use crate::{layout, release, settings, wasm};
+use crate::{cli, layout, release, settings, wasm};
 
 /// WebKit feature flags this host turns off because each conflicts with a
 /// running game's timing or background-download contract.
@@ -51,6 +53,25 @@ fn env_flag(name: &str) -> bool {
 
 fn env_default_on(name: &str) -> bool {
     !std::env::var(name).is_ok_and(|value| value == "0")
+}
+
+#[derive(Clone, Copy)]
+struct FrameOptions {
+    audit: bool,
+    prefer_60_fps: bool,
+    preserve_drawing_buffer: bool,
+    isolation: bool,
+}
+
+impl FrameOptions {
+    fn from_environment() -> Self {
+        Self {
+            audit: env_flag("GWNATIVE_FRAME_AUDIT"),
+            prefer_60_fps: env_flag("GWNATIVE_PREFER_60_FPS"),
+            preserve_drawing_buffer: env_flag("GWNATIVE_PRESERVE_DRAWING_BUFFER"),
+            isolation: env_default_on("GWNATIVE_FRAME_ISOLATION"),
+        }
+    }
 }
 
 /// Turn off every applicable feature in [`DISABLED_FEATURES`].
@@ -159,10 +180,7 @@ fn preamble(
     token: &str,
     settings: &settings::Settings,
     module: &wasm::Module,
-    frame_audit: bool,
-    prefer_60_fps: bool,
-    preserve_drawing_buffer: bool,
-    frame_isolation: bool,
+    frame: FrameOptions,
 ) -> String {
     let forced_runtime = std::env::var("GWNATIVE_CLIENT_RUNTIME")
         .ok()
@@ -193,56 +211,62 @@ fn preamble(
         // promise nothing could keep.
         serde_json::Value::from(crate::updater::available()),
         serde_json::Value::from(forced_runtime),
-        serde_json::Value::from(frame_audit),
-        serde_json::Value::from(prefer_60_fps),
-        serde_json::Value::from(preserve_drawing_buffer),
-        serde_json::Value::from(frame_isolation),
+        serde_json::Value::from(frame.audit),
+        serde_json::Value::from(frame.prefer_60_fps),
+        serde_json::Value::from(frame.preserve_drawing_buffer),
+        serde_json::Value::from(frame.isolation),
     )
+}
+
+/// The loopback origin and browser-state identity selected for one view.
+pub struct Origin<'a> {
+    pub url: &'a str,
+    pub token: &'a str,
+    pub website_data_store_id: Option<&'a str>,
 }
 
 pub fn make(
     mtm: MainThreadMarker,
     frame: NSRect,
-    url: &str,
-    token: &str,
+    origin: Origin<'_>,
     settings: &settings::Settings,
     module: &wasm::Module,
+    invocation: &cli::Invocation,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
-    let frame_audit = env_flag("GWNATIVE_FRAME_AUDIT");
-    let prefer_60_fps = env_flag("GWNATIVE_PREFER_60_FPS");
-    let preserve_drawing_buffer = env_flag("GWNATIVE_PRESERVE_DRAWING_BUFFER");
-    let frame_isolation = env_default_on("GWNATIVE_FRAME_ISOLATION");
-    if frame_audit {
+    if let Some(identifier) = origin.website_data_store_id {
+        let identifier =
+            NSUUID::initWithUUIDString(NSUUID::alloc(), &NSString::from_str(identifier))
+                .expect("profile descriptors validate WebKit data-store UUIDs");
+        // Named profiles need a browser-state boundary, not only a distinct
+        // origin: HTTP cookies ignore ports. The implicit default profile does
+        // not enter this branch, preserving its existing default data store.
+        let data_store = unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) };
+        unsafe { config.setWebsiteDataStore(&data_store) };
+    }
+    let frame_options = FrameOptions::from_environment();
+    if frame_options.audit {
         note!("[gwnative] detailed frame audit enabled");
     }
-    if prefer_60_fps {
+    if frame_options.prefer_60_fps {
         note!("[gwnative] WebKit's near-60-FPS preference left at its default for comparison");
     }
-    if preserve_drawing_buffer {
+    if frame_options.preserve_drawing_buffer {
         note!("[gwnative] preserving the WebGL drawing buffer for a flash comparison");
     }
-    if frame_isolation {
+    if frame_options.isolation {
         note!("[gwnative] complete-frame presentation enabled");
     }
 
     // See DISABLED_FEATURES: the 60 FPS cap and the hidden-page throttling
     // ladder, both of which Chromium-based rivals never had.
     let preferences = unsafe { config.preferences() };
-    disable_features(&preferences, prefer_60_fps);
+    disable_features(&preferences, frame_options.prefer_60_fps);
 
     unsafe {
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
             WKUserScript::alloc(mtm),
-            &NSString::from_str(&preamble(
-                token,
-                settings,
-                module,
-                frame_audit,
-                prefer_60_fps,
-                preserve_drawing_buffer,
-                frame_isolation,
-            )),
+            &NSString::from_str(&preamble(origin.token, settings, module, frame_options)),
             WKUserScriptInjectionTime::AtDocumentStart,
             true,
         );
@@ -251,6 +275,13 @@ pub fn make(
 
     let webview =
         unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config) };
+
+    if invocation.devtools {
+        // Available below this app's deployment floor. Off by default so a
+        // production page cannot be attached to accidentally; the explicit
+        // launch flag makes Safari's Develop menu able to inspect this view.
+        unsafe { webview.setInspectable(true) };
+    }
 
     // The document itself is black. Match the WKWebView-owned native surface
     // underneath it so an unavailable retained-frame snapshot still degrades
@@ -266,7 +297,7 @@ pub fn make(
         )));
     }
 
-    let nsurl = NSURL::URLWithString(&NSString::from_str(url))
+    let nsurl = NSURL::URLWithString(&NSString::from_str(origin.url))
         .expect("the caller builds this from the loopback address, so it always parses");
     let request = NSURLRequest::requestWithURL(&nsurl);
     unsafe { webview.loadRequest(&request) };

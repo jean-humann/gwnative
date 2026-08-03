@@ -23,6 +23,7 @@ unsafe extern "C" {
 }
 
 const LOCK_EX: i32 = 2;
+const LOCK_SH: i32 = 1;
 const LOCK_NB: i32 = 4;
 
 /// How often a patient acquire looks again.
@@ -37,6 +38,21 @@ const POLL: Duration = Duration::from_millis(20);
 /// A held lock. Dropping it — or exiting, or crashing — releases it.
 pub struct Instance(#[allow(dead_code)] File);
 
+impl Instance {
+    /// Keep holding the same file, but allow other shared users alongside it.
+    pub fn downgrade_in_place(&self) -> Result<(), String> {
+        // SAFETY: `self.0` owns the descriptor for the whole call.
+        if unsafe { flock(self.0.as_raw_fd(), LOCK_SH) } == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "cannot downgrade the cache lock: {}",
+                std::io::Error::last_os_error()
+            ))
+        }
+    }
+}
+
 /// Take the lock, or report who already has it.
 ///
 /// `patience` is how long to keep trying. Zero for a launch, where a lock that
@@ -48,6 +64,20 @@ pub struct Instance(#[allow(dead_code)] File);
 /// itself, so it is a hint and not a fact: a lock held by a process that never
 /// managed to write is reported as unknown rather than as nobody.
 pub fn acquire(path: &Path, patience: Duration) -> Result<Instance, String> {
+    acquire_with(path, patience, LOCK_EX, true)
+}
+
+/// Share a lock with other readers, while excluding destructive maintenance.
+pub fn acquire_shared(path: &Path, patience: Duration) -> Result<Instance, String> {
+    acquire_with(path, patience, LOCK_SH, false)
+}
+
+fn acquire_with(
+    path: &Path,
+    patience: Duration,
+    operation: i32,
+    record_holder: bool,
+) -> Result<Instance, String> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -61,7 +91,7 @@ pub fn acquire(path: &Path, patience: Duration) -> Result<Instance, String> {
 
     let deadline = Instant::now() + patience;
     // SAFETY: `file` owns the descriptor for the whole call.
-    while unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+    while unsafe { flock(file.as_raw_fd(), operation | LOCK_NB) } != 0 {
         if Instant::now() >= deadline {
             let holder = std::fs::read_to_string(path)
                 .ok()
@@ -77,9 +107,11 @@ pub fn acquire(path: &Path, patience: Duration) -> Result<Instance, String> {
     // Written after the lock is held, so what is in the file is always the pid
     // of whoever holds it. Failing to write costs the next instance a nicer
     // message and nothing else.
-    let _ = file.set_len(0);
-    let _ = write!(file, "{}", std::process::id());
-    let _ = file.flush();
+    if record_holder {
+        let _ = file.set_len(0);
+        let _ = write!(file, "{}", std::process::id());
+        let _ = file.flush();
+    }
     Ok(Instance(file))
 }
 
@@ -156,6 +188,36 @@ mod tests {
 
         letting_go.join().unwrap();
         drop(successor);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_users_coexist_and_exclude_maintenance() {
+        let dir = std::env::temp_dir().join(format!(
+            "gwnative-shared-lock-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("chunks.lock");
+
+        let first = acquire_shared(&path, Duration::ZERO).expect("first shared user");
+        let second = acquire_shared(&path, Duration::ZERO).expect("second shared user");
+        assert!(
+            acquire(&path, Duration::ZERO).is_err(),
+            "maintenance must wait until every shared user has left"
+        );
+        drop(first);
+        assert!(acquire(&path, Duration::ZERO).is_err());
+        drop(second);
+
+        let maintenance = acquire(&path, Duration::ZERO).expect("exclusive after readers");
+        maintenance
+            .downgrade_in_place()
+            .expect("exclusive becomes shared");
+        let peer = acquire_shared(&path, Duration::ZERO).expect("shared after downgrade");
+        drop(maintenance);
+        drop(peer);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -43,9 +43,11 @@ Start** changes the saved mode.
 
 ## Settings
 
-Open Settings with **⌘,**. The host owns
-`~/Library/Application Support/gwnative/settings.json`; the page never writes
-that file directly.
+Open Settings with **⌘,**. The host owns the default profile's
+`~/Library/Application Support/gwnative/settings.json` and each named profile's
+`profiles/<id>/settings.json`; the page never writes those files directly.
+Application-update intent and cadence are shared by every profile in the base
+`updates.json` file.
 
 | Setting | Default | Takes effect | Notes |
 | --- | --- | --- | --- |
@@ -58,11 +60,11 @@ that file directly.
 | Game cursor | Follow the mouse | After relaunch | Draws the game's cursor art as the native pointer |
 | Target distance | Hidden | After relaunch | Shows the target distance and range band |
 
-Settings files include a format version plus two internal values: the last
-successful update-check time and the runtime-compatibility hash for a recorded
-state. An unreadable file is preserved as
-`settings.json.corrupt-<timestamp>` before defaults are restored; the three most
-recent backups are kept.
+Each profile settings file includes a format version and the
+runtime-compatibility hash for a recorded state. The global update file includes
+its own format version and the last successful update-check time. An unreadable
+file is preserved with a `.corrupt-<timestamp>` suffix before defaults are
+restored; the three most recent backups for that file are kept.
 
 ## Input and window behaviour
 
@@ -122,6 +124,8 @@ Stable builds are offered stable releases only. Recognised prerelease tags are
 The host's ordinary filesystem state lives below
 `~/Library/Application Support/gwnative`. The saved login lives separately in
 the macOS login Keychain, and WebKit page data uses the roots described below.
+Named profiles isolate mutable state, credentials, and WebKit origins while
+sharing immutable game chunks; see [Profiles](profiles.md) for the exact map.
 
 | Path | Contents |
 | --- | --- |
@@ -132,13 +136,17 @@ the macOS login Keychain, and WebKit page data uses the roots described below.
 | `diagnostics/` | Rotating JSONL logs and generated problem reports |
 | `manifest.cache` | Cached patch manifest, service URL, and validator |
 | `manifest.pending.cache` | Verified newer manifest awaiting client promotion |
-| `settings.json` | User settings and update preferences |
+| `settings.json` | Default-profile game and host settings |
+| `updates.json` | Application-wide update preferences and last-check time |
+| `profiles/<id>/` | Named-profile settings, client, diagnostics, generation, and window state |
 | `window.json` | Window frame and mode |
 | `generations/` | Installed-client hashes, proof state, rollback copy, and refusals |
 | `gwnative.lock` | Single-instance lock |
+| `profiles.lock`, `updates.lock`, `chunks.lock` | Cross-process catalog, updater-state, and shared-cache locks |
 
 `chunks.clear` appears temporarily when clearing the chunk cache has been
-scheduled for the next launch.
+scheduled. It remains pending while any profile is using the shared cache and
+is consumed by the next launch that can obtain exclusive maintenance access.
 
 The packaged application stores WebKit page data under
 `~/Library/WebKit/com.gwnative.app`. A development `cargo run` build uses

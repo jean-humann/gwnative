@@ -30,8 +30,8 @@ use std::cmp::Reverse;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -109,10 +109,10 @@ pub struct Settings {
     /// has nothing to install with, and the settings panel does not offer the
     /// switch on a build that cannot honour it.
     ///
-    /// This field and the one above are the profile's copy of two preferences
-    /// the updater keeps in the application's user defaults, which is where the
-    /// real answer lives. [`crate::updater`] documents which way the copy runs
-    /// and why there are two.
+    /// This field and the one above are app-global. A selected profile sees them
+    /// through [`ScopedStore`], but they live in the global `updates.json`
+    /// because Sparkle's preferences and the application update itself are also
+    /// app-global. [`crate::updater`] documents which way the copy runs.
     pub auto_install_updates: bool,
     /// When the last check — automatic or from the menu — got an answer, in
     /// seconds since the epoch. What makes an opted-in launch ask once a day
@@ -198,7 +198,7 @@ struct Wire {
 /// host's record of a request the host made — a page that could write it could
 /// suppress the daily check indefinitely by claiming one had just happened. Both
 /// are still *read* from the file, because a launch has to be able to load what
-/// the previous one wrote; see [`Store::remember_update_check`] for the one way
+/// the previous one wrote; see [`ScopedStore::remember_update_check`] for the one way
 /// the second is set.
 ///
 /// `compatibilityNoticeSeenFor` is here rather than beside them because the page
@@ -368,56 +368,300 @@ impl Store {
         }
         Ok(next)
     }
+}
 
-    /// Record that a check for updates got an answer, at `at`.
-    ///
-    /// Not a patch, because [`PATCHABLE`] deliberately does not contain this
-    /// field: the page must not be able to claim a check happened. Every caller
-    /// is a worker thread that has just finished one, and none of them has
-    /// anything to do about a failed write — the cost of losing it is one extra
-    /// request at the next launch — so this answers nothing and says so in the
-    /// log instead.
-    pub fn remember_update_check(&self, at: u64) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateSettings {
+    format_version: u32,
+    auto_check_updates: bool,
+    auto_install_updates: bool,
+    last_update_check_at: Option<u64>,
+}
+
+impl UpdateSettings {
+    fn from_legacy(settings: &Settings) -> Self {
+        Self {
+            format_version: FORMAT,
+            auto_check_updates: settings.auto_check_updates,
+            auto_install_updates: settings.auto_install_updates,
+            last_update_check_at: settings.last_update_check_at,
+        }
+    }
+}
+
+/// The application-wide updater state, deliberately separate from every full
+/// profile settings file. Concurrent profiles may both update this one small
+/// record, but neither can write a stale copy of the default profile's render or
+/// input settings over a newer choice.
+pub struct UpdateStore {
+    path: PathBuf,
+    current: Mutex<UpdateSettings>,
+}
+
+const UPDATE_LOCK_PATIENCE: Duration = Duration::from_secs(5);
+
+impl UpdateStore {
+    pub fn open(path: PathBuf, legacy: &Settings) -> Self {
+        let fallback = UpdateSettings::from_legacy(legacy);
+        let store = Self {
+            path,
+            current: Mutex::new(fallback),
+        };
+        store.initialize();
+        store
+    }
+
+    #[cfg(test)]
+    fn memory(legacy: &Settings) -> Self {
+        Self {
+            path: PathBuf::new(),
+            current: Mutex::new(UpdateSettings::from_legacy(legacy)),
+        }
+    }
+
+    fn acquire_lock(&self) -> Result<Option<crate::instance::Instance>, String> {
+        if self.path.as_os_str().is_empty() {
+            return Ok(None);
+        }
+        crate::instance::acquire(&self.path.with_extension("lock"), UPDATE_LOCK_PATIENCE)
+            .map(Some)
+            .map_err(|error| format!("could not lock application update settings: {error}"))
+    }
+
+    fn initialize(&self) {
+        let Ok(_lock) = self.acquire_lock() else {
+            note!("[settings] application update preferences could not be locked");
+            return;
+        };
         let mut current = self.current.lock().unwrap();
+        match load_updates(&self.path) {
+            Ok(Some(on_disk)) => *current = on_disk,
+            Ok(None) => {
+                if let Err(error) = save_updates(&self.path, &current) {
+                    note!("[settings] app update preferences could not be migrated: {error}");
+                }
+            }
+            Err(reason) => {
+                match set_aside(&self.path) {
+                    Some(backup) => note!(
+                        "[settings] {} is unreadable ({reason}); kept as {}",
+                        self.path.display(),
+                        backup.display()
+                    ),
+                    None => note!("[settings] {} is unreadable: {reason}", self.path.display()),
+                }
+                if let Err(error) = save_updates(&self.path, &current) {
+                    note!("[settings] app update preferences could not be restored: {error}");
+                }
+            }
+        }
+    }
+
+    fn get(&self) -> UpdateSettings {
+        let Ok(_lock) = self.acquire_lock() else {
+            note!("[settings] application update preferences could not be refreshed");
+            return *self.current.lock().unwrap();
+        };
+        let mut current = self.current.lock().unwrap();
+        match load_updates(&self.path) {
+            Ok(Some(on_disk)) => *current = on_disk,
+            Ok(None) if self.path.as_os_str().is_empty() => {}
+            Ok(None) => note!("[settings] application update preferences disappeared"),
+            Err(error) => {
+                note!("[settings] application update preferences are unreadable: {error}")
+            }
+        }
+        *current
+    }
+
+    fn update_preferences(
+        &self,
+        decide: impl FnOnce((bool, bool)) -> (bool, bool),
+    ) -> Result<(bool, bool), String> {
+        let _lock = self.acquire_lock()?;
+        let mut current = self.current.lock().unwrap();
+        if let Some(on_disk) = load_updates(&self.path)? {
+            *current = on_disk;
+        }
+        let (check, install) = decide((current.auto_check_updates, current.auto_install_updates));
+        let next = UpdateSettings {
+            auto_check_updates: check,
+            auto_install_updates: install,
+            ..*current
+        };
+        if next == *current {
+            return Ok((check, install));
+        }
+        save_updates(&self.path, &next)
+            .map_err(|error| format!("could not save update preferences: {error}"))?;
+        *current = next;
+        Ok((check, install))
+    }
+
+    fn apply_preferences(&self, check: Option<bool>, install: Option<bool>) -> Result<(), String> {
+        self.update_preferences(|current| {
+            (check.unwrap_or(current.0), install.unwrap_or(current.1))
+        })
+        .map(|_| ())
+    }
+
+    fn remember_check(&self, at: u64) {
+        let _lock = match self.acquire_lock() {
+            Ok(lock) => lock,
+            Err(error) => {
+                note!("[settings] the update-check time was not saved: {error}");
+                return;
+            }
+        };
+        let mut current = self.current.lock().unwrap();
+        match load_updates(&self.path) {
+            Ok(Some(on_disk)) => *current = on_disk,
+            Ok(None) => {}
+            Err(error) => {
+                note!("[settings] the update-check time was not saved: {error}");
+                return;
+            }
+        }
         if current.last_update_check_at == Some(at) {
             return;
         }
-        let next = Settings {
+        let next = UpdateSettings {
             last_update_check_at: Some(at),
-            ..current.clone()
+            ..*current
         };
-        match save(&self.path, &next) {
+        match save_updates(&self.path, &next) {
             Ok(()) => *current = next,
-            Err(e) => note!("[settings] the update-check time was not saved: {e}"),
+            Err(error) => note!("[settings] the update-check time was not saved: {error}"),
         }
+    }
+}
+
+/// A profile's settings with the application-wide update preferences overlaid.
+///
+/// Rendering, input, diagnostics and enhancements belong to the selected
+/// profile. Application updates do not: Sparkle persists its switches in the
+/// bundle's standard user defaults, shared by every process and profile. The
+/// small update-settings file is therefore the durable app-global owner of those
+/// switches and the last-check timestamp. Keeping that split here prevents each
+/// caller from inventing a subtly different merge.
+pub struct ScopedStore {
+    profile: Arc<Store>,
+    updates: Arc<UpdateStore>,
+}
+
+impl ScopedStore {
+    pub fn new(profile: Arc<Store>, updates: Arc<UpdateStore>) -> Self {
+        Self { profile, updates }
     }
 
-    /// Copy the updater's two switches into the profile.
-    ///
-    /// Not a patch either, and for the opposite reason to the one above: these
-    /// two *are* patchable, because the settings panel is where they are moved.
-    /// This is the other direction — the launch discovering what the updater
-    /// already thinks, so that the panel shows the answer Sparkle will act on
-    /// rather than the one this file happened to be left with. See
-    /// [`crate::updater`] for why the updater is the one holding the truth.
-    ///
-    /// Silent when they already agree, which is every launch but the ones where
-    /// something changed them from outside the panel.
-    pub fn remember_update_preferences(&self, check: bool, install: bool) {
-        let mut current = self.current.lock().unwrap();
-        if current.auto_check_updates == check && current.auto_install_updates == install {
-            return;
-        }
-        let next = Settings {
-            auto_check_updates: check,
-            auto_install_updates: install,
-            ..current.clone()
-        };
-        match save(&self.path, &next) {
-            Ok(()) => *current = next,
-            Err(e) => note!("[settings] the update preferences were not saved: {e}"),
-        }
+    /// A single-file scope, used by the default profile and unit tests.
+    #[cfg(test)]
+    pub fn single(store: Store) -> Self {
+        let updates = Arc::new(UpdateStore::memory(&store.get()));
+        let store = Arc::new(store);
+        Self::new(store, updates)
     }
+
+    pub fn get(&self) -> Settings {
+        let mut profile = self.profile.get();
+        let updates = self.updates.get();
+        profile.auto_check_updates = updates.auto_check_updates;
+        profile.auto_install_updates = updates.auto_install_updates;
+        profile.last_update_check_at = updates.last_update_check_at;
+        profile
+    }
+
+    /// Apply profile-owned fields to the profile and update-owned fields to the
+    /// global store. Validate the combined patch first so a bad field cannot
+    /// produce a partial write.
+    pub fn apply(&self, raw: &serde_json::Value) -> Result<Settings, String> {
+        let _validated = patch(self.get(), raw)?;
+        let object = raw
+            .as_object()
+            .expect("settings::patch accepted only an object");
+        let mut profile_patch = serde_json::Map::new();
+        let mut update_patch = serde_json::Map::new();
+        for (name, value) in object {
+            if matches!(name.as_str(), "autoCheckUpdates" | "autoInstallUpdates") {
+                update_patch.insert(name.clone(), value.clone());
+            } else {
+                profile_patch.insert(name.clone(), value.clone());
+            }
+        }
+        if !update_patch.is_empty() {
+            self.updates.apply_preferences(
+                update_patch
+                    .contains_key("autoCheckUpdates")
+                    .then_some(_validated.auto_check_updates),
+                update_patch
+                    .contains_key("autoInstallUpdates")
+                    .then_some(_validated.auto_install_updates),
+            )?;
+        }
+        if !profile_patch.is_empty() {
+            self.profile
+                .apply(&serde_json::Value::Object(profile_patch))?;
+        }
+        Ok(self.get())
+    }
+
+    pub fn remember_update_check(&self, at: u64) {
+        self.updates.remember_check(at);
+    }
+
+    /// Settle the application-wide updater switches while holding their
+    /// cross-process lock.
+    ///
+    /// The closure runs synchronously under the lock, so callers may reconcile
+    /// Sparkle's shared `NSUserDefaults` and return the exact values that must
+    /// be mirrored to `updates.json` without another profile interleaving a
+    /// stale read or write. Callers must never carry this lock across an async
+    /// dispatch; dispatch first, then enter here on the destination thread.
+    pub fn reconcile_update_preferences(
+        &self,
+        decide: impl FnOnce((bool, bool)) -> (bool, bool),
+    ) -> Result<(bool, bool), String> {
+        self.updates.update_preferences(decide)
+    }
+}
+
+fn load_updates(path: &Path) -> Result<Option<UpdateSettings>, String> {
+    let body = match fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let updates: UpdateSettings =
+        serde_json::from_slice(&body).map_err(|error| error.to_string())?;
+    if updates.format_version != FORMAT {
+        return Err(format!(
+            "update settings formatVersion {} is not readable",
+            updates.format_version
+        ));
+    }
+    Ok(Some(updates))
+}
+
+fn save_updates(path: &Path, updates: &UpdateSettings) -> std::io::Result<()> {
+    if path.as_os_str().is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_vec_pretty(updates)?;
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(&body)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Seconds since the epoch, or 0 on a clock that will not answer.
@@ -656,23 +900,31 @@ mod tests {
     #[test]
     fn what_the_updater_decided_is_what_the_panel_reads_back() {
         let (_dir, path) = scratch("update-preferences");
-        let store = Store::open(path.clone());
-        assert!(!store.get().auto_check_updates);
-        assert!(!store.get().auto_install_updates);
+        let first = UpdateStore::open(path.clone(), &Settings::default());
+        let second = UpdateStore::open(path, &Settings::default());
+        assert!(!first.get().auto_check_updates);
+        assert!(!first.get().auto_install_updates);
 
-        store.remember_update_preferences(true, true);
-        assert!(store.get().auto_check_updates);
-        assert!(store.get().auto_install_updates);
-        assert_eq!(Store::open(path.clone()).get(), store.get());
+        first.apply_preferences(Some(true), Some(false)).unwrap();
+        assert!(second.get().auto_check_updates);
+        assert!(!second.get().auto_install_updates);
 
-        // Two fields, not a reset: a launch that finds the updater disagreeing
-        // must not take the rest of the profile with it.
-        store.apply(&json!({"renderScale": 1})).unwrap();
-        store.remember_update_preferences(false, false);
-        let after = Store::open(path).get();
-        assert_eq!(after.render_scale, 1.0);
-        assert!(!after.auto_check_updates);
-        assert!(!after.auto_install_updates);
+        // Separate process-style stores reload under the cross-process lock;
+        // the decision closure sees the latest pair and keeps both the external
+        // reconciliation and JSON mirror in the same transaction.
+        second
+            .update_preferences(|current| {
+                assert_eq!(current, (true, false));
+                (current.0, true)
+            })
+            .unwrap();
+        assert!(first.get().auto_check_updates);
+        assert!(first.get().auto_install_updates);
+        first.apply_preferences(Some(false), None).unwrap();
+        assert!(!first.get().auto_check_updates);
+        assert!(first.get().auto_install_updates);
+        assert!(!second.get().auto_check_updates);
+        assert!(second.get().auto_install_updates);
     }
 
     /// The two host-owned fields. A page that could write either could tell
@@ -762,13 +1014,15 @@ mod tests {
     #[test]
     fn the_time_of_a_check_survives_the_launch_that_made_it() {
         let (_dir, path) = scratch("update-check");
-        let store = Store::open(path.clone());
+        let store = UpdateStore::open(path.clone(), &Settings::default());
         assert_eq!(store.get().last_update_check_at, None);
 
-        store.remember_update_check(1_700_000_000);
+        store.remember_check(1_700_000_000);
         assert_eq!(store.get().last_update_check_at, Some(1_700_000_000));
         assert_eq!(
-            Store::open(path).get().last_update_check_at,
+            UpdateStore::open(path, &Settings::default())
+                .get()
+                .last_update_check_at,
             Some(1_700_000_000)
         );
     }
@@ -784,6 +1038,53 @@ mod tests {
             .unwrap();
         assert_eq!(saved.data_strategy, Some(DataStrategy::Full));
         assert_eq!(Store::open(path).get(), saved);
+    }
+
+    #[test]
+    fn scoped_profiles_share_only_application_update_preferences() {
+        let (_profile_dir, profile_path) = scratch("scoped-profile");
+        let (_other_dir, other_path) = scratch("scoped-other");
+        let (_updates_dir, updates_path) = scratch("scoped-updates");
+        let updates = Arc::new(UpdateStore::open(updates_path, &Settings::default()));
+        let first = ScopedStore::new(Arc::new(Store::open(profile_path)), Arc::clone(&updates));
+        first
+            .apply(&json!({"renderScale": 1, "autoCheckUpdates": true}))
+            .unwrap();
+
+        let second = ScopedStore::new(Arc::new(Store::open(other_path)), updates);
+        assert_eq!(first.get().render_scale, 1.0);
+        assert_eq!(second.get().render_scale, 2.0);
+        assert!(first.get().auto_check_updates);
+        assert!(second.get().auto_check_updates);
+
+        second.remember_update_check(1_700_000_000);
+        assert_eq!(
+            first.get().last_update_check_at,
+            Some(1_700_000_000),
+            "application update cadence is shared"
+        );
+    }
+
+    #[test]
+    fn default_profile_settings_and_global_updates_survive_separately() {
+        let (_profile_dir, profile_path) = scratch("scoped-default");
+        let (_updates_dir, updates_path) = scratch("scoped-default-updates");
+        let updates = Arc::new(UpdateStore::open(
+            updates_path.clone(),
+            &Settings::default(),
+        ));
+        let scoped = ScopedStore::new(Arc::new(Store::open(profile_path.clone())), updates);
+        let saved = scoped
+            .apply(&json!({"renderScale": 1.5, "autoInstallUpdates": true}))
+            .unwrap();
+        assert_eq!(Store::open(profile_path).get().render_scale, 1.5);
+        assert!(
+            load_updates(&updates_path)
+                .unwrap()
+                .unwrap()
+                .auto_install_updates
+        );
+        assert_eq!(scoped.get(), saved);
     }
 
     #[test]

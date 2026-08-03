@@ -71,7 +71,7 @@ pub(super) fn serve(
             no_content(stream)?;
         }
         "__dns" => dns(request, stream)?,
-        "__credentials" => credentials(request, stream)?,
+        "__credentials" => credentials(request, stream, context)?,
         "__settings" => settings(request, stream, context)?,
         "__runtime" if request.method == "POST" => runtime_attempt(request, stream, context)?,
         "__transform-failed" if request.method == "POST" => {
@@ -203,9 +203,13 @@ fn dns(request: &Request, stream: &mut TcpStream) -> std::io::Result<()> {
 
 /// Saved login, gated with every other `__` route — which is what makes the
 /// keychain's own access control mean anything on a host-wide port.
-fn credentials(request: &Request, stream: &mut TcpStream) -> std::io::Result<()> {
+fn credentials(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+) -> std::io::Result<()> {
     match request.method.as_str() {
-        "GET" => match keychain::load() {
+        "GET" => match keychain::load(&context.credential_account) {
             Some(credentials) => {
                 let body = serde_json::to_vec(&credentials).unwrap_or_default();
                 note!("[credentials] read from the keychain");
@@ -221,7 +225,9 @@ fn credentials(request: &Request, stream: &mut TcpStream) -> std::io::Result<()>
         "PUT" => {
             let stored = serde_json::from_slice(&request.body)
                 .map_err(|e| e.to_string())
-                .and_then(|c: keychain::Credentials| keychain::store(&c));
+                .and_then(|c: keychain::Credentials| {
+                    keychain::store(&context.credential_account, &c)
+                });
             match stored {
                 Ok(()) => {
                     note!("[credentials] saved to the keychain");
@@ -233,7 +239,7 @@ fn credentials(request: &Request, stream: &mut TcpStream) -> std::io::Result<()>
                 }
             }
         }
-        "DELETE" => match keychain::clear() {
+        "DELETE" => match keychain::clear(&context.credential_account) {
             Ok(()) => {
                 note!("[credentials] cleared");
                 no_content(stream)
@@ -270,6 +276,7 @@ fn settings(request: &Request, stream: &mut TcpStream, context: &Context) -> std
                     // happen on the main thread anyway, where the properties
                     // can be read. A build with no updater drops it.
                     crate::updater::follow(
+                        Arc::clone(&context.settings),
                         settings.auto_check_updates,
                         settings.auto_install_updates,
                     );

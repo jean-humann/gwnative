@@ -12,12 +12,13 @@
 //! debris, a boot list that reads as absent unless it is entirely intact, and
 //! a migration that refuses rather than merges.
 
-use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::time::Duration;
 
 /// Distinguishes the temp files of one process from each other; the pid
 /// distinguishes them from another instance's.
@@ -154,69 +155,6 @@ pub fn sweep_orphans(cache_dir: &Path) {
     }
 }
 
-/// Drop every cached chunk the live manifest can no longer name.
-///
-/// The cache is content-addressed, which is what makes deduplication free and
-/// what makes this necessary: when ArenaNet patches, the chunks whose contents
-/// changed get new hashes and the old files are never asked for again. Nothing
-/// overwrites them, because nothing writes to those names any more. Before this
-/// the cache was a union of every snapshot the machine had ever seen — a second
-/// 4.2 GB after the first patch, and another after the next.
-///
-/// Safe against a fetch happening right now, because the set to keep comes from
-/// the manifest rather than from a listing: a chunk being written this instant
-/// is one this manifest named, so it is in `live` whether or not it is yet on
-/// disk. Anything that is not a chunk file — the boot list at the top level, a
-/// `.tmp` a live writer still owns — fails the name test and is left alone.
-///
-/// Runs at Utility QoS behind the orphan sweep, so it yields to the boot it is
-/// sharing a disk with.
-pub fn prune(cache_dir: &Path, live: &HashSet<String>) {
-    // A manifest with no chunks in it is a manifest that failed to parse into
-    // anything useful, and treating it as authority would empty the cache.
-    if live.is_empty() {
-        return;
-    }
-    let Ok(buckets) = fs::read_dir(cache_dir) else {
-        return;
-    };
-    let (mut removed, mut bytes) = (0usize, 0u64);
-    for bucket in buckets.flatten() {
-        let Ok(entries) = fs::read_dir(bucket.path()) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            // Only ever a name this cache could have written itself: the hex
-            // form of a hash, and nothing else in the directory.
-            if !is_chunk_name(name) || live.contains(name) {
-                continue;
-            }
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            if fs::remove_file(entry.path()).is_ok() {
-                removed += 1;
-                bytes += size;
-            }
-        }
-    }
-    if removed > 0 {
-        note!(
-            "[gwnative] dropped {removed} chunks ({:.2} GB) the current build no longer uses",
-            bytes as f64 / 1e9
-        );
-    }
-}
-
-/// Whether `name` is one this cache writes: lowercase hex, and as long as one
-/// of the digests [`ContentHash`] produces.
-fn is_chunk_name(name: &str) -> bool {
-    matches!(name.len(), 40 | 64)
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 /// `~/Library/Application Support/gwnative/chunks`.
 ///
 /// Not `~/Library/Caches`, where this used to live. That directory is the
@@ -226,15 +164,17 @@ fn is_chunk_name(name: &str) -> bool {
 /// data over a metered connection. The name says cache, but the durability
 /// required is that of user data.
 ///
-/// The old location is moved rather than abandoned, so nobody re-downloads what
-/// they already have.
+/// The old location is migrated by [`prepare`] after instance exclusion and
+/// while the cache maintenance lock is exclusive. Merely computing this path
+/// must not move files underneath an already-running process.
 pub fn default_cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
-    let home = Path::new(&home);
-    let current = home.join("Library/Application Support/gwnative/chunks");
-    let legacy = home.join("Library/Caches/gwnative/chunks");
-    migrate_cache(&legacy, &current);
-    current
+    Path::new(&home).join("Library/Application Support/gwnative/chunks")
+}
+
+fn legacy_cache_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+    Path::new(&home).join("Library/Caches/gwnative/chunks")
 }
 
 /// Move a pre-existing cache to its durable home, once.
@@ -289,7 +229,154 @@ fn migrate_cache(legacy: &Path, current: &Path) {
 /// It lives beside the directory rather than inside it, because inside it would
 /// be deleted by the very sweep it asks for.
 fn clear_marker(cache_dir: &Path) -> PathBuf {
-    cache_dir.with_extension("clear")
+    sidecar_path(cache_dir, ".clear")
+}
+
+fn lock_path(cache_dir: &Path) -> PathBuf {
+    sidecar_path(cache_dir, ".lock")
+}
+
+fn sidecar_path(cache_dir: &Path, suffix: &str) -> PathBuf {
+    let mut name = cache_dir.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    cache_dir.with_file_name(name)
+}
+
+const SHARED: u8 = 0;
+const EXCLUSIVE_READY: u8 = 1;
+const EXCLUSIVE_ACTIVE: u8 = 2;
+
+struct LeaseInner {
+    lock: crate::instance::Instance,
+    state: AtomicU8,
+}
+
+/// A process's claim on the shared chunk cache and manifest-activation boundary.
+///
+/// Every profile takes this before it can promote a manifest. Shared leases let
+/// profiles play together; an exclusive lease is offered to the first process
+/// so it can clear or maintain the cache before admitting peers. Clones hold
+/// the same kernel lock, including across background cache work.
+#[derive(Clone)]
+pub struct Lease(Arc<LeaseInner>);
+
+/// Exclusive ownership temporarily handed to cache maintenance.
+///
+/// Dropping this guard downgrades to the shared lease retained by the store, so
+/// a panic cannot leave peer profiles blocked for the rest of the process.
+pub struct Maintenance {
+    lease: Lease,
+    shared: bool,
+}
+
+impl Lease {
+    /// Claim the one maintenance opportunity attached to an exclusive launch.
+    /// A profile that joined an existing shared user receives `None` and must
+    /// defer destructive work.
+    pub fn maintenance(&self) -> Option<Maintenance> {
+        self.0
+            .state
+            .compare_exchange(
+                EXCLUSIVE_READY,
+                EXCLUSIVE_ACTIVE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+            .then(|| Maintenance {
+                lease: self.clone(),
+                shared: false,
+            })
+    }
+}
+
+impl Maintenance {
+    /// Admit peer profiles after exclusive work is complete.
+    pub fn finish(mut self) -> std::io::Result<()> {
+        self.share()
+    }
+
+    fn share(&mut self) -> std::io::Result<()> {
+        self.lease
+            .0
+            .lock
+            .downgrade_in_place()
+            .map_err(std::io::Error::other)?;
+        self.lease.0.state.store(SHARED, Ordering::Release);
+        self.shared = true;
+        Ok(())
+    }
+}
+
+impl Drop for Maintenance {
+    fn drop(&mut self) {
+        if !self.shared
+            && let Err(reason) = self.share()
+        {
+            note!("[chunks] could not admit another profile after cache maintenance: {reason}");
+        }
+    }
+}
+
+/// Finish the lone launch's safe maintenance window before network or client
+/// installation work begins, then admit peer profiles for the rest of launch.
+pub fn finish_maintenance(lease: &Lease, cache_dir: &Path) -> std::io::Result<bool> {
+    let Some(maintenance) = lease.maintenance() else {
+        return Ok(false);
+    };
+    sweep_orphans(cache_dir);
+    maintenance.finish()?;
+    Ok(true)
+}
+
+/// Lock the cache before any active manifest can change.
+///
+/// With no peer, the caller keeps an exclusive maintenance opportunity. With
+/// a live peer, it joins as a shared reader and must skip destructive work. A
+/// pending clear is consumed only under exclusivity, never under another
+/// profile's open descriptors or writes.
+pub fn prepare(cache_dir: &Path) -> std::io::Result<Lease> {
+    let current = default_cache_dir();
+    let legacy = (cache_dir == current).then(legacy_cache_dir);
+    prepare_with_legacy(cache_dir, legacy.as_deref())
+}
+
+fn prepare_with_legacy(cache_dir: &Path, legacy: Option<&Path>) -> std::io::Result<Lease> {
+    let lock = lock_path(cache_dir);
+    match crate::instance::acquire(&lock, Duration::ZERO) {
+        Ok(exclusive) => {
+            // `Layout::new` is deliberately path-only. This is the first point
+            // after profile instance exclusion where destructive shared-cache
+            // work is safe, and the exclusive lock keeps new profile-aware
+            // processes out until the rename and clear are complete.
+            if let Some(legacy) = legacy {
+                migrate_cache(legacy, cache_dir);
+            }
+            if clear_marker(cache_dir).exists() {
+                take_clear_request(cache_dir);
+            }
+            Ok(Lease(Arc::new(LeaseInner {
+                lock: exclusive,
+                state: AtomicU8::new(EXCLUSIVE_READY),
+            })))
+        }
+        Err(_) => {
+            if clear_marker(cache_dir).exists() {
+                note!(
+                    "[chunks] cache clear deferred while another profile is using {}",
+                    cache_dir.display()
+                );
+            }
+            crate::instance::acquire_shared(&lock, Duration::from_secs(30))
+                .map(|shared| {
+                    Lease(Arc::new(LeaseInner {
+                        lock: shared,
+                        state: AtomicU8::new(SHARED),
+                    }))
+                })
+                .map_err(std::io::Error::other)
+        }
+    }
 }
 
 /// Ask the next launch to start from an empty cache.
@@ -395,54 +482,67 @@ mod tests {
     }
 
     #[test]
-    fn a_patch_takes_the_chunks_it_replaced_with_it() {
-        let temp = TempDir::new("prune");
+    fn a_clear_waits_until_every_profile_releases_the_shared_cache() {
+        let temp = TempDir::new("clear-shared");
         let cache = temp.0.join("chunks");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("kept-while-live"), b"data").unwrap();
 
-        // Two chunks the new manifest still names, one it does not, and three
-        // things that live in the cache but are not chunks.
-        let kept = "11".to_owned() + &"a".repeat(62);
-        let also_kept = "22".to_owned() + &"b".repeat(62);
-        let stale = "33".to_owned() + &"c".repeat(62);
-        // A short digest, to prove the length test admits both forms.
-        let short_kept = "44".to_owned() + &"d".repeat(38);
+        let first = prepare(&cache).expect("first profile opens the cache");
+        first
+            .maintenance()
+            .expect("the first profile starts exclusive")
+            .finish()
+            .unwrap();
+        request_clear(&cache).unwrap();
+        let second = prepare(&cache).expect("a second profile may share the cache");
 
-        for name in [&kept, &also_kept, &stale, &short_kept] {
-            let bucket = cache.join(&name[..2]);
-            fs::create_dir_all(&bucket).unwrap();
-            fs::write(bucket.join(name), vec![0u8; 1000]).unwrap();
-        }
-        // A write in flight, and something with a name this cache never writes.
-        let bucket = cache.join("33");
-        fs::write(bucket.join("in-flight.9999.tmp"), b"half a chunk").unwrap();
-        fs::write(bucket.join("notes.txt"), b"by hand").unwrap();
-        // The boot list, which lives at the top level and describes this cache.
-        fs::write(cache.join(BOOT_LIST), b"[1,2,3]").unwrap();
-
-        let live: HashSet<String> = [kept.clone(), also_kept.clone(), short_kept.clone()].into();
-        prune(&cache, &live);
-
-        assert!(cache.join(&kept[..2]).join(&kept).exists(), "still named");
-        assert!(cache.join(&also_kept[..2]).join(&also_kept).exists());
-        assert!(cache.join(&short_kept[..2]).join(&short_kept).exists());
+        assert!(cache.exists(), "an active profile keeps the cache intact");
+        assert!(clear_marker(&cache).exists(), "the request remains pending");
         assert!(
-            !cache.join(&stale[..2]).join(&stale).exists(),
-            "a chunk no manifest names is dead weight"
-        );
-        assert!(
-            bucket.join("in-flight.9999.tmp").exists(),
-            "a live writer's file is not a chunk and is not touched"
-        );
-        assert!(bucket.join("notes.txt").exists());
-        assert!(
-            cache.join(BOOT_LIST).exists(),
-            "the boot list is not a chunk"
+            second.maintenance().is_none(),
+            "a shared profile must not receive destructive ownership"
         );
 
-        // And a manifest that named nothing is a manifest to disbelieve, not an
-        // instruction to empty the cache.
-        prune(&cache, &HashSet::new());
-        assert!(cache.join(&kept[..2]).join(&kept).exists());
+        drop(first);
+        drop(second);
+        let after = prepare(&cache).expect("the next lone profile performs the clear");
+        assert!(!cache.exists());
+        assert!(!clear_marker(&cache).exists());
+        drop(after);
+    }
+
+    #[test]
+    fn dotted_cache_names_get_distinct_sidecars() {
+        let temp = TempDir::new("dotted-sidecars");
+        let first = temp.0.join("cache.one");
+        let second = temp.0.join("cache.two");
+
+        assert_ne!(clear_marker(&first), clear_marker(&second));
+        assert_ne!(lock_path(&first), lock_path(&second));
+        assert_eq!(clear_marker(&first).file_name().unwrap(), "cache.one.clear");
+        assert_eq!(lock_path(&second).file_name().unwrap(), "cache.two.lock");
+
+        request_clear(&first).unwrap();
+        assert!(clear_marker(&first).exists());
+        assert!(!clear_marker(&second).exists());
+    }
+
+    #[test]
+    fn a_peer_joins_while_the_first_profile_continues_ordinary_launch_work() {
+        let temp = TempDir::new("shared-after-maintenance");
+        let cache = temp.0.join("chunks");
+        let first = prepare(&cache).expect("the first profile enters exclusively");
+
+        assert!(finish_maintenance(&first, &cache).unwrap());
+        let peer = prepare(&cache).expect("non-destructive launch work is shared");
+        assert!(
+            peer.maintenance().is_none(),
+            "the first profile still lives, so the peer must be shared"
+        );
+
+        drop(peer);
+        drop(first);
     }
 
     #[test]
@@ -457,6 +557,25 @@ mod tests {
 
         assert_eq!(fs::read(current.join("abc")).unwrap(), b"a cached chunk");
         assert!(!legacy.exists(), "the old cache should not be left behind");
+    }
+
+    #[test]
+    fn migration_runs_inside_the_exclusive_maintenance_lease() {
+        let temp = TempDir::new("migrate-locked");
+        let legacy = temp.0.join("Caches/gwnative/chunks");
+        let current = temp.0.join("Application Support/gwnative/chunks");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("abc"), b"a cached chunk").unwrap();
+
+        let lease = prepare_with_legacy(&current, Some(&legacy)).unwrap();
+
+        assert_eq!(fs::read(current.join("abc")).unwrap(), b"a cached chunk");
+        assert!(!legacy.exists());
+        assert!(
+            crate::instance::acquire(&lock_path(&current), Duration::ZERO).is_err(),
+            "migration returns with the exclusive maintenance lease still held"
+        );
+        drop(lease);
     }
 
     #[test]
