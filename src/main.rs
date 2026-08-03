@@ -144,6 +144,16 @@ fn main() {
     // process does not.
     let _instance = hold_the_only_instance(windowed, &paths, invocation.new_instance);
 
+    // A packaged or named-development profile uses a writable seeded shell.
+    // Only refresh it after instance exclusion: a second launch must not modify
+    // files the already-running process is serving before it is rejected.
+    if let Err(error) = paths.prepare_web_root() {
+        note!(
+            "[gwnative] could not lay out {}: {error}",
+            paths.web_root().display()
+        );
+    }
+
     // Before the client can ask for the login, so the reason it will not get one
     // is on screen ahead of the dialog rather than after it.
     keychain::check_identity();

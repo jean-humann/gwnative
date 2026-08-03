@@ -46,7 +46,10 @@ because a newly created profile receives a new random store identifier.
 
 In a source checkout, the default profile runs directly from the repository's
 `web/` directory for live development. Named profiles are automatically seeded
-into their own support directory, matching packaged builds. `--dir` deliberately
+into their own support directory, matching packaged builds. Seeding happens only
+after the profile lock is held and copies the same shell-only allowlist as the
+packager; downloaded `Gw*` artifacts and test modules in the source tree are
+never copied into another profile. `--dir` deliberately
 overrides that boundary; pointing two profiles at the same directory makes
 their writable client artifacts shared.
 

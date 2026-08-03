@@ -15,6 +15,7 @@ use crate::{cli, profile};
 pub struct Layout {
     support: PathBuf,
     web: PathBuf,
+    web_seed: Option<PathBuf>,
     derived: PathBuf,
     cache: PathBuf,
     port: u16,
@@ -38,11 +39,15 @@ impl Layout {
             .web_root
             .clone()
             .or_else(|| std::env::var("GWNATIVE_WEB_ROOT").ok().map(PathBuf::from));
-        let web = web_override.unwrap_or_else(|| writable_web_root(&support, profile.is_default()));
+        let web = web_override.map_or_else(
+            || web_root_plan(&support, profile.is_default()),
+            |live| WebRoot { live, seed: None },
+        );
         let derived = support.join("derived");
         Self {
             support,
-            web,
+            web: web.live,
+            web_seed: web.seed,
             derived,
             cache,
             port,
@@ -55,6 +60,17 @@ impl Layout {
 
     pub fn web_root(&self) -> &Path {
         &self.web
+    }
+
+    /// Refresh the writable shell after this profile's instance lock is held.
+    /// Computing a layout must remain read-only: a launch that is about to be
+    /// rejected must never rewrite files underneath the process already using
+    /// them.
+    pub fn prepare_web_root(&self) -> std::io::Result<()> {
+        match &self.web_seed {
+            Some(seed) => seed_web(seed, &self.web),
+            None => Ok(()),
+        }
     }
 
     pub fn derived_dir(&self) -> &Path {
@@ -89,9 +105,19 @@ pub fn certificate_dir() -> PathBuf {
 
 /// The command-line certification root before a launch profile is selected.
 pub fn web_root() -> PathBuf {
-    std::env::var("GWNATIVE_WEB_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| writable_web_root(&base_support_dir(), true))
+    if let Ok(root) = std::env::var("GWNATIVE_WEB_ROOT") {
+        return PathBuf::from(root);
+    }
+    let plan = web_root_plan(&base_support_dir(), true);
+    if let Some(seed) = &plan.seed
+        && let Err(error) = seed_web(seed, &plan.live)
+    {
+        note!(
+            "[gwnative] could not lay out {}: {error}",
+            plan.live.display()
+        );
+    }
+    plan.live
 }
 
 /// The directory the loopback origin serves, and the one `patch::sync` fills.
@@ -104,7 +130,14 @@ pub fn web_root() -> PathBuf {
 /// silently stops appearing. The bundle's copy is a seed for a writable root
 /// instead, refreshed on every launch so an upgraded app ships an upgraded
 /// shell.
-fn writable_web_root(support: &Path, use_source_tree_directly: bool) -> PathBuf {
+struct WebRoot {
+    live: PathBuf,
+    seed: Option<PathBuf>,
+}
+
+/// Decide where the shell lives without touching it. The selected instance
+/// lock must be acquired before [`seed_web`] acts on this plan.
+fn web_root_plan(support: &Path, use_source_tree_directly: bool) -> WebRoot {
     let exe = std::env::current_exe().expect("a running process has a path on macOS");
     let bundled_seed = exe
         .parent()
@@ -114,24 +147,25 @@ fn writable_web_root(support: &Path, use_source_tree_directly: bool) -> PathBuf 
     let source_seed = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web");
     let seed = match bundled_seed {
         Some(seed) => seed,
-        None if use_source_tree_directly => return source_seed,
+        None if use_source_tree_directly => {
+            return WebRoot {
+                live: source_seed,
+                seed: None,
+            };
+        }
         None => source_seed,
     };
-    let live = support.join("web");
-    if let Err(e) = seed_web(&seed, &live) {
-        // Reported rather than fatal, and still the root we return: a partial
-        // seed leaves the missing file to be noticed by whatever needed it,
-        // whereas falling back to the bundle would put the patch sync inside
-        // it, which is the one outcome this function exists to prevent.
-        note!("[gwnative] could not lay out {}: {e}", live.display());
+    WebRoot {
+        live: support.join("web"),
+        seed: Some(seed),
     }
-    live
 }
 
 /// Copy the bundle's shell files over the live web root.
 ///
-/// Only what the bundle carries: the client artifacts sit in the same directory
-/// once fetched and must survive. Contents are compared rather than timestamps,
+/// Only the shell allowlist the bundle carries: a source checkout's `web/`
+/// directory is also the default profile's writable root and may already hold
+/// downloaded client artifacts. Contents are compared rather than timestamps,
 /// which a copy does not preserve — these are a few tens of kilobytes, so the
 /// comparison costs less than being wrong about it would.
 fn seed_web(seed: &Path, live: &Path) -> std::io::Result<()> {
@@ -141,14 +175,26 @@ fn seed_web(seed: &Path, live: &Path) -> std::io::Result<()> {
         if !entry.file_type()?.is_file() {
             continue;
         }
+        let name = entry.file_name();
+        let Some(name) = name.to_str().filter(|name| is_shell_file(name)) else {
+            continue;
+        };
         let fresh = std::fs::read(entry.path())?;
-        let installed = live.join(entry.file_name());
+        let installed = live.join(name);
         if std::fs::read(&installed).is_ok_and(|current| current == fresh) {
             continue;
         }
         std::fs::write(&installed, &fresh)?;
     }
     Ok(())
+}
+
+/// Keep this identical in meaning to the allowlist in `scripts/bundle`.
+fn is_shell_file(name: &str) -> bool {
+    (name.ends_with(".js") || name.ends_with(".html"))
+        && name != "Gw.js"
+        && !name.starts_with("Gw.jspi.")
+        && !name.ends_with(".test.js")
 }
 
 #[cfg(test)]
@@ -194,11 +240,46 @@ mod tests {
     #[test]
     fn named_development_profiles_get_a_private_seeded_web_root() {
         let scratch = crate::scratch::TempDir::new("profile-web-root");
-        let root = writable_web_root(&scratch.0, false);
-        assert_eq!(root, scratch.0.join("web"));
+        let plan = web_root_plan(&scratch.0, false);
+        assert_eq!(plan.live, scratch.0.join("web"));
+        assert!(!plan.live.exists(), "planning must not mutate the root");
+        seed_web(plan.seed.as_ref().unwrap(), &plan.live).unwrap();
         assert_eq!(
-            std::fs::read(root.join("index.html")).unwrap(),
+            std::fs::read(plan.live.join("index.html")).unwrap(),
             std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("web/index.html")).unwrap(),
         );
+    }
+
+    #[test]
+    fn source_seeding_copies_shell_but_never_clients_or_tests() {
+        let scratch = crate::scratch::TempDir::new("profile-web-allowlist");
+        let seed = scratch.0.join("seed");
+        let live = scratch.0.join("live");
+        std::fs::create_dir_all(&seed).unwrap();
+        for (name, bytes) in [
+            ("index.html", b"shell".as_slice()),
+            ("harness.js", b"shell-js".as_slice()),
+            ("Gw.js", b"client-js".as_slice()),
+            ("Gw.jspi.js", b"client-jspi".as_slice()),
+            ("Gw.wasm", b"client-wasm".as_slice()),
+            ("version.json", b"client-version".as_slice()),
+            ("page.test.js", b"test".as_slice()),
+        ] {
+            std::fs::write(seed.join(name), bytes).unwrap();
+        }
+
+        seed_web(&seed, &live).unwrap();
+
+        assert_eq!(std::fs::read(live.join("index.html")).unwrap(), b"shell");
+        assert_eq!(std::fs::read(live.join("harness.js")).unwrap(), b"shell-js");
+        for excluded in [
+            "Gw.js",
+            "Gw.jspi.js",
+            "Gw.wasm",
+            "version.json",
+            "page.test.js",
+        ] {
+            assert!(!live.join(excluded).exists(), "copied {excluded}");
+        }
     }
 }
