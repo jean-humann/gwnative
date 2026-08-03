@@ -35,10 +35,11 @@ duplicate or out-of-range assignments are refused. Its generated colour and
 display name are metadata; changing the `id` or `originPort` by hand does not
 migrate the associated Keychain item or WebKit data.
 
-In a source checkout, the default writable web root is the repository's `web/`
-directory for every profile. Use `--dir` when development sessions also need
-isolated client artifacts. Packaged builds use the per-profile support
-directory automatically.
+In a source checkout, the default profile runs directly from the repository's
+`web/` directory for live development. Named profiles are automatically seeded
+into their own support directory, matching packaged builds. `--dir` deliberately
+overrides that boundary; pointing two profiles at the same directory makes
+their writable client artifacts shared.
 
 ## Isolation map
 

@@ -38,7 +38,7 @@ impl Layout {
             .web_root
             .clone()
             .or_else(|| std::env::var("GWNATIVE_WEB_ROOT").ok().map(PathBuf::from));
-        let web = web_override.unwrap_or_else(|| writable_web_root(&support));
+        let web = web_override.unwrap_or_else(|| writable_web_root(&support, profile.is_default()));
         let derived = support.join("derived");
         Self {
             support,
@@ -91,7 +91,7 @@ pub fn certificate_dir() -> PathBuf {
 pub fn web_root() -> PathBuf {
     std::env::var("GWNATIVE_WEB_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| writable_web_root(&base_support_dir()))
+        .unwrap_or_else(|_| writable_web_root(&base_support_dir(), true))
 }
 
 /// The directory the loopback origin serves, and the one `patch::sync` fills.
@@ -104,15 +104,18 @@ pub fn web_root() -> PathBuf {
 /// silently stops appearing. The bundle's copy is a seed for a writable root
 /// instead, refreshed on every launch so an upgraded app ships an upgraded
 /// shell.
-fn writable_web_root(support: &Path) -> PathBuf {
+fn writable_web_root(support: &Path, use_source_tree_directly: bool) -> PathBuf {
     let exe = std::env::current_exe().expect("a running process has a path on macOS");
-    let seed = exe
+    let bundled_seed = exe
         .parent()
         .and_then(Path::parent)
         .map(|contents| contents.join("Resources/web"))
         .filter(|seed| seed.is_dir());
-    let Some(seed) = seed else {
-        return PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web");
+    let source_seed = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web");
+    let seed = match bundled_seed {
+        Some(seed) => seed,
+        None if use_source_tree_directly => return source_seed,
+        None => source_seed,
     };
     let live = support.join("web");
     if let Err(e) = seed_web(&seed, &live) {
@@ -155,7 +158,7 @@ mod tests {
 
     #[test]
     fn named_profiles_isolate_mutable_state_and_share_chunks() {
-        let invocation = cli::parse(["--profile", "iron"]).unwrap();
+        let invocation = cli::parse(["--profile", "iron", "--dir", "/tmp/gw-web"]).unwrap();
         let profile = profile::Profile {
             format_version: 1,
             id: "iron".into(),
@@ -185,5 +188,16 @@ mod tests {
         let layout = Layout::new(&invocation, &profile);
         assert_eq!(layout.web_root(), Path::new("/tmp/gw-web"));
         assert_eq!(layout.port(), 39000);
+    }
+
+    #[test]
+    fn named_development_profiles_get_a_private_seeded_web_root() {
+        let scratch = crate::scratch::TempDir::new("profile-web-root");
+        let root = writable_web_root(&scratch.0, false);
+        assert_eq!(root, scratch.0.join("web"));
+        assert_eq!(
+            std::fs::read(root.join("index.html")).unwrap(),
+            std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("web/index.html")).unwrap(),
+        );
     }
 }

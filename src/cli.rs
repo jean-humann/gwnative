@@ -188,7 +188,7 @@ Native options:
   --profile NAME      use an isolated launch profile
   --new-instance      allow another isolated profile instance
   --host-port PORT    override the profile origin (bypasses its isolation)
-  -d, --dir PATH      override the web-client directory
+  -d, --dir PATH      override the profile web root (can bypass isolation)
   --offline           forbid launch-time network refreshes
   --no-update         skip client and application update checks
   --no-prefetch       disable speculative game-data fetches
