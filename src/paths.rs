@@ -25,7 +25,10 @@ impl Layout {
     pub fn new(invocation: &cli::Invocation, profile: &profile::Profile) -> Self {
         let base_support = base_support_dir();
         let support = profile.support_dir(&base_support);
-        let cache = crate::cache::default_cache_dir();
+        let cache = invocation
+            .cache_root
+            .clone()
+            .unwrap_or_else(crate::cache::default_cache_dir);
         let port = invocation
             .host_port
             .or_else(|| {
@@ -221,10 +224,12 @@ mod tests {
     }
 
     #[test]
-    fn command_line_web_root_and_port_win() {
+    fn command_line_locations_and_port_win() {
         let invocation = cli::parse([
             "--profile",
             "iron",
+            "--cache",
+            "/tmp/gw-cache",
             "--dir",
             "/tmp/gw-web",
             "--host-port",
@@ -233,6 +238,7 @@ mod tests {
         .unwrap();
         let profile = profile::Profile::default_profile();
         let layout = Layout::new(&invocation, &profile);
+        assert_eq!(layout.cache_dir(), Path::new("/tmp/gw-cache"));
         assert_eq!(layout.web_root(), Path::new("/tmp/gw-web"));
         assert_eq!(layout.port(), 39000);
     }

@@ -275,6 +275,49 @@ fn unlink_regular_at(directory: &fs::File, name: &std::ffi::OsStr) -> Option<u64
     u64::try_from(stat.st_size).ok()
 }
 
+/// Remove one regular cache entry without following its bucket if that bucket
+/// has been replaced by a symlink.
+pub fn remove_regular(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("cache entry has no bucket"))?;
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(parent)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("cache entry has no name"))?;
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::other("cache entry name contains NUL"))?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the directory and C string remain live and `stat` is writable.
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: successful `fstatat` initialized the structure.
+    let stat = unsafe { stat.assume_init() };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "cache entry is not a regular file",
+        ));
+    }
+    // SAFETY: descriptor and C string remain valid; flags 0 refuse directories.
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Whether `name` is one this cache writes: lowercase hex, and as long as one
 /// of the digests [`ContentHash`] produces.
 fn is_chunk_name(name: &str) -> bool {

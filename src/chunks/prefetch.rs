@@ -120,6 +120,7 @@ pub(super) struct Prefetch {
     verify_done: AtomicU64,
     verify_total: AtomicU64,
     verify_repaired: AtomicU64,
+    verify_failed: AtomicU64,
     verifying: AtomicBool,
 }
 
@@ -360,9 +361,36 @@ impl ChunkStore {
     /// Workers walk disjoint strides of the chunk list so no two of them race
     /// for the same hash, and each one is throttled by `prefetch_permits` so
     /// demand reads keep their share of the pool.
-    pub fn start_full_download(self: &Arc<Self>) -> bool {
+    pub fn start_full_download(self: &Arc<Self>) -> crate::error::Result<bool> {
+        self.start_full_download_with_workers(MAX_PREFETCH_FETCHES)
+    }
+
+    /// Start a full download with an explicit worker bound.
+    ///
+    /// Command-line image and repair operations use this to honour `--jobs`.
+    /// The shared prefetch semaphore remains the hard ceiling, so a requested
+    /// value cannot consume capacity reserved for demand reads.
+    pub fn start_full_download_with_workers(
+        self: &Arc<Self>,
+        workers: usize,
+    ) -> crate::error::Result<bool> {
+        self.start_full_download_with_capacity(workers, self.capacity())
+    }
+
+    fn start_full_download_with_capacity(
+        self: &Arc<Self>,
+        workers: usize,
+        capacity: crate::disk::Capacity,
+    ) -> crate::error::Result<bool> {
+        if self.prefetch.running.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        // This belongs inside the operation: command-line, API and future
+        // callers cannot accidentally start a partial fill by forgetting an
+        // outer check.
+        capacity.require()?;
         if self.prefetch.running.swap(true, Ordering::SeqCst) {
-            return false;
+            return Ok(false);
         }
         self.prefetch.stop.store(false, Ordering::Relaxed);
         self.prefetch.done.store(0, Ordering::Relaxed);
@@ -370,7 +398,7 @@ impl ChunkStore {
             .total
             .store(self.chunk_count() as u64, Ordering::Relaxed);
 
-        let workers = MAX_PREFETCH_FETCHES;
+        let workers = workers.clamp(1, MAX_PREFETCH_FETCHES);
         let outstanding = Arc::new(AtomicU64::new(workers as u64));
         for worker in 0..workers {
             let store = Arc::clone(self);
@@ -417,16 +445,17 @@ impl ChunkStore {
             "[gwnative] full download started: {} chunks, {workers} workers",
             self.chunk_count()
         );
-        true
+        Ok(true)
     }
 
-    /// `(checked, total, running, discarded)` for the current or last check.
-    pub fn verify_progress(&self) -> (u64, u64, bool, u64) {
+    /// `(checked, total, running, discarded, failures)` for the current or last check.
+    pub fn verify_progress(&self) -> (u64, u64, bool, u64, u64) {
         (
             self.prefetch.verify_done.load(Ordering::Relaxed),
             self.prefetch.verify_total.load(Ordering::Relaxed),
             self.prefetch.verifying.load(Ordering::Relaxed),
             self.prefetch.verify_repaired.load(Ordering::Relaxed),
+            self.prefetch.verify_failed.load(Ordering::Relaxed),
         )
     }
 
@@ -475,6 +504,7 @@ impl ChunkStore {
         self.prefetch.stop.store(false, Ordering::Relaxed);
         self.prefetch.verify_done.store(0, Ordering::Relaxed);
         self.prefetch.verify_repaired.store(0, Ordering::Relaxed);
+        self.prefetch.verify_failed.store(0, Ordering::Relaxed);
         self.prefetch
             .verify_total
             .store(work.len() as u64, Ordering::Relaxed);
@@ -500,24 +530,35 @@ impl ChunkStore {
                     let index = work[at];
                     if let Ok(hash) = store.chunk_hash(index)
                         && let Ok(expected) = store.chunk_length(index)
+                    {
                         // A chunk that was never fetched is not a failure — it
                         // is the sweep's work, and counting it as damage would
                         // report an interrupted download as a corrupt one.
-                        && store.cached_len(&hash) == Some(expected)
-                        && store.read_cached(&hash, expected).is_none()
-                    {
-                        store
-                            .prefetch
-                            .verify_repaired
-                            .fetch_add(1, Ordering::Relaxed);
+                        let present = store.cache_entry_exists(&hash);
+                        match store.read_cached(&hash, expected) {
+                            Ok(None) if present => {
+                                store
+                                    .prefetch
+                                    .verify_repaired
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(error) => {
+                                *store.last_failure.lock().unwrap() = Some(error.to_string());
+                                store.prefetch.verify_failed.fetch_add(1, Ordering::Relaxed);
+                            }
+                            _ => {}
+                        }
                     }
                     store.prefetch.verify_done.fetch_add(1, Ordering::Relaxed);
                     at += VERIFY_WORKERS;
                 }
                 if outstanding.fetch_sub(1, Ordering::SeqCst) == 1 {
                     store.prefetch.verifying.store(false, Ordering::SeqCst);
-                    let (done, total, _, repaired) = store.verify_progress();
-                    note!("[gwnative] check finished: {done}/{total} chunks, {repaired} discarded");
+                    let (done, total, _, repaired, failed) = store.verify_progress();
+                    note!(
+                        "[gwnative] check finished: {done}/{total} chunks, \
+                         {repaired} discarded, {failed} failure(s)"
+                    );
                 }
             });
         }
@@ -622,7 +663,7 @@ mod tests {
     /// there is nothing to join; the flag they clear is the same one the page
     /// polls, which makes waiting on it the thing the tests should assert
     /// against anyway.
-    fn settled(store: &ChunkStore) -> (u64, u64, bool, u64) {
+    fn settled(store: &ChunkStore) -> (u64, u64, bool, u64, u64) {
         for _ in 0..2000 {
             let progress = store.verify_progress();
             if !progress.2 {
@@ -638,8 +679,8 @@ mod tests {
         let (_temp, store) = planted("verify-clean", &[&[b'a'; 1024], &[b'b'; 1024]]);
 
         assert!(store.start_verify());
-        let (done, total, _, discarded) = settled(&store);
-        assert_eq!((done, total, discarded), (2, 2, 0));
+        let (done, total, _, discarded, failed) = settled(&store);
+        assert_eq!((done, total, discarded, failed), (2, 2, 0, 0));
         assert_eq!(store.resident_count(), 2, "nothing was thrown away");
     }
 
@@ -654,8 +695,8 @@ mod tests {
         assert_eq!(store.resident_count(), 2, "residency cannot tell yet");
 
         assert!(store.start_verify());
-        let (done, total, _, discarded) = settled(&store);
-        assert_eq!((done, total, discarded), (2, 2, 1));
+        let (done, total, _, discarded, failed) = settled(&store);
+        assert_eq!((done, total, discarded, failed), (2, 2, 1, 0));
         assert!(!rotten.exists(), "the bad copy is gone");
         assert_eq!(
             store.resident_count(),
@@ -665,15 +706,74 @@ mod tests {
     }
 
     #[test]
+    fn the_check_discards_a_wrong_size_chunk() {
+        let (_temp, store) = planted("verify-wrong-size", &[&[b'a'; 1024]]);
+        let path = store.cache_path(&store.chunk_hash(0).unwrap());
+        fs::write(&path, b"short").unwrap();
+
+        assert!(store.start_verify());
+        let (done, total, _, discarded, failed) = settled(&store);
+        assert_eq!((done, total, discarded, failed), (1, 1, 1, 0));
+        assert!(!path.exists());
+        assert_eq!(store.resident_count(), 0);
+    }
+
+    #[test]
+    fn an_unreadable_unremovable_chunk_can_never_report_completion() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temp, store) = planted("verify-unremovable", &[&[b'a'; 1024]]);
+        let path = store.cache_path(&store.chunk_hash(0).unwrap());
+        let bucket = path.parent().unwrap();
+        let original_file = fs::metadata(&path).unwrap().permissions();
+        let original = fs::metadata(bucket).unwrap().permissions();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::set_permissions(bucket, fs::Permissions::from_mode(0o500)).unwrap();
+
+        assert!(store.start_verify());
+        let (done, total, _, discarded, failed) = settled(&store);
+        assert_eq!((done, total, discarded, failed), (1, 1, 0, 1));
+        assert_eq!(
+            store.resident_count(),
+            0,
+            "a name whose corrupt bytes remain must not report completion"
+        );
+        assert!(store.last_failure().is_some());
+
+        let capacity = crate::disk::evaluate(store.missing_bytes(), None);
+        assert!(
+            store
+                .start_full_download_with_capacity(1, capacity)
+                .unwrap()
+        );
+        for _ in 0..2000 {
+            if !store.prefetch_progress().2 {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!store.prefetch_progress().2, "the failed sweep must settle");
+        assert_eq!(
+            store.resident_count(),
+            0,
+            "a completed worker walk is not a verified full image"
+        );
+
+        fs::set_permissions(bucket, original).unwrap();
+        fs::set_permissions(&path, original_file).unwrap();
+    }
+
+    #[test]
     fn a_chunk_that_was_never_fetched_is_not_damage() {
         let (_temp, store) = planted("verify-partial", &[&[b'a'; 1024], &[b'b'; 1024]]);
         // Half a download, which is the ordinary state of an interrupted one.
         fs::remove_file(store.cache_path(&store.chunk_hash(1).unwrap())).unwrap();
 
         assert!(store.start_verify());
-        let (done, total, _, discarded) = settled(&store);
+        let (done, total, _, discarded, failed) = settled(&store);
         assert_eq!((done, total), (2, 2), "every distinct chunk is looked at");
         assert_eq!(discarded, 0, "an unfinished download is not a corrupt one");
+        assert_eq!(failed, 0);
     }
 
     #[test]
@@ -689,8 +789,12 @@ mod tests {
 
         assert_eq!(store.chunk_count(), 4);
         assert!(store.start_verify());
-        let (done, total, _, discarded) = settled(&store);
-        assert_eq!((done, total, discarded), (2, 2, 0), "two, not four");
+        let (done, total, _, discarded, failed) = settled(&store);
+        assert_eq!(
+            (done, total, discarded, failed),
+            (2, 2, 0, 0),
+            "two, not four"
+        );
     }
 
     #[test]
@@ -707,5 +811,24 @@ mod tests {
         store.prefetch.verifying.store(false, Ordering::SeqCst);
         assert!(store.start_verify(), "and it clears for the next launch");
         settled(&store);
+    }
+
+    #[test]
+    fn a_full_download_with_insufficient_capacity_never_starts() {
+        let temp = TempDir::new("full-download-capacity");
+        let store = Arc::new(store_of_content(temp.0.join("chunks"), &[&[b'a'; 1024]]));
+        let capacity = crate::disk::evaluate(store.missing_bytes(), Some(0));
+
+        assert!(
+            store
+                .start_full_download_with_capacity(1, capacity)
+                .is_err()
+        );
+        assert_eq!(store.prefetch_progress(), (0, 0, false));
+        assert_eq!(store.resident_count(), 0);
+        assert!(
+            fs::read_dir(store.cache_dir()).unwrap().next().is_none(),
+            "capacity refusal must precede all worker and bucket creation"
+        );
     }
 }

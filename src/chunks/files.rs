@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -69,9 +70,34 @@ impl ChunkStore {
         self.cache_dir.join(&hex[..2]).join(hex.as_str())
     }
 
-    /// The size of the cached file for `hash`, if there is one.
-    pub(super) fn cached_len(&self, hash: &ContentHash) -> Option<u64> {
-        fs::metadata(self.cache_path(hash)).ok().map(|m| m.len())
+    /// Whether the exact regular cache entry exists at its manifest size.
+    ///
+    /// A wrong-size or non-regular entry is corrupt cache state, not absence:
+    /// remove it before a fetch, and surface a removal failure so no later scan
+    /// can count the unusable name as resident.
+    pub(super) fn cached_sized(&self, hash: &ContentHash, expected: u64) -> Result<bool> {
+        if self.invalid.lock().unwrap().contains(hash) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("cached chunk {hash} is unusable and could not be removed"),
+            )
+            .into());
+        }
+        let path = self.cache_path(hash);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(self.mark_invalid(hash, error)),
+        };
+        if metadata.file_type().is_file() && metadata.len() == expected {
+            return Ok(true);
+        }
+        self.discard_cached(hash, &path)?;
+        Ok(false)
+    }
+
+    pub(super) fn cache_entry_exists(&self, hash: &ContentHash) -> bool {
+        fs::symlink_metadata(self.cache_path(hash)).is_ok()
     }
 
     /// The whole cached chunk, if it is there and its bytes still hash right.
@@ -81,23 +107,76 @@ impl ChunkStore {
     /// [`window_into`](ChunkStore::window_into) pread. A file that fails is
     /// unlinked, so the caller refetches it rather than handing corrupt bytes to
     /// the client and leaving the bad copy behind to fail again next launch.
-    pub(super) fn read_cached(&self, hash: &ContentHash, expected: u64) -> Option<Vec<u8>> {
+    pub(super) fn read_cached(&self, hash: &ContentHash, expected: u64) -> Result<Option<Vec<u8>>> {
         let path = self.cache_path(hash);
-        let bytes = fs::read(&path).ok()?;
+        if !self.cached_sized(hash, expected)? {
+            return Ok(None);
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => {
+                // An exact-size name whose bytes cannot be read is not
+                // resident. Remove it if possible; if not, the invalid latch
+                // keeps every later completion scan from rediscovering it.
+                self.discard_cached(hash, &path)?;
+                return Ok(None);
+            }
+        };
         if bytes.len() as u64 != expected {
-            let _ = fs::remove_file(&path);
-            return None;
+            self.discard_cached(hash, &path)?;
+            return Ok(None);
         }
         if self.verified.lock().unwrap().contains(hash) {
-            return Some(bytes);
+            return Ok(Some(bytes));
         }
         if let Err(e) = crate::patch::verify(&bytes, hash) {
             note!("[gwnative] cached chunk is corrupt, refetching: {e}");
-            let _ = fs::remove_file(&path);
-            return None;
+            self.discard_cached(hash, &path)?;
+            return Ok(None);
         }
         self.verified.lock().unwrap().insert(*hash);
-        Some(bytes)
+        Ok(Some(bytes))
+    }
+
+    /// Make a bad cache entry impossible to rediscover by name.
+    fn discard_cached(&self, hash: &ContentHash, path: &std::path::Path) -> Result<()> {
+        self.handles.lock().unwrap().forget(hash);
+        self.verified.lock().unwrap().remove(hash);
+        self.invalid.lock().unwrap().insert(*hash);
+        match cache::remove_regular(path) {
+            Ok(()) => {
+                self.invalid.lock().unwrap().remove(hash);
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.invalid.lock().unwrap().remove(hash);
+                Ok(())
+            }
+            Err(error) => {
+                let error = std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "could not remove unusable cached chunk {}: {error}",
+                        path.display()
+                    ),
+                );
+                *self.last_failure.lock().unwrap() = Some(error.to_string());
+                Err(error.into())
+            }
+        }
+    }
+
+    fn mark_invalid(&self, hash: &ContentHash, error: std::io::Error) -> crate::error::Error {
+        self.handles.lock().unwrap().forget(hash);
+        self.verified.lock().unwrap().remove(hash);
+        self.invalid.lock().unwrap().insert(*hash);
+        let error = std::io::Error::new(
+            error.kind(),
+            format!("cached chunk {hash} is unreadable: {error}"),
+        );
+        *self.last_failure.lock().unwrap() = Some(error.to_string());
+        error.into()
     }
 
     /// `take` bytes at `within` from the cached chunk, in one `pread`.
@@ -163,6 +242,8 @@ impl ChunkStore {
             let _ = fs::remove_file(&tmp);
         }
         written?;
+        self.handles.lock().unwrap().forget(hash);
+        self.invalid.lock().unwrap().remove(hash);
         Ok(())
     }
 
@@ -173,19 +254,62 @@ impl ChunkStore {
     /// chunk: 256 syscalls instead of 16167, over the same directory blocks.
     /// The buckets are gathered as the leading byte, so only the ones this
     /// snapshot could occupy are ever listed.
-    fn resident_names(&self) -> HashSet<String> {
+    fn resident_hashes(&self) -> HashSet<ContentHash> {
         let hashes = &self.manifest.files[&self.snapshot].chunk_hashes;
         let buckets: HashSet<u8> = hashes.iter().map(|h| h.bytes()[0]).collect();
-        let mut present: HashSet<String> = HashSet::new();
+        let mut expected = HashMap::new();
+        for (index, &hash) in hashes.iter().enumerate() {
+            if let Ok(length) = self.chunk_length(index) {
+                expected
+                    .entry(hash.hex().as_str().to_owned())
+                    .or_insert((hash, length));
+            }
+        }
+        let mut present = HashSet::new();
         for bucket in buckets {
-            let Ok(entries) = fs::read_dir(self.cache_dir.join(format!("{bucket:02x}"))) else {
+            let bucket_path = self.cache_dir.join(format!("{bucket:02x}"));
+            let Ok(before) = fs::symlink_metadata(&bucket_path) else {
                 continue;
             };
-            present.extend(
-                entries
-                    .flatten()
-                    .filter_map(|e| e.file_name().into_string().ok()),
-            );
+            if !before.file_type().is_dir() || before.file_type().is_symlink() {
+                continue;
+            }
+            let Ok(entries) = fs::read_dir(&bucket_path) else {
+                continue;
+            };
+            let mut candidates = Vec::new();
+            for entry in entries.flatten() {
+                let Ok(name) = entry.file_name().into_string() else {
+                    continue;
+                };
+                let Some(&(hash, length)) = expected.get(name.as_str()) else {
+                    continue;
+                };
+                let exact = entry
+                    .file_type()
+                    .ok()
+                    .filter(|kind| kind.is_file() && !kind.is_symlink())
+                    .and_then(|_| entry.metadata().ok())
+                    .is_some_and(|metadata| metadata.len() == length);
+                candidates.push((hash, exact));
+            }
+            // Do not use names observed through a bucket that changed identity
+            // while it was listed. This also prevents an external replacement
+            // from being counted as cache residency.
+            let Ok(after) = fs::symlink_metadata(&bucket_path) else {
+                continue;
+            };
+            if !after.file_type().is_dir()
+                || after.file_type().is_symlink()
+                || (before.dev(), before.ino()) != (after.dev(), after.ino())
+            {
+                continue;
+            }
+            for (hash, exact) in candidates {
+                if exact && !self.invalid.lock().unwrap().contains(&hash) {
+                    present.insert(hash);
+                }
+            }
         }
         present
     }
@@ -195,12 +319,12 @@ impl ChunkStore {
     /// what a previous session already paid for.
     pub fn resident_bitmap(&self) -> Vec<u8> {
         let hashes = &self.manifest.files[&self.snapshot].chunk_hashes;
-        let present = self.resident_names();
+        let present = self.resident_hashes();
         let mut bits = vec![0u8; hashes.len().div_ceil(8)];
         for (i, hash) in hashes.iter().enumerate() {
             // A `.tmp` left by a write in flight is in the listing too, and does
             // not match a bare hash, which is the answer wanted anyway.
-            if present.contains(hash.hex().as_str()) {
+            if present.contains(hash) {
                 bits[i / 8] |= 1 << (i % 8);
             }
         }
@@ -215,12 +339,33 @@ impl ChunkStore {
     /// game is already paid for — which only the cache itself can answer, and
     /// which survives restarts.
     pub fn resident_count(&self) -> usize {
-        let present = self.resident_names();
-        self.manifest.files[&self.snapshot]
+        self.residency().0
+    }
+
+    /// Exact resident index count and missing distinct bytes from one scan.
+    /// Polling code needs both and must not pay two metadata walks per tick.
+    pub fn residency(&self) -> (usize, u64) {
+        let present = self.resident_hashes();
+        let count = self.manifest.files[&self.snapshot]
             .chunk_hashes
             .iter()
-            .filter(|hash| present.contains(hash.hex().as_str()))
-            .count()
+            .filter(|hash| present.contains(hash))
+            .count();
+        let mut seen = HashSet::new();
+        let missing = (0..self.chunk_count())
+            .filter_map(|index| {
+                let hash = self.chunk_hash(index).ok()?;
+                (seen.insert(hash) && !present.contains(&hash))
+                    .then(|| self.chunk_length(index).ok())
+                    .flatten()
+            })
+            .sum();
+        (count, missing)
+    }
+
+    /// Exact bytes still missing from this content-addressed snapshot.
+    pub fn missing_bytes(&self) -> u64 {
+        self.residency().1
     }
 }
 
@@ -292,6 +437,65 @@ mod tests {
         assert_eq!(store.resident_count(), 3);
         assert_eq!(store.resident_bitmap(), vec![0b0001_0101]);
         assert_eq!(store.chunk_count(), 5);
+    }
+
+    #[test]
+    fn a_wrong_size_chunk_is_corrupt_not_resident() {
+        let temp = TempDir::new("residency-wrong-size");
+        let cache = temp.0.join("chunks");
+        let store = store_of_five(cache);
+        let hash = store.manifest.files["Gw.snapshot"].chunk_hashes[0];
+        let path = store.cache_path(&hash);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"short").unwrap();
+
+        assert_eq!(store.resident_count(), 0);
+        assert_eq!(store.resident_bitmap(), vec![0]);
+        assert!(
+            path.exists(),
+            "a read-only residency poll must leave repair to demand reads or verification"
+        );
+    }
+
+    #[test]
+    fn residency_polling_cannot_delete_another_store_replacement() {
+        let temp = TempDir::new("residency-shared-replacement");
+        let cache = temp.0.join("chunks");
+        let polling = store_of_five(cache.clone());
+        let writing = store_of_five(cache);
+        let hash = polling.manifest.files["Gw.snapshot"].chunk_hashes[0];
+        let path = polling.cache_path(&hash);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"stale").unwrap();
+
+        assert_eq!(polling.resident_count(), 0);
+        assert!(
+            path.exists(),
+            "polling must not pathname-delete a candidate another store can replace"
+        );
+
+        writing.write_cached(&hash, &[0u8; 1024]).unwrap();
+        assert_eq!(polling.resident_count(), 1);
+        assert_eq!(polling.resident_bitmap(), vec![1]);
+    }
+
+    #[test]
+    fn residency_never_follows_or_cleans_a_bucket_symlink() {
+        let temp = TempDir::new("residency-bucket-symlink");
+        let cache = temp.0.join("chunks");
+        let outside = temp.0.join("outside");
+        let store = store_of_five(cache.clone());
+        let hash = store.manifest.files["Gw.snapshot"].chunk_hashes[0];
+        let external = outside.join(hash.hex().as_str());
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(&external, vec![0u8; 1024]).unwrap();
+        std::os::unix::fs::symlink(&outside, cache.join(&hash.hex().as_str()[..2])).unwrap();
+
+        assert_eq!(store.resident_count(), 0);
+        assert!(
+            external.exists(),
+            "residency cleanup must remain inside cache buckets"
+        );
     }
 
     #[test]

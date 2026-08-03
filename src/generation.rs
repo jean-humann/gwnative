@@ -351,7 +351,6 @@ impl Store {
             .iter()
             .any(|disabled| disabled.runtime == runtime && disabled.build == build)
     }
-
     /// Record the runtime that is about to execute.
     ///
     /// Called immediately before the page appends ArenaNet's glue. A launch
@@ -1130,6 +1129,27 @@ mod tests {
             "there was never anything to undo"
         );
         assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
+    #[test]
+    fn a_maintenance_download_is_not_a_failed_client_attempt() {
+        let temp = TempDir::new("generation-maintenance-download");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "old");
+
+        store.stash(&root, &NAMES);
+        write_client(&root, "downloaded");
+        store.record("downloaded", &root, &NAMES);
+        drop(store);
+
+        let store = Store::open(state);
+        assert_eq!(store.recover(&root), Recovery::None);
+        assert!(!store.rejected("downloaded"));
+        assert_eq!(
+            fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
+            "downloaded:Gw.jspi.js"
+        );
     }
 
     #[test]

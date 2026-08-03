@@ -34,8 +34,11 @@ gradually fills the local image as areas are visited.
 
 **Full Game** downloads the missing chunks in the background. Before a launch
 that believes the image is complete, gwnative reads and hashes the cached
-chunks. A damaged chunk is discarded and fetched again. The full download is
-refused when it would leave less than 2 GiB of usable disk space.
+chunks. Wrong-size, unreadable, or damaged chunks do not count as present and
+are discarded for a safe fetch; a chunk that cannot be removed makes repair
+fail instead of reporting a false completion. Full downloads and local-image
+imports are refused before their first write when the exact missing data would
+leave less than 2 GiB of usable disk space.
 
 The choice can be changed at any time under **Settings → Game data**. Pausing a
 full download keeps the Full Game choice and resumes later; **Switch to Quick
