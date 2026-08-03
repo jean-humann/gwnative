@@ -377,6 +377,77 @@ processes, not JSPI, Asyncify, or a gwnative frame limiter. Lower render scale
 is the available quality/performance trade-off; disabling complete-frame
 isolation would restore the partial-frame flash without solving this workload.
 
+#### macOS 27 runtime and presentation attribution
+
+A follow-up on 2026-08-03 used macOS 27.0 build `26A5388g`, system WebKit
+`22625.1.24.11.2`, the 14-core GPU M3 Pro, client build 38,797, the certified
+High preset, Kamadan America-English District 2 at the denser Xunlai storage
+pair, and 82--90 map agents. The 1,266×682 CSS canvas was measured through the
+official direct framebuffer path so the runtime and render-scale controls did
+not include the complete-frame isolation blit.
+
+| Runtime | Scale | Client ceiling | Agents | FPS | Mean interval | Callback-to-swap mean · p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Asyncify | 1× | 120 | 86 | 117.152 | 8.536 ms | 4.644 · 5.100 ms |
+| JSPI | 1× | 120 | 87 | 118.780 | 8.419 ms | 3.333 · 3.580 ms |
+| Asyncify | 2× | 120 | 82 | 103.862 | 9.628 ms | 4.843 · 5.440 ms |
+| JSPI | 2× | 120 | 82 | 96.529 | 10.359 ms | 4.284 · 7.460 ms |
+| JSPI | 2× | 240 | 86 | 101.157 | 9.886 ms | 4.125 · 4.500 ms |
+| Asyncify | 2× | 240 | 90 | 93.241 | 10.725 ms | 5.500 · 6.020 ms |
+| Asyncify, 60 s profile | 2× | 240 | 88 | 101.549 | 9.847 ms | 4.859 · 7.240 ms |
+
+Every row above covered more than 99.95% of its requested sample window. Two
+earlier JSPI rows were rejected retrospectively: their swap intervals covered
+only 74.70% and 81.07% because WebKit stopped delivering frames for 7.59 and
+5.68 seconds at a sample edge. The runner now fails when more than 10% (and at
+least 250 ms) of a sample is not spanned by logical-frame intervals, so an
+occluded or stalled WKWebView cannot be reported as steady-state throughput.
+
+The result is not a 100 FPS client cap. Both runtimes reach about 118 FPS at
+1×, and raising the game ceiling from 120 to 240 does not move the 2× workload
+to 120. Nor is one suspension transform the general performance answer: at 2×
+the valid Asyncify runs span 93.2--103.9 FPS and the JSPI runs span 96.5--101.2
+FPS as crowd and scheduling change. Runtime selection must therefore remain a
+compatibility decision rather than be flipped from one FPS sample.
+
+Five-second process samples identify the serialized frame path. In the JSPI
+WebContent sample, 1,277 of 2,545 main-thread samples (50.2%) were parked in
+`RemoteGraphicsContextGLProxyCocoa::prepareForDisplay` waiting for a synchronous
+GPU-process reply; 1,045 (41.1%) were inside
+`runWebAssemblyPromisingFunction`. In the Asyncify sample, 1,871 of 2,556
+samples (73.2%) were in the animation callback/Wasm path and 508 (19.9%) in the
+same presentation wait. The two stages together occupy over 91% of either
+sample; the runtime changes where the serial budget is spent, not the existence
+of the boundary.
+
+The GPU process was simultaneously around 65--74% CPU and WebContent around
+60--63%; the native host remained around 4--7%. GPU-process stacks run through
+WebKit's ANGLE Metal backend into the AGX driver, including draw setup, command
+encoding, and render-pipeline state. gwnative is already using Metal through
+WebKit; there is no host flag that replaces this with a more direct Metal path.
+This matches WebKit's own architecture and its history of GPU-process WebGL
+performance work ([WebKit bug 252876](https://bugs.webkit.org/show_bug.cgi?id=252876),
+[WebKit bug 246777](https://bugs.webkit.org/show_bug.cgi?id=246777)).
+
+The optimization order follows the measured ownership:
+
+1. Offer 1× as the explicit high-refresh mode. It preserves the game's High
+   settings and recovers about 14--22 FPS by reducing a 2,532×1,364 surface to
+   1,266×682. Keep 2× as the Retina-quality default; validate 1.5× as the
+   quality/performance compromise before giving it an automatic policy.
+2. Keep complete-frame isolation enabled. Direct rendering was used above and
+   still missed 120 at 2×; removing the barrier reintroduces partial suspended
+   frames without removing WebKit's final `prepareForDisplay` boundary.
+3. Re-run the matrix on each new system WebKit and attach the symbolized
+   WebContent/GPU samples to an upstream report. The synchronous GPU-process
+   presentation is inside WebKit and has no supported WKWebView override.
+4. Measure optional observers independently from the base client. Disable or
+   reduce an observer only if an observer-on/off cell proves material cost;
+   never infer it from the game callback's total Wasm time.
+5. Treat post-processing ArenaNet's Wasm with a generic optimizer as a new
+   artifact family. It would invalidate the exact transform/certificate proofs
+   and cannot address the 2× GPU/presentation share by itself.
+
 ## Updating measurements
 
 1. Use alternating runs, not one application's morning against another's
