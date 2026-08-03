@@ -22,9 +22,22 @@ no optional state capability can be enabled.
 
 The design borrows public API vocabulary and pure algorithms only where their
 licenses permit it. Native GWCA/GWToolbox hooking, scanning, Direct3D, and
-manager code is not a browser runtime and is not imported. GWoNmac is useful
-architecture research, but its GPL-3.0 implementation is not copied into this
-GPL-2.0 project.
+manager code is not a browser runtime and is not imported.
+
+The historical companion kernel does have a material GWoNmac lineage: the
+first gwnative version was built by modifying GWoNmac's GPL-3.0-only kernel.
+It must not be published under an ambiguous GPL-2.0 project claim. A companion
+implementation PR is blocked until the repository records one of these valid
+outcomes:
+
+- distribute the combined work under GPL-3.0-or-later with an explicit
+  provenance and copyright notice;
+- obtain compatible additional permission from the upstream author; or
+- replace it with a genuine clean-room implementation written without access
+  to the GPL implementation.
+
+Reviewing architecture is not a clean-room rewrite, and a rewritten filename
+or reorganized functions do not erase derivation.
 
 The upstreams also do not define a portable mod ABI to inherit. The current
 `gw_in_browser` tree has no `.gwmod` format or loader; GWoNmac explicitly keeps
@@ -201,6 +214,7 @@ with the unit they verify.
 Every unit must pass the ordinary Rust, JavaScript, dependency, formatting, and
 script checks. The companion and domain units additionally prove:
 
+- source provenance and license compatibility are recorded and reviewable;
 - no data segment, start function, game-function import, or unbounded read;
 - private allocations are non-overlapping and overflow-checked;
 - unstable seqlock reads are discarded;
