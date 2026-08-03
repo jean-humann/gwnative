@@ -575,7 +575,13 @@ def run_performance_sample(
     origin: str,
     token: str,
 ) -> None:
+    # Character entry proves the game connection, not that the newly loaded
+    # outpost has begun presenting. Require a focused gameplay frame before
+    # queueing a command that is consumed only at the logical swap boundary.
+    wait_for_real_gameplay_frame(stream, origin, token)
     scene = prepare_benchmark_scene(stream, origin, token)
+    # Travel and pathing both replace visible state. Re-certify the final scene
+    # rather than inheriting the pre-command presentation proof.
     wait_for_real_gameplay_frame(stream, origin, token)
     latest = game_state_after(origin, token, 0, 0)
     if latest is None or not isinstance(latest.get("state"), dict):
