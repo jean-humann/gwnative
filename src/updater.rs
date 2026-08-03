@@ -33,14 +33,20 @@
 //! future" checkbox, and a launch that pushed this profile's values over the
 //! top would quietly undo the box the player had just ticked.
 //!
-//! This project does keep a second copy, in `settings.json`, because the
+//! This project does keep a second copy, in app-global `updates.json`, because the
 //! settings panel is a web page and cannot read `NSUserDefaults`. What keeps
 //! that honest is the direction of the copy. Sparkle's defaults are the truth;
-//! [`start`] reads them and writes the profile to match. The profile is pushed
+//! [`start`] reads them and writes the app-global settings to match. The stored
+//! preference is pushed
 //! the other way in exactly two cases: the first launch after this shipped,
-//! where Sparkle has no stored answer and the player's existing opt-in would
+//! where Sparkle has no stored answer and the player's existing app opt-in would
 //! otherwise be lost, and [`follow`], which is a player moving the switch in the
-//! panel a moment ago.
+//! panel a moment ago. The latter still persists the player's answer when an
+//! offline or no-update launch deliberately did not start Sparkle; writing a
+//! local default does not schedule or perform a network request. Named profiles
+//! overlay this one app-global answer through [`settings::ScopedStore`]; allowing
+//! each profile to persist a different value would make two concurrent updater
+//! processes race on Sparkle's shared default.
 //!
 //! What is copied is what the player asked for, not what Sparkle will do about
 //! it tonight — the two differ, and copying the wrong one silently discards an
@@ -67,9 +73,10 @@ use crate::{app, settings};
 const FEED: &str = "SUFeedURL";
 const KEY: &str = "SUPublicEDKey";
 
-/// The user-defaults names behind the two switches. Read to find out whether
-/// Sparkle has an answer of its own yet; never written here — the framework
-/// owns the writing, through its properties.
+/// The user-defaults names behind the two switches. Normally Sparkle owns these
+/// through its properties. [`follow`] writes them directly only when this
+/// launch deliberately left the updater stopped, so an offline settings change
+/// is not discarded by the next normal launch.
 const CHECKS_DEFAULT: &str = "SUEnableAutomaticChecks";
 const DOWNLOADS_DEFAULT: &str = "SUAutomaticallyUpdate";
 
@@ -109,7 +116,7 @@ pub fn started() -> bool {
 ///
 /// Returns whether the updater is now running, which is what decides whether
 /// [`crate::release`] does anything this launch.
-pub fn start(_mtm: MainThreadMarker, store: &Arc<settings::Store>) -> bool {
+pub fn start(_mtm: MainThreadMarker, store: &Arc<settings::ScopedStore>) -> bool {
     if !available() {
         return false;
     }
@@ -118,12 +125,15 @@ pub fn start(_mtm: MainThreadMarker, store: &Arc<settings::Store>) -> bool {
     };
 
     // The migration case, and only it. See the module docs: Sparkle's stored
-    // answer wins wherever there is one, and the profile fills in where there
+    // answer wins wherever there is one, and app settings fill in where there
     // is not — which is the launch after this shipped, and a fresh install.
-    let profile = store.get();
+    let application = store.get();
     let stored = intent(&updater);
     let wanted = reconcile(
-        (profile.auto_check_updates, profile.auto_install_updates),
+        (
+            application.auto_check_updates,
+            application.auto_install_updates,
+        ),
         stored,
         (default_set(CHECKS_DEFAULT), default_set(DOWNLOADS_DEFAULT)),
     );
@@ -189,16 +199,18 @@ extern "C" fn apply(context: *mut c_void) {
     // with it.
     let wanted = *unsafe { Box::from_raw(context.cast::<(bool, bool)>()) };
     RUNNING.with(|running| {
-        if let Some(updater) = running.borrow().as_ref()
-            && intent(updater) != wanted
-        {
-            set_switches(updater, wanted);
-            note!(
-                "[sparkle] checks: {}, installs on its own: {}",
-                if wanted.0 { "on" } else { "off" },
-                if wanted.1 { "on" } else { "off" },
-            );
+        if let Some(updater) = running.borrow().as_ref() {
+            if intent(updater) != wanted {
+                set_switches(updater, wanted);
+            }
+        } else {
+            persist_switches(wanted);
         }
+        note!(
+            "[sparkle] checks: {}, installs on its own: {}",
+            if wanted.0 { "on" } else { "off" },
+            if wanted.1 { "on" } else { "off" },
+        );
     });
 }
 
@@ -305,6 +317,16 @@ fn set_switches(updater: &AnyObject, (checks, downloads): (bool, bool)) {
         let _: () = msg_send![updater, setAutomaticallyChecksForUpdates: Bool::new(checks)];
         let _: () = msg_send![updater, setAutomaticallyDownloadsUpdates: Bool::new(downloads)];
     }
+}
+
+/// Persist a settings-panel choice without starting Sparkle.
+///
+/// Used by offline/no-update launches. This changes only application defaults;
+/// it neither constructs the updater nor schedules a check.
+fn persist_switches((checks, downloads): (bool, bool)) {
+    let defaults = NSUserDefaults::standardUserDefaults();
+    defaults.setBool_forKey(checks, &NSString::from_str(CHECKS_DEFAULT));
+    defaults.setBool_forKey(downloads, &NSString::from_str(DOWNLOADS_DEFAULT));
 }
 
 /// Whether the main bundle's Info.plist carries `key`.

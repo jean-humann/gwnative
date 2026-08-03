@@ -1,9 +1,10 @@
 # Profiles
 
 A gwnative profile is an isolation boundary, not only a launcher label.
-Settings, window state, writable client artifacts, derived modules, diagnostics,
-Keychain credentials, WebKit origin, overlays, and the build library all follow
-the selected profile. Immutable content-addressed game chunks remain shared so
+Game settings, window state, writable client artifacts, derived modules,
+diagnostics, Keychain credentials, WebKit state, overlays, and the build library
+all follow the selected profile. Application update preferences and immutable
+content-addressed game chunks remain shared so
 multiple profiles do not each consume another full game image.
 
 ## Create and use a profile
@@ -57,7 +58,8 @@ their writable client artifacts shared.
 
 | Resource | Default profile | Named profile | Shared |
 | --- | --- | --- | --- |
-| Settings, window, diagnostics | Base support directory | `profiles/<id>/` | No |
+| Game settings, window, diagnostics | Base support directory | `profiles/<id>/` | No |
+| Application update preferences and cadence | Base `updates.json` | Base `updates.json` | Yes |
 | Writable web root and client artifacts | Base support directory | `profiles/<id>/` | No |
 | Derived certified modules | Base support directory | `profiles/<id>/` | No |
 | Saved login | Keychain account `login` | Keychain account `login:<id>` | No |
@@ -65,9 +67,10 @@ their writable client artifacts shared.
 | Game-image chunks | `chunks/` | `chunks/` | Yes |
 
 `--host-port` deliberately overrides the persisted assignment. It is a
-diagnostic escape hatch, not a profile-isolation mechanism: selecting a port
-belonging to another profile makes that session use the other origin's
-IndexedDB and local-storage data.
+diagnostic escape hatch, not a stable profile origin: changing it makes that
+session see a different origin inside the selected profile's WebKit store. It
+does not cross into another profile's identified data store, even when the port
+matches that profile's assignment.
 
 ## Concurrent instances
 
@@ -101,3 +104,11 @@ this release exposes no broad command. The UUID in a restored descriptor finds
 the same store again. Creating a profile after deleting its descriptor always
 generates a new UUID—even when the same profile ID is reused—so the orphaned
 store is never attached to the replacement profile.
+
+Application update preferences are also intentionally unaffected. Sparkle and
+the installed application bundle are global to the app, so automatic-check and
+automatic-install intent plus the last-check time live in the small global
+`updates.json` file and appear consistently in every profile. On upgrade it is
+seeded once from the default profile's existing preferences. Rendering, input,
+diagnostics, game-data strategy, compatibility acknowledgements, and
+enhancements remain profile-local.

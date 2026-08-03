@@ -132,6 +132,12 @@ impl Default for Invocation {
 }
 
 impl Invocation {
+    /// Whether this launch may schedule automatic client/application refreshes.
+    /// Manual checks remain an explicit player action.
+    pub fn automatic_updates_allowed(&self) -> bool {
+        !self.offline && !self.no_update
+    }
+
     /// The launch options needed inside the generated client's realm.
     ///
     /// This value is injected at document start and is never served by the
@@ -189,8 +195,8 @@ Native options:
   --new-instance      allow another isolated profile instance
   --host-port PORT    override the profile origin (bypasses its isolation)
   -d, --dir PATH      override the profile web root (can bypass isolation)
-  --offline           forbid launch-time network refreshes
-  --no-update         skip client and application update checks
+  --offline           forbid launch-time network and automatic update refreshes
+  --no-update         skip automatic client and application update checks
   --no-prefetch       disable speculative game-data fetches
   --no-browser        serve without opening an AppKit window
   --debug, --devtools enable Web Inspector support
@@ -853,6 +859,21 @@ mod tests {
         ] {
             assert!(parse_str(args).unwrap_err().failed, "{args:?}");
         }
+    }
+
+    #[test]
+    fn offline_and_no_update_suppress_automatic_refreshes() {
+        assert!(parse_str(&[]).unwrap().automatic_updates_allowed());
+        assert!(
+            !parse_str(&["--offline"])
+                .unwrap()
+                .automatic_updates_allowed()
+        );
+        assert!(
+            !parse_str(&["--no-update"])
+                .unwrap()
+                .automatic_updates_allowed()
+        );
     }
 
     #[test]

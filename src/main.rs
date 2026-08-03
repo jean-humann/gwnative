@@ -236,7 +236,23 @@ fn main() {
             Err(error) => note!("[gwnative] local preferences could not be reset: {error}"),
         }
     }
-    let settings = Arc::new(settings::Store::open(settings_path));
+    let profile_settings = Arc::new(settings::Store::open(settings_path));
+    let legacy_update_settings = if profile.is_default() {
+        profile_settings.get()
+    } else {
+        settings::Store::open(base_support.join("settings.json")).get()
+    };
+    // Application updates replace one bundle, not one profile. Sparkle's own
+    // preferences are app-global too, so a small global record owns update
+    // intent and cadence. The old default settings file seeds it once.
+    let update_settings = Arc::new(settings::UpdateStore::open(
+        base_support.join("updates.json"),
+        &legacy_update_settings,
+    ));
+    let settings = Arc::new(settings::ScopedStore::new(
+        profile_settings,
+        update_settings,
+    ));
 
     // Derive the client that can save a template, if this is a build we have
     // certified, and layer optional enhancements on top when the player has
@@ -664,7 +680,12 @@ fn run_windowed(
     // with and the updater is allowed to change two of them: on the first
     // launch after Sparkle shipped, the profile's opt-in is what seeds it, and
     // afterwards the updater's own answer is what the panel has to show.
-    updater::start(mtm, &loopback.settings);
+    let automatic_updates_allowed = invocation.automatic_updates_allowed();
+    if automatic_updates_allowed {
+        updater::start(mtm, &loopback.settings);
+    } else {
+        note!("[gwnative] automatic application update checks disabled for this launch");
+    }
 
     // The frame the web view is created at does not matter: `window::open`
     // resizes the window to the remembered one before it is ever shown, and the
@@ -712,7 +733,7 @@ fn run_windowed(
     // item uses, and off this thread — the request takes up to five seconds and
     // the page is loading. A no-op unless the player asked to be told; see
     // [`release::due`].
-    if !invocation.no_update {
+    if automatic_updates_allowed {
         menu::check_for_updates_at_launch(&loopback.settings);
     }
 

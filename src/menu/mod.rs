@@ -52,7 +52,7 @@ fn updates_offered() -> bool {
 pub fn install(
     mtm: MainThreadMarker,
     webview: &WKWebView,
-    settings: Arc<settings::Store>,
+    settings: Arc<settings::ScopedStore>,
     recorder: Arc<diagnostics::Recorder>,
 ) -> Retained<NSMenu> {
     let actions = Actions::new(mtm, webview, settings, recorder);

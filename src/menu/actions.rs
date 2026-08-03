@@ -78,7 +78,7 @@ pub struct Ivars {
     /// The settings file, so that a diagnostics overlay switched on from the
     /// menu is still on after a relaunch — and the profile a problem report
     /// prints at the top of itself.
-    settings: Arc<settings::Store>,
+    settings: Arc<settings::ScopedStore>,
     /// The diagnostics log, for Report a Problem and Mark a Slowdown. Both
     /// write to it; one of them also reads it back.
     recorder: Arc<diagnostics::Recorder>,
@@ -291,7 +291,7 @@ enum Requested {
 /// the answer went and whoever asked for it: a manual check counts against the
 /// daily automatic one, because a player who has just looked does not need the
 /// next launch to look again on their behalf.
-fn ask(settings: Arc<settings::Store>, who: Requested) {
+fn ask(settings: Arc<settings::ScopedStore>, who: Requested) {
     if ASKING.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -316,7 +316,7 @@ fn ask(settings: Arc<settings::Store>, who: Requested) {
 /// Called once, after the window is up. Returns immediately on every launch
 /// that is not due, which is all of them by default — see
 /// [`crate::settings::Settings::auto_check_updates`], off in a fresh profile.
-pub fn at_launch(settings: &Arc<settings::Store>) {
+pub fn at_launch(settings: &Arc<settings::ScopedStore>) {
     // Sparkle keeps its own schedule, in its own preference, and started it
     // when the updater did. Asking GitHub as well would be a second request
     // about the same question, answered in a worse alert.
@@ -393,7 +393,7 @@ impl Actions {
     pub(super) fn new(
         mtm: MainThreadMarker,
         webview: &WKWebView,
-        settings: Arc<settings::Store>,
+        settings: Arc<settings::ScopedStore>,
         recorder: Arc<diagnostics::Recorder>,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(Ivars {

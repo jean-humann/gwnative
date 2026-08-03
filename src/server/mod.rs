@@ -60,7 +60,7 @@ pub struct Loopback {
     pub addr: SocketAddr,
     /// The same store the `__settings` route answers from, so the host can read
     /// what the player chose without a second copy that could disagree.
-    pub settings: Arc<settings::Store>,
+    pub settings: Arc<settings::ScopedStore>,
     /// The same recorder `__report` and `__diag` write into, for the same
     /// reason: the menu's Mark a Slowdown has to land in the file the page's
     /// own counters are landing in, or the two describe different sessions.
@@ -95,7 +95,7 @@ struct Context {
     /// The derived client, served in place of the one on disk. See `crate::wasm`
     /// for what it changes and why the base module is kept untouched.
     derived_wasm: wasm::DerivedModules,
-    settings: Arc<settings::Store>,
+    settings: Arc<settings::ScopedStore>,
     generations: Arc<generation::Store>,
     token: String,
     /// Profile-specific Keychain account name. The service remains stable so
@@ -139,7 +139,7 @@ pub struct Config {
     pub snapshot: Option<Arc<ChunkStore>>,
     pub recorder: Arc<Recorder>,
     pub derived_wasm: wasm::DerivedModules,
-    pub settings: Arc<settings::Store>,
+    pub settings: Arc<settings::ScopedStore>,
     pub generations: Arc<generation::Store>,
     pub token: String,
     pub port: u16,
@@ -400,7 +400,9 @@ mod tests {
             snapshot: None,
             recorder: Recorder::open(dir.join("diagnostics")),
             derived_wasm: wasm::DerivedModules::default(),
-            settings: Arc::new(settings::Store::open(file.clone())),
+            settings: Arc::new(settings::ScopedStore::single(settings::Store::open(
+                file.clone(),
+            ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             token: token.to_owned(),
             port: PORT,
@@ -478,7 +480,9 @@ mod tests {
             snapshot: None,
             recorder: Recorder::open(dir.join("diagnostics")),
             derived_wasm: wasm::DerivedModules::default(),
-            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            settings: Arc::new(settings::ScopedStore::single(settings::Store::open(
+                dir.join("settings.json"),
+            ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             token: token.to_owned(),
             port: PORT,
@@ -525,7 +529,9 @@ mod tests {
             snapshot: None,
             recorder: Recorder::open(diagnostics.clone()),
             derived_wasm: wasm::DerivedModules::default(),
-            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            settings: Arc::new(settings::ScopedStore::single(settings::Store::open(
+                dir.join("settings.json"),
+            ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             token: token.to_owned(),
             port: PORT,
@@ -581,7 +587,9 @@ mod tests {
             snapshot: None,
             recorder: Recorder::open(dir.join("diagnostics")),
             derived_wasm: derived,
-            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            settings: Arc::new(settings::ScopedStore::single(settings::Store::open(
+                dir.join("settings.json"),
+            ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             token: "test-token".to_owned(),
             port: PORT,
@@ -617,7 +625,9 @@ mod tests {
             snapshot: None,
             recorder: Recorder::open(dir.join("diagnostics")),
             derived_wasm: wasm::DerivedModules::default(),
-            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            settings: Arc::new(settings::ScopedStore::single(settings::Store::open(
+                dir.join("settings.json"),
+            ))),
             generations: Arc::clone(&generations),
             token: token.to_owned(),
             port: PORT,
