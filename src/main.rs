@@ -82,6 +82,14 @@ fn main() {
             std::process::exit(i32::from(exit.failed) * 2);
         }
     };
+    for notice in &invocation.notices {
+        note!(
+            "[gwnative] {}: {} ({:?})",
+            notice.option,
+            notice.message,
+            notice.kind
+        );
+    }
     if invocation.verbose {
         server::enable_tracing();
         sockets::enable_tracing();
@@ -240,6 +248,16 @@ fn main() {
     // once at the wrong scale and correcting it in front of the player. Which
     // client module to derive is settled here too — see below.
     let settings_path = paths.support_dir().join("settings.json");
+    if invocation.legacy.reset_preferences {
+        match settings::reset(&settings_path) {
+            Ok(true) => note!(
+                "[gwnative] local preferences reset; previous values kept at {}",
+                settings_path.with_extension("json.reset").display()
+            ),
+            Ok(false) => {}
+            Err(error) => note!("[gwnative] local preferences could not be reset: {error}"),
+        }
+    }
     let profile_settings = Arc::new(settings::Store::open(settings_path));
     let legacy_update_settings = if profile.is_default() {
         profile_settings.get()
@@ -704,7 +722,12 @@ fn run_windowed(
         module,
         invocation,
     );
-    let window = window::open(mtm, &webview, support_dir.join("window.json"));
+    let window = window::open(
+        mtm,
+        &webview,
+        support_dir.join("window.json"),
+        invocation.legacy.window_mode,
+    );
     activation_cover::install(&webview, &window, loopback.recorder.clone());
 
     // After the window, not before: two of the menu's items are requests to the
