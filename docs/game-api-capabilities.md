@@ -158,12 +158,14 @@ unit only when it actually consumes that unit's public contract.
 3. `.gwmod` validation and loading.
 4. Minimal companion core plus map/player/target read-only API.
 5. Tools shell, overlay, hotkeys, and build library.
-6. Authenticated E2E transport, native input, and secure input.
-7. Per-domain ABI and capability registry.
-8. Party, skillbar, and effects domain.
-9. Agents, quests, and objectives domain.
-10. Performance sampler and benchmark-only scene controls.
-11. Passive observer demand scheduling, change-only publication, and cadence
+6. Authenticated E2E transport and bounded event synchronization.
+7. Trusted AppKit input bridge.
+8. Login, character-entry, and secure-input synchronization.
+9. Per-domain ABI and capability registry.
+10. Party, skillbar, and effects domain.
+11. Agents, quests, and objectives domain.
+12. Performance sampler and benchmark-only scene controls.
+13. Passive observer demand scheduling, change-only publication, and cadence
     enforcement.
 
 Inventory/economy, social/progression, and UI/camera domains follow only when a
