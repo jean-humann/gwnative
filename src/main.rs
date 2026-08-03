@@ -90,6 +90,10 @@ fn main() {
             notice.kind
         );
     }
+    if invocation.verbose {
+        server::enable_tracing();
+        sockets::enable_tracing();
+    }
     let command = invocation.command;
     if command == cli::Command::Certify {
         let root = invocation.web_root.clone().unwrap_or_else(paths::web_root);

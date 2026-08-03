@@ -23,7 +23,7 @@ use std::io::BufReader;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -74,10 +74,17 @@ pub struct Loopback {
 /// while it streams content, so writing a line per request is not free: stderr
 /// is line-buffered and unbuffered against a terminal, which makes every one of
 /// these a synchronous write on the thread serving the read.
+static TRACE_REQUESTS: AtomicBool = AtomicBool::new(false);
+
+pub fn enable_tracing() {
+    TRACE_REQUESTS.store(true, Ordering::Relaxed);
+}
+
 fn tracing() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("GWNATIVE_TRACE_HTTP").is_some())
+    TRACE_REQUESTS.load(Ordering::Relaxed)
+        || *ON.get_or_init(|| std::env::var_os("GWNATIVE_TRACE_HTTP").is_some())
 }
 
 struct Context {
