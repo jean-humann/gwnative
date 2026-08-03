@@ -5,13 +5,10 @@
 //! page content: it is the page asking the host to do something only the host
 //! can do.
 //!
-//! Loopback is host-wide — any process running as this user can reach the
-//! port — so the token is the whole of what separates the page from everything
-//! else on the machine. It is checked once, at the top of [`serve`], rather
-//! than on each route: a route added below inherits the gate by being under
-//! `__`, and the wire test in [`super`] is what keeps that true. `Gw.snapshot`
-//! and the static files stay open, because the vendored client requests those
-//! itself and cannot be taught to carry a token.
+//! Loopback is host-wide. Administrative browser routes, read-only game-state
+//! access, and state publication therefore use separate bearer capabilities.
+//! Routes inherit browser-only authority unless [`authorized`] explicitly
+//! narrows them.
 
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -20,6 +17,19 @@ use super::{Context, Flow, tracing};
 use crate::chunks::ChunkStore;
 use crate::http::{Request, json, no_content, respond, text, token_matches};
 use crate::{app, cache, diagnostics, disk, dock, generation, keychain, net, relaunch, ws};
+
+fn authorized(request: &Request, context: &Context) -> bool {
+    let offered = request.offered_token();
+    let offered = offered.as_deref();
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "__game/v1" | "__game/v1/state") => {
+            token_matches(&context.tokens.browser, offered)
+                | token_matches(&context.tokens.game_reader, offered)
+        }
+        ("PUT", "__game/v1/state") => token_matches(&context.tokens.game_publisher, offered),
+        _ => token_matches(&context.tokens.browser, offered),
+    }
+}
 
 /// Answer a `__` route.
 ///
@@ -37,9 +47,9 @@ pub(super) fn serve(
     }
     let flow = Flow::after(request);
 
-    if !token_matches(&context.token, request.offered_token().as_deref()) {
+    if !authorized(request, context) {
         note!(
-            "[loopback] refused an untokened {} /{}",
+            "[loopback] refused an unauthorized {} /{}",
             request.method,
             request.path
         );
@@ -69,6 +79,13 @@ pub(super) fn serve(
         "__transform-failed" if request.method == "POST" => {
             transform_failed(request, stream, context)?
         }
+        "__game/v1" => game_description(request, stream, context)?,
+        "__game/v1/state" => game_state(request, stream, context)?,
+        "__game/v1/actions" => text(
+            stream,
+            409,
+            "no write operation is certified for this client build",
+        )?,
         "__socket" => return socket(request, stream, flow).map(Some),
         "__diag" => diag(request, stream, context)?,
         "__resident" => match &context.snapshot {
@@ -155,6 +172,54 @@ pub(super) fn serve(
         }
     }
     Ok(Some(flow))
+}
+
+fn game_description(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+) -> std::io::Result<()> {
+    if request.method != "GET" {
+        return not_allowed(stream, "GET");
+    }
+    json(stream, 200, &context.game_api.description_json())
+}
+
+fn game_state(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
+    match request.method.as_str() {
+        "GET" => {
+            let after = match request
+                .param("after")
+                .unwrap_or_else(|| "0".into())
+                .parse::<u64>()
+            {
+                Ok(value) => value,
+                Err(_) => return text(stream, 400, "after must be an unsigned integer"),
+            };
+            let wait_ms = match request
+                .param("waitMs")
+                .unwrap_or_else(|| "0".into())
+                .parse::<u64>()
+            {
+                Ok(value) => value.min(crate::game_api::MAX_WAIT_MS),
+                Err(_) => return text(stream, 400, "waitMs must be an unsigned integer"),
+            };
+            match context.game_api.state_json_after(after, wait_ms) {
+                Some(state) => json(stream, 200, &state),
+                None => text(stream, 404, "no newer game state is available"),
+            }
+        }
+        "PUT" => match context.game_api.publish(&request.body) {
+            Ok(revision) => {
+                let body = serde_json::json!({"revision": revision})
+                    .to_string()
+                    .into_bytes();
+                json(stream, 200, &body)
+            }
+            Err(reason) => text(stream, 400, &reason),
+        },
+        _ => not_allowed(stream, "GET, PUT"),
+    }
 }
 
 /// The answer for a route that speaks for the game image on a launch that has

@@ -22,6 +22,7 @@ mod diagnostics;
 mod disk;
 mod dock;
 mod error;
+mod game_api;
 mod generation;
 mod http;
 mod instance;
@@ -340,7 +341,11 @@ fn main() {
     };
     module.logs();
 
-    let token = session_token();
+    let tokens = server::CapabilityTokens {
+        browser: session_token(),
+        game_reader: session_token(),
+        game_publisher: session_token(),
+    };
     let loopback = match server::spawn(server::Config {
         root: root.clone(),
         snapshot,
@@ -348,7 +353,7 @@ fn main() {
         derived_wasm,
         settings,
         generations: Arc::clone(&generations),
-        token: token.clone(),
+        tokens: tokens.clone(),
         port: paths.port(),
         credential_account: profile.keychain_account(),
     }) {
@@ -373,15 +378,20 @@ fn main() {
     // lives behind that gate on `__diag`, and a benchmark that cannot read it
     // is a benchmark of nothing. So: on request, and only on request.
     if std::env::var_os("GWNATIVE_PRINT_TOKEN").is_some() {
-        note!("[gwnative] session token {token}");
+        note!("[gwnative] session token {}", tokens.browser);
+    }
+    // External state consumers receive no credential, settings, diagnostics,
+    // process-control, or publication authority.
+    if std::env::var_os("GWNATIVE_PRINT_GAME_TOKEN").is_some() {
+        note!("[gwnative] game API read token {}", tokens.game_reader);
     }
 
     if headless {
-        park_headless(&loopback, &token);
+        park_headless(&loopback, &tokens.browser);
     }
     run_windowed(
         &loopback,
-        &token,
+        &tokens,
         &module,
         &invocation,
         paths.support_dir(),
@@ -799,7 +809,7 @@ fn park_headless(loopback: &server::Loopback, token: &str) -> ! {
 /// terminated.
 fn run_windowed(
     loopback: &server::Loopback,
-    token: &str,
+    tokens: &server::CapabilityTokens,
     module: &wasm::Module,
     invocation: &cli::Invocation,
     support_dir: &Path,
@@ -833,7 +843,8 @@ fn run_windowed(
         frame,
         webview::Origin {
             url: &url,
-            token,
+            token: &tokens.browser,
+            game_publisher_token: &tokens.game_publisher,
             website_data_store_id,
         },
         &loopback.settings.get(),

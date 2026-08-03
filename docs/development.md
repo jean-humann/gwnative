@@ -62,8 +62,11 @@ workflow rather than invoking `certify` directly. See
 127.0.0.1:38112 <token>
 ```
 
-Use it to exercise the snapshot and gated host routes without a window. Set
-`GWNATIVE_PRINT_TOKEN=1` when a windowed diagnostic tool also needs the token.
+Use it to exercise the snapshot and gated host routes without a window. A
+windowed tool that only consumes the public game API should set
+`GWNATIVE_PRINT_GAME_TOKEN=1`; that token cannot reach credentials, settings,
+process controls, or state publication. `GWNATIVE_PRINT_TOKEN=1` is the
+deliberate full-authority escape for diagnostics requiring other host routes.
 
 ## Code signing and the Keychain
 
@@ -146,6 +149,7 @@ All runtime overrides are optional.
 | `GWNATIVE_WEB_ROOT` | Override the web shell and client-artifact directory |
 | `GWNATIVE_PORT` | Override loopback port `38112` |
 | `GWNATIVE_PRINT_TOKEN` | Print the injected host-route token to stderr |
+| `GWNATIVE_PRINT_GAME_TOKEN` | Print a token limited to read-only public game-state routes |
 | `GWNATIVE_TRACE_HTTP` | Log each loopback HTTP request |
 | `GWNATIVE_TRACE_SOCKETS` | Log socket frame sizes; value `hex` also logs at most the first 16 bytes |
 | `GWNATIVE_FRAME_AUDIT` | Value `1` enables animation-callback, draw, suspension and logical-swap correlation |

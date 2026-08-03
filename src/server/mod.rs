@@ -32,6 +32,7 @@ mod content;
 
 use crate::chunks::ChunkStore;
 use crate::diagnostics::Recorder;
+use crate::game_api;
 use crate::generation;
 use crate::http::{MAX_BODY_BYTES, POLICY, Request, policy, read_request, text};
 use crate::qos;
@@ -97,10 +98,11 @@ struct Context {
     derived_wasm: wasm::DerivedModules,
     settings: Arc<settings::ScopedStore>,
     generations: Arc<generation::Store>,
-    token: String,
+    tokens: CapabilityTokens,
     /// Profile-specific Keychain account name. The service remains stable so
     /// existing default-profile credentials keep working.
     credential_account: String,
+    game_api: Arc<game_api::Hub>,
 }
 
 /// A browser uses only a small connection pool. This ceiling leaves ample room
@@ -129,11 +131,19 @@ impl Drop for Connection {
 
 /// Serve `root` on 127.0.0.1:<ephemeral> until the process exits.
 ///
-/// `token` gates the credential routes. Loopback is host-wide, not per-user, so
-/// without it any process on the machine could ask this server for the saved
-/// password — which would make the keychain's own access control decorative.
-/// The page receives the token through an injected script, never over this
-/// socket, so reading the traffic does not yield it.
+/// Capability tokens gate host routes. Loopback is host-wide, not per-user, so
+/// the browser's administrative authority, an external reader, and the page's
+/// state publisher must not share one bearer credential.
+#[derive(Clone)]
+pub struct CapabilityTokens {
+    /// Full page authority, including credentials and process control.
+    pub browser: String,
+    /// Read-only access to the deliberately narrow public game-state schema.
+    pub game_reader: String,
+    /// Write-only access for the in-page state publisher.
+    pub game_publisher: String,
+}
+
 pub struct Config {
     pub root: PathBuf,
     pub snapshot: Option<Arc<ChunkStore>>,
@@ -141,7 +151,7 @@ pub struct Config {
     pub derived_wasm: wasm::DerivedModules,
     pub settings: Arc<settings::ScopedStore>,
     pub generations: Arc<generation::Store>,
-    pub token: String,
+    pub tokens: CapabilityTokens,
     pub port: u16,
     pub credential_account: String,
 }
@@ -154,7 +164,7 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
         derived_wasm,
         settings,
         generations,
-        token,
+        tokens,
         port,
         credential_account,
     } = config;
@@ -172,8 +182,9 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
         derived_wasm,
         settings: Arc::clone(&settings),
         generations,
-        token,
+        tokens,
         credential_account,
+        game_api: Arc::default(),
     });
     let active = Arc::new(AtomicUsize::new(0));
 
@@ -376,6 +387,14 @@ mod tests {
         (status, body.to_owned())
     }
 
+    fn capability_tokens(browser: &str) -> CapabilityTokens {
+        CapabilityTokens {
+            browser: browser.to_owned(),
+            game_reader: "game-reader-token".to_owned(),
+            game_publisher: "game-publisher-token".to_owned(),
+        }
+    }
+
     /// The settings route end to end, over a real socket.
     ///
     /// Worth a wire test rather than only unit tests of `settings::patch`: the
@@ -404,7 +423,7 @@ mod tests {
                 file.clone(),
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
-            token: token.to_owned(),
+            tokens: capability_tokens(token),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -460,6 +479,121 @@ mod tests {
         assert_eq!(request(addr, "GET", "/__nonesuch", auth, "").0, 404);
     }
 
+    #[test]
+    fn game_state_read_and_publish_capabilities_are_disjoint() {
+        let temp = TempDir::new("server-game-api");
+        let dir = temp.0.clone();
+        let browser = "browser-token";
+        let reader = "game-reader-token";
+        let publisher = "game-publisher-token";
+        let loopback = spawn(Config {
+            root: dir.clone(),
+            snapshot: None,
+            recorder: Recorder::open(dir.join("diagnostics")),
+            derived_wasm: wasm::DerivedModules::default(),
+            settings: Arc::new(settings::ScopedStore::single(settings::Store::open(
+                dir.join("settings.json"),
+            ))),
+            generations: Arc::new(generation::Store::open(dir.join("generations"))),
+            tokens: capability_tokens(browser),
+            port: PORT,
+            credential_account: "login".into(),
+        })
+        .unwrap();
+        let address = loopback.addr;
+
+        assert_eq!(request(address, "GET", "/__game/v1", None, "").0, 403);
+        let (status, description) = request(address, "GET", "/__game/v1", Some(reader), "");
+        assert_eq!(status, 200);
+        assert!(description.contains(r#""longPoll":true"#), "{description}");
+        assert!(
+            description.contains(r#""available":false"#),
+            "{description}"
+        );
+
+        assert_eq!(
+            request(address, "GET", "/__credentials", Some(reader), "").0,
+            403,
+        );
+        assert_eq!(
+            request(
+                address,
+                "PUT",
+                "/__game/v1/state",
+                Some(reader),
+                r#"{"status":"waiting"}"#,
+            )
+            .0,
+            403,
+        );
+        assert_eq!(
+            request(
+                address,
+                "PUT",
+                "/__game/v1/state",
+                Some(browser),
+                r#"{"status":"waiting"}"#,
+            )
+            .0,
+            403,
+        );
+        assert_eq!(
+            request(address, "GET", "/__game/v1/state", Some(publisher), "").0,
+            403,
+        );
+
+        let ready = r#"{"status":"ready","mapId":55,"playerId":2,"playerX":0,"playerY":0,"targetValid":false}"#;
+        assert_eq!(
+            request(address, "PUT", "/__game/v1/state", Some(publisher), ready,).0,
+            200,
+        );
+        let (status, state) = request(address, "GET", "/__game/v1/state", Some(reader), "");
+        assert_eq!(status, 200);
+        assert!(state.contains(r#""revision":1"#), "{state}");
+        assert!(state.contains(r#""mapId":55"#), "{state}");
+        assert_eq!(
+            request(
+                address,
+                "GET",
+                "/__game/v1/state?after=1&waitMs=0",
+                Some(reader),
+                "",
+            )
+            .0,
+            404,
+        );
+
+        assert_eq!(
+            request(
+                address,
+                "PUT",
+                "/__game/v1/state",
+                Some(publisher),
+                r#"{"status":"unsupported","reason":"producer stopped"}"#,
+            )
+            .0,
+            200,
+        );
+        let (status, state) = request(address, "GET", "/__game/v1/state?after=1", Some(reader), "");
+        assert_eq!(status, 200);
+        assert!(state.contains(r#""status":"unsupported""#), "{state}");
+        assert!(!state.contains("mapId"), "stale state leaked: {state}");
+        let (_, description) = request(address, "GET", "/__game/v1", Some(browser), "");
+        assert!(
+            description.contains(r#""available":false"#),
+            "{description}"
+        );
+
+        assert_eq!(
+            request(address, "POST", "/__game/v1/actions", Some(reader), "{}").0,
+            403,
+        );
+        assert_eq!(
+            request(address, "POST", "/__game/v1/actions", Some(browser), "{}").0,
+            409,
+        );
+    }
+
     /// The route the settings panel's "Clear Game Data…" reaches.
     ///
     /// What it does when there *is* a store is `cache::request_clear`, which has
@@ -484,7 +618,7 @@ mod tests {
                 dir.join("settings.json"),
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
-            token: token.to_owned(),
+            tokens: capability_tokens(token),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -533,7 +667,7 @@ mod tests {
                 dir.join("settings.json"),
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
-            token: token.to_owned(),
+            tokens: capability_tokens(token),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -591,7 +725,7 @@ mod tests {
                 dir.join("settings.json"),
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
-            token: "test-token".to_owned(),
+            tokens: capability_tokens("test-token"),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -629,7 +763,7 @@ mod tests {
                 dir.join("settings.json"),
             ))),
             generations: Arc::clone(&generations),
-            token: token.to_owned(),
+            tokens: capability_tokens(token),
             port: PORT,
             credential_account: "login".into(),
         })
