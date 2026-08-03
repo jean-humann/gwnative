@@ -154,6 +154,24 @@ fn main() {
         );
     }
 
+    // Profiles share the content-addressed game-data cache even though their
+    // client manifests are isolated. Hold this before any active manifest can
+    // be promoted, and keep it for the store's lifetime.
+    let cache_lease = cache::prepare(paths.cache_dir()).unwrap_or_else(|reason| {
+        alert::fatal(
+            windowed,
+            "Guild Wars game data is busy",
+            &format!("The shared game-data cache could not be locked safely.\n\n{reason}"),
+        )
+    });
+    cache::finish_maintenance(&cache_lease, paths.cache_dir()).unwrap_or_else(|reason| {
+        alert::fatal(
+            windowed,
+            "Guild Wars game data could not be maintained",
+            &reason.to_string(),
+        )
+    });
+
     // Before the client can ask for the login, so the reason it will not get one
     // is on screen ahead of the dialog rather than after it.
     keychain::check_identity();
@@ -192,9 +210,13 @@ fn main() {
     // download failed, or one that rollback just refused.
     let active_manifest = client.active_manifest(paths.support_dir());
     let snapshot = match active_manifest {
-        Ok(manifest) => {
-            open_and_warm_snapshot(client, manifest, paths.cache_dir(), invocation.no_prefetch)
-        }
+        Ok(manifest) => open_and_warm_snapshot(
+            client,
+            manifest,
+            paths.cache_dir(),
+            cache_lease,
+            invocation.no_prefetch,
+        ),
         // Without a manifest there is no chunk list, so there is no snapshot —
         // the same outcome as failing to open one, reported the same way.
         Err(e) => {
@@ -607,15 +629,11 @@ fn open_and_warm_snapshot(
     client: patch::Client,
     manifest: manifest::Manifest,
     cache_dir: &Path,
+    cache_lease: cache::Lease,
     no_prefetch: bool,
 ) -> Option<Arc<chunks::ChunkStore>> {
     let cache_dir = cache_dir.to_owned();
-    // Before the store opens, which is the only moment this is safe: from here
-    // on the directory has a readahead thread, a prefetch thread and up to
-    // forty-eight fetches holding descriptors into it. See `cache::request_clear`
-    // for why the deletion is a launch behind the button that asks for it.
-    cache::take_clear_request(&cache_dir);
-    match chunks::ChunkStore::open(client, manifest, cache_dir).map(Arc::new) {
+    match chunks::ChunkStore::open(client, manifest, cache_dir, cache_lease).map(Arc::new) {
         Ok(store) => {
             note!(
                 "[gwnative] snapshot: {:.1} GB in {} KiB chunks, on demand",

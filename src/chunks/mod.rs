@@ -26,9 +26,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
 
-use crate::cache::{prune, sweep_orphans};
 use crate::error::{Error, Result};
 use crate::manifest::{ContentHash, Manifest};
 use crate::patch::Client;
@@ -57,6 +55,9 @@ pub struct ChunkStore {
     /// Manifest path of the snapshot, resolved once at construction.
     snapshot: String,
     cache_dir: PathBuf,
+    /// Covers manifest activation and prevents a clear while this store or one
+    /// of its background workers can still touch the shared cache.
+    _cache_lease: crate::cache::Lease,
     inflight: Mutex<HashMap<ContentHash, Arc<Slot>>>,
     permits: Semaphore,
     /// Held *in addition to* `permits` by prefetch workers only. See
@@ -119,43 +120,20 @@ struct Stats {
 }
 
 impl ChunkStore {
-    pub fn open(client: Client, manifest: Manifest, cache_dir: PathBuf) -> Result<Self> {
+    pub fn open(
+        client: Client,
+        manifest: Manifest,
+        cache_dir: PathBuf,
+        cache_lease: crate::cache::Lease,
+    ) -> Result<Self> {
         let snapshot = manifest.require_unique(crate::patch::SNAPSHOT)?.to_owned();
         fs::create_dir_all(&cache_dir)?;
-        // Every hash this manifest can ever ask for, across every file in it —
-        // not just the snapshot's. Collected here, on the manifest that was
-        // just fetched and is about to become the live one, because that is
-        // what makes everything else in the cache provably dead.
-        //
-        // Owned strings rather than borrowed `Hex`, which is a stack type with
-        // no identity: this crosses onto another thread and has to outlive the
-        // manifest reference it came from. A 4.2 GB snapshot is ~16k hashes, so
-        // the set is about a megabyte and it is dropped as soon as it is used.
-        let live: HashSet<String> = manifest
-            .files
-            .values()
-            .flat_map(|file| {
-                file.chunk_hashes
-                    .iter()
-                    .map(|hash| hash.hex().as_str().to_owned())
-            })
-            .collect();
-
-        // Off the launch path: this walks 256 directories and the game has
-        // nothing to gain by waiting for it.
-        thread::spawn({
-            let cache_dir = cache_dir.clone();
-            move || {
-                crate::qos::set(crate::qos::Class::Utility);
-                sweep_orphans(&cache_dir);
-                prune(&cache_dir, &live);
-            }
-        });
         Ok(Self {
             client,
             manifest,
             snapshot,
             cache_dir,
+            _cache_lease: cache_lease,
             inflight: Mutex::new(HashMap::new()),
             permits: Semaphore::new(MAX_CONCURRENT_FETCHES),
             prefetch_permits: Semaphore::new(MAX_PREFETCH_FETCHES),

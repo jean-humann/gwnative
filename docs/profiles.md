@@ -88,6 +88,14 @@ gwnative --profile second --new-instance
 profile-specific lock is never bypassed, so two live processes cannot write the
 same settings, IndexedDB origin, window state, and credential identity.
 
+Every process also keeps a shared lease on the common game-chunk cache across
+the manifest-activation boundary. The first process performs the short
+clear/sweep maintenance window exclusively, then downgrades before network or
+client installation work so another profile can join without waiting for a
+patch. A requested cache clear remains pending until no profile is using the
+cache; it is never performed underneath another process's open files or chunk
+writes.
+
 ## Removal
 
 There is intentionally no broad destructive profile command. To remove one:
