@@ -246,20 +246,26 @@ where
             .map_or((raw.as_str(), None), |(name, value)| (name, Some(value)));
 
         match option {
-            "-h" | "--help" | "help" => return Err(answer(USAGE)),
+            "-h" | "--help" | "help" => {
+                no_inline(option, inline, || {})?;
+                return Err(answer(USAGE));
+            }
             "-V" | "--version" | "version" => {
+                no_inline(option, inline, || {})?;
                 return Err(answer(&format!("gwnative {}", env!("CARGO_PKG_VERSION"))));
             }
-            "run" => set_command(&mut invocation, &mut command_seen, Command::Run, option)?,
-            "sync" => set_command(&mut invocation, &mut command_seen, Command::Sync, option)?,
-            "serve" => set_command(&mut invocation, &mut command_seen, Command::Serve, option)?,
-            "certify" => set_command(&mut invocation, &mut command_seen, Command::Certify, option)?,
-            "profiles" => set_command(
-                &mut invocation,
-                &mut command_seen,
-                Command::Profiles,
-                option,
-            )?,
+            "run" | "sync" | "serve" | "certify" | "profiles" => {
+                no_inline(option, inline, || {})?;
+                let command = match option {
+                    "run" => Command::Run,
+                    "sync" => Command::Sync,
+                    "serve" => Command::Serve,
+                    "certify" => Command::Certify,
+                    "profiles" => Command::Profiles,
+                    _ => unreachable!(),
+                };
+                set_command(&mut invocation, &mut command_seen, command, option)?;
+            }
             "--profile" => {
                 let value = take_value(&args, &mut index, option, inline)?;
                 validate_profile(value)?;
@@ -368,6 +374,7 @@ where
                 );
             }
             "-windowed" => {
+                no_inline(option, inline, || {})?;
                 set_once(
                     &mut invocation.legacy.window_mode,
                     WindowMode::Windowed,
@@ -375,6 +382,7 @@ where
                 )?;
             }
             "-windowedfullscreen" => {
+                no_inline(option, inline, || {})?;
                 set_once(
                     &mut invocation.legacy.window_mode,
                     WindowMode::Fullscreen,
@@ -382,6 +390,7 @@ where
                 )?;
             }
             "-update" => {
+                no_inline(option, inline, || {})?;
                 set_command(&mut invocation, &mut command_seen, Command::Sync, option)?;
                 translated(
                     &mut invocation,
@@ -390,6 +399,7 @@ where
                 );
             }
             "-uninstall" => {
+                no_inline(option, inline, || {})?;
                 return Err(answer(
                     "gwnative does not remove player data from a command-line switch.\n\
                      Move Guild Wars.app to Trash, then remove \
@@ -400,76 +410,89 @@ where
             "-mute" | "-nosound" => {
                 no_inline(option, inline, || invocation.legacy.mute = true)?;
             }
-            "-diag" => invocation.legacy.diagnostics = true,
-            "-perf" => invocation.legacy.performance = true,
+            "-diag" => no_inline(option, inline, || invocation.legacy.diagnostics = true)?,
+            "-perf" => no_inline(option, inline, || invocation.legacy.performance = true)?,
             "-log" => {
-                invocation.verbose = true;
+                no_inline(option, inline, || invocation.verbose = true)?;
                 translated(
                     &mut invocation,
                     option,
                     "enables native HTTP and socket-size tracing",
                 );
             }
-            "-bmp" => unsupported(
+            "-bmp" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "the WebAssembly client exposes no screenshot-format launch hook",
-            ),
-            "-fqdn" => unsupported(
+            )?,
+            "-fqdn" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "authentication routing is owned by the current client and restricted native network bridge",
-            ),
-            "-lodfull" => unsupported(
+            )?,
+            "-lodfull" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "the WebAssembly client exposes no supported model-detail launch hook",
-            ),
-            "-nopatchui" => invocation.legacy.no_patch_ui = true,
-            "-noshaders" => unsupported(
+            )?,
+            "-nopatchui" => no_inline(option, inline, || invocation.legacy.no_patch_ui = true)?,
+            "-noshaders" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "the WebGL client cannot run without its shaders",
-            ),
-            "-noui" => unsupported(
+            )?,
+            "-noui" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "the WebAssembly client exposes no supported user-interface suppression hook",
-            ),
-            "-oldfov" => unsupported(
+            )?,
+            "-oldfov" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "the WebAssembly client exposes no supported field-of-view launch hook",
-            ),
-            "-prefresetlocal" => invocation.legacy.reset_preferences = true,
-            "-resetmap" => unsupported(
+            )?,
+            "-prefresetlocal" => no_inline(option, inline, || {
+                invocation.legacy.reset_preferences = true
+            })?,
+            "-resetmap" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "map state belongs to the current client and has no separately certified reset operation",
-            ),
+            )?,
 
-            "-dsound" | "-sndasio" | "-sndwinmm" => unsupported(
+            "-dsound" | "-sndasio" | "-sndwinmm" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "the WebAssembly client uses Web Audio; Windows sound backends do not apply",
-            ),
-            "-dx8" => unsupported(
+            )?,
+            "-dx8" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "the WebAssembly client renders through WebGL and WebKit/Metal, not DirectX 8",
-            ),
-            "-mce" => unsupported(
+            )?,
+            "-mce" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "Windows Media Center integration is unavailable on macOS",
-            ),
-            "-newauth" | "-oldauth" => unsupported(
+            )?,
+            "-newauth" | "-oldauth" => unsupported_flag(
                 &mut invocation,
                 option,
+                inline,
                 "authentication selection is owned by ArenaNet's current WebAssembly client",
-            ),
+            )?,
             "-authsrv" | "-exit" | "-map" | "-port" | "-sndfastbuf" => {
-                no_known_effect(&mut invocation, option);
+                no_inline(option, inline, || no_known_effect(&mut invocation, option))?;
             }
             _ => return Err(usage_error(raw)),
         }
@@ -618,6 +641,15 @@ fn unsupported(invocation: &mut Invocation, option: &str, message: &str) {
         kind: NoticeKind::Unsupported,
         message: message.to_owned(),
     });
+}
+
+fn unsupported_flag(
+    invocation: &mut Invocation,
+    option: &str,
+    inline: Option<&str>,
+    message: &str,
+) -> Result<(), Exit> {
+    no_inline(option, inline, || unsupported(invocation, option, message))
 }
 
 fn no_known_effect(invocation: &mut Invocation, option: &str) {
@@ -839,6 +871,48 @@ mod tests {
                 .iter()
                 .all(|notice| notice.kind == NoticeKind::Unsupported)
         );
+    }
+
+    #[test]
+    fn every_valueless_compatibility_switch_refuses_an_inline_value() {
+        for option in [
+            "-autologin",
+            "-windowed",
+            "-windowedfullscreen",
+            "-update",
+            "-uninstall",
+            "-mute",
+            "-nosound",
+            "-diag",
+            "-perf",
+            "-log",
+            "-bmp",
+            "-fqdn",
+            "-lodfull",
+            "-nopatchui",
+            "-noshaders",
+            "-noui",
+            "-oldfov",
+            "-prefresetlocal",
+            "-resetmap",
+            "-dsound",
+            "-sndasio",
+            "-sndwinmm",
+            "-dx8",
+            "-mce",
+            "-newauth",
+            "-oldauth",
+            "-authsrv",
+            "-exit",
+            "-map",
+            "-port",
+            "-sndfastbuf",
+        ] {
+            let inline = format!("{option}=unexpected");
+            let exit = parse([inline]).unwrap_err();
+            assert!(exit.failed, "{option}");
+            assert!(exit.message.contains("does not take a value"), "{option}");
+        }
     }
 
     #[test]
