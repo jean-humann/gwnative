@@ -94,7 +94,11 @@ clear/sweep maintenance window exclusively, then downgrades before network or
 client installation work so another profile can join without waiting for a
 patch. A requested cache clear remains pending until no profile is using the
 cache; it is never performed underneath another process's open files or chunk
-writes.
+writes. Automatic manifest pruning is intentionally disabled because two
+profiles may run different client generations whose manifests reference
+different chunks. **Clear game data** is the current explicit way to reclaim
+obsolete chunks, and clears the complete shared image only after all profiles
+release it.
 
 ## Removal
 
