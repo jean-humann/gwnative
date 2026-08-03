@@ -458,7 +458,7 @@ fn install_client(
     if let Ok((_, source, offered)) = &plan
         && should_activate_pending_manifest(force_sync, missing.is_empty(), *source, outdated)
     {
-        let failure = match client.activate_manifest(&paths::support_dir()) {
+        let failure = match client.activate_manifest(support_dir) {
             Ok(true) => {
                 if !generations.refresh_manifest(offered) {
                     note!(
@@ -479,7 +479,7 @@ fn install_client(
         // promoted is deferred. If there is no matching active copy,
         // continuing would start the shell with an incoherent game image.
         let active_matches = client
-            .active_manifest(&paths::support_dir())
+            .active_manifest(support_dir)
             .and_then(|active| generation::identify(&active, &names))
             .is_ok_and(|active| active == *offered);
         if active_matches {
