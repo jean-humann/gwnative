@@ -5,8 +5,11 @@
 //! raw depending on the manifest's compression mode, and **the hash covers the
 //! decoded bytes** — decode first, then verify.
 
+use std::collections::HashSet;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -193,6 +196,43 @@ impl Client {
                 "offline mode needs an active manifest from an earlier successful launch".into(),
             )
         })
+    }
+
+    /// Chunks named by every usable manifest cached for this installation.
+    ///
+    /// Profiles isolate their client generation but deliberately share the
+    /// content-addressed chunk directory. Pruning against only the profile
+    /// being launched can therefore strand another installed generation. The
+    /// default profile and each immediate named-profile directory contribute
+    /// both the active manifest and the predecessor stashed for rollback.
+    ///
+    /// Retention deliberately ignores the recorded patch root. The chunk cache
+    /// is shared even when profiles use different service overrides, and a
+    /// content hash has the same meaning whichever root supplied its bytes.
+    /// The cache envelope and manifest parser remain bounded and fail closed.
+    pub fn cached_profile_chunk_names(&self, base: &Path) -> HashSet<String> {
+        let mut directories = vec![base.to_owned()];
+        if let Ok(entries) = fs::read_dir(base.join("profiles")) {
+            directories.extend(entries.flatten().filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(|kind| kind.is_dir())
+                    .map(|_| entry.path())
+            }));
+        }
+        directories
+            .into_iter()
+            .flat_map(|directory| {
+                [
+                    active_manifest_path(&directory),
+                    directory.join("generations/previous/manifest.cache"),
+                ]
+            })
+            .filter_map(|path| read_cache_envelope(&path))
+            .filter_map(|(_, _, bytes)| Manifest::parse(&bytes).ok())
+            .flat_map(|manifest| manifest.chunk_names())
+            .collect()
     }
 
     /// Refresh the cached manifest if the service has a different one, and say
@@ -470,6 +510,9 @@ pub enum Source {
 /// first two leaves the manifest's own bytes untouched.
 const ACTIVE_MANIFEST: &str = "manifest.cache";
 const PENDING_MANIFEST: &str = "manifest.pending.cache";
+/// Root plus validator. Real values are tiny; this bound keeps a malformed
+/// cache from making retention read an arbitrary file around a valid body.
+const MAX_CACHE_HEADER_BYTES: u64 = 64 * 1024;
 
 pub fn active_manifest_path(dir: &Path) -> PathBuf {
     dir.join(ACTIVE_MANIFEST)
@@ -487,13 +530,64 @@ fn pending_manifest_path(dir: &Path) -> PathBuf {
 /// it differently. The caller's answer to all of those is the same, and it is
 /// the answer that was correct before this cache existed — fetch it.
 fn read_cache(path: &Path, root: &str) -> Option<(Option<String>, Vec<u8>)> {
-    let raw = fs::read(path).ok()?;
-    let (stored, rest) = split_line(&raw)?;
+    let (stored, validator, bytes) = read_cache_envelope(path)?;
     if stored != root {
         return None;
     }
+    Some((validator, bytes))
+}
+
+/// Read one structurally valid, size-bounded manifest cache envelope without
+/// assigning policy to its recorded service root.
+fn read_cache_envelope(path: &Path) -> Option<(String, Option<String>, Vec<u8>)> {
+    // Resolve the pathname exactly once and refuse a symlink at that point.
+    // Checking with `symlink_metadata` and opening afterwards leaves a window
+    // where another process can replace the checked file with a link. The
+    // descriptor below is the object whose type, length and bytes we trust.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    read_cache_envelope_file(file)
+}
+
+/// Parse a cache envelope from one already-resolved descriptor.
+fn read_cache_envelope_file(file: fs::File) -> Option<(String, Option<String>, Vec<u8>)> {
+    let metadata = file.metadata().ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    read_cache_envelope_descriptor(file, metadata.len())
+}
+
+fn read_cache_envelope_descriptor(
+    file: fs::File,
+    observed_length: u64,
+) -> Option<(String, Option<String>, Vec<u8>)> {
+    let limit = MAX_MANIFEST_BYTES + MAX_CACHE_HEADER_BYTES + 2;
+    if observed_length > limit {
+        return None;
+    }
+    // The descriptor can grow after the metadata call. `take(limit + 1)` keeps
+    // the allocation and read bounded while the extra byte distinguishes an
+    // at-limit envelope from a file that crossed the limit during the read.
+    let mut raw = Vec::with_capacity(observed_length as usize);
+    file.take(limit + 1).read_to_end(&mut raw).ok()?;
+    if raw.len() as u64 > limit {
+        return None;
+    }
+    let (stored, rest) = split_line(&raw)?;
     let (validator, bytes) = split_line(rest)?;
+    let header = stored.len().checked_add(validator.len())? as u64;
+    if !(stored.starts_with("https://") || stored.starts_with("http://"))
+        || header > MAX_CACHE_HEADER_BYTES
+        || bytes.len() as u64 > MAX_MANIFEST_BYTES
+    {
+        return None;
+    }
     Some((
+        stored.to_owned(),
         (!validator.is_empty()).then(|| validator.to_owned()),
         bytes.to_vec(),
     ))
@@ -765,6 +859,79 @@ mod tests {
         assert!(read_cache(&path, PATCH_ROOT).is_none());
     }
 
+    #[test]
+    fn a_manifest_cache_symlink_is_never_followed() {
+        let dir = TempDir::new("manifest-cache-symlink");
+        let target = dir.0.join("target");
+        let path = dir.0.join(ACTIVE_MANIFEST);
+        write_cache(&target, PATCH_ROOT, Some("\"target\""), b"{}").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        assert!(read_cache_envelope(&path).is_none());
+    }
+
+    #[test]
+    fn a_cache_path_replacement_cannot_change_an_open_envelope() {
+        let dir = TempDir::new("manifest-cache-replaced");
+        let path = dir.0.join(ACTIVE_MANIFEST);
+        write_cache(&path, PATCH_ROOT, Some("\"old\""), b"old").unwrap();
+        let opened = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .unwrap();
+
+        // `write_cache` atomically replaces the pathname. The descriptor must
+        // still produce the object it resolved, while a new read sees the new
+        // envelope rather than mixing metadata from one with bytes from the
+        // other.
+        write_cache(&path, PATCH_ROOT, Some("\"new\""), b"new").unwrap();
+        let (_, validator, body) = read_cache_envelope_file(opened).unwrap();
+        assert_eq!(validator.as_deref(), Some("\"old\""));
+        assert_eq!(body, b"old");
+
+        let (_, validator, body) = read_cache_envelope(&path).unwrap();
+        assert_eq!(validator.as_deref(), Some("\"new\""));
+        assert_eq!(body, b"new");
+    }
+
+    #[test]
+    fn a_cache_that_grows_after_metadata_is_still_read_to_a_bound() {
+        let dir = TempDir::new("manifest-cache-growing");
+        let path = dir.0.join(ACTIVE_MANIFEST);
+        write_cache(&path, PATCH_ROOT, None, b"{}").unwrap();
+        let opened = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .unwrap();
+        let observed_length = opened.metadata().unwrap().len();
+
+        // Model a writer extending the same inode after the descriptor's
+        // metadata check. The parser reads at most one byte beyond its budget,
+        // sees that byte, and rejects the envelope.
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_MANIFEST_BYTES + MAX_CACHE_HEADER_BYTES + 3)
+            .unwrap();
+        assert!(read_cache_envelope_descriptor(opened, observed_length).is_none());
+    }
+
+    #[test]
+    fn retention_never_reads_past_the_manifest_envelope_budget() {
+        let dir = TempDir::new("manifest-cache-oversized");
+        let path = dir.0.join(ACTIVE_MANIFEST);
+        let mut file = fs::File::create(&path).unwrap();
+        file.write_all(format!("{PATCH_ROOT}\n\n").as_bytes())
+            .unwrap();
+        file.set_len(MAX_MANIFEST_BYTES + MAX_CACHE_HEADER_BYTES + 3)
+            .unwrap();
+
+        assert!(read_cache_envelope(&path).is_none());
+    }
+
     /// The cache belongs to the service that filled it. `GWNATIVE_PATCH_ROOT`
     /// exists so a run can be pointed at a local one, and without this the run
     /// after it would boot on the local manifest and offer the local ETag back
@@ -884,6 +1051,103 @@ mod tests {
                 .files
                 .contains_key("old.bin")
         );
+    }
+
+    #[test]
+    fn shared_cache_retention_unions_valid_manifests_across_patch_roots() {
+        fn one_chunk(hash: char) -> Vec<u8> {
+            format!(
+                r#"{{"compressionMode":"none","chunkSize":16,
+                     "files":[{{"name":"Gw.snapshot","size":16,
+                                "chunkHashes":["{}"]}}]}}"#,
+                hash.to_string().repeat(64)
+            )
+            .into_bytes()
+        }
+
+        let base = TempDir::new("manifest-profile-union");
+        let older = base.0.join("profiles/older");
+        let malformed = base.0.join("profiles/malformed");
+        let foreign = base.0.join("profiles/foreign");
+        for directory in [&older, &malformed, &foreign] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        write_cache(
+            &active_manifest_path(&base.0),
+            PATCH_ROOT,
+            None,
+            &one_chunk('a'),
+        )
+        .unwrap();
+        write_cache(
+            &active_manifest_path(&older),
+            PATCH_ROOT,
+            None,
+            &one_chunk('b'),
+        )
+        .unwrap();
+        write_cache(
+            &active_manifest_path(&malformed),
+            PATCH_ROOT,
+            None,
+            b"not a manifest",
+        )
+        .unwrap();
+        write_cache(
+            &active_manifest_path(&foreign),
+            "http://127.0.0.1:8080",
+            None,
+            &one_chunk('c'),
+        )
+        .unwrap();
+
+        let client = Client::new(PATCH_ROOT, String::new());
+        assert_eq!(
+            client.cached_profile_chunk_names(&base.0),
+            HashSet::from(["a".repeat(64), "b".repeat(64), "c".repeat(64)]),
+            "a shared content-addressed cache must retain valid manifests from every root"
+        );
+    }
+
+    #[test]
+    fn offline_rollback_predecessor_chunks_survive_shared_cache_pruning() {
+        fn one_chunk(hash: char) -> Vec<u8> {
+            format!(
+                r#"{{"compressionMode":"none","chunkSize":16,
+                     "files":[{{"name":"Gw.snapshot","size":16,
+                                "chunkHashes":["{}"]}}]}}"#,
+                hash.to_string().repeat(64)
+            )
+            .into_bytes()
+        }
+
+        let base = TempDir::new("manifest-rollback-retention");
+        let previous = base.0.join("generations/previous/manifest.cache");
+        write_cache(
+            &active_manifest_path(&base.0),
+            PATCH_ROOT,
+            None,
+            &one_chunk('a'),
+        )
+        .unwrap();
+        write_cache(&previous, "http://127.0.0.1:8080", None, &one_chunk('b')).unwrap();
+
+        let cache = base.0.join("chunks");
+        for hash in ["a".repeat(64), "b".repeat(64), "c".repeat(64)] {
+            let path = cache.join(&hash[..2]).join(&hash);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"cached").unwrap();
+        }
+        let client = Client::new(PATCH_ROOT, String::new()).with_offline(true);
+        let retained = client.cached_profile_chunk_names(&base.0);
+        crate::cache::prune(&cache, &retained);
+
+        assert!(cache.join("aa").join("a".repeat(64)).exists());
+        assert!(
+            cache.join("bb").join("b".repeat(64)).exists(),
+            "offline recovery must keep the predecessor manifest's chunks"
+        );
+        assert!(!cache.join("cc").join("c".repeat(64)).exists());
     }
 
     #[test]

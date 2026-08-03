@@ -4,8 +4,11 @@ A gwnative profile is an isolation boundary, not only a launcher label.
 Game settings, window state, writable client artifacts, derived modules,
 diagnostics, Keychain credentials, WebKit state, overlays, and the build library
 all follow the selected profile. Application update preferences and immutable
-content-addressed game chunks remain shared so
-multiple profiles do not each consume another full game image.
+content-addressed game chunks remain shared so multiple profiles do not each
+consume another 4.2 GB. Cache cleanup retains the union named by every valid
+cached profile active and rollback manifest, even when patch-service roots
+differ, allowing profiles on different installed client generations to keep
+launching independently.
 
 ## Create and use a profile
 
@@ -26,7 +29,8 @@ profiles:
 
 A named profile uses:
 
-- support directory: `~/Library/Application Support/gwnative/profiles/<id>`
+- support directory:
+  `~/Library/Application Support/gwnative/profiles/<id>`
 - Keychain account: `login:<id>`
 - an assigned port in `38113` through `39112`, persisted in the descriptor
 - a persistent WebKit data-store UUID, also persisted in the descriptor
@@ -86,19 +90,14 @@ gwnative --profile second --new-instance
 
 `--new-instance` without a non-default `--profile` is refused. The
 profile-specific lock is never bypassed, so two live processes cannot write the
-same settings, IndexedDB origin, window state, and credential identity.
-
-Every process also keeps a shared lease on the common game-chunk cache across
-the manifest-activation boundary. The first process performs the short
-clear/sweep maintenance window exclusively, then downgrades before network or
-client installation work so another profile can join without waiting for a
-patch. A requested cache clear remains pending until no profile is using the
-cache; it is never performed underneath another process's open files or chunk
-writes. Automatic manifest pruning is intentionally disabled because two
-profiles may run different client generations whose manifests reference
-different chunks. **Clear game data** is the current explicit way to reclaim
-obsolete chunks, and clears the complete shared image only after all profiles
-release it.
+same settings, IndexedDB origin, window state, and credential identity. Each
+process also keeps a shared lease on the common game-chunk cache and
+active-manifest catalog. Migration, clear, sweep, and union-aware pruning run
+only while the first process owns the exclusive maintenance window. It then
+downgrades before network or client installation work so a second profile does
+not wait for a patch. A pending clear is deferred until every profile releases
+the lease; it is never performed under another process's open files or chunk
+writes.
 
 ## Removal
 

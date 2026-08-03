@@ -164,13 +164,17 @@ fn main() {
             &format!("The shared game-data cache could not be locked safely.\n\n{reason}"),
         )
     });
-    cache::finish_maintenance(&cache_lease, paths.cache_dir()).unwrap_or_else(|reason| {
-        alert::fatal(
-            windowed,
-            "Guild Wars game data could not be maintained",
-            &reason.to_string(),
-        )
-    });
+    let client = patch::Client::from_env().with_offline(invocation.offline);
+    let protected_chunks = client.cached_profile_chunk_names(&base_support);
+    cache::finish_maintenance(&cache_lease, paths.cache_dir(), &protected_chunks).unwrap_or_else(
+        |reason| {
+            alert::fatal(
+                windowed,
+                "Guild Wars game data could not be maintained",
+                &reason.to_string(),
+            )
+        },
+    );
 
     // Before the client can ask for the login, so the reason it will not get one
     // is on screen ahead of the dialog rather than after it.
@@ -178,7 +182,6 @@ fn main() {
 
     let root = paths.web_root().to_owned();
     // One client and one manifest, for everything below that needs either.
-    let client = patch::Client::from_env().with_offline(invocation.offline);
     let manifest = load_manifest(&client, force_sync, paths.support_dir(), invocation.offline);
     let revalidate = manifest
         .as_ref()

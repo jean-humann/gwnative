@@ -46,29 +46,38 @@ launcher, settings UI, and metrics.
 
 `src/main.rs` orders launch phases by dependency:
 
-1. Parse no command, `sync`, `serve`, help, or version before opening anything.
-2. Acquire the per-support-directory single-instance lock.
-3. Check whether the current code-signing identity can use the Keychain item.
-4. Select a writable web root.
-5. Load a pending patch offer when one exists, otherwise load the active
+1. Parse the command, native options, and Guild Wars compatibility switches
+   before opening anything.
+2. Select or create the profile.
+3. Acquire the profile lock and, for a primary launch, the global instance
+   lock.
+4. Select and prepare a writable profile web root.
+5. Acquire the shared-cache lease. The exclusive first user migrates the legacy
+   cache, consumes a pending clear, sweeps abandoned writes, and prunes only
+   chunks outside the union of every profile's valid active and rollback
+   manifests, independent of patch-service root; it then
+   downgrades before network or client installation work.
+6. Check whether the current code-signing identity can use the profile's
+   Keychain item.
+7. Load a pending patch offer when one exists, otherwise load the active
    manifest. Explicit sync fetches a fresh pending offer.
-6. Recover a failed optional transform or unproven official generation, verify
+8. Recover a failed optional transform or unproven official generation, verify
    installed artifacts, and promote missing or newer artifacts with their
    matching manifest. After promotion, revalidate the manifest in the
    background for the next launch.
-7. Open the game-image chunk store, consume a pending clear request, replay the
-   boot prefetch list, and start cursor-based readahead.
-8. Start diagnostics and load settings.
-9. Prepare certified WebAssembly transforms when available.
-10. Start the loopback origin and inject its session token, current keyboard
+9. Open the game-image chunk store, replay the boot prefetch list, and start
+   cursor-based readahead.
+10. Start diagnostics and load profile settings.
+11. Prepare certified WebAssembly transforms when available.
+12. Start the loopback origin and inject its session token, current keyboard
     layout, settings, update capabilities, and module state at document start.
-11. Create the WKWebView, window, menu, native event bridges, renderer recovery,
+13. Create the WKWebView, window, menu, native event bridges, renderer recovery,
     and application lifecycle delegate.
-12. Mark the client generation proven and seal the boot chunk list when the
+14. Mark the client generation proven and seal the boot chunk list when the
     page reports its first frame.
 
 The `sync` command exits after artifact installation. The `serve` command stops
-after step 10 and prints `<address> <session-token>` on stdout.
+after step 12 and prints `<address> <session-token>` on stdout.
 
 ## Loopback origin and trust model
 
@@ -109,6 +118,23 @@ Every host response carries a content-security policy, COOP/COEP/CORP, and
 `wasm-unsafe-eval`, and blob workers) but denies objects, frames, base URL
 changes, forms, and off-origin resource loads. A navigation delegate rejects
 top-level navigation away from the exact loopback origin.
+
+## Profile boundaries
+
+The default profile preserves the original support directory, Keychain account,
+and port. A named profile moves mutable support files below `profiles/<id>`,
+uses `login:<id>` in Keychain, and receives a deterministic loopback port.
+Because WebKit keys IndexedDB and local storage by origin, the stable port also
+isolates page data, overlays, and the build library.
+
+Content-addressed snapshot chunks remain shared. Chunk pruning retains the
+union of each profile's valid active and rollback manifests, including
+manifests recorded under another patch-service root, so an older installed
+profile generation is not evicted by a newer one. A second instance
+bypasses only the global primary lock and requires an explicit non-default
+profile. Its profile lock is still mandatory, preventing an accidental pair of
+writers to the same settings, window, and page origin. See
+[Profiles](profiles.md) for the storage map.
 
 ## Client artifacts and generation rollback
 
@@ -169,11 +195,11 @@ Core invariants:
 - speculative boot, readahead, and full-download work shares a 32-permit subset
   so demand reads always have capacity;
 - up to 2,048 verified chunk descriptors are held open for cheap `pread`;
-- every live profile holds a shared cache lease, while clear and orphan cleanup
-  require the exclusive maintenance lease; and
-- obsolete content chunks are retained because another profile may still use an
-  older manifest. **Clear game data** is currently the explicit reclamation
-  path; it waits until every live cache lease has been released.
+- every live profile holds a shared cache lease, while migration, clear, orphan
+  cleanup, and pruning require the exclusive maintenance lease; and
+- pruning retains every chunk named by the union of valid cached profile active
+  and rollback manifests, and removes only regular content-addressed files from
+  real lowercase-hex bucket directories without following symlinks.
 
 Quick Start records the chunks touched before first frame and replays that list
 on the next launch. A built-in list covers the first launch. Readahead follows

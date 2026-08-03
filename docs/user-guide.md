@@ -130,6 +130,7 @@ sharing immutable game chunks; see [Profiles](profiles.md) for the exact map.
 | Path | Contents |
 | --- | --- |
 | `chunks/` | Content-addressed game-image chunks |
+| `chunks.lock` | Cross-profile lease preventing live cache deletion |
 | `web/` | Writable copy of the web shell plus downloaded client artifacts |
 | `derived/` | Certified transformed WebAssembly modules |
 | `certificates/` | Verified signed compatibility-feed updates |
@@ -142,7 +143,11 @@ sharing immutable game chunks; see [Profiles](profiles.md) for the exact map.
 | `window.json` | Window frame and mode |
 | `generations/` | Installed-client hashes, proof state, rollback copy, and refusals |
 | `gwnative.lock` | Single-instance lock |
-| `profiles.lock`, `updates.lock`, `chunks.lock` | Cross-process catalog, updater-state, and shared-cache locks |
+| `profiles.lock`, `updates.lock` | Cross-process profile-catalog and updater-state locks |
+
+Named profiles place the mutable rows above under `profiles/<id>/`. The
+`chunks/` cache remains shared. The exact storage map is in
+[Profiles](profiles.md).
 
 `chunks.clear` appears temporarily when clearing the chunk cache has been
 scheduled. It remains pending while any profile is using the shared cache and
@@ -155,8 +160,8 @@ WebKit derives them from the bundle identifier or process name. IndexedDB in
 these roots holds the client's local files, including templates and chat logs.
 
 **Settings → Clear Game Data…** schedules deletion of the chunk cache for the
-next launch, before any background reader opens it. The game re-fetches what it
-needs. This does not delete characters or other account state.
+next launch on which no profile is using it. The game re-fetches what it needs.
+This does not delete characters or other account state.
 
 The failed-boot action **Reset game data…** is different: it deletes the
 current origin's IndexedDB data while retaining downloaded chunks. Use it only

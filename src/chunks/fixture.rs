@@ -5,6 +5,7 @@
 //! built with has no credentials and is never expected to succeed. A fetch that
 //! reaches it fails, which several of the tests rely on.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use super::ChunkStore;
@@ -67,7 +68,7 @@ fn open(hashes: &str, size: u64, cache_dir: PathBuf) -> ChunkStore {
     )
     .expect("the synthetic manifest should parse");
     let cache_lease = crate::cache::prepare(&cache_dir).expect("the cache should lock");
-    crate::cache::finish_maintenance(&cache_lease, &cache_dir)
+    crate::cache::finish_maintenance(&cache_lease, &cache_dir, &HashSet::new())
         .expect("the cache maintenance should finish");
     ChunkStore::open(
         Client::new("", String::new()),
