@@ -152,9 +152,8 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences, prefer_60_fps: b
 
 /// What the page is handed before it has run a line of its own.
 ///
-/// The token goes out of band rather than over the loopback origin, which would
-/// put it where any local process could simply ask for it — the exposure the
-/// token exists to close.
+/// The browser and publisher tokens go out of band rather than over the
+/// loopback origin. The read-only game token is deliberately not injected.
 ///
 /// The keyboard layout rides the same channel for a different reason: it has to
 /// be in place before the page can see a keydown, and a fetch at boot would not
@@ -178,6 +177,7 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences, prefer_60_fps: b
 /// instantiated artifact, so the immutable launch snapshot is injected here.
 fn preamble(
     token: &str,
+    game_publisher_token: &str,
     settings: &settings::Settings,
     module: &wasm::Module,
     frame: FrameOptions,
@@ -187,7 +187,8 @@ fn preamble(
         .ok()
         .filter(|value| value == "jspi" || value == "asyncify");
     format!(
-        "window.__gwnativeToken = {};\nwindow.__gwnativeLayout = {};\n\
+        "window.__gwnativeToken = {};\nwindow.__gwnativeGamePublisherToken = {};\n\
+         window.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
          window.__gwnativeRuntimeCapabilities = {};\n\
          window.__gwnativeTemplateSave = \"uncertified\";\nwindow.__gwnativeClientBuild = null;\n\
@@ -198,6 +199,7 @@ fn preamble(
          window.__gwnativePreserveDrawingBuffer = {};\nwindow.__gwnativeFrameIsolation = {};\n\
          window.__gwnativeLaunch = {};",
         serde_json::Value::from(token),
+        serde_json::Value::from(game_publisher_token),
         layout::as_json(),
         wasm::markers_json(),
         serde_json::to_string(settings).unwrap_or_else(|_| "{}".to_owned()),
@@ -225,6 +227,7 @@ fn preamble(
 pub struct Origin<'a> {
     pub url: &'a str,
     pub token: &'a str,
+    pub game_publisher_token: &'a str,
     pub website_data_store_id: Option<&'a str>,
 }
 
@@ -271,6 +274,7 @@ pub fn make(
             WKUserScript::alloc(mtm),
             &NSString::from_str(&preamble(
                 origin.token,
+                origin.game_publisher_token,
                 settings,
                 module,
                 frame_options,

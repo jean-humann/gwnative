@@ -71,8 +71,9 @@ launcher, settings UI, and metrics.
    import, or verify and fill a requested full image or repair operation.
 11. Start diagnostics and load profile settings.
 12. Prepare certified WebAssembly transforms when available.
-13. Start the loopback origin and inject its session token, current keyboard
-    layout, settings, update capabilities, and module state at document start.
+13. Start the loopback origin and inject its browser and game-state publisher
+    capabilities, current keyboard layout, settings, update capabilities, and
+    module state at document start.
 14. Create the WKWebView, window, menu, native event bridges, renderer recovery,
     and application lifecycle delegate.
 15. Mark the client generation proven and seal the boot chunk list when the
@@ -99,10 +100,20 @@ ephemeral fallback keeps the app launchable but temporarily presents an empty
 page-data origin.
 
 Loopback is machine-local, not user-private. Host capability routes beginning
-with `__` therefore require a random session token. The token is injected into
-the page through `WKUserScript`; it is never served over the socket. The window
-prints it only when `GWNATIVE_PRINT_TOKEN` is set, and `serve` prints it because
-external test clients otherwise have no route through the gate.
+with `__` therefore require fresh random tokens with disjoint authority:
+
+- the browser token controls credentials, settings, sockets, diagnostics, and
+  process operations;
+- a read-only game-state token can only `GET /__game/v1` and
+  `GET /__game/v1/state`; and
+- an injection-only publisher token can only `PUT /__game/v1/state`.
+
+The browser and publisher tokens are injected through `WKUserScript`; the
+reader token is never injected or served. A windowed external tool can request
+only that reader token with `GWNATIVE_PRINT_GAME_TOKEN=1`. The browser token is
+printed only by the explicit `GWNATIVE_PRINT_TOKEN` diagnostic escape, while
+`serve` prints it for full host-route testing. The game-state shell performs no
+memory observation itself and exposes no product action capability.
 
 Content requests are intentionally not token-gated because the generated client
 cannot attach a custom header. Their authority is narrow instead:

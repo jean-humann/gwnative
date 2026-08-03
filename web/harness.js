@@ -720,7 +720,7 @@ function reportTransformFailure() {
   try {
     const [
       graphics, audio, memory, filesystem, image, sockets, platform, input, templates, prefs,
-      start, panel, data, compat, guide, metrics, runtime, audit,
+      start, panel, data, compat, guide, gameApi, metrics, runtime, audit,
     ] = await Promise.all([
       import('./graphics.js'),
       import('./audio.js'),
@@ -737,6 +737,7 @@ function reportTransformFailure() {
       import('./game-data.js'),
       import('./compatibility.js'),
       import('./guide.js'),
+      import('./game-api.js'),
       import('./diagnostics.js'),
       import('./client-runtime.js'),
       import('./frame-audit.js'),
@@ -757,6 +758,7 @@ function reportTransformFailure() {
       ...data,
       ...compat,
       ...guide,
+      ...gameApi,
       ...runtime,
       ...audit,
     };
@@ -846,6 +848,9 @@ function reportTransformFailure() {
     read: host.readSettings,
     save: host.saveSettings,
   };
+  // This installs only a dormant publisher transport. A later certified
+  // producer decides whether and when state is observed.
+  window.gwGameApi = host.installGameApi({ log });
 
   // The panel is wired before the client exists, so ⌘, answers from the first
   // moment the page is up rather than only once the game has booted — which is
