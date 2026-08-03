@@ -569,6 +569,18 @@ def maximum_unsampled_callbacks(frames: int) -> int:
     return max(5, math.ceil(frames / 100))
 
 
+def performance_sample_coverage(
+    duration_ms: float,
+    interval_samples: int,
+    interval_mean_ms: float,
+) -> tuple[float, float]:
+    """Return covered ratio and unobserved edge time for a frame sample."""
+    observed_span_ms = min(duration_ms, interval_samples * interval_mean_ms)
+    uncovered_ms = max(0.0, duration_ms - observed_span_ms)
+    coverage = observed_span_ms / duration_ms if duration_ms > 0 else 0.0
+    return coverage, uncovered_ms
+
+
 def run_performance_sample(
     args: argparse.Namespace,
     stream: EventStream,
@@ -609,8 +621,11 @@ def run_performance_sample(
     stream.wait_for_action(sample_sequence, 5)
     sample = sample_event.get("detail", {})
     frames = sample.get("frames")
+    duration_ms = sample.get("durationMs")
     logical_fps = sample.get("framesPerSecond")
     intervals = sample.get("intervalMs", {})
+    interval_samples = intervals.get("samples") if isinstance(intervals, dict) else None
+    interval_mean_ms = intervals.get("mean") if isinstance(intervals, dict) else None
     p95_ms = intervals.get("p95") if isinstance(intervals, dict) else None
     callback = sample.get("callbackToSwapMs", {})
     callback_p95_ms = callback.get("p95") if isinstance(callback, dict) else None
@@ -624,7 +639,12 @@ def run_performance_sample(
     if (
         not isinstance(frames, int)
         or frames < 2
+        or not isinstance(duration_ms, (int, float))
+        or duration_ms <= 0
         or not isinstance(logical_fps, (int, float))
+        or not isinstance(interval_samples, int)
+        or interval_samples != frames - 1
+        or not isinstance(interval_mean_ms, (int, float))
         or not isinstance(p95_ms, (int, float))
         or not isinstance(callback_p95_ms, (int, float))
         or not isinstance(callback_samples, int)
@@ -642,6 +662,18 @@ def run_performance_sample(
             f"(frames={frames!r}, fps={logical_fps!r}, p95={p95_ms!r}, "
             f"callback={callback!r}, unsampledLimit={unsampled_limit}, "
             f"webglLost={webgl.get('lost')!r}, audit={audit!r})"
+        )
+    coverage_ratio, uncovered_ms = performance_sample_coverage(
+        duration_ms,
+        interval_samples,
+        interval_mean_ms,
+    )
+    maximum_uncovered_ms = max(250.0, duration_ms * 0.1)
+    if uncovered_ms > maximum_uncovered_ms:
+        raise Failure(
+            "WebKit did not provide a sustained native frame stream "
+            f"(coverage={coverage_ratio:.3f}, uncovered={uncovered_ms:.1f}ms, "
+            f"allowed={maximum_uncovered_ms:.1f}ms)"
         )
     if args.runtime != "auto" and sample.get("runtime") != args.runtime:
         raise Failure(
@@ -684,6 +716,8 @@ def run_performance_sample(
         },
         "sample": sample,
         "derived": {
+            "sampleCoverageRatio": round(coverage_ratio, 4),
+            "sampleUncoveredMs": round(uncovered_ms, 3),
             "p95FrameBudgetRatio": (
                 round(budget_ratio, 4) if budget_ratio is not None else None
             ),

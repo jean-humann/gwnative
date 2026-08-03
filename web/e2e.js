@@ -124,7 +124,7 @@ const XUNLAI_AGENT_LEVEL = 24;
 const XUNLAI_AGENT_ALLEGIANCE = 6;
 const XUNLAI_DISTANCE = 180;
 const XUNLAI_PAIR_MAX_DISTANCE = 600;
-const XUNLAI_PAIR_SEPARATION_RATIO = 4;
+const XUNLAI_CROWD_RADIUS = 2_500;
 const XUNLAI_INTERACTION_ATTEMPTS = 5;
 const XUNLAI_POLLS_PER_ATTEMPT = 50;
 const BENCHMARK_MIN_AGENT_COUNT = 80;
@@ -199,9 +199,10 @@ const travelToBenchmarkDistrict = async (window, sleep) => {
   return fallback;
 };
 
-const recertifyBenchmarkPosition = async (window, sleep) => {
+const recertifyBenchmarkPosition = async (window, sleep, anchorId) => {
   const state = await waitForBenchmarkPopulation(window, sleep);
-  const anchor = state && xunlaiAnchor(state);
+  const anchor = state && xunlaiMatches(state)
+    .find((agent) => agent.agentId === anchorId);
   if (!state || !anchor) return null;
   const distance = Math.hypot(anchor.x - state.playerX, anchor.y - state.playerY);
   return distance <= XUNLAI_DISTANCE ? { state, anchor, distance } : null;
@@ -217,31 +218,48 @@ const xunlaiMatches = (state) =>
     && Number.isFinite(agent.y)
   ));
 
+// Kamadan has more than one otherwise-identical Xunlai storage pair. Select
+// the one surrounded by the most nearby living agents: that both avoids a
+// coordinate/build identifier and defines the crowded workload this benchmark
+// is intended to reproduce. Once selected, the agent id is held only for this
+// district instance so moving players cannot switch the destination mid-path.
 const xunlaiAnchor = (state) => {
   const matches = xunlaiMatches(state);
+  const living = (state.agents?.agents ?? []).filter((agent) => (
+    agent.isLiving && Number.isFinite(agent.x) && Number.isFinite(agent.y)
+  ));
   const pairs = [];
   for (let left = 0; left < matches.length; left += 1) {
     for (let right = left + 1; right < matches.length; right += 1) {
+      const midpointX = (matches[left].x + matches[right].x) / 2;
+      const midpointY = (matches[left].y + matches[right].y) / 2;
+      const distance = Math.hypot(
+        matches[left].x - matches[right].x,
+        matches[left].y - matches[right].y,
+      );
+      if (distance > XUNLAI_PAIR_MAX_DISTANCE) continue;
       pairs.push({
         agents: [matches[left], matches[right]],
-        distance: Math.hypot(
-          matches[left].x - matches[right].x,
-          matches[left].y - matches[right].y,
-        ),
+        distance,
+        crowd: living.reduce((score, agent) => {
+          const proximity = 1 - Math.hypot(agent.x - midpointX, agent.y - midpointY)
+            / XUNLAI_CROWD_RADIUS;
+          return score + Math.max(0, proximity);
+        }, 0),
       });
     }
   }
-  pairs.sort((a, b) => a.distance - b.distance
+  pairs.sort((a, b) => b.crowd - a.crowd
+    || a.distance - b.distance
     || a.agents[0].agentId - b.agents[0].agentId
     || a.agents[1].agentId - b.agents[1].agentId);
-  const closest = pairs[0];
+  const selected = pairs[0];
   const runnerUp = pairs[1];
   if (
-    !closest
-    || closest.distance > XUNLAI_PAIR_MAX_DISTANCE
-    || (runnerUp && runnerUp.distance < closest.distance * XUNLAI_PAIR_SEPARATION_RATIO)
+    !selected
+    || (runnerUp && runnerUp.crowd === selected.crowd)
   ) return null;
-  return [...closest.agents].sort((a, b) => a.x - b.x || a.agentId - b.agentId)[0];
+  return [...selected.agents].sort((a, b) => a.x - b.x || a.agentId - b.agentId)[0];
 };
 
 const xunlaiDiagnostic = (state) => {
@@ -289,8 +307,9 @@ const positionAtXunlai = async (window, sleep) => {
     );
     for (let poll = 0; poll < XUNLAI_POLLS_PER_ATTEMPT; poll += 1) {
       const next = gameState(window);
-      const nextAnchor = next && xunlaiAnchor(next);
-      if (nextAnchor?.agentId === anchor.agentId) {
+      const nextAnchor = next && xunlaiMatches(next)
+        .find((agent) => agent.agentId === anchor.agentId);
+      if (nextAnchor) {
         lastDistance = Math.hypot(nextAnchor.x - next.playerX, nextAnchor.y - next.playerY);
         if (lastDistance <= XUNLAI_DISTANCE) {
           return { state: next, anchor: nextAnchor, distance: lastDistance };
@@ -312,16 +331,16 @@ const prepareBenchmarkScene = async (window, sleep) => {
   );
   await window.gwCompanionRuntime.benchmarkSceneCommand('high-graphics', 0);
   let placement = await travelToBenchmarkDistrict(window, sleep);
-  await positionAtXunlai(window, sleep);
-  let positioned = await recertifyBenchmarkPosition(window, sleep);
+  let path = await positionAtXunlai(window, sleep);
+  let positioned = await recertifyBenchmarkPosition(window, sleep, path.anchor.agentId);
   if (!positioned && placement.district === 2) {
     placement = await loadBenchmarkDistrict(window, sleep, 1);
     assert(
       await waitForBenchmarkPopulation(window, sleep),
       `Kamadan America-English District 1 has fewer than ${BENCHMARK_MIN_AGENT_COUNT} agents`,
     );
-    await positionAtXunlai(window, sleep);
-    positioned = await recertifyBenchmarkPosition(window, sleep);
+    path = await positionAtXunlai(window, sleep);
+    positioned = await recertifyBenchmarkPosition(window, sleep, path.anchor.agentId);
   }
   assert(
     positioned,

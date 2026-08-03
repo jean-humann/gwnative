@@ -62,6 +62,24 @@ function benchmarkSceneHarness({
       x: -4_422,
       y: 10_452,
     },
+    {
+      agentId: 46,
+      isLiving: true,
+      playerNumber: 5052,
+      level: 24,
+      allegiance: 6,
+      x: -4_062,
+      y: 10_772,
+    },
+    ...Array.from({ length: 12 }, (_, index) => ({
+      agentId: 100 + index,
+      isLiving: true,
+      playerNumber: 1_000 + index,
+      level: 20,
+      allegiance: 1,
+      x: -7_600 + index * 40,
+      y: 14_100 + index * 35,
+    })),
   ];
   const state = {
     status: 'ready',

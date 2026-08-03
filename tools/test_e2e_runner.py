@@ -137,6 +137,16 @@ class GameStateTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNNER.Failure, "expected at least 2"):
             RUNNER.certified_performance_scene(state, 449, 2)
 
+    def test_performance_sample_coverage_exposes_boundary_pauses(self) -> None:
+        coverage, uncovered = RUNNER.performance_sample_coverage(30_000, 2_205, 10.164)
+        self.assertAlmostEqual(coverage, 0.747, places=3)
+        self.assertAlmostEqual(uncovered, 7_588.38, places=2)
+
+    def test_performance_sample_coverage_accepts_a_sustained_stream(self) -> None:
+        coverage, uncovered = RUNNER.performance_sample_coverage(25_004.28, 2_969, 8.419)
+        self.assertGreater(coverage, 0.99)
+        self.assertLess(uncovered, 20)
+
     def test_ready_state_requires_two_matching_reads_without_a_new_revision(self) -> None:
         states = iter(
             [
