@@ -24,17 +24,23 @@ The design borrows public API vocabulary and pure algorithms only where their
 licenses permit it. Native GWCA/GWToolbox hooking, scanning, Direct3D, and
 manager code is not a browser runtime and is not imported.
 
-The historical companion kernel does have a material GWoNmac lineage: the
-first gwnative version was built by modifying GWoNmac's GPL-3.0-only kernel.
-It must not be published under an ambiguous GPL-2.0 project claim. A companion
-implementation PR is blocked until the repository records one of these valid
-outcomes:
+The historical companion kernel and parts of the renderer, input, template,
+and WebAssembly transformation code have material GPL-3.0-only GWoNmac
+lineage. Parts of the renderer also descend from GPLv3 `gw_in_browser` code.
+They must not be published under the repository's current GPL-2.0-or-later
+claim. Distribution and companion implementation PRs are blocked until the
+repository records one of these valid outcomes:
 
-- distribute the combined work under GPL-3.0-or-later with an explicit
-  provenance and copyright notice;
+- distribute the combined work under GPL-3.0-only with explicit provenance,
+  copyright, third-party notices, corresponding source, and build scripts;
 - obtain compatible additional permission from the upstream author; or
 - replace it with a genuine clean-room implementation written without access
   to the GPL implementation.
+
+GPL-3.0-or-later is not an accurate shortcut: it would grant later-version
+permission that the copied GPL-3.0-only expression does not carry. A license
+remediation must also keep ArenaNet client and game artifacts outside the
+distribution and preserve the existing Sparkle and asset notices.
 
 Reviewing architecture is not a clean-room rewrite, and a rewritten filename
 or reorganized functions do not erase derivation.
