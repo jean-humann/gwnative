@@ -130,6 +130,7 @@ are in the [development guide](docs/development.md).
 | --- | --- |
 | [User guide](docs/user-guide.md) | Installation, settings, data, updates, and recovery |
 | [Architecture](docs/architecture.md) | Trust boundaries, boot flow, storage, networking, WebAssembly transforms, and module map |
+| [Game API capabilities](docs/game-api-capabilities.md) | Per-domain certification, demand scheduling, API boundaries, and merge train |
 | [Development](docs/development.md) | Toolchain, commands, tests, debugging, and environment variables |
 | [Client compatibility mechanism](docs/client-compatibility.md) | Update transaction, runtime fallback, certification trust, graphs, and audit checklist |
 | [Client certification](docs/certification.md) | Dual-runtime certificates, automation, signing, and rollback |
