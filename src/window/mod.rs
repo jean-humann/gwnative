@@ -26,6 +26,7 @@ use objc2_app_kit::{
 use objc2_foundation::{MainThreadMarker, NSObjectNSDelayedPerforming, NSString};
 use objc2_web_kit::WKWebView;
 
+use crate::cli::WindowMode;
 use crate::notify::{self, Callback, CenterRef};
 
 use state::{Bounds, Mode, State, default_state, fit, load, save, work_areas};
@@ -91,12 +92,22 @@ fn report_refresh_rate(tracker: &mut Tracker) {
 /// The state file is read here rather than by the caller because the frame has
 /// to be known before `initWithContentRect:`: creating a window at one size and
 /// moving it afterwards shows the player both.
-pub fn open(mtm: MainThreadMarker, webview: &WKWebView, path: PathBuf) -> Retained<NSWindow> {
+pub fn open(
+    mtm: MainThreadMarker,
+    webview: &WKWebView,
+    path: PathBuf,
+    requested_mode: Option<WindowMode>,
+) -> Retained<NSWindow> {
     let (areas, primary) = work_areas(mtm);
     let stored = load(&path);
-    let state = match stored {
+    let mut state = match stored {
         Some(state) => fit(state, &areas, primary),
         None => default_state(primary),
+    };
+    state.mode = match requested_mode {
+        Some(WindowMode::Windowed) => Mode::Normal,
+        Some(WindowMode::Fullscreen) => Mode::Fullscreen,
+        None => state.mode,
     };
 
     let style = NSWindowStyleMask::Titled

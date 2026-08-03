@@ -181,6 +181,7 @@ fn preamble(
     settings: &settings::Settings,
     module: &wasm::Module,
     frame: FrameOptions,
+    invocation: &cli::Invocation,
 ) -> String {
     let forced_runtime = std::env::var("GWNATIVE_CLIENT_RUNTIME")
         .ok()
@@ -194,7 +195,8 @@ fn preamble(
          window.__gwnativeEnhancements = \"off\";\n\
          window.__gwnativeEnhancementManifest = null;\nwindow.__gwnativeClientRuntime = {};\n\
          window.__gwnativeFrameAuditEnabled = {};\nwindow.__gwnativePrefer60FPS = {};\n\
-         window.__gwnativePreserveDrawingBuffer = {};\nwindow.__gwnativeFrameIsolation = {};",
+         window.__gwnativePreserveDrawingBuffer = {};\nwindow.__gwnativeFrameIsolation = {};\n\
+         window.__gwnativeLaunch = {};",
         serde_json::Value::from(token),
         layout::as_json(),
         wasm::markers_json(),
@@ -215,6 +217,7 @@ fn preamble(
         serde_json::Value::from(frame.prefer_60_fps),
         serde_json::Value::from(frame.preserve_drawing_buffer),
         serde_json::Value::from(frame.isolation),
+        invocation.client_json(),
     )
 }
 
@@ -266,7 +269,13 @@ pub fn make(
     unsafe {
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
             WKUserScript::alloc(mtm),
-            &NSString::from_str(&preamble(origin.token, settings, module, frame_options)),
+            &NSString::from_str(&preamble(
+                origin.token,
+                settings,
+                module,
+                frame_options,
+                invocation,
+            )),
             WKUserScriptInjectionTime::AtDocumentStart,
             true,
         );
