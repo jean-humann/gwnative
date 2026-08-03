@@ -163,18 +163,20 @@ The historical stacked branches remain reference points. Implementation is
 rebuilt into the following review units; a child is based on the preceding
 unit only when it actually consumes that unit's public contract.
 
-1. Profiles, paths, Keychain scoping, and instance ownership.
-2. Cache maintenance, image verification, and recovery.
-3. Minimal companion core plus map/player/target read-only API.
-4. Tools shell, overlay, hotkeys, and build library.
-5. Authenticated E2E transport and bounded event synchronization.
-6. Trusted AppKit input bridge.
-7. Login, character-entry, and secure-input synchronization.
-8. Per-domain ABI and capability registry.
-9. Party, skillbar, and effects domain.
-10. Agents, quests, and objectives domain.
-11. Performance sampler and benchmark-only scene controls.
-12. Passive observer demand scheduling, change-only publication, and cadence
+1. Profiles, paths, Keychain scoping, instance ownership, and shared-state
+   concurrency.
+2. Legacy Guild Wars CLI compatibility and its host/WebKit behavior.
+3. Cache maintenance, image verification, and recovery.
+4. Minimal companion core plus map/player/target read-only API.
+5. Tools shell, overlay, hotkeys, and build library.
+6. Authenticated E2E transport and bounded event synchronization.
+7. Trusted AppKit input bridge.
+8. Login, character-entry, and secure-input synchronization.
+9. Per-domain ABI and capability registry.
+10. Party, skillbar, and effects domain.
+11. Agents, quests, and objectives domain.
+12. Performance sampler and benchmark-only scene controls.
+13. Passive observer demand scheduling, change-only publication, and cadence
     enforcement.
 
 The tools shell and E2E transport are sibling branches from the companion
