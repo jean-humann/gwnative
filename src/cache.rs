@@ -164,15 +164,17 @@ pub fn sweep_orphans(cache_dir: &Path) {
 /// data over a metered connection. The name says cache, but the durability
 /// required is that of user data.
 ///
-/// The old location is moved rather than abandoned, so nobody re-downloads what
-/// they already have.
+/// The old location is migrated by [`prepare`] after instance exclusion and
+/// while the cache maintenance lock is exclusive. Merely computing this path
+/// must not move files underneath an already-running process.
 pub fn default_cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
-    let home = Path::new(&home);
-    let current = home.join("Library/Application Support/gwnative/chunks");
-    let legacy = home.join("Library/Caches/gwnative/chunks");
-    migrate_cache(&legacy, &current);
-    current
+    Path::new(&home).join("Library/Application Support/gwnative/chunks")
+}
+
+fn legacy_cache_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+    Path::new(&home).join("Library/Caches/gwnative/chunks")
 }
 
 /// Move a pre-existing cache to its durable home, once.
@@ -334,9 +336,22 @@ pub fn finish_maintenance(lease: &Lease, cache_dir: &Path) -> std::io::Result<bo
 /// pending clear is consumed only under exclusivity, never under another
 /// profile's open descriptors or writes.
 pub fn prepare(cache_dir: &Path) -> std::io::Result<Lease> {
+    let current = default_cache_dir();
+    let legacy = (cache_dir == current).then(legacy_cache_dir);
+    prepare_with_legacy(cache_dir, legacy.as_deref())
+}
+
+fn prepare_with_legacy(cache_dir: &Path, legacy: Option<&Path>) -> std::io::Result<Lease> {
     let lock = lock_path(cache_dir);
     match crate::instance::acquire(&lock, Duration::ZERO) {
         Ok(exclusive) => {
+            // `Layout::new` is deliberately path-only. This is the first point
+            // after profile instance exclusion where destructive shared-cache
+            // work is safe, and the exclusive lock keeps new profile-aware
+            // processes out until the rename and clear are complete.
+            if let Some(legacy) = legacy {
+                migrate_cache(legacy, cache_dir);
+            }
             if clear_marker(cache_dir).exists() {
                 take_clear_request(cache_dir);
             }
@@ -542,6 +557,25 @@ mod tests {
 
         assert_eq!(fs::read(current.join("abc")).unwrap(), b"a cached chunk");
         assert!(!legacy.exists(), "the old cache should not be left behind");
+    }
+
+    #[test]
+    fn migration_runs_inside_the_exclusive_maintenance_lease() {
+        let temp = TempDir::new("migrate-locked");
+        let legacy = temp.0.join("Caches/gwnative/chunks");
+        let current = temp.0.join("Application Support/gwnative/chunks");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("abc"), b"a cached chunk").unwrap();
+
+        let lease = prepare_with_legacy(&current, Some(&legacy)).unwrap();
+
+        assert_eq!(fs::read(current.join("abc")).unwrap(), b"a cached chunk");
+        assert!(!legacy.exists());
+        assert!(
+            crate::instance::acquire(&lock_path(&current), Duration::ZERO).is_err(),
+            "migration returns with the exclusive maintenance lease still held"
+        );
+        drop(lease);
     }
 
     #[test]
