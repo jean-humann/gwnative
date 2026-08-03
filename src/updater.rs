@@ -47,6 +47,10 @@
 //! overlay this one app-global answer through [`settings::ScopedStore`]; allowing
 //! each profile to persist a different value would make two concurrent updater
 //! processes race on Sparkle's shared default.
+//! Every settlement holds the `updates.json` cross-process lock across both the
+//! `NSUserDefaults` operation and the mirror write. [`follow`] dispatches to the
+//! main thread before taking that lock, so no file lock is carried across an
+//! asynchronous boundary.
 //!
 //! What is copied is what the player asked for, not what Sparkle will do about
 //! it tonight — the two differ, and copying the wrong one silently discards an
@@ -127,26 +131,30 @@ pub fn start(_mtm: MainThreadMarker, store: &Arc<settings::ScopedStore>) -> bool
     // The migration case, and only it. See the module docs: Sparkle's stored
     // answer wins wherever there is one, and app settings fill in where there
     // is not — which is the launch after this shipped, and a fresh install.
-    let application = store.get();
-    let stored = intent(&updater);
-    let wanted = reconcile(
-        (
-            application.auto_check_updates,
-            application.auto_install_updates,
-        ),
-        stored,
-        (default_set(CHECKS_DEFAULT), default_set(DOWNLOADS_DEFAULT)),
-    );
-    if wanted != stored {
-        set_switches(&updater, wanted);
-    }
-
-    // Read back rather than assume: `set_switches` may not have run, and where
-    // it did the framework is entitled to have stored something else. [`intent`]
-    // rather than [`switches`], because this is what the settings panel will
-    // show and the panel shows what was asked for.
-    let (checks, downloads) = intent(&updater);
-    store.remember_update_preferences(checks, downloads);
+    // The defaults and JSON mirror are one transaction: another profile must
+    // not slip an older answer between reading one and writing the other.
+    let settled = store.reconcile_update_preferences(|application| {
+        let stored = intent(&updater);
+        let wanted = reconcile(
+            application,
+            stored,
+            (default_set(CHECKS_DEFAULT), default_set(DOWNLOADS_DEFAULT)),
+        );
+        if wanted != stored {
+            set_switches(&updater, wanted);
+        }
+        // Read back rather than assume: the framework is entitled to persist a
+        // different effective answer. `intent`, not `switches`, preserves an
+        // install opt-in while automatic checking is off.
+        intent(&updater)
+    });
+    let (checks, downloads) = match settled {
+        Ok(settled) => settled,
+        Err(error) => {
+            note!("[sparkle] updater preferences could not be reconciled: {error}");
+            intent(&updater)
+        }
+    };
     note!(
         "[sparkle] the updater is running (checks: {}, installs on its own: {})",
         if checks { "on" } else { "off" },
@@ -183,35 +191,51 @@ pub fn check() -> bool {
 /// Sparkle's schedule, and changing the render scale should not postpone a
 /// check. The hop exists because the panel's change arrives on a connection
 /// thread and these properties are main-thread-only.
-pub fn follow(checks: bool, downloads: bool) {
+pub fn follow(store: Arc<settings::ScopedStore>, checks: bool, downloads: bool) {
     if !started() && !available() {
         return;
     }
-    let wanted = Box::new((checks, downloads));
+    let request = Box::new(Follow {
+        store,
+        wanted: (checks, downloads),
+    });
     // SAFETY: the box is leaked here and rebuilt exactly once, by the function
     // libdispatch hands it to.
-    unsafe { app::to_main(Box::into_raw(wanted).cast(), apply) };
+    unsafe { app::to_main(Box::into_raw(request).cast(), apply) };
+}
+
+struct Follow {
+    store: Arc<settings::ScopedStore>,
+    wanted: (bool, bool),
 }
 
 /// The main-thread half of [`follow`].
 extern "C" fn apply(context: *mut c_void) {
     // SAFETY: `follow` leaked exactly this box, and libdispatch runs this once
     // with it.
-    let wanted = *unsafe { Box::from_raw(context.cast::<(bool, bool)>()) };
-    RUNNING.with(|running| {
-        if let Some(updater) = running.borrow().as_ref() {
-            if intent(updater) != wanted {
-                set_switches(updater, wanted);
+    let request = unsafe { Box::from_raw(context.cast::<Follow>()) };
+    let wanted = request.wanted;
+    let settled = request.store.reconcile_update_preferences(|_| {
+        RUNNING.with(|running| {
+            if let Some(updater) = running.borrow().as_ref() {
+                if intent(updater) != wanted {
+                    set_switches(updater, wanted);
+                }
+                intent(updater)
+            } else {
+                persist_switches(wanted);
+                wanted
             }
-        } else {
-            persist_switches(wanted);
-        }
-        note!(
-            "[sparkle] checks: {}, installs on its own: {}",
-            if wanted.0 { "on" } else { "off" },
-            if wanted.1 { "on" } else { "off" },
-        );
+        })
     });
+    match settled {
+        Ok((checks, downloads)) => note!(
+            "[sparkle] checks: {}, installs on its own: {}",
+            if checks { "on" } else { "off" },
+            if downloads { "on" } else { "off" },
+        ),
+        Err(error) => note!("[sparkle] updater preferences could not be followed: {error}"),
+    }
 }
 
 /// Make the updater and its interface, and start it.

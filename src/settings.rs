@@ -494,24 +494,35 @@ impl UpdateStore {
         *current
     }
 
-    fn apply_preferences(&self, check: Option<bool>, install: Option<bool>) -> Result<(), String> {
+    fn update_preferences(
+        &self,
+        decide: impl FnOnce((bool, bool)) -> (bool, bool),
+    ) -> Result<(bool, bool), String> {
         let _lock = self.acquire_lock()?;
         let mut current = self.current.lock().unwrap();
         if let Some(on_disk) = load_updates(&self.path)? {
             *current = on_disk;
         }
+        let (check, install) = decide((current.auto_check_updates, current.auto_install_updates));
         let next = UpdateSettings {
-            auto_check_updates: check.unwrap_or(current.auto_check_updates),
-            auto_install_updates: install.unwrap_or(current.auto_install_updates),
+            auto_check_updates: check,
+            auto_install_updates: install,
             ..*current
         };
         if next == *current {
-            return Ok(());
+            return Ok((check, install));
         }
         save_updates(&self.path, &next)
             .map_err(|error| format!("could not save update preferences: {error}"))?;
         *current = next;
-        Ok(())
+        Ok((check, install))
+    }
+
+    fn apply_preferences(&self, check: Option<bool>, install: Option<bool>) -> Result<(), String> {
+        self.update_preferences(|current| {
+            (check.unwrap_or(current.0), install.unwrap_or(current.1))
+        })
+        .map(|_| ())
     }
 
     fn remember_check(&self, at: u64) {
@@ -541,12 +552,6 @@ impl UpdateStore {
         match save_updates(&self.path, &next) {
             Ok(()) => *current = next,
             Err(error) => note!("[settings] the update-check time was not saved: {error}"),
-        }
-    }
-
-    fn remember_preferences(&self, check: bool, install: bool) {
-        if let Err(error) = self.apply_preferences(Some(check), Some(install)) {
-            note!("[settings] the updater preferences were not saved: {error}");
         }
     }
 }
@@ -624,8 +629,19 @@ impl ScopedStore {
         self.updates.remember_check(at);
     }
 
-    pub fn remember_update_preferences(&self, check: bool, install: bool) {
-        self.updates.remember_preferences(check, install);
+    /// Settle the application-wide updater switches while holding their
+    /// cross-process lock.
+    ///
+    /// The closure runs synchronously under the lock, so callers may reconcile
+    /// Sparkle's shared `NSUserDefaults` and return the exact values that must
+    /// be mirrored to `updates.json` without another profile interleaving a
+    /// stale read or write. Callers must never carry this lock across an async
+    /// dispatch; dispatch first, then enter here on the destination thread.
+    pub fn reconcile_update_preferences(
+        &self,
+        decide: impl FnOnce((bool, bool)) -> (bool, bool),
+    ) -> Result<(bool, bool), String> {
+        self.updates.update_preferences(decide)
     }
 }
 
@@ -908,14 +924,19 @@ mod tests {
         assert!(!first.get().auto_check_updates);
         assert!(!first.get().auto_install_updates);
 
-        first.remember_preferences(true, false);
+        first.apply_preferences(Some(true), Some(false)).unwrap();
         assert!(second.get().auto_check_updates);
         assert!(!second.get().auto_install_updates);
 
         // Separate process-style stores reload under the cross-process lock;
-        // neither keeps serving or writing its stale launch-time copy. A patch
-        // to one switch must also preserve a newer value of the other switch.
-        second.apply_preferences(None, Some(true)).unwrap();
+        // the decision closure sees the latest pair and keeps both the external
+        // reconciliation and JSON mirror in the same transaction.
+        second
+            .update_preferences(|current| {
+                assert_eq!(current, (true, false));
+                (current.0, true)
+            })
+            .unwrap();
         assert!(first.get().auto_check_updates);
         assert!(first.get().auto_install_updates);
         first.apply_preferences(Some(false), None).unwrap();
