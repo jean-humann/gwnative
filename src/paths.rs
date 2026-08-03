@@ -166,6 +166,7 @@ mod tests {
             color: "#000000".into(),
             created_at: 0,
             origin_port: 38113,
+            website_data_store_id: Some("00000000-0000-4000-8000-000000000001".into()),
         };
         let layout = Layout::new(&invocation, &profile);
         assert!(layout.support_dir().ends_with("gwnative/profiles/iron"));

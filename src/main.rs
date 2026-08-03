@@ -296,7 +296,14 @@ fn main() {
     if headless {
         park_headless(&loopback, &token);
     }
-    run_windowed(&loopback, &token, &module, &invocation, paths.support_dir());
+    run_windowed(
+        &loopback,
+        &token,
+        &module,
+        &invocation,
+        paths.support_dir(),
+        profile.website_data_store_id(),
+    );
 }
 
 /// Take the single-instance lock, or hand the running app the foreground.
@@ -634,6 +641,7 @@ fn run_windowed(
     module: &wasm::Module,
     invocation: &cli::Invocation,
     support_dir: &Path,
+    website_data_store_id: Option<&str>,
 ) {
     let mtm = MainThreadMarker::new().expect("main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -652,11 +660,15 @@ fn run_windowed(
     // resizes the window to the remembered one before it is ever shown, and the
     // content view follows.
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
+    let url = format!("http://{}/index.html", loopback.addr);
     let webview = webview::make(
         mtm,
         frame,
-        &format!("http://{}/index.html", loopback.addr),
-        token,
+        webview::Origin {
+            url: &url,
+            token,
+            website_data_store_id,
+        },
         &loopback.settings.get(),
         module,
         invocation,

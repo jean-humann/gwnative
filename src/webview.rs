@@ -13,10 +13,12 @@
 //! declared by hand — that one carries its argument.
 
 use objc2::rc::Retained;
-use objc2::{MainThreadOnly, msg_send};
+use objc2::{AnyThread, MainThreadOnly, msg_send};
 use objc2_app_kit::NSColor;
-use objc2_foundation::{MainThreadMarker, NSRect, NSString, NSURL, NSURLRequest};
-use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration};
+use objc2_foundation::{MainThreadMarker, NSRect, NSString, NSURL, NSURLRequest, NSUUID};
+use objc2_web_kit::{
+    WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+};
 
 use crate::{cli, layout, release, settings, wasm};
 
@@ -219,16 +221,32 @@ fn preamble(
     )
 }
 
+/// The loopback origin and browser-state identity selected for one view.
+pub struct Origin<'a> {
+    pub url: &'a str,
+    pub token: &'a str,
+    pub website_data_store_id: Option<&'a str>,
+}
+
 pub fn make(
     mtm: MainThreadMarker,
     frame: NSRect,
-    url: &str,
-    token: &str,
+    origin: Origin<'_>,
     settings: &settings::Settings,
     module: &wasm::Module,
     invocation: &cli::Invocation,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
+    if let Some(identifier) = origin.website_data_store_id {
+        let identifier =
+            NSUUID::initWithUUIDString(NSUUID::alloc(), &NSString::from_str(identifier))
+                .expect("profile descriptors validate WebKit data-store UUIDs");
+        // Named profiles need a browser-state boundary, not only a distinct
+        // origin: HTTP cookies ignore ports. The implicit default profile does
+        // not enter this branch, preserving its existing default data store.
+        let data_store = unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) };
+        unsafe { config.setWebsiteDataStore(&data_store) };
+    }
     let frame_options = FrameOptions::from_environment();
     if frame_options.audit {
         note!("[gwnative] detailed frame audit enabled");
@@ -252,7 +270,7 @@ pub fn make(
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
             WKUserScript::alloc(mtm),
             &NSString::from_str(&preamble(
-                token,
+                origin.token,
                 settings,
                 module,
                 frame_options,
@@ -281,7 +299,7 @@ pub fn make(
         )));
     }
 
-    let nsurl = NSURL::URLWithString(&NSString::from_str(url))
+    let nsurl = NSURL::URLWithString(&NSString::from_str(origin.url))
         .expect("the caller builds this from the loopback address, so it always parses");
     let request = NSURLRequest::requestWithURL(&nsurl);
     unsafe { webview.loadRequest(&request) };

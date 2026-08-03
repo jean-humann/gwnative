@@ -28,12 +28,21 @@ A named profile uses:
 - support directory: `~/Library/Application Support/gwnative/profiles/<id>`
 - Keychain account: `login:<id>`
 - an assigned port in `38113` through `39112`, persisted in the descriptor
+- a persistent WebKit data-store UUID, also persisted in the descriptor
 
 The descriptor is `profile.json`, format version 1. Its origin port is allocated
 under a catalog lock and probed past ports already assigned to other profiles;
 duplicate or out-of-range assignments are refused. Its generated colour and
 display name are metadata; changing the `id` or `originPort` by hand does not
 migrate the associated Keychain item or WebKit data.
+
+The separate WebKit store is required even with separate ports: IndexedDB and
+local storage are origin-keyed, but HTTP cookies ignore ports. The default
+profile keeps WebKit's historical default store so existing browser state
+continues to load. Named profiles use the public persistent identified-store API
+available below this app's deployment floor. Removing a descriptor and later
+creating a different profile cannot inherit the deleted profile's browser state,
+because a newly created profile receives a new random store identifier.
 
 In a source checkout, the default profile runs directly from the repository's
 `web/` directory for live development. Named profiles are automatically seeded
@@ -49,7 +58,7 @@ their writable client artifacts shared.
 | Writable web root and client artifacts | Base support directory | `profiles/<id>/` | No |
 | Derived certified modules | Base support directory | `profiles/<id>/` | No |
 | Saved login | Keychain account `login` | Keychain account `login:<id>` | No |
-| IndexedDB and local storage | Origin on port `38112` | Origin on assigned persisted port | No |
+| Cookies, IndexedDB and local storage | Default WebKit store, origin on port `38112` | Persistent identified WebKit store and assigned origin | No |
 | Game-image chunks | `chunks/` | `chunks/` | Yes |
 
 `--host-port` deliberately overrides the persisted assignment. It is a
@@ -82,4 +91,10 @@ There is intentionally no broad destructive profile command. To remove one:
 3. Remove the corresponding `login:<id>` item from Keychain Access if the saved
    login should also be forgotten.
 
-Shared chunks are unaffected.
+Shared chunks are unaffected. WebKit's identified data store is intentionally
+not deleted by this filesystem operation: WebKit owns it outside the profile
+directory, and removing browser data is a separate destructive action for which
+this release exposes no broad command. The UUID in a restored descriptor finds
+the same store again. Creating a profile after deleting its descriptor always
+generates a new UUID—even when the same profile ID is reused—so the orphaned
+store is never attached to the replacement profile.

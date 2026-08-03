@@ -12,6 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use objc2_foundation::NSUUID;
+
 use crate::instance;
 
 const FORMAT: u32 = 1;
@@ -28,6 +30,12 @@ pub struct Profile {
     pub color: String,
     pub created_at: u64,
     pub origin_port: u16,
+    /// The persistent WebKit store for this named profile. Ports isolate
+    /// origin-keyed storage, but cookies ignore ports; the store is the actual
+    /// browser-state boundary. Absent only on the implicit default profile and
+    /// descriptors written before profile stores were introduced.
+    #[serde(default)]
+    pub website_data_store_id: Option<String>,
 }
 
 impl Profile {
@@ -39,6 +47,7 @@ impl Profile {
             color: "#d9b25c".into(),
             created_at: 0,
             origin_port: DEFAULT_PORT,
+            website_data_store_id: None,
         }
     }
 
@@ -66,6 +75,10 @@ impl Profile {
     pub fn is_default(&self) -> bool {
         self.id == "default"
     }
+
+    pub fn website_data_store_id(&self) -> Option<&str> {
+        self.website_data_store_id.as_deref()
+    }
 }
 
 /// Select a profile, creating its small descriptor on first use.
@@ -84,7 +97,8 @@ pub fn select(base: &Path, id: Option<&str>) -> Result<Profile, String> {
     // observe the same free origin and persist it for different profiles.
     let _catalog = instance::acquire(&base.join("profiles.lock"), Duration::from_secs(5))
         .map_err(|error| format!("could not lock the profile catalog: {error}"))?;
-    let profiles = named_profiles(base)?;
+    let mut profiles = named_profiles(base)?;
+    ensure_data_store_ids(base, &mut profiles)?;
     if let Some(profile) = profiles.iter().find(|profile| profile.id == id) {
         return Ok(profile.clone());
     }
@@ -103,6 +117,7 @@ pub fn select(base: &Path, id: Option<&str>) -> Result<Profile, String> {
             .unwrap_or_default()
             .as_secs(),
         origin_port: allocate_port(id, &profiles)?,
+        website_data_store_id: Some(allocate_data_store_id(&profiles)),
     };
     write(&path, &profile)?;
     Ok(profile)
@@ -110,8 +125,12 @@ pub fn select(base: &Path, id: Option<&str>) -> Result<Profile, String> {
 
 /// List the implicit default profile and every named descriptor.
 pub fn list(base: &Path) -> Result<Vec<Profile>, String> {
+    let _catalog = instance::acquire(&base.join("profiles.lock"), Duration::from_secs(5))
+        .map_err(|error| format!("could not lock the profile catalog: {error}"))?;
     let mut profiles = vec![Profile::default_profile()];
-    profiles.extend(named_profiles(base)?);
+    let mut named = named_profiles(base)?;
+    ensure_data_store_ids(base, &mut named)?;
+    profiles.extend(named);
     Ok(profiles)
 }
 
@@ -155,6 +174,26 @@ fn named_profiles(base: &Path) -> Result<Vec<Profile>, String> {
                 known.id, profile.id, profile.origin_port
             ));
         }
+        if let Some(identifier) = profile.website_data_store_id.as_deref() {
+            if !valid_uuid(identifier) {
+                return Err(format!(
+                    "{} assigns invalid WebKit data-store identifier {:?}",
+                    path.display(),
+                    identifier
+                ));
+            }
+            if let Some(known) = profiles.iter().find(|known: &&Profile| {
+                known
+                    .website_data_store_id
+                    .as_deref()
+                    .is_some_and(|known| known.eq_ignore_ascii_case(identifier))
+            }) {
+                return Err(format!(
+                    "profiles {:?} and {:?} both claim WebKit data store {identifier}",
+                    known.id, profile.id
+                ));
+            }
+        }
         profiles.push(profile);
     }
     profiles.sort_by(|left, right| {
@@ -164,6 +203,51 @@ fn named_profiles(base: &Path) -> Result<Vec<Profile>, String> {
             .then_with(|| left.id.cmp(&right.id))
     });
     Ok(profiles)
+}
+
+/// Give descriptors from the first profile implementation their durable
+/// browser-state identity. The caller holds `profiles.lock`, so two upgrade
+/// launches cannot assign different stores to the same profile.
+fn ensure_data_store_ids(base: &Path, profiles: &mut [Profile]) -> Result<(), String> {
+    for index in 0..profiles.len() {
+        if profiles[index].website_data_store_id.is_some() {
+            continue;
+        }
+        let identifier = allocate_data_store_id(profiles);
+        profiles[index].website_data_store_id = Some(identifier);
+        let path = base
+            .join("profiles")
+            .join(&profiles[index].id)
+            .join("profile.json");
+        write(&path, &profiles[index])?;
+    }
+    Ok(())
+}
+
+fn allocate_data_store_id(profiles: &[Profile]) -> String {
+    loop {
+        let identifier = NSUUID::UUID().UUIDString().to_string();
+        if profiles.iter().all(|profile| {
+            profile
+                .website_data_store_id
+                .as_deref()
+                .is_none_or(|known| !known.eq_ignore_ascii_case(&identifier))
+        }) {
+            return identifier;
+        }
+    }
+}
+
+fn valid_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
 }
 
 fn read(path: &Path) -> Result<Profile, String> {
@@ -265,6 +349,7 @@ mod tests {
         assert_eq!(profile.support_dir(base), base);
         assert_eq!(profile.keychain_account(), "login");
         assert_eq!(profile.port(), 38112);
+        assert_eq!(profile.website_data_store_id(), None);
     }
 
     #[test]
@@ -277,6 +362,7 @@ mod tests {
         );
         assert_eq!(profile.keychain_account(), "login:iron");
         assert_ne!(profile.port(), 38112);
+        assert!(profile.website_data_store_id().is_some());
         assert_eq!(select(&scratch.0, Some("iron")).unwrap(), profile);
     }
 
@@ -340,5 +426,65 @@ mod tests {
 
         fs::write(scratch.0.join("profiles/second/profile.json"), b"not json").unwrap();
         assert!(list(&scratch.0).unwrap_err().contains("could not parse"));
+    }
+
+    #[test]
+    fn named_profiles_keep_distinct_persistent_webkit_stores() {
+        let scratch = TempDir::new("profile-webkit-stores");
+        let first = select(&scratch.0, Some("first")).unwrap();
+        let second = select(&scratch.0, Some("second")).unwrap();
+        assert_ne!(
+            first.website_data_store_id(),
+            second.website_data_store_id()
+        );
+        assert_eq!(select(&scratch.0, Some("first")).unwrap(), first);
+        assert!(valid_uuid(first.website_data_store_id().unwrap()));
+    }
+
+    #[test]
+    fn differently_cased_spellings_cannot_claim_the_same_webkit_store() {
+        let scratch = TempDir::new("profile-webkit-store-case");
+        let first = select(&scratch.0, Some("first")).unwrap();
+        let mut second = select(&scratch.0, Some("second")).unwrap();
+        second.website_data_store_id = first.website_data_store_id().map(str::to_ascii_lowercase);
+        write(&scratch.0.join("profiles/second/profile.json"), &second).unwrap();
+
+        assert!(list(&scratch.0).unwrap_err().contains("both claim"));
+    }
+
+    #[test]
+    fn old_descriptors_receive_one_persisted_webkit_store() {
+        let scratch = TempDir::new("profile-webkit-migration");
+        let mut profile = select(&scratch.0, Some("old")).unwrap();
+        profile.website_data_store_id = None;
+        let path = scratch.0.join("profiles/old/profile.json");
+        write(&path, &profile).unwrap();
+
+        let migrated = select(&scratch.0, Some("old")).unwrap();
+        let identifier = migrated.website_data_store_id().unwrap().to_owned();
+        assert!(valid_uuid(&identifier));
+        assert_eq!(
+            select(&scratch.0, Some("old"))
+                .unwrap()
+                .website_data_store_id(),
+            Some(identifier.as_str())
+        );
+        assert_eq!(
+            read(&path).unwrap().website_data_store_id(),
+            Some(identifier.as_str())
+        );
+    }
+
+    #[test]
+    fn deleting_and_recreating_an_id_does_not_reuse_browser_state() {
+        let scratch = TempDir::new("profile-webkit-recreation");
+        let first = select(&scratch.0, Some("temporary")).unwrap();
+        fs::remove_dir_all(scratch.0.join("profiles/temporary")).unwrap();
+
+        let replacement = select(&scratch.0, Some("temporary")).unwrap();
+        assert_ne!(
+            first.website_data_store_id(),
+            replacement.website_data_store_id()
+        );
     }
 }
