@@ -159,8 +159,22 @@ impl Hub {
                     "description": "select a populated Kamadan America-English District 2/1 and move to the certified Xunlai anchor",
                 },
                 {
+                    "name": "prepare-guild-hall-scene",
+                    "description": "travel to the current player's own Guild Hall for a low-population performance control",
+                },
+                {
+                    "name": "prepare-kamadan-international-scene",
+                    "description": "select Kamadan International District 1 and move to the certified Xunlai anchor for a same-map population control",
+                },
+                {
                     "name": "sample-performance",
                     "description": "observe logical frame cadence without issuing WebGL commands",
+                    "minimumDurationMs": 1000,
+                    "maximumDurationMs": 60000,
+                },
+                {
+                    "name": "sample-performance-without-observer",
+                    "description": "observe logical frame cadence while the passive companion observer is temporarily paused",
                     "minimumDurationMs": 1000,
                     "maximumDurationMs": 60000,
                 },
@@ -198,13 +212,18 @@ impl Hub {
                 }
                 40
             }
-            "test-ui" | "probe-layout" | "probe-benchmark-ui" | "prepare-benchmark-scene" => {
+            "test-ui"
+            | "probe-layout"
+            | "probe-benchmark-ui"
+            | "prepare-benchmark-scene"
+            | "prepare-guild-hall-scene"
+            | "prepare-kamadan-international-scene" => {
                 if request.duration_ms.is_some() {
                     return Err("page-owned E2E actions do not accept a duration".into());
                 }
                 0
             }
-            "sample-performance" => {
+            "sample-performance" | "sample-performance-without-observer" => {
                 let duration = request.duration_ms.unwrap_or(10_000);
                 if !(1_000..=60_000).contains(&duration) {
                     return Err(
@@ -236,7 +255,10 @@ impl Hub {
                 | "probe-layout"
                 | "probe-benchmark-ui"
                 | "prepare-benchmark-scene"
+                | "prepare-guild-hall-scene"
+                | "prepare-kamadan-international-scene"
                 | "sample-performance"
+                | "sample-performance-without-observer"
         ) {
             inner.native_actions.push_back(action.clone());
         }
@@ -675,10 +697,14 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             bool_field(object, "districtPresent")
         }
         "benchmark-scene" => {
-            exact_keys(
-                object,
-                &[
+            let scene = object
+                .get("scene")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "benchmark scene has no finite scene name".to_owned())?;
+            let keys = match scene {
+                "kamadan" | "kamadan-international" => [
                     "actionSequence",
+                    "scene",
                     "mapId",
                     "district",
                     "language",
@@ -689,25 +715,53 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
                     "anchorDistance",
                     "agentCount",
                     "graphicsPreset",
-                ],
-            )?;
+                ]
+                .as_slice(),
+                "guild-hall" => [
+                    "actionSequence",
+                    "scene",
+                    "mapId",
+                    "district",
+                    "language",
+                    "playerX",
+                    "playerY",
+                    "agentCount",
+                    "graphicsPreset",
+                ]
+                .as_slice(),
+                _ => return Err("benchmark scene name is outside its finite set".into()),
+            };
+            exact_keys(object, keys)?;
             positive_u64_field(object, "actionSequence")?;
-            match object.get("mapId").and_then(Value::as_u64) {
-                Some(449) => {}
-                _ => return Err("benchmark scene is not Kamadan".into()),
-            }
-            match object.get("district").and_then(Value::as_u64) {
-                Some(1 | 2) => {}
-                _ => return Err("benchmark scene is not America district 1 or 2".into()),
-            }
+            positive_u64_field(object, "mapId")?;
+            u32_field(object, "district")?;
             match object.get("language").and_then(Value::as_u64) {
-                Some(0) => {}
-                _ => return Err("benchmark scene is not English".into()),
+                Some(0..=11) => {}
+                _ => return Err("benchmark scene language is outside its bound".into()),
             }
-            for name in ["playerX", "playerY", "anchorX", "anchorY"] {
+            for name in ["playerX", "playerY"] {
                 bounded_number_field(object, name, -1_000_000.0, 1_000_000.0, false)?;
             }
-            bounded_number_field(object, "anchorDistance", 0.0, 180.0, false)?;
+            if matches!(scene, "kamadan" | "kamadan-international") {
+                if object.get("mapId").and_then(Value::as_u64) != Some(449) {
+                    return Err("benchmark scene is not Kamadan".into());
+                }
+                let district = object.get("district").and_then(Value::as_u64);
+                match (scene, district) {
+                    ("kamadan", Some(1 | 2)) | ("kamadan-international", Some(1)) => {}
+                    ("kamadan", _) => {
+                        return Err("benchmark scene is not America district 1 or 2".into());
+                    }
+                    _ => return Err("benchmark scene is not International district 1".into()),
+                }
+                if object.get("language").and_then(Value::as_u64) != Some(0) {
+                    return Err("benchmark scene is not English".into());
+                }
+                for name in ["anchorX", "anchorY"] {
+                    bounded_number_field(object, name, -1_000_000.0, 1_000_000.0, false)?;
+                }
+                bounded_number_field(object, "anchorDistance", 0.0, 180.0, false)?;
+            }
             u32_field(object, "agentCount")?;
             enum_text_field(object, "graphicsPreset", &["high"])
         }
@@ -717,6 +771,7 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
                 &[
                     "actionSequence",
                     "requestedDurationMs",
+                    "observerEnabled",
                     "runtime",
                     "durationMs",
                     "frames",
@@ -735,6 +790,7 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
                 _ => return Err("performance sample request duration is outside its bound".into()),
             }
             enum_text_field(object, "runtime", &["jspi", "asyncify"])?;
+            bool_field(object, "observerEnabled")?;
             bounded_number_field(object, "durationMs", 0.0, 120_000.0, false)?;
             u32_field(object, "frames")?;
             bounded_number_field(object, "framesPerSecond", 0.0, 1_000.0, false)?;
@@ -803,6 +859,9 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
             exact_keys(
                 audit,
                 &[
+                    "logicalFrames",
+                    "drawCalls",
+                    "clearCalls",
                     "contextLost",
                     "contextRestored",
                     "framesInterruptedAfterDraw",
@@ -811,6 +870,9 @@ fn validate_event(kind: &str, detail: &Value) -> Result<(), String> {
                 ],
             )?;
             for name in [
+                "logicalFrames",
+                "drawCalls",
+                "clearCalls",
                 "contextLost",
                 "contextRestored",
                 "framesInterruptedAfterDraw",
@@ -907,7 +969,10 @@ fn action_result(object: &Map<String, Value>) -> Result<(), String> {
             | "probe-layout"
             | "probe-benchmark-ui"
             | "prepare-benchmark-scene"
-            | "sample-performance",
+            | "prepare-guild-hall-scene"
+            | "prepare-kamadan-international-scene"
+            | "sample-performance"
+            | "sample-performance-without-observer",
         ) => {}
         _ => return Err("E2E action result names an unknown action".into()),
     }
@@ -1251,6 +1316,7 @@ mod tests {
         let detail = serde_json::json!({
             "actionSequence": 1,
             "requestedDurationMs": 10_000,
+            "observerEnabled": true,
             "runtime": "jspi",
             "durationMs": 10_001.25,
             "frames": 601,
@@ -1285,6 +1351,9 @@ mod tests {
                 "drawingBufferHeight": 1364,
             },
             "audit": {
+                "logicalFrames": 601,
+                "drawCalls": 120200,
+                "clearCalls": 601,
                 "contextLost": 0,
                 "contextRestored": 0,
                 "framesInterruptedAfterDraw": 0,
@@ -1311,6 +1380,35 @@ mod tests {
         assert!(
             hub.publish_event(&serde_json::to_vec(&invalid).unwrap())
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn benchmark_scene_events_keep_scene_specific_evidence() {
+        let hub = Hub::default();
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"benchmark-scene","detail":{"actionSequence":1,"scene":"kamadan","mapId":449,"district":2,"language":0,"playerX":1,"playerY":2,"anchorX":3,"anchorY":4,"anchorDistance":100,"agentCount":100,"graphicsPreset":"high"}}"#,
+            )
+            .is_ok()
+        );
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"benchmark-scene","detail":{"actionSequence":2,"scene":"guild-hall","mapId":4,"district":0,"language":0,"playerX":1,"playerY":2,"agentCount":18,"graphicsPreset":"high"}}"#,
+            )
+            .is_ok()
+        );
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"benchmark-scene","detail":{"actionSequence":3,"scene":"kamadan-international","mapId":449,"district":1,"language":0,"playerX":1,"playerY":2,"anchorX":3,"anchorY":4,"anchorDistance":100,"agentCount":24,"graphicsPreset":"high"}}"#,
+            )
+            .is_ok()
+        );
+        assert!(
+            hub.publish_event(
+                br#"{"kind":"benchmark-scene","detail":{"actionSequence":4,"scene":"guild-hall","mapId":4,"district":0,"language":0,"playerX":1,"playerY":2,"anchorX":3,"agentCount":18,"graphicsPreset":"high"}}"#,
+            )
+            .is_err()
         );
     }
 

@@ -16,6 +16,36 @@ describe('finite benchmark command', () => {
       runtimeIdle: () => true,
     });
     assert.deepEqual(calls, [[0, 2]]);
+    await executeBenchmarkCommand('travel-guild-hall', 0, {
+      enabled: true,
+      benchmarkCommand: (...args) => {
+        calls.push(args);
+        return 1;
+      },
+      queueCommand: async (callback) => callback(),
+      runtimeIdle: () => true,
+    });
+    assert.deepEqual(calls, [[0, 2], [3, 0]]);
+    await executeBenchmarkCommand('leave-guild-hall', 0, {
+      enabled: true,
+      benchmarkCommand: (...args) => {
+        calls.push(args);
+        return 1;
+      },
+      queueCommand: async (callback) => callback(),
+      runtimeIdle: () => true,
+    });
+    assert.deepEqual(calls, [[0, 2], [3, 0], [4, 0]]);
+    await executeBenchmarkCommand('travel-international', 0, {
+      enabled: true,
+      benchmarkCommand: (...args) => {
+        calls.push(args);
+        return 1;
+      },
+      queueCommand: async (callback) => callback(),
+      runtimeIdle: () => true,
+    });
+    assert.deepEqual(calls, [[0, 2], [3, 0], [4, 0], [5, 0]]);
     await assert.rejects(
       executeBenchmarkCommand('travel-america', 3, {
         enabled: true,

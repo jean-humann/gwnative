@@ -66,7 +66,7 @@ fn runtime_compatibility_id(
 }
 
 const STAMP: &str = "derived.json";
-const BENCHMARK_API_ABI: u32 = 2;
+const BENCHMARK_API_ABI: u32 = 3;
 
 pub const COMPANION_KERNEL: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/companion-kernel.wasm"));

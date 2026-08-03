@@ -439,6 +439,9 @@ describe('frame audit', () => {
         attributes: { alpha: false, antialias: true },
       },
       audit: {
+        logicalFrames: 0,
+        drawCalls: 0,
+        clearCalls: 0,
         contextLost: 0,
         contextRestored: 0,
         framesInterruptedAfterDraw: 0,

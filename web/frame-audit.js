@@ -739,6 +739,9 @@ export function createFrameAudit(options = {}) {
         canvas: after.canvas,
         webgl: after.webgl,
         audit: Object.freeze({
+          logicalFrames: delta('submittedLogicalFrames'),
+          drawCalls: delta('drawCalls'),
+          clearCalls: delta('clearCalls'),
           contextLost: delta('contextLost'),
           contextRestored: delta('contextRestored'),
           framesInterruptedAfterDraw: delta('framesInterruptedAfterDraw'),

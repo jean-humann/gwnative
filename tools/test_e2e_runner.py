@@ -137,6 +137,30 @@ class GameStateTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNNER.Failure, "expected at least 2"):
             RUNNER.certified_performance_scene(state, 449, 2)
 
+    def test_performance_scene_accepts_player_omitted_only_by_bounded_truncation(self) -> None:
+        captured = [
+            {"agentId": agent_id, "isLiving": True}
+            for agent_id in range(1, 129)
+        ]
+        state = {
+            "status": "ready",
+            "mapId": 449,
+            "playerId": 1_000,
+            "agents": {
+                "truncated": True,
+                "total": 155,
+                "agents": captured,
+            },
+        }
+        self.assertEqual(
+            RUNNER.certified_performance_scene(state, 449, 80),
+            (449, 155, 128),
+        )
+        state["agents"]["truncated"] = False
+        state["agents"]["total"] = 128
+        with self.assertRaisesRegex(RUNNER.Failure, "incomplete"):
+            RUNNER.certified_performance_scene(state, 449, 80)
+
     def test_performance_sample_coverage_exposes_boundary_pauses(self) -> None:
         coverage, uncovered = RUNNER.performance_sample_coverage(30_000, 2_205, 10.164)
         self.assertAlmostEqual(coverage, 0.747, places=3)

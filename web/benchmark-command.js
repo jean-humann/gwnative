@@ -4,6 +4,9 @@ const COMMANDS = Object.freeze({
   'travel-america': 0,
   'interact-xunlai': 1,
   'high-graphics': 2,
+  'travel-guild-hall': 3,
+  'leave-guild-hall': 4,
+  'travel-international': 5,
 });
 
 /** Execute one command only while the client is in a synchronous normal state. */
@@ -27,7 +30,7 @@ export async function executeBenchmarkCommand(command, argument, {
     !Number.isSafeInteger(argument)
     || (commandId === 0 && ![1, 2].includes(argument))
     || (commandId === 1 && (argument <= 0 || argument >= 4096))
-    || (commandId === 2 && argument !== 0)
+    || ([2, 3, 4, 5].includes(commandId) && argument !== 0)
     || commandId < 0
   ) {
     throw new Error('benchmark command arguments are outside the finite API');

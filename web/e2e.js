@@ -114,8 +114,14 @@ const PAGE_ACTIONS = new Set([
   'probe-layout',
   'probe-benchmark-ui',
   'prepare-benchmark-scene',
+  'prepare-guild-hall-scene',
+  'prepare-kamadan-international-scene',
   'sample-performance',
+  'sample-performance-without-observer',
 ]);
+
+const matchesPerformanceAction = (action) => action === 'sample-performance'
+  || action === 'sample-performance-without-observer';
 
 const KAMADAN_MAP_ID = 449;
 const ENGLISH_LANGUAGE_ID = 0;
@@ -129,6 +135,9 @@ const XUNLAI_INTERACTION_ATTEMPTS = 5;
 const XUNLAI_POLLS_PER_ATTEMPT = 50;
 const BENCHMARK_MIN_AGENT_COUNT = 80;
 const BENCHMARK_POPULATION_POLLS = 20;
+const GUILD_HALL_TRANSITION_START_POLLS = 20;
+const GUILD_HALL_TRANSITION_SETTLE_POLLS = 200;
+const INTERNATIONAL_TRAVEL_ATTEMPTS = 3;
 
 const gameState = (window) => window.gwCompanionState?.status === 'ready'
   ? window.gwCompanionState
@@ -151,16 +160,18 @@ const loadBenchmarkDistrict = async (window, sleep, district) => {
   // Europe-English, so map/language/district alone cannot distinguish them
   // when the saved character happens to start in Europe-English District 2.
   await runtime.benchmarkSceneCommand('travel-america', district);
+  let consecutive = 0;
   return waitFor(
     () => {
       const state = placement();
-      return state?.mapId === KAMADAN_MAP_ID
+      const client = gameState(window);
+      const matches = state?.mapId === KAMADAN_MAP_ID
         && state.language === ENGLISH_LANGUAGE_ID
         && state.district === district
         && state.instanceType === 0
-        && gameState(window)
-        ? state
-        : null;
+        && client?.mapId === KAMADAN_MAP_ID;
+      consecutive = matches ? consecutive + 1 : 0;
+      return consecutive >= 3 ? state : null;
     },
     sleep,
     20_000,
@@ -168,12 +179,16 @@ const loadBenchmarkDistrict = async (window, sleep, district) => {
   );
 };
 
-const waitForBenchmarkPopulation = async (window, sleep) => {
+const waitForBenchmarkPopulation = async (
+  window,
+  sleep,
+  minimumAgentCount = BENCHMARK_MIN_AGENT_COUNT,
+) => {
   let consecutive = 0;
   for (let poll = 0; poll < BENCHMARK_POPULATION_POLLS; poll += 1) {
     const state = gameState(window);
     const total = state?.agents?.total;
-    consecutive = Number.isSafeInteger(total) && total >= BENCHMARK_MIN_AGENT_COUNT
+    consecutive = Number.isSafeInteger(total) && total >= minimumAgentCount
       ? consecutive + 1
       : 0;
     if (consecutive >= 3) return state;
@@ -199,8 +214,13 @@ const travelToBenchmarkDistrict = async (window, sleep) => {
   return fallback;
 };
 
-const recertifyBenchmarkPosition = async (window, sleep, anchorId) => {
-  const state = await waitForBenchmarkPopulation(window, sleep);
+const recertifyBenchmarkPosition = async (
+  window,
+  sleep,
+  anchorId,
+  minimumAgentCount = BENCHMARK_MIN_AGENT_COUNT,
+) => {
+  const state = await waitForBenchmarkPopulation(window, sleep, minimumAgentCount);
   const anchor = state && xunlaiMatches(state)
     .find((agent) => agent.agentId === anchorId);
   if (!state || !anchor) return null;
@@ -347,6 +367,146 @@ const prepareBenchmarkScene = async (window, sleep) => {
     `no populated Kamadan district retained ${BENCHMARK_MIN_AGENT_COUNT} agents at Xunlai`,
   );
   return Object.freeze({
+    scene: 'kamadan',
+    mapId: placement.mapId,
+    district: placement.district,
+    language: placement.language,
+    playerX: positioned.state.playerX,
+    playerY: positioned.state.playerY,
+    anchorX: positioned.anchor.x,
+    anchorY: positioned.anchor.y,
+    anchorDistance: positioned.distance,
+    agentCount: positioned.state.agents?.total ?? 0,
+    graphicsPreset: 'high',
+  });
+};
+
+const waitForGuildHallTransition = async (window, sleep, previousMapId) => {
+  let sawTransition = false;
+  for (let poll = 0; poll < GUILD_HALL_TRANSITION_START_POLLS; poll += 1) {
+    const state = gameState(window);
+    if (!state || state.mapId !== previousMapId) {
+      sawTransition = true;
+      break;
+    }
+    await sleep(100);
+  }
+  if (!sawTransition) return null;
+
+  let settledMapId = null;
+  let settledReads = 0;
+  for (let poll = 0; poll < GUILD_HALL_TRANSITION_SETTLE_POLLS; poll += 1) {
+    const state = gameState(window);
+    if (state && state.mapId !== previousMapId) {
+      if (state.mapId === settledMapId) settledReads += 1;
+      else {
+        settledMapId = state.mapId;
+        settledReads = 1;
+      }
+      if (settledReads >= 3) return state;
+    }
+    await sleep(100);
+  }
+  return null;
+};
+
+const prepareGuildHallScene = async (window, sleep) => {
+  assert(
+    typeof window.gwCompanionRuntime?.benchmarkSceneState === 'function'
+      && typeof window.gwCompanionRuntime?.benchmarkSceneCommand === 'function',
+    'certified benchmark scene API is unavailable',
+  );
+  const initial = await waitFor(
+    () => gameState(window),
+    sleep,
+    5_000,
+    'certified gameplay state is unavailable before Guild Hall travel',
+  );
+  const initialMapId = initial.mapId;
+
+  // Force a round trip when the prior cell ended in this hall. Outside a Guild
+  // Hall the leave message is a bounded no-op, so no map identity is assumed.
+  await window.gwCompanionRuntime.benchmarkSceneCommand('leave-guild-hall', 0);
+  const afterLeave = await waitForGuildHallTransition(window, sleep, initialMapId) ?? initial;
+  const departureMapId = afterLeave.mapId;
+  await window.gwCompanionRuntime.benchmarkSceneCommand('travel-guild-hall', 0);
+  const entered = await waitForGuildHallTransition(window, sleep, departureMapId);
+  assert(entered, 'the player Guild Hall did not load');
+  await window.gwCompanionRuntime.benchmarkSceneCommand('high-graphics', 0);
+  const placement = window.gwCompanionRuntime.benchmarkSceneState();
+  assert(
+    placement?.mapId === entered.mapId && placement.instanceType === 0,
+    'the loaded Guild Hall has no certified outpost placement',
+  );
+  return Object.freeze({
+    scene: 'guild-hall',
+    mapId: placement.mapId,
+    district: placement.district,
+    language: placement.language,
+    playerX: entered.playerX,
+    playerY: entered.playerY,
+    agentCount: entered.agents?.total ?? 0,
+    graphicsPreset: 'high',
+  });
+};
+
+const prepareKamadanInternationalScene = async (window, sleep) => {
+  assert(
+    typeof window.gwCompanionRuntime?.benchmarkSceneState === 'function'
+      && typeof window.gwCompanionRuntime?.benchmarkSceneCommand === 'function',
+    'certified benchmark scene API is unavailable',
+  );
+  // Normalize through America District 2 and require stable certified reads.
+  // International and America-English otherwise share map/language/district
+  // values, so the final District 2 -> District 1 transition is bounded
+  // observable proof that the fixed International travel packet was processed.
+  await loadBenchmarkDistrict(window, sleep, 2);
+  assert(
+    await waitForBenchmarkPopulation(window, sleep, 0),
+    'Kamadan America District 2 did not settle before International travel',
+  );
+  let placement = null;
+  for (let attempt = 0; attempt < INTERNATIONAL_TRAVEL_ATTEMPTS && !placement; attempt += 1) {
+    await window.gwCompanionRuntime.benchmarkSceneCommand('travel-international', 0);
+    let consecutive = 0;
+    try {
+      placement = await waitFor(
+        () => {
+          const candidate = window.gwCompanionRuntime.benchmarkSceneState();
+          const client = gameState(window);
+          const matches = candidate?.mapId === KAMADAN_MAP_ID
+            && candidate.district === 1
+            && candidate.language === ENGLISH_LANGUAGE_ID
+            && candidate.instanceType === 0
+            && client?.mapId === KAMADAN_MAP_ID;
+          consecutive = matches ? consecutive + 1 : 0;
+          return consecutive >= 3 ? candidate : null;
+        },
+        sleep,
+        10_000,
+        'Kamadan International District 1 did not load',
+      );
+    } catch {
+      // ArenaNet may throttle a district transfer immediately after another
+      // map entry. Retry only this same finite command a bounded number of times.
+    }
+  }
+  assert(placement, 'Kamadan International District 1 did not load');
+  await window.gwCompanionRuntime.benchmarkSceneCommand('high-graphics', 0);
+  assert(
+    await waitForBenchmarkPopulation(window, sleep, 0),
+    'Kamadan International did not produce a stable certified agent count',
+  );
+  const path = await positionAtXunlai(window, sleep);
+  const positioned = await recertifyBenchmarkPosition(
+    window,
+    sleep,
+    path.anchor.agentId,
+    0,
+  );
+  assert(positioned, 'Kamadan International did not retain the Xunlai position');
+  return Object.freeze({
+    scene: 'kamadan-international',
     mapId: placement.mapId,
     district: placement.district,
     language: placement.language,
@@ -415,7 +575,7 @@ export async function executeE2EAction(action, {
   assert(Number.isSafeInteger(action?.sequence) && action.sequence > 0,
     'E2E action has no valid sequence');
   assert(PAGE_ACTIONS.has(action.action), 'gameplay actions are native-only');
-  if (action.action === 'sample-performance') {
+  if (matchesPerformanceAction(action.action)) {
     assert(
       Number.isSafeInteger(action.durationMs)
         && action.durationMs >= 1_000
@@ -426,15 +586,30 @@ export async function executeE2EAction(action, {
       typeof window.gwFrameAudit?.beginPerformanceSample === 'function',
       'frame performance sampler is not installed',
     );
-    const finish = window.gwFrameAudit.beginPerformanceSample();
-    await sleep(action.durationMs);
-    const sampled = finish();
+    const observerEnabled = action.action === 'sample-performance';
+    const observerRuntime = window.gwCompanionRuntime;
+    assert(
+      typeof observerRuntime?.setObserverEnabled === 'function',
+      'passive observer control is unavailable',
+    );
+    const previousObserverEnabled = observerRuntime.observerEnabled === true;
+    const observerChanged = previousObserverEnabled !== observerEnabled;
+    if (observerChanged) observerRuntime.setObserverEnabled(observerEnabled);
+    let sampled;
+    try {
+      const finish = window.gwFrameAudit.beginPerformanceSample();
+      await sleep(action.durationMs);
+      sampled = finish();
+    } finally {
+      if (observerChanged) observerRuntime.setObserverEnabled(previousObserverEnabled);
+    }
     return {
       target: 'app-ui',
       activeTarget: targetName(window, canvas, window.Module?.oskActiveInput),
       performanceSample: {
         actionSequence: action.sequence,
         requestedDurationMs: action.durationMs,
+        observerEnabled,
         runtime: sampled.runtime,
         durationMs: sampled.durationMs,
         frames: sampled.frames,
@@ -484,6 +659,16 @@ export async function executeE2EAction(action, {
     benchmarkScene = {
       actionSequence: action.sequence,
       ...await prepareBenchmarkScene(window, sleep),
+    };
+  } else if (action.action === 'prepare-guild-hall-scene') {
+    benchmarkScene = {
+      actionSequence: action.sequence,
+      ...await prepareGuildHallScene(window, sleep),
+    };
+  } else if (action.action === 'prepare-kamadan-international-scene') {
+    benchmarkScene = {
+      actionSequence: action.sequence,
+      ...await prepareKamadanInternationalScene(window, sleep),
     };
   }
   return {

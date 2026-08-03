@@ -28,11 +28,14 @@ use super::{Outcome, digest};
 const CARRIER_MODULE: &str = "env";
 const CARRIER_NAME: &str = "__syscall_newfstatat";
 const BENCHMARK_EXPORT: &str = "__gwnative_e2e_benchmark_command";
+const GUILD_HALL_UI_MESSAGE: i32 = 0x1000_0180;
+const LEAVE_GUILD_HALL_UI_MESSAGE: i32 = 0x1000_0182;
 const TRAVEL_UI_MESSAGE: i32 = 0x1000_0183;
 const PREFERENCE_ENUM_UI_MESSAGE: i32 = 0x1000_0140;
 const PREFERENCE_FLAG_UI_MESSAGE: i32 = 0x1000_0141;
 const KAMADAN_MAP_ID: i32 = 449;
 const AMERICA_REGION_ID: i32 = 0;
+const INTERNATIONAL_REGION_ID: i32 = -2;
 const ENGLISH_LANGUAGE_ID: i32 = 0;
 const INTERACT_NPC_ACTION: i32 = 2;
 const MAX_AGENT_ID_EXCLUSIVE: i32 = 4096;
@@ -43,6 +46,10 @@ const HIGH_FLAG_PREFERENCES: &[u32] = &[82, 84, 97, 98, 100];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct BenchmarkTargets {
     dispatcher: u32,
+    guild_hall_key_getter: u32,
+    guild_context_accessor: u32,
+    guild_context_slot: i32,
+    guild_hall_key_offset: i32,
     interaction_dispatcher: u32,
     interaction_agent_validator: u32,
     enum_setter: u32,
@@ -628,7 +635,10 @@ pub(super) fn rewrite(input: &[u8], certificate: &RuntimeCertificate) -> Outcome
 /// This is deliberately a wrapper rather than an export of the discovered
 /// dispatcher. JavaScript can request only command 0 (travel to map 449,
 /// America/English, district 1 or 2), command 1 (interact with one bounded
-/// agent ID), or command 2 (apply the fixed high-quality benchmark preset).
+/// agent ID), command 2 (apply the fixed high-quality benchmark preset), or
+/// command 3 (travel to the current player's own Guild Hall), or command 4
+/// (leave a Guild Hall before normalizing the next scene), or command 5
+/// (travel to the fixed Kamadan International server-selected control).
 /// The normal player module never receives the extra export.
 pub(super) fn add_benchmark_api(
     input: &[u8],
@@ -694,6 +704,13 @@ fn benchmark_targets(input: &[u8], import_count: u32) -> Outcome<BenchmarkTarget
         return Err("benchmark API: function and code sections disagree".to_owned());
     }
     let dispatcher = benchmark_ui_dispatcher(&bodies)?;
+    if zero_argument_ui_message_callers(&bodies, LEAVE_GUILD_HALL_UI_MESSAGE, dispatcher, false)?
+        < 3
+    {
+        return Err("benchmark API: no repeated Leave Guild Hall path was found".to_owned());
+    }
+    let (guild_hall_key_getter, guild_context_accessor, guild_context_slot, guild_hall_key_offset) =
+        guild_hall_key_getter(&bodies, &parameter_counts, import_count, dispatcher)?;
     let (interaction_dispatcher, interaction_agent_validator) =
         interaction_dispatcher(&bodies, &parameter_counts, import_count)?;
     let (enum_setter, enum_values) = preference_setter(
@@ -760,6 +777,10 @@ fn benchmark_targets(input: &[u8], import_count: u32) -> Outcome<BenchmarkTarget
     }
     Ok(BenchmarkTargets {
         dispatcher,
+        guild_hall_key_getter,
+        guild_context_accessor,
+        guild_context_slot,
+        guild_hall_key_offset,
         interaction_dispatcher,
         interaction_agent_validator,
         enum_setter,
@@ -959,6 +980,74 @@ fn certify_asyncify_benchmark_targets(
     if benchmark_ui_dispatcher(&bodies)? != targets.dispatcher {
         return Err("benchmark API: paired runtimes disagree on the UI dispatcher".to_owned());
     }
+    if zero_argument_ui_message_callers(
+        &bodies,
+        LEAVE_GUILD_HALL_UI_MESSAGE,
+        targets.dispatcher,
+        true,
+    )? < 3
+    {
+        return Err(
+            "benchmark API: paired Asyncify Leave Guild Hall path failed correspondence".to_owned(),
+        );
+    }
+    let guild_getter_local = targets
+        .guild_hall_key_getter
+        .checked_sub(import_count)
+        .and_then(|local| usize::try_from(local).ok())
+        .ok_or_else(|| "benchmark API: paired Guild Hall key getter index is invalid".to_owned())?;
+    let guild_getter = bodies
+        .get(guild_getter_local)
+        .ok_or_else(|| "benchmark API: paired Guild Hall key getter is missing".to_owned())?;
+    let guild_getter_operators = function_operators(guild_getter)?;
+    if parameter_counts.get(guild_getter_local) != Some(&0)
+        || !asyncify_state_guard(&guild_getter_operators)
+        || !guild_getter_operators.windows(2).any(|window| {
+            matches!(
+                window,
+                [
+                    Operator::I32Const { value },
+                    Operator::Call { function_index },
+                ] if *value == targets.guild_context_slot
+                    && *function_index == targets.guild_context_accessor
+            )
+        })
+        || !guild_getter_operators.windows(2).any(|window| {
+            matches!(
+                window,
+                [Operator::I32Const { value }, Operator::I32Add]
+                    if *value == targets.guild_hall_key_offset
+            )
+        })
+        || !guild_getter_operators
+            .iter()
+            .any(|operator| matches!(operator, Operator::Return))
+    {
+        return Err(
+            "benchmark API: paired Asyncify Guild Hall key getter failed correspondence".to_owned(),
+        );
+    }
+    let mut guild_hall_callers = 0;
+    for body in &bodies {
+        let operators = function_operators(body)?;
+        if asyncify_state_guard(&operators)
+            && ui_message_calls(&operators, GUILD_HALL_UI_MESSAGE, targets.dispatcher) == 1
+            && operators.iter().any(|operator| {
+                matches!(
+                    operator,
+                    Operator::Call { function_index }
+                        if *function_index == targets.guild_hall_key_getter
+                )
+            })
+        {
+            guild_hall_callers += 1;
+        }
+    }
+    if guild_hall_callers < 3 {
+        return Err(
+            "benchmark API: paired Asyncify Guild Hall call sites failed correspondence".to_owned(),
+        );
+    }
     let interaction_local = targets
         .interaction_dispatcher
         .checked_sub(import_count)
@@ -1110,6 +1199,104 @@ fn benchmark_ui_dispatcher(bodies: &[Vec<u8>]) -> Outcome<u32> {
         [] => Err("benchmark API: no repeated kTravel dispatcher was found".to_owned()),
         _ => Err("benchmark API: kTravel resolves to multiple dispatchers".to_owned()),
     }
+}
+
+fn guild_hall_key_getter(
+    bodies: &[Vec<u8>],
+    parameter_counts: &[usize],
+    import_count: u32,
+    dispatcher: u32,
+) -> Outcome<(u32, u32, i32, i32)> {
+    let mut calls = HashMap::<u32, usize>::new();
+    for body in bodies {
+        let operators = function_operators(body)?;
+        for window in operators.windows(4) {
+            if let [
+                Operator::I32Const {
+                    value: GUILD_HALL_UI_MESSAGE,
+                },
+                Operator::Call {
+                    function_index: getter,
+                },
+                Operator::I32Const { value: 0 },
+                Operator::Call {
+                    function_index: target,
+                },
+            ] = window
+                && *target == dispatcher
+            {
+                *calls.entry(*getter).or_default() += 1;
+            }
+        }
+    }
+    let repeated = calls
+        .into_iter()
+        .filter(|(_, occurrences)| *occurrences >= 3)
+        .collect::<Vec<_>>();
+    let [(getter, _)] = repeated.as_slice() else {
+        return match repeated.as_slice() {
+            [] => Err("benchmark API: no repeated player Guild Hall key path was found".to_owned()),
+            _ => Err("benchmark API: player Guild Hall key path is ambiguous".to_owned()),
+        };
+    };
+    let local = getter
+        .checked_sub(import_count)
+        .and_then(|local| usize::try_from(local).ok())
+        .ok_or_else(|| "benchmark API: Guild Hall key getter is imported".to_owned())?;
+    let body = bodies
+        .get(local)
+        .ok_or_else(|| "benchmark API: Guild Hall key getter is missing".to_owned())?;
+    let operators = function_operators(body)?;
+    let [
+        Operator::I32Const {
+            value: context_slot,
+        },
+        Operator::Call {
+            function_index: context_accessor,
+        },
+        Operator::I32Const { value: key_offset },
+        Operator::I32Add,
+        Operator::End,
+    ] = operators.as_slice()
+    else {
+        return Err("benchmark API: player Guild Hall key getter changed".to_owned());
+    };
+    if parameter_counts.get(local) != Some(&0)
+        || !(1..64).contains(context_slot)
+        || *key_offset <= 0
+        || *key_offset > 4_096
+        || *key_offset % 4 != 0
+    {
+        return Err("benchmark API: player Guild Hall key getter is outside its bounds".to_owned());
+    }
+    Ok((*getter, *context_accessor, *context_slot, *key_offset))
+}
+
+fn zero_argument_ui_message_callers(
+    bodies: &[Vec<u8>],
+    message: i32,
+    dispatcher: u32,
+    require_asyncify_guard: bool,
+) -> Outcome<usize> {
+    let mut callers = 0;
+    for body in bodies {
+        let operators = function_operators(body)?;
+        let calls_message = operators.windows(4).any(|window| {
+            matches!(
+                window,
+                [
+                    Operator::I32Const { value },
+                    Operator::I32Const { value: 0 },
+                    Operator::I32Const { value: 0 },
+                    Operator::Call { function_index },
+                ] if *value == message && *function_index == dispatcher
+            )
+        });
+        if calls_message && (!require_asyncify_guard || asyncify_state_guard(&operators)) {
+            callers += 1;
+        }
+    }
+    Ok(callers)
 }
 
 fn ui_message_calls(operators: &[Operator<'_>], message: i32, target: u32) -> usize {
@@ -1372,6 +1559,23 @@ fn call_ui(body: &mut Vec<u8>, message: i32, target: u32) {
     body.extend_from_slice(&uleb(u64::from(target)));
 }
 
+fn call_travel(
+    body: &mut Vec<u8>,
+    target: u32,
+    map_id: i32,
+    region_id: i32,
+    language_id: i32,
+    district: Option<i32>,
+) {
+    allocate_stack(body, 16);
+    store_i32(body, 2, 0, Some(map_id));
+    store_i32(body, 2, 4, Some(region_id));
+    store_i32(body, 2, 8, Some(language_id));
+    store_i32(body, 2, 12, district);
+    call_ui(body, TRAVEL_UI_MESSAGE, target);
+    restore_stack(body, 16);
+}
+
 fn call_preference_setter(body: &mut Vec<u8>, target: u32, preference: i32, value: i32) {
     instruction_i32_const(body, preference);
     instruction_i32_const(body, value);
@@ -1409,13 +1613,14 @@ fn benchmark_wrapper(targets: BenchmarkTargets) -> Vec<u8> {
     body.push(0x46); // i32.eq
     body.push(0x72); // i32.or
     body.extend_from_slice(&[0x04, 0x40]); // if
-    allocate_stack(&mut body, 16);
-    store_i32(&mut body, 2, 0, Some(KAMADAN_MAP_ID));
-    store_i32(&mut body, 2, 4, Some(AMERICA_REGION_ID));
-    store_i32(&mut body, 2, 8, Some(ENGLISH_LANGUAGE_ID));
-    store_i32(&mut body, 2, 12, None); // district argument
-    call_ui(&mut body, TRAVEL_UI_MESSAGE, targets.dispatcher);
-    restore_stack(&mut body, 16);
+    call_travel(
+        &mut body,
+        targets.dispatcher,
+        KAMADAN_MAP_ID,
+        AMERICA_REGION_ID,
+        ENGLISH_LANGUAGE_ID,
+        None,
+    );
     instruction_i32_const(&mut body, 1);
     body.extend_from_slice(&[0x21, 0x03]); // result = accepted
     body.push(0x0b); // end district guard
@@ -1482,6 +1687,71 @@ fn benchmark_wrapper(targets: BenchmarkTargets) -> Vec<u8> {
     body.extend_from_slice(&[0x21, 0x03]); // local.set result
     body.push(0x0b); // end argument guard
     body.push(0x0b); // end preset command
+
+    // command 3: travel only to the current player's own Guild Hall. The key
+    // getter is structurally identified from repeated native kGuildHall call
+    // sites, so neither JavaScript nor the runner can provide an arbitrary key.
+    instruction_local_get(&mut body, 0);
+    instruction_i32_const(&mut body, 3);
+    body.push(0x46); // i32.eq
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    instruction_local_get(&mut body, 1);
+    body.push(0x45); // argument == 0
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    instruction_i32_const(&mut body, GUILD_HALL_UI_MESSAGE);
+    body.push(0x10);
+    body.extend_from_slice(&uleb(u64::from(targets.guild_hall_key_getter)));
+    instruction_i32_const(&mut body, 0);
+    body.push(0x10);
+    body.extend_from_slice(&uleb(u64::from(targets.dispatcher)));
+    instruction_i32_const(&mut body, 1);
+    body.extend_from_slice(&[0x21, 0x03]); // result = accepted
+    body.push(0x0b); // end argument guard
+    body.push(0x0b); // end Guild Hall command
+
+    // command 4: leave a Guild Hall through the game's zero-argument message.
+    // It is safe to issue while already outside a hall; the client ignores it.
+    instruction_local_get(&mut body, 0);
+    instruction_i32_const(&mut body, 4);
+    body.push(0x46); // i32.eq
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    instruction_local_get(&mut body, 1);
+    body.push(0x45); // argument == 0
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    instruction_i32_const(&mut body, LEAVE_GUILD_HALL_UI_MESSAGE);
+    instruction_i32_const(&mut body, 0);
+    instruction_i32_const(&mut body, 0);
+    body.push(0x10);
+    body.extend_from_slice(&uleb(u64::from(targets.dispatcher)));
+    instruction_i32_const(&mut body, 1);
+    body.extend_from_slice(&[0x21, 0x03]); // result = accepted
+    body.push(0x0b); // end argument guard
+    body.push(0x0b); // end Leave Guild Hall command
+
+    // command 5: fixed lower-population Kamadan International control. A zero
+    // district requests the first available International district, matching
+    // the game's native default rather than assuming that district 1 accepts
+    // an explicit number.
+    instruction_local_get(&mut body, 0);
+    instruction_i32_const(&mut body, 5);
+    body.push(0x46); // i32.eq
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    instruction_local_get(&mut body, 1);
+    body.push(0x45); // argument == 0
+    body.extend_from_slice(&[0x04, 0x40]); // if
+    call_travel(
+        &mut body,
+        targets.dispatcher,
+        KAMADAN_MAP_ID,
+        INTERNATIONAL_REGION_ID,
+        ENGLISH_LANGUAGE_ID,
+        Some(0),
+    );
+    instruction_i32_const(&mut body, 1);
+    body.extend_from_slice(&[0x21, 0x03]); // result = accepted
+    body.push(0x0b); // end argument guard
+    body.push(0x0b); // end International command
+
     instruction_local_get(&mut body, 3);
     body.push(0x0b); // function end
     body

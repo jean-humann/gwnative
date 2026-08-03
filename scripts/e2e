@@ -546,9 +546,12 @@ def certified_performance_scene(
         or any(not isinstance(agent.get("agentId"), int) for agent in map_agents)
         or [agent.get("agentId") for agent in map_agents]
         != sorted({agent.get("agentId") for agent in map_agents})
-        or not any(
-            agent.get("agentId") == player_id and agent.get("isLiving") is True
-            for agent in map_agents
+        or (
+            not agents.get("truncated")
+            and not any(
+                agent.get("agentId") == player_id and agent.get("isLiving") is True
+                for agent in map_agents
+            )
         )
     ):
         raise Failure("certified performance scene is incomplete")
@@ -591,7 +594,7 @@ def run_performance_sample(
     # outpost has begun presenting. Require a focused gameplay frame before
     # queueing a command that is consumed only at the logical swap boundary.
     wait_for_real_gameplay_frame(stream, origin, token)
-    scene = prepare_benchmark_scene(stream, origin, token)
+    scene = prepare_benchmark_scene(args, stream, origin, token)
     # Travel and pathing both replace visible state. Re-certify the final scene
     # rather than inheriting the pre-command presentation proof.
     wait_for_real_gameplay_frame(stream, origin, token)
@@ -608,7 +611,11 @@ def run_performance_sample(
     sample_sequence = submit_action(
         origin,
         token,
-        "sample-performance",
+        (
+            "sample-performance"
+            if args.benchmark_observer == "on"
+            else "sample-performance-without-observer"
+        ),
         requested_ms,
     )
     sample_event = stream.wait_for_action_event(
@@ -620,6 +627,7 @@ def run_performance_sample(
         raise Failure("logical-frame performance sample did not arrive")
     stream.wait_for_action(sample_sequence, 5)
     sample = sample_event.get("detail", {})
+    observer_enabled = sample.get("observerEnabled")
     frames = sample.get("frames")
     duration_ms = sample.get("durationMs")
     logical_fps = sample.get("framesPerSecond")
@@ -642,6 +650,7 @@ def run_performance_sample(
         or not isinstance(duration_ms, (int, float))
         or duration_ms <= 0
         or not isinstance(logical_fps, (int, float))
+        or observer_enabled != (args.benchmark_observer == "on")
         or not isinstance(interval_samples, int)
         or interval_samples != frames - 1
         or not isinstance(interval_mean_ms, (int, float))
@@ -694,12 +703,15 @@ def run_performance_sample(
         "schemaVersion": 1,
         "configuration": {
             "requestedRuntime": args.runtime,
+            "benchmarkScene": args.benchmark_scene,
+            "benchmarkObserver": args.benchmark_observer,
             "frameIsolation": args.frame_isolation or "default",
             "clientFrameLimit": args.fps,
             "refreshHz": args.refresh_hz,
             "renderScale": args.render_scale,
         },
         "scene": {
+            "name": scene["scene"],
             "mapId": map_id,
             "instanceType": state.get("instanceType"),
             "district": scene["district"],
@@ -709,10 +721,16 @@ def run_performance_sample(
             "playerId": state.get("playerId"),
             "playerX": scene["playerX"],
             "playerY": scene["playerY"],
-            "anchorX": scene["anchorX"],
-            "anchorY": scene["anchorY"],
-            "anchorDistance": scene["anchorDistance"],
             "graphicsPreset": scene["graphicsPreset"],
+            **(
+                {
+                    "anchorX": scene["anchorX"],
+                    "anchorY": scene["anchorY"],
+                    "anchorDistance": scene["anchorDistance"],
+                }
+                if scene["scene"] in {"kamadan", "kamadan-international"}
+                else {}
+            ),
         },
         "sample": sample,
         "derived": {
@@ -739,12 +757,18 @@ def run_performance_sample(
 
 
 def prepare_benchmark_scene(
+    args: argparse.Namespace,
     stream: EventStream,
     origin: str,
     token: str,
 ) -> dict[str, object]:
     """Use the finite in-client API to normalize district and position."""
-    sequence = submit_action(origin, token, "prepare-benchmark-scene")
+    action = {
+        "kamadan": "prepare-benchmark-scene",
+        "guild-hall": "prepare-guild-hall-scene",
+        "kamadan-international": "prepare-kamadan-international-scene",
+    }[args.benchmark_scene]
+    sequence = submit_action(origin, token, action)
     event = stream.wait_for_action_event(sequence, "benchmark-scene", 100)
     if event is None:
         raise Failure("the in-client benchmark scene API produced no result")
@@ -752,11 +776,24 @@ def prepare_benchmark_scene(
     scene = event.get("detail")
     if not isinstance(scene, dict):
         raise Failure("the in-client benchmark scene result is incomplete")
+    if scene.get("scene") in {"kamadan", "kamadan-international"}:
+        region = (
+            "America-English"
+            if scene.get("scene") == "kamadan"
+            else "International"
+        )
+        location = (
+            f"Kamadan {region} District {scene.get('district')}, "
+            f"Xunlai distance={scene.get('anchorDistance'):.1f}"
+        )
+    elif scene.get("scene") == "guild-hall":
+        location = f"player Guild Hall map {scene.get('mapId')}"
+    else:
+        raise Failure("the in-client benchmark scene has an unknown finite name")
     print(
         "[e2e] benchmark scene ready "
-        f"(Kamadan America-English District {scene.get('district')}, "
-        f"Xunlai distance={scene.get('anchorDistance'):.1f}, "
-        f"graphics={scene.get('graphicsPreset')}, agents={scene.get('agentCount')})"
+        f"({location}, graphics={scene.get('graphicsPreset')}, "
+        f"agents={scene.get('agentCount')})"
     )
     return scene
 
@@ -825,6 +862,18 @@ def main() -> int:
         "--benchmark-seconds",
         type=float,
         help="sample logical frame cadence for 1 to 60 seconds in certified gameplay",
+    )
+    parser.add_argument(
+        "--benchmark-scene",
+        choices=("kamadan", "guild-hall", "kamadan-international"),
+        default="kamadan",
+        help="select the crowded, same-map International, or Guild Hall benchmark scene",
+    )
+    parser.add_argument(
+        "--benchmark-observer",
+        choices=("on", "off"),
+        default="on",
+        help="keep or temporarily pause the passive companion observer during the sample",
     )
     parser.add_argument(
         "--benchmark-output",
@@ -1049,7 +1098,10 @@ def main() -> int:
                 "probe-layout",
                 "probe-benchmark-ui",
                 "prepare-benchmark-scene",
+                "prepare-guild-hall-scene",
+                "prepare-kamadan-international-scene",
                 "sample-performance",
+                "sample-performance-without-observer",
             }
             if action_names != expected_actions:
                 raise Failure(f"unexpected E2E action vocabulary: {sorted(action_names)}")
@@ -1404,10 +1456,13 @@ def main() -> int:
                 )
                 or [agent.get("agentId") for agent in map_agents]
                 != sorted({agent.get("agentId") for agent in map_agents})
-                or not any(
-                    agent.get("agentId") == state.get("playerId")
-                    and agent.get("isLiving") is True
-                    for agent in map_agents
+                or (
+                    not agents.get("truncated")
+                    and not any(
+                        agent.get("agentId") == state.get("playerId")
+                        and agent.get("isLiving") is True
+                        for agent in map_agents
+                    )
                 )
             ):
                 raise Failure("certified map-agent state is incomplete")

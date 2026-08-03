@@ -32,6 +32,7 @@ class MemoryStorage {
 function benchmarkSceneHarness({
   district2Agents = 111,
   district2AgentsAfterPath = district2Agents,
+  internationalAgents = 24,
 } = {}) {
   let placement = { mapId: 449, district: 3, language: 0, instanceType: 0 };
   const agents = [
@@ -83,6 +84,8 @@ function benchmarkSceneHarness({
   ];
   const state = {
     status: 'ready',
+    mapId: 449,
+    instanceType: 0,
     playerX: -9_167,
     playerY: 13_147,
     agents: { total: 111, agents },
@@ -101,6 +104,12 @@ function benchmarkSceneHarness({
           state.playerX = -9_167;
           state.playerY = 13_147;
         }
+        if (command === 'travel-international') {
+          placement = { mapId: 449, district: 1, language: 0, instanceType: 0 };
+          state.agents.total = internationalAgents;
+          state.playerX = -9_167;
+          state.playerY = 13_147;
+        }
         if (command === 'interact-xunlai') {
           assert.equal(argument, 44);
           if (commands.filter(([name]) => name === 'interact-xunlai').length === 2) {
@@ -112,6 +121,40 @@ function benchmarkSceneHarness({
             state.playerX = agents[1].x;
             state.playerY = agents[1].y;
           }
+        }
+      },
+    },
+  };
+  return { commands, window };
+}
+
+function guildHallSceneHarness() {
+  let placement = { mapId: 449, district: 1, language: 0, instanceType: 0 };
+  const state = {
+    status: 'ready',
+    mapId: 449,
+    instanceType: 0,
+    playerX: -9_167,
+    playerY: 13_147,
+    agents: { total: 111, agents: [] },
+    social: { guild: { index: 1 } },
+  };
+  const commands = [];
+  const window = {
+    Module: {},
+    gwCompanionState: state,
+    gwCompanionRuntime: {
+      benchmarkSceneState: () => placement,
+      async benchmarkSceneCommand(command, argument) {
+        commands.push([command, argument]);
+        if (command === 'travel-guild-hall') {
+          placement = { mapId: 4, district: 0, language: 0, instanceType: 0 };
+          Object.assign(state, {
+            mapId: 4,
+            playerX: 1_200,
+            playerY: -800,
+            agents: { total: 18, agents: [] },
+          });
         }
       },
     },
@@ -361,6 +404,7 @@ describe('end-to-end helpers', () => {
     ]);
     assert.deepEqual(result.benchmarkScene, {
       actionSequence: 9,
+      scene: 'kamadan',
       mapId: 449,
       district: 2,
       language: 0,
@@ -370,6 +414,104 @@ describe('end-to-end helpers', () => {
       anchorY: 14_159,
       anchorDistance: 0,
       agentCount: 111,
+      graphicsPreset: 'high',
+    });
+  });
+
+  it('travels to the player Guild Hall through the finite client API', async () => {
+    const { commands, window } = guildHallSceneHarness();
+    const result = await executeE2EAction(
+      { sequence: 12, action: 'prepare-guild-hall-scene', durationMs: 0 },
+      { window, canvas: {}, sleep: async () => {} },
+    );
+
+    assert.deepEqual(commands, [
+      ['leave-guild-hall', 0],
+      ['travel-guild-hall', 0],
+      ['high-graphics', 0],
+    ]);
+    assert.deepEqual(result.benchmarkScene, {
+      actionSequence: 12,
+      scene: 'guild-hall',
+      mapId: 4,
+      district: 0,
+      language: 0,
+      playerX: 1_200,
+      playerY: -800,
+      agentCount: 18,
+      graphicsPreset: 'high',
+    });
+  });
+
+  it('allows a started Guild Hall transition to finish settling', async () => {
+    const entered = {
+      status: 'ready',
+      mapId: 4,
+      instanceType: 0,
+      playerX: 1_200,
+      playerY: -800,
+      agents: { total: 18, agents: [] },
+    };
+    let placement = { mapId: 449, district: 1, language: 0, instanceType: 0 };
+    let travelStarted = false;
+    let settlePolls = 0;
+    const window = {
+      Module: {},
+      gwCompanionState: {
+        ...entered,
+        mapId: 449,
+      },
+      gwCompanionRuntime: {
+        benchmarkSceneState: () => placement,
+        async benchmarkSceneCommand(command) {
+          if (command === 'travel-guild-hall') {
+            travelStarted = true;
+            window.gwCompanionState = null;
+          }
+        },
+      },
+    };
+    const sleep = async () => {
+      if (travelStarted && ++settlePolls === 5) {
+        placement = { mapId: 4, district: 0, language: 0, instanceType: 0 };
+        window.gwCompanionState = entered;
+      }
+    };
+
+    const result = await executeE2EAction(
+      { sequence: 14, action: 'prepare-guild-hall-scene', durationMs: 0 },
+      { window, canvas: {}, sleep },
+    );
+    assert.equal(result.benchmarkScene.mapId, 4);
+    assert(settlePolls >= 5);
+  });
+
+  it('uses the same Xunlai anchor in Kamadan International as a population control', async () => {
+    const { commands, window } = benchmarkSceneHarness({ internationalAgents: 24 });
+    const result = await executeE2EAction(
+      { sequence: 13, action: 'prepare-kamadan-international-scene', durationMs: 0 },
+      { window, canvas: {}, sleep: async () => {} },
+    );
+
+    assert.deepEqual(commands, [
+      ['travel-america', 2],
+      ['travel-international', 0],
+      ['high-graphics', 0],
+      ['interact-xunlai', 44],
+      ['interact-xunlai', 44],
+    ]);
+    assert.deepEqual(result.benchmarkScene, {
+      actionSequence: 13,
+      scene: 'kamadan-international',
+      mapId: 449,
+      district: 1,
+      language: 0,
+      playerX: -7_671,
+      playerY: 14_159,
+      anchorX: -7_671,
+      anchorY: 14_159,
+      anchorDistance: 0,
+      agentCount: 24,
       graphicsPreset: 'high',
     });
   });
@@ -431,6 +573,9 @@ describe('end-to-end helpers', () => {
         attributes: { alpha: false },
       },
       audit: {
+        logicalFrames: 121,
+        drawCalls: 0,
+        clearCalls: 0,
         contextLost: 0,
         contextRestored: 0,
         framesInterruptedAfterDraw: 0,
@@ -439,8 +584,17 @@ describe('end-to-end helpers', () => {
       },
     };
     let slept = 0;
+    const observerTransitions = [];
+    const companionRuntime = {
+      observerEnabled: true,
+      setObserverEnabled(enabled) {
+        this.observerEnabled = enabled;
+        observerTransitions.push(enabled);
+      },
+    };
     const window = {
       Module: {},
+      gwCompanionRuntime: companionRuntime,
       gwFrameAudit: { beginPerformanceSample: () => () => sampled },
     };
     const result = await executeE2EAction(
@@ -458,6 +612,7 @@ describe('end-to-end helpers', () => {
       performanceSample: {
         actionSequence: 7,
         requestedDurationMs: 1_000,
+        observerEnabled: true,
         runtime: 'jspi',
         durationMs: 1_001,
         frames: 121,
@@ -480,9 +635,27 @@ describe('end-to-end helpers', () => {
         gpuTiming: 'not-sampled',
       },
     });
+    const withoutObserver = await executeE2EAction(
+      {
+        sequence: 8,
+        action: 'sample-performance-without-observer',
+        durationMs: 1_000,
+      },
+      { window, canvas: {}, sleep: async () => {} },
+    );
+    assert.deepEqual(observerTransitions, [false, true]);
+    assert.equal(withoutObserver.performanceSample.observerEnabled, false);
+    companionRuntime.observerEnabled = false;
+    const withObserver = await executeE2EAction(
+      { sequence: 9, action: 'sample-performance', durationMs: 1_000 },
+      { window, canvas: {}, sleep: async () => {} },
+    );
+    assert.deepEqual(observerTransitions, [false, true, true, false]);
+    assert.equal(withObserver.performanceSample.observerEnabled, true);
+    assert.equal(companionRuntime.observerEnabled, false);
     await assert.rejects(
       executeE2EAction(
-        { sequence: 8, action: 'sample-performance', durationMs: 999 },
+        { sequence: 10, action: 'sample-performance', durationMs: 999 },
         { window, canvas: {}, sleep: async () => {} },
       ),
       /outside its bound/,
