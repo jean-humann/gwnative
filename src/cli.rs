@@ -64,7 +64,6 @@ impl Drop for Secret {
 /// The classic options that can be carried into the web client or native host.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct LegacyOptions {
-    pub autologin: bool,
     pub email: Option<String>,
     pub password: Option<Secret>,
     pub character: Option<String>,
@@ -73,7 +72,6 @@ pub struct LegacyOptions {
     pub mute: bool,
     pub diagnostics: bool,
     pub performance: bool,
-    pub mock_steam_deck: bool,
     pub no_patch_ui: bool,
     pub reset_preferences: bool,
 }
@@ -157,13 +155,11 @@ impl Invocation {
             });
         serde_json::json!({
             "profile": self.profile.as_deref().unwrap_or("default"),
-            "autologin": self.legacy.autologin,
             "credentials": credentials,
             "fps": self.legacy.fps,
             "mute": self.legacy.mute,
             "diagnostics": self.legacy.diagnostics,
             "performance": self.legacy.performance,
-            "mockSteamDeck": self.legacy.mock_steam_deck,
             "noPatchUi": self.legacy.no_patch_ui,
         })
     }
@@ -298,11 +294,11 @@ where
             }
 
             "-autologin" => {
-                no_inline(option, inline, || invocation.legacy.autologin = true)?;
-                translated(
+                no_inline(option, inline, || {})?;
+                unsupported(
                     &mut invocation,
                     option,
-                    "offers the invocation or profile Keychain credentials to the current client",
+                    "credentials are prefilled, but the current WebAssembly client exposes no supported automatic login-submission hook",
                 );
             }
             "-email" => {
@@ -365,7 +361,11 @@ where
                 if !value.eq_ignore_ascii_case("SteamDeck") {
                     return Err(value_error(option, "expected SteamDeck"));
                 }
-                invocation.legacy.mock_steam_deck = true;
+                unsupported(
+                    &mut invocation,
+                    option,
+                    "the WebAssembly client exposes no supported platform-simulation hook",
+                );
             }
             "-windowed" => {
                 set_once(
@@ -745,13 +745,18 @@ mod tests {
             "Devona",
         ])
         .unwrap();
-        assert!(parsed.legacy.autologin);
         assert_eq!(parsed.legacy.email.as_deref(), Some("player@example.test"));
         assert_eq!(
             parsed.legacy.password.as_ref().and_then(Secret::expose),
             Some("hunter2")
         );
         assert_eq!(parsed.legacy.character.as_deref(), Some("Devona"));
+        assert!(parsed.notices.iter().any(|notice| {
+            notice.option == "-autologin" && notice.kind == NoticeKind::Unsupported
+        }));
+        let client = parsed.client_json();
+        assert!(client.get("autologin").is_none());
+        assert!(client.get("mockSteamDeck").is_none());
         let debug = format!("{parsed:?}");
         assert!(!debug.contains("hunter2"));
         assert!(debug.contains("<redacted>"));
@@ -825,10 +830,9 @@ mod tests {
             "4",
         ])
         .unwrap();
-        assert!(parsed.legacy.mock_steam_deck);
         assert!(parsed.legacy.no_patch_ui);
         assert!(parsed.legacy.reset_preferences);
-        assert_eq!(parsed.notices.len(), 8);
+        assert_eq!(parsed.notices.len(), 9);
         assert!(
             parsed
                 .notices

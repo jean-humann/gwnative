@@ -285,6 +285,13 @@ pub fn make(
     let webview =
         unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config) };
 
+    if invocation.devtools {
+        // Available below this app's deployment floor. Off by default so a
+        // production page cannot be attached to accidentally; the explicit
+        // launch flag makes Safari's Develop menu able to inspect this view.
+        unsafe { webview.setInspectable(true) };
+    }
+
     // The document itself is black. Match the WKWebView-owned native surface
     // underneath it so an unavailable retained-frame snapshot still degrades
     // to the game's background instead of a system-coloured flash.
