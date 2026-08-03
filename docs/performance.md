@@ -132,6 +132,10 @@ runner supplies no map, region, language, agent identity, graphics value,
 pointer, or coordinate. It receives only the verified final scene and rejects a
 player farther than 180 game units from the anchor.
 
+Each finite command waits at most five seconds for a logical game frame. This
+covers the bounded presentation pause immediately after character entry while
+still failing explicitly if WebKit or the client stops producing frames.
+
 The normal `/__game/v1` API remains read-only. This command path exists only in
 a disposable benchmark launch (`GWNATIVE_E2E=1` plus the runner-owned
 `GWNATIVE_E2E_BENCHMARK_API=1`), exposes three finite commands, and is appended

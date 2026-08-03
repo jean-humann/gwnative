@@ -436,6 +436,7 @@ let recovery;
 let gameInstance;
 let gameImports;
 let pendingBenchmarkCommand = null;
+const BENCHMARK_COMMAND_FRAME_TIMEOUT_MS = 5_000;
 
 function queueBenchmarkCommand(callback) {
   if (window.__gwnativeE2E !== true || typeof callback !== 'function') {
@@ -450,7 +451,7 @@ function queueBenchmarkCommand(callback) {
       if (pendingBenchmarkCommand !== pending) return;
       pendingBenchmarkCommand = null;
       reject(new Error('no game frame consumed the benchmark command'));
-    }, 2_000);
+    }, BENCHMARK_COMMAND_FRAME_TIMEOUT_MS);
     pendingBenchmarkCommand = pending;
   });
 }
