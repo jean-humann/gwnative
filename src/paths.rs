@@ -162,6 +162,7 @@ mod tests {
             display_name: "Iron".into(),
             color: "#000000".into(),
             created_at: 0,
+            origin_port: 38113,
         };
         let layout = Layout::new(&invocation, &profile);
         assert!(layout.support_dir().ends_with("gwnative/profiles/iron"));

@@ -108,7 +108,14 @@ fn main() {
     }
     let base_support = paths::base_support_dir();
     if command == cli::Command::Profiles {
-        for profile in profile::list(&base_support) {
+        let profiles = match profile::list(&base_support) {
+            Ok(profiles) => profiles,
+            Err(reason) => {
+                note!("[gwnative] {reason}");
+                std::process::exit(2);
+            }
+        };
+        for profile in profiles {
             println!(
                 "{}\t{}\t{}\t{}",
                 profile.id,

@@ -8,9 +8,11 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+use crate::instance;
 
 const FORMAT: u32 = 1;
 const DEFAULT_PORT: u16 = 38112;
@@ -25,6 +27,7 @@ pub struct Profile {
     pub display_name: String,
     pub color: String,
     pub created_at: u64,
+    pub origin_port: u16,
 }
 
 impl Profile {
@@ -35,6 +38,7 @@ impl Profile {
             display_name: "Default".into(),
             color: "#d9b25c".into(),
             created_at: 0,
+            origin_port: DEFAULT_PORT,
         }
     }
 
@@ -56,13 +60,7 @@ impl Profile {
 
     /// A stable origin for IndexedDB, distinct between ordinary profiles.
     pub fn port(&self) -> u16 {
-        if self.is_default() {
-            return DEFAULT_PORT;
-        }
-        let hash = self.id.bytes().fold(2_166_136_261u32, |hash, byte| {
-            (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
-        });
-        PROFILE_PORT_FIRST + (hash % u32::from(PROFILE_PORT_COUNT)) as u16
+        self.origin_port
     }
 
     pub fn is_default(&self) -> bool {
@@ -78,23 +76,21 @@ pub fn select(base: &Path, id: Option<&str>) -> Result<Profile, String> {
     if id == "default" {
         return Ok(Profile::default_profile());
     }
+    if !valid_id(id) {
+        return Err(format!("profile id {id:?} is not a safe directory name"));
+    }
+
+    // Allocation is a catalog transaction: two first launches must not both
+    // observe the same free origin and persist it for different profiles.
+    let _catalog = instance::acquire(&base.join("profiles.lock"), Duration::from_secs(5))
+        .map_err(|error| format!("could not lock the profile catalog: {error}"))?;
+    let profiles = named_profiles(base)?;
+    if let Some(profile) = profiles.iter().find(|profile| profile.id == id) {
+        return Ok(profile.clone());
+    }
 
     let dir = base.join("profiles").join(id);
     let path = dir.join("profile.json");
-    if path.exists() {
-        return read(&path).and_then(|profile| {
-            if profile.id == id {
-                Ok(profile)
-            } else {
-                Err(format!(
-                    "{} names profile {:?}, expected {id:?}",
-                    path.display(),
-                    profile.id
-                ))
-            }
-        });
-    }
-
     fs::create_dir_all(&dir)
         .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
     let profile = Profile {
@@ -106,34 +102,68 @@ pub fn select(base: &Path, id: Option<&str>) -> Result<Profile, String> {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        origin_port: allocate_port(id, &profiles)?,
     };
     write(&path, &profile)?;
     Ok(profile)
 }
 
-/// List the implicit default profile and every valid named descriptor.
-pub fn list(base: &Path) -> Vec<Profile> {
+/// List the implicit default profile and every named descriptor.
+pub fn list(base: &Path) -> Result<Vec<Profile>, String> {
     let mut profiles = vec![Profile::default_profile()];
-    let Ok(entries) = fs::read_dir(base.join("profiles")) else {
-        return profiles;
+    profiles.extend(named_profiles(base)?);
+    Ok(profiles)
+}
+
+fn named_profiles(base: &Path) -> Result<Vec<Profile>, String> {
+    let root = base.join("profiles");
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("could not list {}: {error}", root.display())),
     };
-    for entry in entries.flatten() {
+    let mut profiles = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("could not read {}: {error}", root.display()))?;
         let path = entry.path().join("profile.json");
-        let Ok(profile) = read(&path) else { continue };
-        if profile.id != "default"
-            && entry.file_name().to_str() == Some(profile.id.as_str())
-            && !profiles.iter().any(|known| known.id == profile.id)
-        {
-            profiles.push(profile);
+        if !path.exists() {
+            continue;
         }
+        let profile = read(&path)?;
+        if entry.file_name().to_str() != Some(profile.id.as_str()) {
+            return Err(format!(
+                "{} names profile {:?}, which does not match its directory",
+                path.display(),
+                profile.id
+            ));
+        }
+        if let Some(known) = profiles
+            .iter()
+            .find(|known: &&Profile| known.id == profile.id)
+        {
+            return Err(format!(
+                "profiles {:?} and {:?} have the same id",
+                known.id, profile.id
+            ));
+        }
+        if let Some(known) = profiles
+            .iter()
+            .find(|known: &&Profile| known.origin_port == profile.origin_port)
+        {
+            return Err(format!(
+                "profiles {:?} and {:?} both claim WebKit origin port {}",
+                known.id, profile.id, profile.origin_port
+            ));
+        }
+        profiles.push(profile);
     }
-    profiles[1..].sort_by(|left, right| {
+    profiles.sort_by(|left, right| {
         left.display_name
             .to_lowercase()
             .cmp(&right.display_name.to_lowercase())
             .then_with(|| left.id.cmp(&right.id))
     });
-    profiles
+    Ok(profiles)
 }
 
 fn read(path: &Path) -> Result<Profile, String> {
@@ -148,7 +178,53 @@ fn read(path: &Path) -> Result<Profile, String> {
             profile.format_version
         ));
     }
+    if profile.id == "default" || !valid_id(&profile.id) {
+        return Err(format!(
+            "{} contains invalid named profile id {:?}",
+            path.display(),
+            profile.id
+        ));
+    }
+    if !(PROFILE_PORT_FIRST..PROFILE_PORT_FIRST + PROFILE_PORT_COUNT).contains(&profile.origin_port)
+    {
+        return Err(format!(
+            "{} assigns WebKit origin port {}, outside {}–{}",
+            path.display(),
+            profile.origin_port,
+            PROFILE_PORT_FIRST,
+            PROFILE_PORT_FIRST + PROFILE_PORT_COUNT - 1
+        ));
+    }
     Ok(profile)
+}
+
+fn allocate_port(id: &str, profiles: &[Profile]) -> Result<u16, String> {
+    let start = usize::from(preferred_port(id) - PROFILE_PORT_FIRST);
+    (0..usize::from(PROFILE_PORT_COUNT))
+        .map(|offset| (start + offset) % usize::from(PROFILE_PORT_COUNT))
+        .map(|offset| PROFILE_PORT_FIRST + offset as u16)
+        .find(|candidate| {
+            profiles
+                .iter()
+                .all(|profile| profile.origin_port != *candidate)
+        })
+        .ok_or_else(|| "all reserved profile origin ports are assigned".to_owned())
+}
+
+fn preferred_port(id: &str) -> u16 {
+    let hash = id.bytes().fold(2_166_136_261u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
+    });
+    PROFILE_PORT_FIRST + (hash % u32::from(PROFILE_PORT_COUNT)) as u16
+}
+
+fn valid_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn write(path: &Path, profile: &Profile) -> Result<(), String> {
@@ -204,14 +280,13 @@ mod tests {
     }
 
     #[test]
-    fn listing_is_stable_and_ignores_malformed_descriptors() {
+    fn listing_is_stable() {
         let scratch = TempDir::new("profile-list");
         select(&scratch.0, Some("zeta")).unwrap();
         select(&scratch.0, Some("alpha")).unwrap();
-        fs::create_dir_all(scratch.0.join("profiles/broken")).unwrap();
-        fs::write(scratch.0.join("profiles/broken/profile.json"), b"not json").unwrap();
         assert_eq!(
             list(&scratch.0)
+                .unwrap()
                 .iter()
                 .map(|profile| profile.id.as_str())
                 .collect::<Vec<_>>(),
@@ -220,14 +295,49 @@ mod tests {
     }
 
     #[test]
-    fn ports_are_stable_and_in_the_reserved_profile_range() {
-        let one = Profile {
-            id: "one".into(),
-            ..Profile::default_profile()
-        };
-        assert_eq!(one.port(), one.port());
+    fn colliding_preferences_probe_to_distinct_persisted_origins() {
+        let scratch = TempDir::new("profile-port-collision");
+        let mut first_by_port = vec![None; usize::from(PROFILE_PORT_COUNT)];
+        let (first_id, second_id) = (0..10_000)
+            .find_map(|index| {
+                let id = format!("collision-{index}");
+                let slot = usize::from(preferred_port(&id) - PROFILE_PORT_FIRST);
+                first_by_port[slot]
+                    .replace(id.clone())
+                    .map(|first| (first, id))
+            })
+            .expect("the finite preferred-port range must collide");
+        assert_eq!(preferred_port(&first_id), preferred_port(&second_id));
+
+        let first = select(&scratch.0, Some(&first_id)).unwrap();
+        let second = select(&scratch.0, Some(&second_id)).unwrap();
+        assert_ne!(first.port(), second.port());
+        assert_eq!(select(&scratch.0, Some(&first_id)).unwrap(), first);
+        assert_eq!(select(&scratch.0, Some(&second_id)).unwrap(), second);
         assert!(
-            (PROFILE_PORT_FIRST..PROFILE_PORT_FIRST + PROFILE_PORT_COUNT).contains(&one.port())
+            (PROFILE_PORT_FIRST..PROFILE_PORT_FIRST + PROFILE_PORT_COUNT).contains(&first.port())
         );
+    }
+
+    #[test]
+    fn malformed_duplicate_and_out_of_range_descriptors_fail_closed() {
+        let scratch = TempDir::new("profile-invalid-catalog");
+        let first = select(&scratch.0, Some("first")).unwrap();
+        let mut second = select(&scratch.0, Some("second")).unwrap();
+        second.origin_port = first.origin_port;
+        write(&scratch.0.join("profiles/second/profile.json"), &second).unwrap();
+        assert!(list(&scratch.0).unwrap_err().contains("both claim"));
+        assert!(
+            select(&scratch.0, Some("first"))
+                .unwrap_err()
+                .contains("both claim")
+        );
+
+        second.origin_port = PROFILE_PORT_FIRST - 1;
+        write(&scratch.0.join("profiles/second/profile.json"), &second).unwrap();
+        assert!(list(&scratch.0).unwrap_err().contains("outside"));
+
+        fs::write(scratch.0.join("profiles/second/profile.json"), b"not json").unwrap();
+        assert!(list(&scratch.0).unwrap_err().contains("could not parse"));
     }
 }

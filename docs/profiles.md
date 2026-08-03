@@ -27,11 +27,13 @@ A named profile uses:
 
 - support directory: `~/Library/Application Support/gwnative/profiles/<id>`
 - Keychain account: `login:<id>`
-- a stable port in `38113` through `39112`
+- an assigned port in `38113` through `39112`, persisted in the descriptor
 
-The descriptor is `profile.json`, format version 1. Its generated colour and
-display name are metadata; changing the `id` by hand does not migrate the
-associated Keychain item or WebKit origin.
+The descriptor is `profile.json`, format version 1. Its origin port is allocated
+under a catalog lock and probed past ports already assigned to other profiles;
+duplicate or out-of-range assignments are refused. Its generated colour and
+display name are metadata; changing the `id` or `originPort` by hand does not
+migrate the associated Keychain item or WebKit data.
 
 In a source checkout, the default writable web root is the repository's `web/`
 directory for every profile. Use `--dir` when development sessions also need
@@ -49,9 +51,10 @@ directory automatically.
 | IndexedDB and local storage | Origin on port `38112` | Origin on stable hashed port | No |
 | Game-image chunks | `chunks/` | `chunks/` | Yes |
 
-The named-port range is deterministic but finite. A collision is possible. Use
-`--host-port` to resolve one; changing the port also changes the WebKit origin,
-so that session sees different IndexedDB and local-storage data.
+`--host-port` deliberately overrides the persisted assignment. It is a
+diagnostic escape hatch, not a profile-isolation mechanism: selecting a port
+belonging to another profile makes that session use the other origin's
+IndexedDB and local-storage data.
 
 ## Concurrent instances
 

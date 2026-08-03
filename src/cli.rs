@@ -187,7 +187,7 @@ Commands:
 Native options:
   --profile NAME      use an isolated launch profile
   --new-instance      allow another isolated profile instance
-  --host-port PORT    choose the loopback origin port
+  --host-port PORT    override the profile origin (bypasses its isolation)
   -d, --dir PATH      override the web-client directory
   --offline           forbid launch-time network refreshes
   --no-update         skip client and application update checks
