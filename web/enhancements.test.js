@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
   asyncifyStateReader,
+  createObserverCadence,
   createPassiveObserver,
 } from './passive-observer.js';
 import { decodeCompanionManifest } from './companion-manifest.js';
@@ -39,6 +40,24 @@ describe('signed companion manifest', () => {
 });
 
 describe('passive enhancement observer', () => {
+  it('averages 60 Hz without assuming a 60 or 120 Hz display', () => {
+    for (const displayHertz of [60, 90, 100, 120]) {
+      const cadence = createObserverCadence(60);
+      let reads = 0;
+      for (let frame = 0; frame <= displayHertz; frame += 1) {
+        if (cadence(frame * (1_000 / displayHertz))) reads += 1;
+      }
+      assert(reads >= 59 && reads <= 61, `${displayHertz} Hz produced ${reads} reads`);
+    }
+  });
+
+  it('does not burst observer work after a long pause', () => {
+    const cadence = createObserverCadence(60);
+    assert.equal(cadence(0), true);
+    assert.equal(cadence(1_000), true);
+    assert.equal(cadence(1_001), false);
+  });
+
   it('observes JSPI without requiring an Asyncify export', () => {
     let reads = 0;
     const observe = createPassiveObserver(null, () => { reads += 1; });

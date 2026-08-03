@@ -44,3 +44,35 @@ export function createPassiveObserver(state, observe) {
     }
   };
 }
+
+/**
+ * Limit companion work without tying it to a particular display refresh rate.
+ *
+ * An accumulator produces an average 60 Hz cadence on 90/100/120 Hz displays,
+ * while a fixed "every other frame" rule would fall to 45/50 Hz. Long pauses
+ * add at most one interval, so reactivation cannot burst stale observer work.
+ *
+ * @param {number} maximumHertz
+ */
+export function createObserverCadence(maximumHertz = 60) {
+  if (!Number.isFinite(maximumHertz) || maximumHertz <= 0 || maximumHertz > 1_000) {
+    throw new Error('observer cadence is outside its bound');
+  }
+  const interval = 1_000 / maximumHertz;
+  const tolerance = Math.min(0.5, interval / 20);
+  let previous = null;
+  let budget = interval;
+  return (timestamp) => {
+    if (!Number.isFinite(timestamp)) return false;
+    if (previous === null) {
+      previous = timestamp;
+    } else {
+      const elapsed = Math.max(0, Math.min(interval, timestamp - previous));
+      previous = timestamp;
+      budget += elapsed;
+    }
+    if (budget + tolerance < interval) return false;
+    budget = Math.max(0, budget - interval);
+    return true;
+  };
+}

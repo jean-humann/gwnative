@@ -58,6 +58,16 @@ audit, and never sees Keychain values. Its JSON
 contains logical FPS, interval p50/p95/p99/max, drawing-buffer dimensions,
 runtime, context-loss evidence, and certified scene metadata.
 
+`--benchmark-scene kamadan-international` uses the same Kamadan map, High
+preset, and certified Xunlai pair as the crowded America scene, but requests
+the server-selected International district. This is the preferred population
+control because it changes neither map geometry nor camera destination.
+`--benchmark-scene guild-hall` is also available for accounts whose current
+character has a usable player Guild Hall; it fails closed otherwise.
+`--benchmark-observer off` pauses only the passive companion observer for the
+sample and restores it afterward, allowing gwnative overhead to be measured
+without disabling the state needed to certify the scene.
+
 Before sampling, the runner brings the signed window forward and waits for a
 native WebKit animation frame. A locked or sleeping macOS display therefore
 fails the benchmark explicitly; the authenticated pregame timer rescue is
@@ -139,7 +149,7 @@ if WebKit or the client stops producing frames.
 
 The normal `/__game/v1` API remains read-only. This command path exists only in
 a disposable benchmark launch (`GWNATIVE_E2E=1` plus the runner-owned
-`GWNATIVE_E2E_BENCHMARK_API=1`), exposes three finite commands, and is appended
+`GWNATIVE_E2E_BENCHMARK_API=1`), exposes six finite commands, and is appended
 only to that launch's derived Wasm. Ordinary UI and login E2E runs therefore do
 not depend on paired benchmark certification:
 
@@ -149,6 +159,8 @@ flowchart LR
     P -->|"one queued finite command"| S["Guild Wars logical swap"]
     S --> C{"Closed client command"}
     C -->|"travel 449 / America / English / populated district 2 or 1"| U["Certified UI dispatcher"]
+    C -->|"travel 449 / International / server-selected district"| U
+    C -->|"enter own Guild Hall / leave Guild Hall"| U
     C -->|"NPC interaction + client pathing / certified Xunlai agent ID"| U
     C -->|"fixed non-persistent High preset"| G["Certified preference setters"]
     U --> V["Read-only companion verification"]
@@ -447,6 +459,80 @@ The optimization order follows the measured ownership:
 5. Treat post-processing ArenaNet's Wasm with a generic optimizer as a new
    artifact family. It would invalidate the exact transform/certificate proofs
    and cannot address the 2× GPU/presentation share by itself.
+
+#### Same-map crowd-density attribution
+
+A second 2026-08-03 matrix held the map, Xunlai destination, High preset,
+direct presentation path, 1,266×682 CSS size, 120 FPS client ceiling, and
+macOS/WebKit build constant. Only district population, runtime, and render
+scale varied. International had 14--43 agents; America had 113--121.
+
+| Runtime | Scene | Scale | Agents | FPS | Mean interval | Callback-to-swap mean · p95 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| JSPI | International | 1× | 43 | 119.547 | 8.364 ms | 2.562 · 3.060 ms |
+| JSPI | International | 2× | 42 | 119.823 | 8.346 ms | 2.458 · 2.880 ms |
+| JSPI | America | 1× | 116 | 89.423 | 11.182 ms | 5.098 · 6.040 ms |
+| JSPI | America | 2× | 113 | 79.257 | 12.616 ms | 5.501 · 6.380 ms |
+| Asyncify | International | 1× | 14 | 119.948 | 8.336 ms | 2.694 · 3.120 ms |
+| Asyncify | International | 2× | 15 | 119.798 | 8.347 ms | 2.669 · 3.140 ms |
+| Asyncify | America | 1× | 117 | 82.876 | 12.067 ms | 6.823 · 8.040 ms |
+| Asyncify | America | 2× | 121 | 78.993 | 12.659 ms | 6.831 · 8.720 ms |
+
+Every cell covered more than 99.9% of its requested 20-second window, retained
+its WebGL2 context, and recorded no renderer work during suspension. Both
+runtimes reach 120 FPS at either scale in the low-population control. Crowd
+density is therefore the condition that exposes the bottleneck; neither a
+100 FPS cap nor 2× fill rate explains it on its own.
+
+The opt-in draw audit counted 653 framebuffer writes per logical frame with 15
+agents and 1,084 with 114 agents, a 66% increase; both cleared exactly three
+times per frame. Its wrappers are diagnostic overhead, so their FPS values are
+not mixed into the table. The command-count delta and the ordinary
+callback-to-swap delta agree: additional agents cause more client animation,
+visibility, render-state, and WebGL submission work before WebKit can present.
+
+```mermaid
+flowchart LR
+    A["More map/nearby agents"] --> B["Guild Wars animation and visibility work"]
+    B --> C["~66% more WebGL framebuffer writes per frame"]
+    C --> D["Longer Wasm/WebGL callback-to-swap time"]
+    D --> E["WebKit GPU process / ANGLE Metal submission"]
+    E --> F["Synchronous prepareForDisplay boundary"]
+    F --> G["79–89 FPS instead of 120 FPS"]
+    H["2× drawing buffer"] --> E
+    I["Asyncify transform"] --> D
+    J["Passive companion observer"] --> K["Independent main-thread scheduling pressure"]
+    K --> G
+```
+
+The observer A/B used nearby crowded 1× JSPI runs: 89.423 FPS with the original
+per-animation-frame observer at 116 agents and 93.620 FPS with it paused at 118
+agents. Callback-to-swap p95 stayed 6.04 versus 6.08 ms, locating the roughly
+0.5 ms mean interval difference outside the game callback. The production
+observer now uses an accumulator capped at 60 Hz: it averages 60 reads per
+second on 60/90/100/120 Hz displays, while Guild Wars and presentation remain
+uncapped at 120 Hz. Native pointer movement remains an OS cursor; only the
+companion texture/state refresh is bounded.
+
+Optimization ownership is now explicit:
+
+1. **Implemented in gwnative:** prefer JSPI when compatible, retain the direct
+   presentation path where certified, cap passive observation at 60 Hz, and
+   expose 1×/1.5×/2× as explicit quality choices.
+2. **Player-controlled:** 1× improved the crowded JSPI cell by 10.2 FPS and the
+   Asyncify cell by 3.9 FPS. Lowering crowd-sensitive game options such as
+   shadows, reflections, and character detail can reduce client draw work, but
+   is not silently applied by the High-preset benchmark.
+3. **ArenaNet-owned:** agent animation, culling, batching, and draw-call count
+   live in the official client. Rewriting them would be an invasive new Wasm
+   artifact family and cannot be inferred safely from build-to-build structure.
+4. **WebKit-owned:** ANGLE Metal command encoding and the synchronous
+   `prepareForDisplay` boundary. gwnative already reaches Metal through WebKit;
+   a separate host Metal renderer would require replacing WebGL semantics and
+   is not a drop-in optimization.
+5. **Not justified:** generic Wasm optimization, frame skipping, forced 120 Hz,
+   or disabling JSPI/Asyncify safety. None targets the measured per-agent draw
+   expansion, and each risks compatibility or pacing regressions.
 
 ## Updating measurements
 

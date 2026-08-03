@@ -20,6 +20,7 @@ import {
 import * as diagnostics from './diagnostics.js';
 import {
   asyncifyStateReader,
+  createObserverCadence,
   createPassiveObserver,
 } from './passive-observer.js';
 
@@ -52,7 +53,13 @@ function observeSnapshots(runtime, cursor, readout, observeState, observeGame) {
   let frame = 0;
   let cadenceAt = performance.now();
   let cadenceTick = 0;
-  const observe = () => {
+  const observeCadence = createObserverCadence();
+  const observe = (timestamp) => {
+    if (!observeCadence(timestamp)) {
+      runtime.observerCadenceSkips += 1;
+      frame = requestAnimationFrame(observe);
+      return;
+    }
     if (!observeGame()) {
       runtime.observerSkips += 1;
       frame = requestAnimationFrame(observe);
@@ -316,6 +323,7 @@ export async function installEnhancements(
       rejectedSnapshots: 0,
       observerRuns: 0,
       observerSkips: 0,
+      observerCadenceSkips: 0,
       probeLayout() {
         if (window.__gwnativeE2E !== true) {
           throw new Error('layout probing is available only during E2E certification');
