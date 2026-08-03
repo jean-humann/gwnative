@@ -12,9 +12,13 @@
 //! debris, a boot list that reads as absent unless it is entirely intact, and
 //! a migration that refuses rather than merges.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -155,6 +159,130 @@ pub fn sweep_orphans(cache_dir: &Path) {
     }
 }
 
+/// Drop every cached chunk no retained profile manifest can name.
+///
+/// The cache is content-addressed, which is what makes deduplication free and
+/// what makes this necessary: when ArenaNet patches, the chunks whose contents
+/// changed get new hashes and the old files are never asked for again. Nothing
+/// overwrites them, because nothing writes to those names any more. Before this
+/// the cache was a union of every snapshot the machine had ever seen — a second
+/// 4.2 GB after the first patch, and another after the next.
+///
+/// Safe against a fetch happening right now, because the set to keep comes from
+/// manifests rather than from a listing: a chunk being written this instant is
+/// one a retained manifest named, so it is in `live` whether or not it is yet
+/// on disk. Anything that is not a chunk file — the boot list at the top level,
+/// a `.tmp` a live writer still owns — fails the name test and is left alone.
+///
+/// Runs at Utility QoS behind the orphan sweep, so it yields to the boot it is
+/// sharing a disk with.
+pub fn prune(cache_dir: &Path, live: &HashSet<String>) {
+    // A manifest with no chunks in it is a manifest that failed to parse into
+    // anything useful, and treating it as authority would empty the cache.
+    if live.is_empty() {
+        return;
+    }
+    let Ok(buckets) = fs::read_dir(cache_dir) else {
+        return;
+    };
+    let (mut removed, mut bytes) = (0usize, 0u64);
+    for bucket in buckets.flatten() {
+        let name = bucket.file_name();
+        if !name.to_str().is_some_and(is_bucket_name) {
+            continue;
+        }
+        let Ok(kind) = bucket.file_type() else {
+            continue;
+        };
+        if !kind.is_dir() || kind.is_symlink() {
+            continue;
+        }
+        // Anchor deletion to the directory we checked. If the path is swapped
+        // after this open, `unlinkat` below still acts only inside this exact
+        // non-symlink directory rather than following the replacement.
+        let Ok(directory) = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(bucket.path())
+        else {
+            continue;
+        };
+        let Ok(entries) = fs::read_dir(bucket.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // Only ever a name this cache could have written itself: the hex
+            // form of a hash, and nothing else in the directory.
+            if !is_chunk_name(name) || live.contains(name) {
+                continue;
+            }
+            let Some(size) = unlink_regular_at(&directory, &entry.file_name()) else {
+                continue;
+            };
+            removed += 1;
+            bytes += size;
+        }
+    }
+    if removed > 0 {
+        note!(
+            "[gwnative] dropped {removed} chunks ({:.2} GB) no cached profile uses",
+            bytes as f64 / 1e9
+        );
+    }
+}
+
+/// A fan-out bucket is exactly the first byte of a chunk hash.
+fn is_bucket_name(name: &str) -> bool {
+    name.len() == 2
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Remove one regular file relative to an already-open bucket.
+///
+/// `fstatat` refuses symlinks without following them; `unlinkat` then removes
+/// the same name through the directory descriptor. Returning `None` for every
+/// mismatch or failure makes pruning conservative.
+fn unlink_regular_at(directory: &fs::File, name: &std::ffi::OsStr) -> Option<u64> {
+    let name = std::ffi::CString::new(name.as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `directory` remains open, `name` is NUL-terminated, and `stat`
+    // points to writable storage for the duration of the call.
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return None;
+    }
+    // SAFETY: a successful `fstatat` initialized the structure.
+    let stat = unsafe { stat.assume_init() };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return None;
+    }
+    // SAFETY: both descriptor and name are still live, and flags 0 mean a file
+    // rather than a directory. The descriptor keeps this inside the bucket.
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return None;
+    }
+    u64::try_from(stat.st_size).ok()
+}
+
+/// Whether `name` is one this cache writes: lowercase hex, and as long as one
+/// of the digests [`ContentHash`] produces.
+fn is_chunk_name(name: &str) -> bool {
+    matches!(name.len(), 40 | 64)
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 /// `~/Library/Application Support/gwnative/chunks`.
 ///
 /// Not `~/Library/Caches`, where this used to live. That directory is the
@@ -318,17 +446,6 @@ impl Drop for Maintenance {
     }
 }
 
-/// Finish the lone launch's safe maintenance window before network or client
-/// installation work begins, then admit peer profiles for the rest of launch.
-pub fn finish_maintenance(lease: &Lease, cache_dir: &Path) -> std::io::Result<bool> {
-    let Some(maintenance) = lease.maintenance() else {
-        return Ok(false);
-    };
-    sweep_orphans(cache_dir);
-    maintenance.finish()?;
-    Ok(true)
-}
-
 /// Lock the cache before any active manifest can change.
 ///
 /// With no peer, the caller keeps an exclusive maintenance opportunity. With
@@ -377,6 +494,32 @@ fn prepare_with_legacy(cache_dir: &Path, legacy: Option<&Path>) -> std::io::Resu
                 .map_err(std::io::Error::other)
         }
     }
+}
+
+/// Finish the lone launch's safe catalog/cache maintenance before network or
+/// client installation work begins, then admit peers for ordinary launch.
+pub fn finish_maintenance(
+    lease: &Lease,
+    cache_dir: &Path,
+    protected_chunks: &HashSet<String>,
+) -> std::io::Result<bool> {
+    let Some(maintenance) = lease.maintenance() else {
+        return Ok(false);
+    };
+    let completed = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                crate::qos::set(crate::qos::Class::Utility);
+                sweep_orphans(cache_dir);
+                prune(cache_dir, protected_chunks);
+            })
+            .join()
+    });
+    if completed.is_err() {
+        return Err(std::io::Error::other("cache maintenance panicked"));
+    }
+    maintenance.finish()?;
+    Ok(true)
 }
 
 /// Ask the next launch to start from an empty cache.
@@ -534,7 +677,7 @@ mod tests {
         let cache = temp.0.join("chunks");
         let first = prepare(&cache).expect("the first profile enters exclusively");
 
-        assert!(finish_maintenance(&first, &cache).unwrap());
+        assert!(finish_maintenance(&first, &cache, &HashSet::new()).unwrap());
         let peer = prepare(&cache).expect("non-destructive launch work is shared");
         assert!(
             peer.maintenance().is_none(),
@@ -543,6 +686,110 @@ mod tests {
 
         drop(peer);
         drop(first);
+    }
+
+    #[test]
+    fn a_prune_keeps_every_chunk_named_by_the_profile_union() {
+        let temp = TempDir::new("prune");
+        let cache = temp.0.join("chunks");
+
+        let kept = "11".to_owned() + &"a".repeat(62);
+        let other_profile = "22".to_owned() + &"b".repeat(62);
+        let stale = "33".to_owned() + &"c".repeat(62);
+        let short_kept = "44".to_owned() + &"d".repeat(38);
+        for name in [&kept, &other_profile, &stale, &short_kept] {
+            let bucket = cache.join(&name[..2]);
+            fs::create_dir_all(&bucket).unwrap();
+            fs::write(bucket.join(name), vec![0u8; 1000]).unwrap();
+        }
+
+        let bucket = cache.join("33");
+        fs::write(bucket.join("in-flight.9999.tmp"), b"half a chunk").unwrap();
+        fs::write(bucket.join("notes.txt"), b"by hand").unwrap();
+        fs::write(cache.join(BOOT_LIST), b"[1,2,3]").unwrap();
+
+        let live: HashSet<String> =
+            [kept.clone(), other_profile.clone(), short_kept.clone()].into();
+        prune(&cache, &live);
+
+        assert!(cache.join(&kept[..2]).join(&kept).exists());
+        assert!(
+            cache
+                .join(&other_profile[..2])
+                .join(&other_profile)
+                .exists(),
+            "a second profile's retained chunk must survive"
+        );
+        assert!(cache.join(&short_kept[..2]).join(&short_kept).exists());
+        assert!(!cache.join(&stale[..2]).join(&stale).exists());
+        assert!(bucket.join("in-flight.9999.tmp").exists());
+        assert!(bucket.join("notes.txt").exists());
+        assert!(cache.join(BOOT_LIST).exists());
+
+        prune(&cache, &HashSet::new());
+        assert!(cache.join(&kept[..2]).join(&kept).exists());
+    }
+
+    #[test]
+    fn a_prune_never_follows_a_bucket_symlink() {
+        let temp = TempDir::new("prune-bucket-symlink");
+        let cache = temp.0.join("chunks");
+        let outside = temp.0.join("outside");
+        let stale = "aa".to_owned() + &"b".repeat(62);
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join(&stale), b"belongs outside the cache").unwrap();
+        std::os::unix::fs::symlink(&outside, cache.join("aa")).unwrap();
+
+        prune(&cache, &HashSet::from(["cc".to_owned() + &"d".repeat(62)]));
+
+        assert_eq!(
+            fs::read(outside.join(stale)).unwrap(),
+            b"belongs outside the cache",
+            "a directory symlink must never turn pruning into an external delete"
+        );
+    }
+
+    #[test]
+    fn a_live_profile_defers_pruning_across_manifest_and_chunk_writes() {
+        let temp = TempDir::new("concurrent-catalog");
+        let cache = temp.0.join("chunks");
+        let catalog = temp.0.join("profiles/other/manifest.cache");
+        let new_chunk = "66".to_owned() + &"e".repeat(62);
+        let new_path = cache.join(&new_chunk[..2]).join(&new_chunk);
+        fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+
+        let live = crate::instance::acquire_shared(&lock_path(&cache), Duration::ZERO)
+            .expect("the existing profile holds the catalog/cache lease");
+        let newcomer = prepare(&cache).expect("a second profile joins as shared");
+        let ready = Arc::new(std::sync::Barrier::new(2));
+
+        std::thread::scope(|scope| {
+            let ready_writer = Arc::clone(&ready);
+            let new_path = new_path.clone();
+            let catalog = catalog.clone();
+            scope.spawn(move || {
+                let _live = live;
+                fs::write(&catalog, format!("manifest names {new_chunk}")).unwrap();
+                fs::write(&new_path, b"new profile chunk").unwrap();
+                ready_writer.wait();
+                ready_writer.wait();
+            });
+
+            ready.wait();
+            assert!(
+                !finish_maintenance(&newcomer, &cache, &HashSet::from(["old".into()])).unwrap(),
+                "a shared launch must defer pruning instead of using a stale union"
+            );
+            ready.wait();
+        });
+
+        assert!(catalog.exists());
+        assert!(
+            new_path.exists(),
+            "the concurrent profile's chunk must survive"
+        );
     }
 
     #[test]
