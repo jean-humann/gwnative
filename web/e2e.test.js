@@ -29,7 +29,10 @@ class MemoryStorage {
   }
 }
 
-function benchmarkSceneHarness({ district2Agents = 111 } = {}) {
+function benchmarkSceneHarness({
+  district2Agents = 111,
+  district2AgentsAfterPath = district2Agents,
+} = {}) {
   let placement = { mapId: 449, district: 3, language: 0, instanceType: 0 };
   const agents = [
     {
@@ -77,10 +80,17 @@ function benchmarkSceneHarness({ district2Agents = 111 } = {}) {
         if (command === 'travel-america') {
           placement = { mapId: 449, district: argument, language: 0, instanceType: 0 };
           state.agents.total = argument === 2 ? district2Agents : 111;
+          state.playerX = -9_167;
+          state.playerY = 13_147;
         }
         if (command === 'interact-xunlai') {
           assert.equal(argument, 44);
           if (commands.filter(([name]) => name === 'interact-xunlai').length === 2) {
+            state.playerX = agents[1].x;
+            state.playerY = agents[1].y;
+            if (placement.district === 2) state.agents.total = district2AgentsAfterPath;
+          }
+          if (commands.filter(([name]) => name === 'interact-xunlai').length === 4) {
             state.playerX = agents[1].x;
             state.playerY = agents[1].y;
           }
@@ -356,6 +366,26 @@ describe('end-to-end helpers', () => {
     assert.deepEqual(commands, [
       ['high-graphics', 0],
       ['travel-america', 2],
+      ['travel-america', 1],
+      ['interact-xunlai', 44],
+      ['interact-xunlai', 44],
+    ]);
+    assert.equal(result.benchmarkScene.district, 1);
+    assert.equal(result.benchmarkScene.agentCount, 111);
+  });
+
+  it('rechecks population at Xunlai before accepting District 2', async () => {
+    const { commands, window } = benchmarkSceneHarness({ district2AgentsAfterPath: 79 });
+    const result = await executeE2EAction(
+      { sequence: 11, action: 'prepare-benchmark-scene', durationMs: 0 },
+      { window, canvas: {}, sleep: async () => {} },
+    );
+
+    assert.deepEqual(commands, [
+      ['high-graphics', 0],
+      ['travel-america', 2],
+      ['interact-xunlai', 44],
+      ['interact-xunlai', 44],
       ['travel-america', 1],
       ['interact-xunlai', 44],
       ['interact-xunlai', 44],

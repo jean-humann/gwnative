@@ -124,8 +124,10 @@ the two Xunlai agents by their certified numeric agent
 fields and their unique close-pair geometry, and invokes the game's own
 six-way interaction dispatcher for the stable left-hand anchor. Unlike a raw
 world-action packet, this is the client path that approaches an out-of-range
-NPC before interacting. The runner may reissue that same bounded command up to
-five times because movement can be interrupted by the crowded outpost. The
+NPC before interacting. Population is checked again after pathing; if District
+2 fell below 80 while moving, the client repeats the bounded operation in
+District 1. The runner may reissue the interaction command up to five times
+because movement can be interrupted by the crowded outpost. The
 runner supplies no map, region, language, agent identity, graphics value,
 pointer, or coordinate. It receives only the verified final scene and rejects a
 player farther than 180 game units from the anchor.

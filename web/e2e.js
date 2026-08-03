@@ -169,12 +169,17 @@ const loadBenchmarkDistrict = async (window, sleep, district) => {
 };
 
 const waitForBenchmarkPopulation = async (window, sleep) => {
+  let consecutive = 0;
   for (let poll = 0; poll < BENCHMARK_POPULATION_POLLS; poll += 1) {
-    const total = gameState(window)?.agents?.total;
-    if (Number.isSafeInteger(total) && total >= BENCHMARK_MIN_AGENT_COUNT) return true;
+    const state = gameState(window);
+    const total = state?.agents?.total;
+    consecutive = Number.isSafeInteger(total) && total >= BENCHMARK_MIN_AGENT_COUNT
+      ? consecutive + 1
+      : 0;
+    if (consecutive >= 3) return state;
     await sleep(100);
   }
-  return false;
+  return null;
 };
 
 const travelToBenchmarkDistrict = async (window, sleep) => {
@@ -192,6 +197,14 @@ const travelToBenchmarkDistrict = async (window, sleep) => {
     `neither Kamadan America-English district has ${BENCHMARK_MIN_AGENT_COUNT} agents`,
   );
   return fallback;
+};
+
+const recertifyBenchmarkPosition = async (window, sleep) => {
+  const state = await waitForBenchmarkPopulation(window, sleep);
+  const anchor = state && xunlaiAnchor(state);
+  if (!state || !anchor) return null;
+  const distance = Math.hypot(anchor.x - state.playerX, anchor.y - state.playerY);
+  return distance <= XUNLAI_DISTANCE ? { state, anchor, distance } : null;
 };
 
 const xunlaiMatches = (state) =>
@@ -298,8 +311,22 @@ const prepareBenchmarkScene = async (window, sleep) => {
     'certified benchmark scene API is unavailable',
   );
   await window.gwCompanionRuntime.benchmarkSceneCommand('high-graphics', 0);
-  const placement = await travelToBenchmarkDistrict(window, sleep);
-  const positioned = await positionAtXunlai(window, sleep);
+  let placement = await travelToBenchmarkDistrict(window, sleep);
+  await positionAtXunlai(window, sleep);
+  let positioned = await recertifyBenchmarkPosition(window, sleep);
+  if (!positioned && placement.district === 2) {
+    placement = await loadBenchmarkDistrict(window, sleep, 1);
+    assert(
+      await waitForBenchmarkPopulation(window, sleep),
+      `Kamadan America-English District 1 has fewer than ${BENCHMARK_MIN_AGENT_COUNT} agents`,
+    );
+    await positionAtXunlai(window, sleep);
+    positioned = await recertifyBenchmarkPosition(window, sleep);
+  }
+  assert(
+    positioned,
+    `no populated Kamadan district retained ${BENCHMARK_MIN_AGENT_COUNT} agents at Xunlai`,
+  );
   return Object.freeze({
     mapId: placement.mapId,
     district: placement.district,
