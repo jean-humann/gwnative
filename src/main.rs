@@ -134,11 +134,12 @@ fn main() {
         }
     };
     let paths = paths::Layout::new(&invocation, &profile);
-    let force_sync = command == cli::Command::Sync;
+    let client_sync = command == cli::Command::Sync;
+    let maintenance = matches!(command, cli::Command::Sync | cli::Command::Repair);
     let headless = command == cli::Command::Serve;
     // The two commands above are the runs with a terminal attached. Everything
     // that would otherwise put a message on screen asks this first.
-    let windowed = !headless && !force_sync;
+    let windowed = !headless && !maintenance;
 
     // Held for as long as the process lives; the kernel takes it back if the
     // process does not.
@@ -182,24 +183,38 @@ fn main() {
 
     let root = paths.web_root().to_owned();
     // One client and one manifest, for everything below that needs either.
-    let manifest = load_manifest(&client, force_sync, paths.support_dir(), invocation.offline);
+    let manifest = load_manifest(
+        &client,
+        client_sync,
+        paths.support_dir(),
+        invocation.offline,
+    );
     let revalidate = manifest
         .as_ref()
         .is_ok_and(|(_, source)| !matches!(source, patch::Source::Service))
         && !invocation.offline
         && !invocation.no_update;
 
-    let generations = install_client(
-        &root,
-        &client,
-        manifest
-            .as_ref()
-            .map(|(manifest, source)| (manifest, *source)),
-        force_sync,
-        windowed,
-        paths.support_dir(),
-    );
-    if force_sync {
+    // Repair is a game-data operation. In particular, `repair --no-update`
+    // must not install a pending client generation merely because the service
+    // offered one after the active snapshot manifest was promoted.
+    let generations = if command == cli::Command::Repair {
+        Arc::new(generation::Store::open(
+            paths.support_dir().join("generations"),
+        ))
+    } else {
+        install_client(
+            &root,
+            &client,
+            manifest
+                .as_ref()
+                .map(|(manifest, source)| (manifest, *source)),
+            client_sync,
+            windowed,
+            paths.support_dir(),
+        )
+    };
+    if !invocation.needs_snapshot() {
         return;
     }
     // Do this only after installation. A pending offer may be the manifest
@@ -218,7 +233,7 @@ fn main() {
             manifest,
             paths.cache_dir(),
             cache_lease,
-            invocation.no_prefetch,
+            invocation.no_prefetch || maintenance,
         ),
         // Without a manifest there is no chunk list, so there is no snapshot —
         // the same outcome as failing to open one, reported the same way.
@@ -227,6 +242,23 @@ fn main() {
             None
         }
     };
+    if let Some(image) = invocation.image_path.as_deref() {
+        let Some(store) = &snapshot else {
+            note!("[gwnative] a local image cannot be imported without a cached manifest");
+            std::process::exit(1);
+        };
+        if let Err(reason) = store.import_image(image) {
+            note!(
+                "[gwnative] local game image {} was refused: {reason}",
+                image.display()
+            );
+            std::process::exit(1);
+        }
+    }
+    if matches!(command, cli::Command::Sync | cli::Command::Repair) {
+        verify_and_download_snapshot(snapshot, invocation.jobs);
+        return;
+    }
 
     // Started before the window so that whatever the shell costs to build is
     // in the record too.
@@ -315,14 +347,14 @@ fn main() {
         recorder,
         derived_wasm,
         settings,
-        generations,
+        generations: Arc::clone(&generations),
         token: token.clone(),
         port: paths.port(),
         credential_account: profile.keychain_account(),
     }) {
         Ok(loopback) => loopback,
         // Nothing downstream has an answer to this: the client is a page, and
-        // without an origin to serve it from there is no client. `force_sync`
+        // without an origin to serve it from there is no client. Maintenance
         // has already returned by here, so the only run with a terminal left is
         // the headless one.
         Err(e) => alert::fatal(
@@ -355,6 +387,89 @@ fn main() {
         paths.support_dir(),
         profile.website_data_store_id(),
     );
+}
+
+fn verify_and_download_snapshot(snapshot: Option<Arc<chunks::ChunkStore>>, jobs: Option<usize>) {
+    let Some(snapshot) = snapshot else {
+        note!("[gwnative] game-data verification could not start without a cached manifest");
+        std::process::exit(1);
+    };
+    if !snapshot.start_verify() {
+        note!("[gwnative] a game-data check is already running");
+        return;
+    }
+    let mut reported = u64::MAX;
+    loop {
+        let (checked, total, running, discarded, failed) = snapshot.verify_progress();
+        let percent = checked
+            .saturating_mul(100)
+            .checked_div(total)
+            .unwrap_or(100);
+        if percent != reported {
+            reported = percent;
+            note!("[gwnative] checking cached game data: {checked}/{total} ({percent}%)");
+        }
+        if !running {
+            note!(
+                "[gwnative] game-data check complete: {checked}/{total}, \
+                 {discarded} corrupt chunk(s) discarded for safe refetch, \
+                 {failed} cache failure(s)"
+            );
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    download_snapshot(Some(snapshot), jobs);
+}
+
+fn download_snapshot(snapshot: Option<Arc<chunks::ChunkStore>>, jobs: Option<usize>) {
+    let Some(snapshot) = snapshot else {
+        note!("[gwnative] the full game image is unavailable without a cached manifest");
+        std::process::exit(1);
+    };
+    let total = snapshot.chunk_count();
+    let resident = snapshot.resident_count();
+    let verify_failures = snapshot.verify_progress().4;
+    if resident == total && verify_failures == 0 {
+        note!("[gwnative] full game image is already present");
+        return;
+    }
+
+    let workers = jobs.unwrap_or(32);
+    match snapshot.start_full_download_with_workers(workers) {
+        Ok(true) => {}
+        Ok(false) => note!("[gwnative] a full-image download is already running"),
+        Err(reason) => {
+            note!("[gwnative] full image refused: {reason}");
+            std::process::exit(1);
+        }
+    }
+    let mut reported = u64::MAX;
+    loop {
+        let (done, sweep_total, running) = snapshot.prefetch_progress();
+        let percent = done
+            .saturating_mul(100)
+            .checked_div(sweep_total)
+            .unwrap_or(100);
+        if percent != reported {
+            reported = percent;
+            note!("[gwnative] downloading full game image: {done}/{sweep_total} ({percent}%)");
+        }
+        if !running {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    let resident = snapshot.resident_count();
+    if resident != total || verify_failures > 0 {
+        let reason = snapshot
+            .last_failure()
+            .unwrap_or_else(|| "one or more chunks could not be cached".into());
+        note!("[gwnative] full game image is incomplete: {resident}/{total} chunks ({reason})");
+        std::process::exit(1);
+    }
+    note!("[gwnative] full game image verified: {resident}/{total} chunks");
 }
 
 /// Take the single-instance lock, or hand the running app the foreground.
@@ -424,7 +539,7 @@ fn acquire_instance(windowed: bool, lock_path: &Path) -> instance::Instance {
 /// now.
 fn load_manifest(
     client: &patch::Client,
-    force_sync: bool,
+    client_sync: bool,
     support_dir: &Path,
     offline: bool,
 ) -> error::Result<(manifest::Manifest, patch::Source)> {
@@ -434,7 +549,7 @@ fn load_manifest(
             .cached_manifest(dir)
             .map(|manifest| (manifest, patch::Source::Active));
     }
-    if force_sync {
+    if client_sync {
         return client
             .fetch_manifest(dir)
             .map(|manifest| (manifest, patch::Source::Service));
@@ -459,7 +574,7 @@ fn install_client(
     root: &Path,
     client: &patch::Client,
     manifest: Result<(&manifest::Manifest, patch::Source), &error::Error>,
-    force_sync: bool,
+    client_sync: bool,
     windowed: bool,
     support_dir: &Path,
 ) -> Arc<generation::Store> {
@@ -518,7 +633,7 @@ fn install_client(
     // pending manifest names the exact installed artifact generation, so
     // promote it without re-downloading or unproving the client.
     if let Ok((_, source, offered)) = &plan
-        && should_activate_pending_manifest(force_sync, missing.is_empty(), *source, outdated)
+        && should_activate_pending_manifest(client_sync, missing.is_empty(), *source, outdated)
     {
         let failure = match client.activate_manifest(support_dir) {
             Ok(true) => {
@@ -570,7 +685,7 @@ fn install_client(
             "[gwnative] could not reconcile the active manifest with client generation {offered}"
         );
     }
-    if !(force_sync || !missing.is_empty() || outdated) {
+    if !(client_sync || !missing.is_empty() || outdated) {
         return generations;
     }
 
@@ -583,7 +698,7 @@ fn install_client(
             offered,
             support_dir,
         }
-        .run(&missing, force_sync)
+        .run(&missing, client_sync)
         .err()
         .map(|e| e.to_string()),
         Err(e) => Some(e.clone()),

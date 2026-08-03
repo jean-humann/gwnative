@@ -189,8 +189,35 @@ function choose(buttons) {
 }
 
 /**
- * Read the cache back and prove it, drawing the pass; resolve with how many
- * chunks the host had to throw away.
+ * Interpret the terminal state of a full-image verification pass.
+ *
+ * A full image is proven only when every distinct chunk was checked and the
+ * host reported no cache failures. `discarded` is repairable damage; a failure
+ * means the host could not make a bad cache entry safe for replacement.
+ *
+ * @param {Record<string, number | boolean>} state
+ */
+export function imageCheckResult(state) {
+  const count = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : 0;
+  };
+  const checked = count(state.verified);
+  const total = count(state.verifyTotal);
+  const discarded = count(state.discarded);
+  const failures = count(state.verifyFailures);
+  return Object.freeze({
+    checked,
+    total,
+    discarded,
+    failures,
+    verified: total > 0 && checked === total && failures === 0,
+  });
+}
+
+/**
+ * Read the cache back and prove it, drawing the pass; resolve with the terminal
+ * result, or `null` when the check could not be observed.
  *
  * Only a Full Game launch that believes it is complete runs this, and that is
  * the point: it is the one launch that was promised the network is done with,
@@ -198,13 +225,13 @@ function choose(buttons) {
  * cannot keep. A Quick Start launch verifies as it reads, which costs nothing
  * because it was going to read the chunk anyway.
  *
- * Every failure path answers 0 — the same rule the rest of this file follows.
- * A check that cannot be run is not a reason to keep a player out of the game;
- * the demand reads verify lazily regardless, and the worst case is that a bad
- * chunk is caught a few seconds later than it could have been.
+ * An inability to start or observe the check answers `null`, and the caller
+ * boots anyway: demand reads still verify lazily. A completed pass reporting
+ * cache failures is different. It is surfaced as an explicit Quick Start
+ * fallback and is never described as a verified Full Game image.
  *
  * @param {(...args: unknown[]) => void} log
- * @returns {Promise<number>} chunks discarded, so the caller knows to refetch
+ * @returns {Promise<ReturnType<typeof imageCheckResult> | null>}
  */
 async function checkImage(log) {
   el('launcher-title').textContent = 'Checking Guild Wars';
@@ -222,7 +249,7 @@ async function checkImage(log) {
     state = await sweepSnapshot('verify');
   } catch (error) {
     log(`[warn] launcher: the check could not be started (${error}); playing anyway`);
-    return 0;
+    return null;
   }
 
   let failures = 0;
@@ -237,7 +264,7 @@ async function checkImage(log) {
     el('launcher-detail').textContent = `${state.verified} of ${state.verifyTotal} pieces checked`;
     // Read after drawing, so the finished pass gets its full bar before the
     // screen moves on.
-    if (!state.verifying) return state.discarded ?? 0;
+    if (!state.verifying) return imageCheckResult(state);
     await new Promise((resume) => setTimeout(resume, POLL_MS));
     try {
       state = await poll();
@@ -245,7 +272,7 @@ async function checkImage(log) {
     } catch (error) {
       if (++failures >= POLL_FAILURES_TOLERATED) {
         log(`[warn] launcher: lost sight of the check (${error}); playing anyway`);
-        return 0;
+        return null;
       }
     }
   }
@@ -291,8 +318,32 @@ export async function resolveDataStrategy(snapshotBytes, { log, save, strategy }
     // are streaming, and streaming verifies each chunk on the read that wants
     // it. Residency here is a happy accident of having walked the whole world.
     if (strategy !== 'full') return;
-    const discarded = await checkImage(log);
-    if (discarded === 0) {
+    const check = await checkImage(log);
+    if (check === null) {
+      done();
+      return;
+    }
+    if (!check.verified) {
+      const reason = check.failures > 0
+        ? `${check.failures} cached piece${check.failures === 1 ? '' : 's'} could not be repaired.`
+        : `Only ${check.checked} of ${check.total} cached pieces were checked.`;
+      log(
+        `[warn] launcher: Full Game verification incomplete ` +
+        `(${check.checked}/${check.total} checked, ${check.failures} failure(s)); ` +
+        'falling back to Quick Start for this launch',
+      );
+      el('launcher-title').textContent = 'Full Game check incomplete';
+      el('launcher-text').textContent =
+        `${reason} Guild Wars can still start safely with Quick Start, which ` +
+        'verifies game data as it is read. Full Game will be checked again on ' +
+        'the next launch.';
+      el('launcher-detail').textContent = '';
+      el('launcher-rail').hidden = true;
+      await choose([{ label: 'Play with Quick Start', value: 'play', primary: true }]);
+      done();
+      return;
+    }
+    if (check.discarded === 0) {
       done();
       return;
     }
@@ -301,7 +352,7 @@ export async function resolveDataStrategy(snapshotBytes, { log, save, strategy }
     // incomplete image and refetches exactly the damage. Re-polled because the
     // `info` above still says complete, and a bar drawn from it would open at
     // 100% and go backwards.
-    log(`launcher: ${discarded} damaged chunks discarded; refetching them`);
+    log(`launcher: ${check.discarded} damaged chunks discarded; refetching them`);
     info = await poll().catch(() => info);
   }
 

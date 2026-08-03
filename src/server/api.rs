@@ -21,14 +21,6 @@ use crate::chunks::ChunkStore;
 use crate::http::{Request, json, no_content, respond, text, token_matches};
 use crate::{app, cache, diagnostics, disk, dock, generation, keychain, net, relaunch, ws};
 
-/// Room to leave behind after a full download.
-///
-/// A volume with nothing left is not merely full: swap, the WebKit caches and
-/// every atomic rename in this process all want space, and the first thing to
-/// break would be the game rather than the download that caused it. 2 GB is
-/// generous next to a 4.2 GB snapshot and cheap next to the alternative.
-const DISK_HEADROOM: u64 = 2 * 1024 * 1024 * 1024;
-
 /// Answer a `__` route.
 ///
 /// `None` means this request is not one of ours and the caller should go on to
@@ -475,14 +467,11 @@ fn prefetch(
     // it could take. Both are reported on every poll so the page can show the
     // price before the player agrees to it — asking for 4.2 GB and then filling
     // the disk is the failure this exists to avoid.
-    let outstanding = (store.chunk_count() - store.resident_count()) as u64 * store.chunk_size();
-    // Two numbers, because they answer different questions: `outstanding` is
-    // what the download would write and belongs in the prose, `needed` is what
-    // the volume must have and is what the refusal below compares. Taken once,
-    // so the figure the refusal reports and the figure it decided on cannot
-    // come to be written differently.
-    let needed = outstanding + DISK_HEADROOM;
-    let free = disk::available(store.cache_dir());
+    let (cached, missing) = store.residency();
+    let capacity = disk::capacity(store.cache_dir(), missing);
+    let outstanding = capacity.outstanding;
+    let needed = capacity.needed;
+    let free = capacity.free;
 
     if request.method == "POST" {
         if request.query == "stop" {
@@ -494,26 +483,27 @@ fn prefetch(
             // would refuse the check on exactly the full volume where an
             // interrupted write is likeliest to have left damage.
             store.start_verify();
-        } else if let Some(free) = free.filter(|free| *free < needed) {
-            // Refused rather than started-and-abandoned: a sweep that runs
-            // until the volume fills takes the rest of the machine down with
-            // it, and the client streams perfectly well without it.
-            note!(
-                "[prefetch] refused: {:.1} GB free, {:.1} GB needed",
-                free as f64 / 1e9,
-                needed as f64 / 1e9
-            );
-            let body = serde_json::json!({
-                "error": "not enough room",
-                "free": free,
-                "needed": needed,
-            });
-            return json(stream, 507, body.to_string().as_bytes());
-        } else if store.start_full_download() {
-            // Only on the start that actually started something: the icon
-            // follows the sweep, and a second POST while one is running is
-            // answered by the same progress the first one is already drawing.
-            dock::follow(store);
+        } else {
+            match store.start_full_download() {
+                Ok(true) => {
+                    // Only on the start that actually started something: the
+                    // icon follows the sweep, and a second POST while one is
+                    // running is answered by the same progress.
+                    dock::follow(store);
+                }
+                Ok(false) => {}
+                Err(reason) => {
+                    // Refused rather than started-and-abandoned: a sweep that
+                    // fills the volume takes the rest of the machine down.
+                    note!("[prefetch] refused: {reason}");
+                    let body = serde_json::json!({
+                        "error": "not enough room",
+                        "free": free,
+                        "needed": needed,
+                    });
+                    return json(stream, 507, body.to_string().as_bytes());
+                }
+            }
         }
     }
     // `cached` is residency, not sweep progress: the launcher's question is how
@@ -526,8 +516,7 @@ fn prefetch(
     // draws the check and the sweep from one timer. They never run at once —
     // the check is what a full launch does before deciding whether a sweep is
     // needed — but the page should not have to know that to render.
-    let (checked, verify_total, verifying, discarded) = store.verify_progress();
-    let cached = store.resident_count();
+    let (checked, verify_total, verifying, discarded, verify_failures) = store.verify_progress();
     let total = store.chunk_count();
     let chunk_size = store.chunk_size();
     // Built by the encoder rather than spelled out, like [`diag`] above it and
@@ -551,6 +540,7 @@ fn prefetch(
         // which case it is in.
         "verifyTotal": verify_total,
         "discarded": discarded,
+        "verifyFailures": verify_failures,
         // `null` rather than a guess when the volume will not say: the page
         // treats not knowing as no reason to stop, which is the same thing it
         // does when this whole route is missing. `None` encodes as `null` with

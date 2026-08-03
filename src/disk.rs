@@ -14,6 +14,52 @@ use objc2_foundation::{
     NSArray, NSNumber, NSString, NSURL, NSURLVolumeAvailableCapacityForImportantUsageKey,
 };
 
+/// Room deliberately left after a cache-filling operation.
+pub const HEADROOM: u64 = 2 * 1024 * 1024 * 1024;
+
+/// One authoritative capacity decision for a cache-filling operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capacity {
+    pub outstanding: u64,
+    pub needed: u64,
+    pub free: Option<u64>,
+}
+
+impl Capacity {
+    pub fn fits(self) -> bool {
+        self.free.is_none_or(|free| free >= self.needed)
+    }
+
+    pub fn require(self) -> std::io::Result<Self> {
+        if self.fits() {
+            return Ok(self);
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            format!(
+                "{:.1} GB free, {:.1} GB needed",
+                self.free.unwrap_or_default() as f64 / 1e9,
+                self.needed as f64 / 1e9
+            ),
+        ))
+    }
+}
+
+/// Evaluate a known amount of cache work against a known capacity answer.
+/// Kept separate so operation-level tests can prove refusal happens before the
+/// first write without trying to fill the test runner's real volume.
+pub(crate) fn evaluate(outstanding: u64, free: Option<u64>) -> Capacity {
+    Capacity {
+        outstanding,
+        needed: outstanding.saturating_add(HEADROOM),
+        free,
+    }
+}
+
+pub fn capacity(path: &Path, outstanding: u64) -> Capacity {
+    evaluate(outstanding, available(path))
+}
+
 /// Bytes that could be written under `path` if it mattered, or `None` when the
 /// volume declines to say.
 pub fn available(path: &Path) -> Option<u64> {

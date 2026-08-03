@@ -61,23 +61,27 @@ launcher, settings UI, and metrics.
    Keychain item.
 7. Load a pending patch offer when one exists, otherwise load the active
    manifest. Explicit sync fetches a fresh pending offer.
-8. Recover a failed optional transform or unproven official generation, verify
-   installed artifacts, and promote missing or newer artifacts with their
-   matching manifest. After promotion, revalidate the manifest in the
-   background for the next launch.
-9. Open the game-image chunk store, replay the boot prefetch list, and start
-   cursor-based readahead.
-10. Start diagnostics and load profile settings.
-11. Prepare certified WebAssembly transforms when available.
-12. Start the loopback origin and inject its session token, current keyboard
+8. For launches and client syncs, recover a failed optional transform or
+   previously attempted unproven client, verify installed artifacts, and
+   promote missing or newer artifacts with their matching manifest. Game-data
+   repair does not alter the client.
+9. Open the chunk store under the retained shared lease, replay the boot
+   prefetch list, and start cursor-based readahead.
+10. Capacity-check before the first write, then complete a requested local-image
+   import, or verify and fill a requested full image or repair operation.
+11. Start diagnostics and load profile settings.
+12. Prepare certified WebAssembly transforms when available.
+13. Start the loopback origin and inject its session token, current keyboard
     layout, settings, update capabilities, and module state at document start.
-13. Create the WKWebView, window, menu, native event bridges, renderer recovery,
+14. Create the WKWebView, window, menu, native event bridges, renderer recovery,
     and application lifecycle delegate.
-14. Mark the client generation proven and seal the boot chunk list when the
+15. Mark the client generation proven and seal the boot chunk list when the
     page reports its first frame.
 
-The `sync` command exits after artifact installation. The `serve` command stops
-after step 12 and prints `<address> <session-token>` on stdout.
+The `sync` command exits after artifact installation unless full-image work was
+also requested. `repair` verifies and fills game-image chunks without changing
+the client. Both exit before a window is created. The `serve` command stops
+after the loopback starts and prints `<address> <session-token>` on stdout.
 
 ## Loopback origin and trust model
 
@@ -189,7 +193,8 @@ Core invariants:
 - a hash identifies immutable content;
 - a fetched chunk is verified before an atomic rename makes it visible;
 - cached bytes are hashed on first use in a session;
-- a corrupt file is unlinked and fetched again;
+- wrong-size, unreadable and hash-invalid files are never resident; a failure
+  to unlink one remains a hard cache failure rather than becoming completion;
 - concurrent readers of the same missing hash share one fetch;
 - at most 48 network fetches run concurrently;
 - speculative boot, readahead, and full-download work shares a 32-permit subset
@@ -199,7 +204,9 @@ Core invariants:
   cleanup, and pruning require the exclusive maintenance lease; and
 - pruning retains every chunk named by the union of valid cached profile active
   and rollback manifests, and removes only regular content-addressed files from
-  real lowercase-hex bucket directories without following symlinks.
+  real lowercase-hex bucket directories without following symlinks; and
+- local imports and full downloads share one exact missing-byte capacity check
+  before the first cache write and retain 2 GiB of volume headroom.
 
 Quick Start records the chunks touched before first frame and replays that list
 on the next launch. A built-in list covers the first launch. Readahead follows
@@ -208,8 +215,9 @@ bar reports cache residency rather than how far the current walk has advanced.
 
 A complete Full Game launch runs a separate integrity pass. It hashes distinct
 resident chunks, discards failures, and lets the ordinary download path repair
-them. Verification is separate from resume so every interrupted download does
-not pay for a full reread.
+them. An entry that cannot be read or removed is latched unusable and prevents
+a successful completion report. Verification is separate from resume so every
+interrupted download does not pay for a full reread.
 
 ## WebAssembly compatibility layers
 

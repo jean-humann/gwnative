@@ -18,6 +18,8 @@ pub enum Command {
     Run,
     /// Download and verify the current client, then exit.
     Sync,
+    /// Verify and refill cached game data without changing the client.
+    Repair,
     /// Serve the loopback origin without an AppKit window.
     Serve,
     /// Produce an unsigned, reviewable certificate candidate from the four
@@ -100,7 +102,13 @@ pub struct Invocation {
     pub profile: Option<String>,
     pub new_instance: bool,
     pub host_port: Option<u16>,
+    pub cache_root: Option<PathBuf>,
     pub web_root: Option<PathBuf>,
+    pub image_path: Option<PathBuf>,
+    pub jobs: Option<usize>,
+    /// Whether the classic `-image` operation should populate the whole game
+    /// image after synchronising the small client artifacts.
+    pub full_image: bool,
     pub offline: bool,
     pub no_update: bool,
     pub no_prefetch: bool,
@@ -117,7 +125,11 @@ impl Default for Invocation {
             profile: None,
             new_instance: false,
             host_port: None,
+            cache_root: None,
             web_root: None,
+            image_path: None,
+            jobs: None,
+            full_image: false,
             offline: false,
             no_update: false,
             no_prefetch: false,
@@ -134,6 +146,19 @@ impl Invocation {
     /// Manual checks remain an explicit player action.
     pub fn automatic_updates_allowed(&self) -> bool {
         !self.offline && !self.no_update
+    }
+
+    /// Whether command routing must open the game-data snapshot.
+    ///
+    /// An explicit local image is itself a snapshot operation. Keeping this
+    /// decision beside parsing prevents an accepted option from being skipped
+    /// by a command-specific early return.
+    pub fn needs_snapshot(&self) -> bool {
+        match self.command {
+            Command::Run | Command::Repair | Command::Serve => true,
+            Command::Sync => self.full_image || self.image_path.is_some(),
+            Command::Certify | Command::Profiles => false,
+        }
     }
 
     /// The launch options needed inside the generated client's realm.
@@ -182,6 +207,7 @@ Usage: gwnative [command] [options]
 Commands:
   run                 open the game window (default)
   sync                download and verify the current client
+  repair              verify and repair installed game data
   serve               serve the local origin without a window
   certify             print an artifact-family certificate candidate
   profiles            list launch profiles
@@ -191,6 +217,9 @@ Native options:
   --new-instance      allow another isolated profile instance
   --host-port PORT    override the profile origin (bypasses its isolation)
   -d, --dir PATH      override the profile web root (can bypass isolation)
+  -c, --cache PATH    override the game-data cache
+  -j, --jobs COUNT    bound -image or repair workers (1–32)
+  -i, --image PATH    use a local game image
   --offline           forbid launch-time network and automatic update refreshes
   --no-update         skip automatic client and application update checks
   --no-prefetch       disable speculative game-data fetches
@@ -200,7 +229,7 @@ Native options:
 
 Guild Wars compatibility:
   -autologin  -email VALUE  -password VALUE  -character NAME
-  -windowed   -windowedfullscreen
+  -image      -repair       -windowed        -windowedfullscreen
   -fps VALUE  -mute         -nosound         -diag  -log  -perf
   -bmp        -fqdn         -lodfull         -mock SteamDeck
   -nopatchui  -noshaders    -noui            -oldfov
@@ -254,11 +283,12 @@ where
                 no_inline(option, inline, || {})?;
                 return Err(answer(&format!("gwnative {}", env!("CARGO_PKG_VERSION"))));
             }
-            "run" | "sync" | "serve" | "certify" | "profiles" => {
+            "run" | "sync" | "repair" | "serve" | "certify" | "profiles" => {
                 no_inline(option, inline, || {})?;
                 let command = match option {
                     "run" => Command::Run,
                     "sync" => Command::Sync,
+                    "repair" => Command::Repair,
                     "serve" => Command::Serve,
                     "certify" => Command::Certify,
                     "profiles" => Command::Profiles,
@@ -284,6 +314,23 @@ where
             "-d" | "--dir" => {
                 let value = path_value(&args, &mut index, option, inline)?;
                 set_once(&mut invocation.web_root, value, option)?;
+            }
+            "-c" | "--cache" | "--cache-root" => {
+                let value = path_value(&args, &mut index, option, inline)?;
+                set_once(&mut invocation.cache_root, value, option)?;
+            }
+            "-i" | "--image" => {
+                let value = path_value(&args, &mut index, option, inline)?;
+                set_once(&mut invocation.image_path, value, option)?;
+            }
+            "-j" | "--jobs" => {
+                let value = parse_number::<usize>(
+                    take_value(&args, &mut index, option, inline)?,
+                    option,
+                    1,
+                    32,
+                )?;
+                set_once(&mut invocation.jobs, value, option)?;
             }
             "--offline" => no_inline(option, inline, || invocation.offline = true)?,
             "--no-update" => no_inline(option, inline, || invocation.no_update = true)?,
@@ -388,6 +435,20 @@ where
                     WindowMode::Fullscreen,
                     option,
                 )?;
+            }
+            "-image" => {
+                no_inline(option, inline, || {})?;
+                set_command(&mut invocation, &mut command_seen, Command::Sync, option)?;
+                invocation.full_image = true;
+                translated(
+                    &mut invocation,
+                    option,
+                    "downloads and verifies the complete current client and game image",
+                );
+            }
+            "-repair" => {
+                no_inline(option, inline, || {})?;
+                set_command(&mut invocation, &mut command_seen, Command::Repair, option)?;
             }
             "-update" => {
                 no_inline(option, inline, || {})?;
@@ -501,7 +562,7 @@ where
     if invocation.offline && invocation.command == Command::Sync {
         return Err(value_error(
             "--offline",
-            "cannot be combined with sync or -update",
+            "cannot be combined with sync, -image, or -update",
         ));
     }
     if invocation.new_instance
@@ -514,6 +575,40 @@ where
             "--new-instance",
             "requires a non-default --profile so storage and credentials remain isolated",
         ));
+    }
+    if invocation.jobs.is_some()
+        && !(matches!(invocation.command, Command::Sync | Command::Repair)
+            && invocation.needs_snapshot())
+    {
+        return Err(value_error(
+            "--jobs",
+            "is only meaningful with -image, sync --image PATH, or repair",
+        ));
+    }
+    if matches!(invocation.command, Command::Certify | Command::Profiles) {
+        let ignored = invocation
+            .cache_root
+            .as_ref()
+            .map(|_| "--cache")
+            .or_else(|| invocation.image_path.as_ref().map(|_| "--image"))
+            .or(invocation.no_prefetch.then_some("--no-prefetch"));
+        if let Some(option) = ignored {
+            return Err(value_error(option, "does not apply to certify or profiles"));
+        }
+    }
+    if invocation.command == Command::Sync && !invocation.needs_snapshot() {
+        if invocation.cache_root.is_some() {
+            return Err(value_error(
+                "--cache",
+                "requires -image or --image PATH when used with sync",
+            ));
+        }
+        if invocation.no_prefetch {
+            return Err(value_error(
+                "--no-prefetch",
+                "requires -image or --image PATH when used with sync",
+            ));
+        }
     }
     if invocation.legacy.email.is_some() != invocation.legacy.password.is_some() {
         let option = if invocation.legacy.email.is_some() {
@@ -699,6 +794,7 @@ mod tests {
         for (argument, command) in [
             ("run", Command::Run),
             ("sync", Command::Sync),
+            ("repair", Command::Repair),
             ("serve", Command::Serve),
             ("certify", Command::Certify),
             ("profiles", Command::Profiles),
@@ -728,12 +824,14 @@ mod tests {
             "--profile=iron",
             "--host-port",
             "38113",
+            "--cache=/tmp/cache",
             "--offline",
             "--debug",
         ])
         .unwrap();
         assert_eq!(parsed.profile.as_deref(), Some("iron"));
         assert_eq!(parsed.host_port, Some(38113));
+        assert_eq!(parsed.cache_root, Some(PathBuf::from("/tmp/cache")));
         assert!(parsed.offline);
         assert!(parsed.devtools);
     }
@@ -813,9 +911,17 @@ mod tests {
 
     #[test]
     fn official_host_switches_are_translated() {
-        let parsed =
-            parse_str(&["-fps=144", "-mute", "-diag", "-perf", "-windowedfullscreen"]).unwrap();
-        assert_eq!(parsed.command, Command::Run);
+        let parsed = parse_str(&[
+            "-image",
+            "-fps=144",
+            "-mute",
+            "-diag",
+            "-perf",
+            "-windowedfullscreen",
+        ])
+        .unwrap();
+        assert_eq!(parsed.command, Command::Sync);
+        assert!(parsed.full_image);
         assert_eq!(parsed.legacy.fps, Some(144));
         assert!(parsed.legacy.mute);
         assert!(parsed.legacy.diagnostics);
@@ -925,11 +1031,62 @@ mod tests {
     }
 
     #[test]
+    fn worker_bounds_only_apply_to_full_image_operations() {
+        assert_eq!(parse_str(&["-image", "--jobs=8"]).unwrap().jobs, Some(8));
+        assert_eq!(
+            parse_str(&["sync", "--image", "/tmp/Gw.dat", "--jobs=6"])
+                .unwrap()
+                .jobs,
+            Some(6)
+        );
+        assert_eq!(parse_str(&["repair", "--jobs=4"]).unwrap().jobs, Some(4));
+        assert!(parse_str(&["--jobs=8"]).unwrap_err().failed);
+    }
+
+    #[test]
+    fn every_accepted_image_path_reaches_snapshot_routing() {
+        for command in ["run", "sync", "repair", "serve"] {
+            let parsed = parse_str(&[command, "--image", "/tmp/Gw.dat"]).unwrap();
+            assert!(parsed.image_path.is_some(), "{command}");
+            assert!(parsed.needs_snapshot(), "{command}");
+        }
+        for command in ["certify", "profiles"] {
+            assert!(
+                parse_str(&[command, "--image", "/tmp/Gw.dat"])
+                    .unwrap_err()
+                    .failed,
+                "{command} must fail instead of ignoring the image"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_options_never_hide_behind_an_early_return() {
+        for args in [
+            &["sync", "--cache", "/tmp/chunks"][..],
+            &["sync", "--no-prefetch"][..],
+            &["profiles", "--cache", "/tmp/chunks"][..],
+            &["certify", "--no-prefetch"][..],
+        ] {
+            assert!(parse_str(args).unwrap_err().failed, "{args:?}");
+        }
+        assert!(
+            parse_str(&["sync", "--image", "/tmp/Gw.dat", "--cache", "/tmp/chunks"])
+                .unwrap()
+                .needs_snapshot()
+        );
+    }
+
+    #[test]
     fn invalid_values_and_conflicts_fail_closed() {
         for args in [
             &["-fps", "0"][..],
             &["-fps", "fast"][..],
             &["-mock", "Phone"][..],
+            &["--jobs", "0"][..],
+            &["-image", "--jobs", "33"][..],
+            &["-image=unexpected"][..],
+            &["-repair=unexpected"][..],
             &["--host-port", "70000"][..],
             &["--offline", "sync"][..],
             &["-windowed", "-windowedfullscreen"][..],

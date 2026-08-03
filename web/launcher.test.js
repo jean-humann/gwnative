@@ -10,7 +10,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { progressLine, rate, remaining, watchSweep } from './launcher.js';
+import {
+  imageCheckResult,
+  progressLine,
+  rate,
+  remaining,
+  resolveDataStrategy,
+  watchSweep,
+} from './launcher.js';
 
 /** A window of samples `mb` megabytes apart, one per second. */
 const steady = (seconds, mbPerSecond, from = 0) =>
@@ -75,6 +82,80 @@ describe('the line under the bar', () => {
       progressLine(4.19e9, 4.2e9, steady(11, 40, 4.15e9)),
       '4.2 of 4.2 GB · 40 MB/s · less than a minute left',
     );
+  });
+});
+
+describe('full-image verification', () => {
+  it('does not call a completed pass successful when the host reported a failure', () => {
+    assert.deepEqual(
+      imageCheckResult({
+        verified: 16_167,
+        verifyTotal: 16_167,
+        discarded: 0,
+        verifyFailures: 1,
+      }),
+      {
+        checked: 16_167,
+        total: 16_167,
+        discarded: 0,
+        failures: 1,
+        verified: false,
+      },
+    );
+  });
+
+  it('requires every piece and distinguishes repairable discards from failures', () => {
+    assert.equal(imageCheckResult({
+      verified: 10,
+      verifyTotal: 11,
+      discarded: 0,
+      verifyFailures: 0,
+    }).verified, false);
+    assert.deepEqual(
+      imageCheckResult({
+        verified: 11,
+        verifyTotal: 11,
+        discarded: 2,
+        verifyFailures: 0,
+      }),
+      {
+        checked: 11,
+        total: 11,
+        discarded: 2,
+        failures: 0,
+        verified: true,
+      },
+    );
+  });
+
+  it('never starts a verification pass for an ordinary Quick Start launch', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalWindow = globalThis.window;
+    const originalDocument = globalThis.document;
+    const requests = [];
+    globalThis.window = {};
+    globalThis.document = { getElementById: () => ({}) };
+    globalThis.fetch = async (url, options = {}) => {
+      requests.push({ url, method: options.method ?? 'GET' });
+      return {
+        ok: true,
+        json: async () => ({ cached: 2, total: 2, chunkSize: 1024 }),
+      };
+    };
+    try {
+      await resolveDataStrategy(2048, {
+        log: () => {},
+        save: async () => ({}),
+        strategy: 'quick',
+      });
+      assert.deepEqual(requests, [{ url: '__prefetch', method: 'GET' }]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalWindow === undefined) delete globalThis.window;
+      else globalThis.window = originalWindow;
+      if (originalDocument === undefined) delete globalThis.document;
+      else globalThis.document = originalDocument;
+    }
   });
 });
 

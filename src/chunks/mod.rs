@@ -22,7 +22,7 @@ mod prefetch;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -86,6 +86,12 @@ pub struct ChunkStore {
     /// the amplification the pread path exists to remove — so each chunk is
     /// checked the first time this session asks for it and preads after that.
     verified: Mutex<HashSet<ContentHash>>,
+    /// Cache names that were proven unusable but could not be removed.
+    ///
+    /// A read-only directory can leave corrupt bytes at the expected hash
+    /// path. Remembering the hash prevents filename or length scans from later
+    /// reclassifying that path as resident and reporting a false completion.
+    invalid: Mutex<HashSet<ContentHash>>,
     /// Why the most recent fetch that failed, failed.
     ///
     /// Kept because the page cannot see it otherwise. A chunk read reaches the
@@ -144,6 +150,7 @@ impl ChunkStore {
             recording: AtomicBool::new(true),
             playing: AtomicBool::new(false),
             verified: Mutex::default(),
+            invalid: Mutex::default(),
             last_failure: Mutex::default(),
             handles: Mutex::default(),
         })
@@ -181,9 +188,72 @@ impl ChunkStore {
         self.manifest.files[&self.snapshot].chunk_hashes.len()
     }
 
+    /// Validate and seed the cache from a raw local snapshot image.
+    ///
+    /// The local file is never trusted by name or size alone. Every manifest
+    /// chunk is hashed before the ordinary atomic cache write makes it visible,
+    /// so a partial, stale, or unrelated image cannot poison later reads.
+    pub fn import_image(&self, path: &Path) -> Result<()> {
+        self.import_image_with_capacity(path, self.capacity())
+    }
+
+    fn import_image_with_capacity(
+        &self,
+        path: &Path,
+        capacity: crate::disk::Capacity,
+    ) -> Result<()> {
+        let file = fs::File::open(path)?;
+        let actual = file.metadata()?.len();
+        let expected = self.snapshot_size();
+        if actual != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{} is {actual} bytes; the current game image is {expected} bytes",
+                    path.display()
+                ),
+            )
+            .into());
+        }
+        // Before the first cache write. The local image is safe to read on a
+        // full volume, but a partial import is not useful and could consume the
+        // last space the running system needs.
+        capacity.require()?;
+
+        let mut input = BufReader::new(file);
+        let total = self.chunk_count();
+        let mut reported = usize::MAX;
+        for index in 0..total {
+            let hash = self.chunk_hash(index)?;
+            let length = self.chunk_length(index)?;
+            let mut bytes = vec![0u8; length as usize];
+            input.read_exact(&mut bytes)?;
+            crate::patch::verify(&bytes, &hash)?;
+            self.write_cached(&hash, &bytes)?;
+            self.verified.lock().unwrap().insert(hash);
+
+            let percent = (index + 1).saturating_mul(100) / total.max(1);
+            if percent / 5 != reported / 5 {
+                reported = percent;
+                note!(
+                    "[gwnative] importing local game image: {}/{} ({percent}%)",
+                    index + 1,
+                    total
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Where the cache lives, for anyone who needs to ask the volume about it.
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
+    }
+
+    /// The shared capacity decision used by every operation that fills the
+    /// snapshot cache, including UI, command-line and local-image routes.
+    pub fn capacity(&self) -> crate::disk::Capacity {
+        crate::disk::capacity(&self.cache_dir, self.missing_bytes())
     }
 
     /// How many bytes a read at `offset` for `length` will actually produce.
@@ -322,7 +392,7 @@ impl ChunkStore {
     /// place a corrupt one can do harm.
     fn ensure(&self, index: usize) -> Result<()> {
         let hash = self.chunk_hash(index)?;
-        if self.cached_len(&hash) == Some(self.chunk_length(index)?) {
+        if self.cached_sized(&hash, self.chunk_length(index)?)? {
             self.stats.from_cache.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
@@ -358,7 +428,7 @@ impl ChunkStore {
         let hash = self.chunk_hash(index)?;
         let expected = self.chunk_length(index)?;
 
-        if let Some(cached) = self.read_cached(&hash, expected) {
+        if let Some(cached) = self.read_cached(&hash, expected)? {
             self.stats.from_cache.fetch_add(1, Ordering::Relaxed);
             return Ok(Arc::new(cached));
         }
@@ -426,6 +496,40 @@ mod tests {
     use super::*;
     use crate::chunks::fixture::store_of;
     use crate::scratch::TempDir;
+
+    #[test]
+    fn a_local_image_is_verified_before_it_seeds_the_cache() {
+        let temp = TempDir::new("local-image");
+        let bytes = vec![0x5au8; 1024];
+        let store = crate::chunks::fixture::store_of_content(temp.0.join("chunks"), &[&bytes]);
+        let image = temp.0.join("Gw.snapshot");
+        fs::write(&image, &bytes).unwrap();
+
+        store.import_image(&image).unwrap();
+        assert_eq!(store.resident_count(), 1);
+
+        let other = crate::chunks::fixture::store_of_content(temp.0.join("other"), &[&bytes]);
+        fs::write(&image, vec![0xa5u8; 1024]).unwrap();
+        assert!(other.import_image(&image).is_err());
+        assert_eq!(other.resident_count(), 0);
+    }
+
+    #[test]
+    fn a_local_image_with_insufficient_capacity_writes_nothing() {
+        let temp = TempDir::new("local-image-capacity");
+        let bytes = vec![0x5au8; 1024];
+        let store = crate::chunks::fixture::store_of_content(temp.0.join("chunks"), &[&bytes]);
+        let image = temp.0.join("Gw.snapshot");
+        fs::write(&image, &bytes).unwrap();
+
+        let capacity = crate::disk::evaluate(store.missing_bytes(), Some(0));
+        assert!(store.import_image_with_capacity(&image, capacity).is_err());
+        assert_eq!(store.resident_count(), 0);
+        assert!(
+            fs::read_dir(store.cache_dir()).unwrap().next().is_none(),
+            "capacity refusal must happen before the first bucket or chunk write"
+        );
+    }
 
     /// The whole point of taking the permit first. A demand read joins a fetch
     /// already claimed for the chunk it wants, so a speculative fetch holding
