@@ -134,17 +134,30 @@ impl Drop for Connection {
 /// password — which would make the keychain's own access control decorative.
 /// The page receives the token through an injected script, never over this
 /// socket, so reading the traffic does not yield it.
-pub fn spawn(
-    root: PathBuf,
-    snapshot: Option<Arc<ChunkStore>>,
-    recorder: Arc<Recorder>,
-    derived_wasm: wasm::DerivedModules,
-    settings: Arc<settings::Store>,
-    generations: Arc<generation::Store>,
-    token: String,
-    port: u16,
-    credential_account: String,
-) -> std::io::Result<Loopback> {
+pub struct Config {
+    pub root: PathBuf,
+    pub snapshot: Option<Arc<ChunkStore>>,
+    pub recorder: Arc<Recorder>,
+    pub derived_wasm: wasm::DerivedModules,
+    pub settings: Arc<settings::Store>,
+    pub generations: Arc<generation::Store>,
+    pub token: String,
+    pub port: u16,
+    pub credential_account: String,
+}
+
+pub fn spawn(config: Config) -> std::io::Result<Loopback> {
+    let Config {
+        root,
+        snapshot,
+        recorder,
+        derived_wasm,
+        settings,
+        generations,
+        token,
+        port,
+        credential_account,
+    } = config;
     let listener = bind(port)?;
     let addr = listener.local_addr()?;
     // Before the first response can be written, and only once — a second
@@ -382,17 +395,17 @@ mod tests {
         let dir = temp.0.clone();
         let file = dir.join("settings.json");
         let token = "test-token";
-        let loopback = spawn(
-            dir.clone(),
-            None,
-            Recorder::open(dir.join("diagnostics")),
-            wasm::DerivedModules::default(),
-            Arc::new(settings::Store::open(file.clone())),
-            Arc::new(generation::Store::open(dir.join("generations"))),
-            token.to_owned(),
-            PORT,
-            "login".into(),
-        )
+        let loopback = spawn(Config {
+            root: dir.clone(),
+            snapshot: None,
+            recorder: Recorder::open(dir.join("diagnostics")),
+            derived_wasm: wasm::DerivedModules::default(),
+            settings: Arc::new(settings::Store::open(file.clone())),
+            generations: Arc::new(generation::Store::open(dir.join("generations"))),
+            token: token.to_owned(),
+            port: PORT,
+            credential_account: "login".into(),
+        })
         .unwrap();
         let addr = loopback.addr;
         let auth = Some(token);
@@ -457,20 +470,20 @@ mod tests {
         let temp = TempDir::new("server-clear");
         let dir = temp.0.clone();
         let token = "test-token";
-        let loopback = spawn(
-            dir.clone(),
+        let loopback = spawn(Config {
+            root: dir.clone(),
             // The interesting half of this test: no store, which is every launch
             // before the manifest is fetched and every launch that failed to get
             // one.
-            None,
-            Recorder::open(dir.join("diagnostics")),
-            wasm::DerivedModules::default(),
-            Arc::new(settings::Store::open(dir.join("settings.json"))),
-            Arc::new(generation::Store::open(dir.join("generations"))),
-            token.to_owned(),
-            PORT,
-            "login".into(),
-        )
+            snapshot: None,
+            recorder: Recorder::open(dir.join("diagnostics")),
+            derived_wasm: wasm::DerivedModules::default(),
+            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            generations: Arc::new(generation::Store::open(dir.join("generations"))),
+            token: token.to_owned(),
+            port: PORT,
+            credential_account: "login".into(),
+        })
         .unwrap();
         let addr = loopback.addr;
 
@@ -507,17 +520,17 @@ mod tests {
         let dir = temp.0.clone();
         let token = "test-token";
         let diagnostics = dir.join("diagnostics");
-        let loopback = spawn(
-            dir.clone(),
-            None,
-            Recorder::open(diagnostics.clone()),
-            wasm::DerivedModules::default(),
-            Arc::new(settings::Store::open(dir.join("settings.json"))),
-            Arc::new(generation::Store::open(dir.join("generations"))),
-            token.to_owned(),
-            PORT,
-            "login".into(),
-        )
+        let loopback = spawn(Config {
+            root: dir.clone(),
+            snapshot: None,
+            recorder: Recorder::open(diagnostics.clone()),
+            derived_wasm: wasm::DerivedModules::default(),
+            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            generations: Arc::new(generation::Store::open(dir.join("generations"))),
+            token: token.to_owned(),
+            port: PORT,
+            credential_account: "login".into(),
+        })
         .unwrap();
         let addr = loopback.addr;
 
@@ -563,17 +576,17 @@ mod tests {
         std::fs::write(&transformed, b"transformed").unwrap();
         let mut derived = wasm::DerivedModules::default();
         derived.insert(wasm::Runtime::Asyncify, transformed);
-        let loopback = spawn(
-            dir.clone(),
-            None,
-            Recorder::open(dir.join("diagnostics")),
-            derived,
-            Arc::new(settings::Store::open(dir.join("settings.json"))),
-            Arc::new(generation::Store::open(dir.join("generations"))),
-            "test-token".to_owned(),
-            PORT,
-            "login".into(),
-        )
+        let loopback = spawn(Config {
+            root: dir.clone(),
+            snapshot: None,
+            recorder: Recorder::open(dir.join("diagnostics")),
+            derived_wasm: derived,
+            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            generations: Arc::new(generation::Store::open(dir.join("generations"))),
+            token: "test-token".to_owned(),
+            port: PORT,
+            credential_account: "login".into(),
+        })
         .unwrap();
 
         assert_eq!(
@@ -599,17 +612,17 @@ mod tests {
         let dir = temp.0.clone();
         let token = "test-token";
         let generations = Arc::new(generation::Store::open(dir.join("generations")));
-        let loopback = spawn(
-            dir.clone(),
-            None,
-            Recorder::open(dir.join("diagnostics")),
-            wasm::DerivedModules::default(),
-            Arc::new(settings::Store::open(dir.join("settings.json"))),
-            Arc::clone(&generations),
-            token.to_owned(),
-            PORT,
-            "login".into(),
-        )
+        let loopback = spawn(Config {
+            root: dir.clone(),
+            snapshot: None,
+            recorder: Recorder::open(dir.join("diagnostics")),
+            derived_wasm: wasm::DerivedModules::default(),
+            settings: Arc::new(settings::Store::open(dir.join("settings.json"))),
+            generations: Arc::clone(&generations),
+            token: token.to_owned(),
+            port: PORT,
+            credential_account: "login".into(),
+        })
         .unwrap();
 
         let attempt = format!(r#"{{"runtime":"jspi","build":"{BUILD}","transformed":true}}"#);

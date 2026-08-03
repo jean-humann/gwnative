@@ -122,6 +122,8 @@ Stable builds are offered stable releases only. Recognised prerelease tags are
 The host's ordinary filesystem state lives below
 `~/Library/Application Support/gwnative`. The saved login lives separately in
 the macOS login Keychain, and WebKit page data uses the roots described below.
+Named profiles isolate mutable state, credentials, and WebKit origins while
+sharing immutable game chunks; see [Profiles](profiles.md) for the exact map.
 
 | Path | Contents |
 | --- | --- |

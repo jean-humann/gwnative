@@ -17,7 +17,6 @@ pub struct Layout {
     web: PathBuf,
     derived: PathBuf,
     cache: PathBuf,
-    mods: PathBuf,
     port: u16,
 }
 
@@ -25,14 +24,7 @@ impl Layout {
     pub fn new(invocation: &cli::Invocation, profile: &profile::Profile) -> Self {
         let base_support = base_support_dir();
         let support = profile.support_dir(&base_support);
-        let cache = invocation
-            .cache_root
-            .clone()
-            .unwrap_or_else(crate::cache::default_cache_dir);
-        let mods = invocation
-            .mod_dir
-            .clone()
-            .unwrap_or_else(|| base_support.join("mods"));
+        let cache = crate::cache::default_cache_dir();
         let port = invocation
             .host_port
             .or_else(|| {
@@ -53,7 +45,6 @@ impl Layout {
             web,
             derived,
             cache,
-            mods,
             port,
         }
     }
@@ -72,10 +63,6 @@ impl Layout {
 
     pub fn cache_dir(&self) -> &Path {
         &self.cache
-    }
-
-    pub fn mod_dir(&self) -> &Path {
-        &self.mods
     }
 
     pub fn port(&self) -> u16 {
@@ -138,52 +125,6 @@ fn writable_web_root(support: &Path) -> PathBuf {
     live
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cli;
-
-    #[test]
-    fn named_profiles_isolate_mutable_state_and_share_chunks_and_mods() {
-        let invocation = cli::parse(["--profile", "iron"]).unwrap();
-        let profile = profile::Profile {
-            format_version: 1,
-            id: "iron".into(),
-            display_name: "Iron".into(),
-            color: "#000000".into(),
-            created_at: 0,
-        };
-        let layout = Layout::new(&invocation, &profile);
-        assert!(layout.support_dir().ends_with("gwnative/profiles/iron"));
-        assert!(layout.cache_dir().ends_with("gwnative/chunks"));
-        assert!(layout.mod_dir().ends_with("gwnative/mods"));
-        assert_ne!(layout.port(), 38112);
-    }
-
-    #[test]
-    fn command_line_locations_and_port_win() {
-        let invocation = cli::parse([
-            "--profile",
-            "iron",
-            "--cache",
-            "/tmp/gw-cache",
-            "--mods",
-            "/tmp/gw-mods",
-            "--dir",
-            "/tmp/gw-web",
-            "--host-port",
-            "39000",
-        ])
-        .unwrap();
-        let profile = profile::Profile::default_profile();
-        let layout = Layout::new(&invocation, &profile);
-        assert_eq!(layout.cache_dir(), Path::new("/tmp/gw-cache"));
-        assert_eq!(layout.mod_dir(), Path::new("/tmp/gw-mods"));
-        assert_eq!(layout.web_root(), Path::new("/tmp/gw-web"));
-        assert_eq!(layout.port(), 39000);
-    }
-}
-
 /// Copy the bundle's shell files over the live web root.
 ///
 /// Only what the bundle carries: the client artifacts sit in the same directory
@@ -205,4 +146,43 @@ fn seed_web(seed: &Path, live: &Path) -> std::io::Result<()> {
         std::fs::write(&installed, &fresh)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli;
+
+    #[test]
+    fn named_profiles_isolate_mutable_state_and_share_chunks() {
+        let invocation = cli::parse(["--profile", "iron"]).unwrap();
+        let profile = profile::Profile {
+            format_version: 1,
+            id: "iron".into(),
+            display_name: "Iron".into(),
+            color: "#000000".into(),
+            created_at: 0,
+        };
+        let layout = Layout::new(&invocation, &profile);
+        assert!(layout.support_dir().ends_with("gwnative/profiles/iron"));
+        assert!(layout.cache_dir().ends_with("gwnative/chunks"));
+        assert_ne!(layout.port(), 38112);
+    }
+
+    #[test]
+    fn command_line_web_root_and_port_win() {
+        let invocation = cli::parse([
+            "--profile",
+            "iron",
+            "--dir",
+            "/tmp/gw-web",
+            "--host-port",
+            "39000",
+        ])
+        .unwrap();
+        let profile = profile::Profile::default_profile();
+        let layout = Layout::new(&invocation, &profile);
+        assert_eq!(layout.web_root(), Path::new("/tmp/gw-web"));
+        assert_eq!(layout.port(), 39000);
+    }
 }
