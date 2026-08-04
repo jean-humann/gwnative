@@ -1,6 +1,6 @@
 [package]
 name = "gwnative"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 rust-version = "1.90"
 description = "Unofficial native macOS host for the Guild Wars Reforged WebAssembly client"
