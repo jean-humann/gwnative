@@ -11,6 +11,13 @@ changes public GitHub state and the update feed seen by installed applications.
 | Release package | `scripts/release` | notarized `.dmg`, updater `.zip`, and dSYM |
 | Publish | `scripts/publish vX.Y.Z` | GitHub release and signed `appcast.xml` |
 
+The required platform and recovery evidence is declared in
+[`support-matrix.json`](../support-matrix.json). `macos-15` and `macos-26` are
+the only verified GitHub-hosted Apple Silicon labels. Until GitHub publishes a
+macOS 27 image, the automatic-JSPI and forced-Asyncify macOS 27 cells require a
+successful authorized `macos-27-canary.yml` run for the exact release commit.
+Those cells are release blockers, never inferred passes.
+
 CI uses the same `scripts/release` and `scripts/publish` files. The workflow
 creates their Keychain environment; it does not reimplement the release.
 
