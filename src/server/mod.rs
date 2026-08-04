@@ -754,6 +754,10 @@ mod tests {
         let dir = temp.0.clone();
         let token = "test-token";
         let generations = Arc::new(generation::Store::open(dir.join("generations")));
+        std::fs::write(dir.join("Gw.jspi.js"), b"glue").unwrap();
+        std::fs::write(dir.join("Gw.jspi.wasm"), b"wasm").unwrap();
+        std::fs::write(dir.join("manifest.cache"), b"manifest").unwrap();
+        generations.record("test", &dir, &["Gw.jspi.js", "Gw.jspi.wasm"]);
         let loopback = spawn(Config {
             root: dir.clone(),
             snapshot: None,
@@ -769,7 +773,9 @@ mod tests {
         })
         .unwrap();
 
-        let attempt = format!(r#"{{"runtime":"jspi","build":"{BUILD}","transformed":true}}"#);
+        let attempt = format!(
+            r#"{{"runtime":"jspi","build":"{BUILD}","transformed":true,"nonce":"{BUILD}"}}"#
+        );
         assert_eq!(
             request(loopback.addr, "POST", "/__runtime", None, &attempt).0,
             403
@@ -780,22 +786,23 @@ mod tests {
                 "POST",
                 "/__runtime",
                 Some(token),
-                r#"{"runtime":"other","build":null,"transformed":false}"#
+                &format!(
+                    r#"{{"runtime":"other","build":null,"transformed":false,"nonce":"{BUILD}"}}"#
+                )
             )
             .0,
             400
         );
-        assert_eq!(
-            request(loopback.addr, "POST", "/__runtime", Some(token), &attempt).0,
-            204
-        );
+        let (status, identity) =
+            request(loopback.addr, "POST", "/__runtime", Some(token), &attempt);
+        assert_eq!(status, 200);
         assert_eq!(
             request(
                 loopback.addr,
                 "POST",
                 "/__transform-failed",
                 Some(token),
-                &format!(r#"{{"runtime":"jspi","build":"{BUILD}"}}"#)
+                &format!(r#"{{"launch":{identity}}}"#)
             )
             .0,
             204
@@ -803,8 +810,8 @@ mod tests {
         assert!(generations.transform_disabled("jspi", BUILD));
 
         // A valid request is a server failure, not an acknowledgement, when the
-        // journal cannot make the attempt durable. The page logs this response
-        // and still boots, so honesty here does not put bookkeeping on its path.
+        // journal cannot make the attempt durable. The page must not execute
+        // glue after this response.
         std::fs::remove_file(dir.join("generations/state.json")).unwrap();
         std::fs::create_dir(dir.join("generations/state.json")).unwrap();
         assert_eq!(
