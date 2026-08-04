@@ -1011,7 +1011,13 @@ impl ClientSync<'_> {
         for (name, bytes) in fetched {
             note!("[gwnative]   {name} ({bytes} bytes)");
         }
-        generations.record(offered, root, &names);
+        if !generations.record(offered, root, &names) {
+            let _ = generations.recover(root);
+            return Err(std::io::Error::other(
+                "the installed client could not be recorded durably",
+            )
+            .into());
+        }
         Ok(())
     }
 }

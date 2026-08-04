@@ -26,9 +26,11 @@
 //! is taken from the bytes as written. Neither can stand in for the other.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -37,6 +39,7 @@ use crate::error::{Error, Result};
 use crate::manifest::Manifest;
 
 const FORMAT: u32 = 1;
+static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// How many refused builds to remember.
 ///
@@ -86,6 +89,46 @@ struct RuntimeAttempt {
     /// selected transform output.
     build: Option<String>,
     transformed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchIdentity {
+    pub generation_id: String,
+    pub runtime: String,
+    pub official_glue_sha256: String,
+    pub official_wasm_sha256: String,
+    pub mode: RuntimeMode,
+    pub transform_abi: Option<u32>,
+    pub compatibility_id: Option<String>,
+    pub nonce: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeMode {
+    Original,
+    Derived,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "launch", rename_all = "kebab-case")]
+enum ProofState {
+    InstalledUnproven,
+    LegacyFirstFrame,
+    FirstFrameProven(LaunchIdentity),
+    GameplayProven(LaunchIdentity),
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "launch", rename_all = "kebab-case")]
+enum LaunchState {
+    #[default]
+    Idle,
+    AttemptingRuntime(LaunchIdentity),
+    FailedRuntime(LaunchIdentity),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,10 +227,57 @@ fn hash_file(path: &Path) -> Result<Artifact> {
     })
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StateHeader {
+    format_version: u64,
+}
+
+fn read_state(bytes: &[u8]) -> (State, Option<u64>) {
+    match serde_json::from_slice::<StateHeader>(bytes) {
+        Ok(header) if header.format_version == u64::from(FORMAT) => {
+            match serde_json::from_slice(bytes) {
+                Ok(state) => (state, None),
+                Err(error) => {
+                    note!(
+                        "[generation] the record is unreadable ({error}); starting without authority"
+                    );
+                    (State::default(), None)
+                }
+            }
+        }
+        Ok(header) => {
+            note!(
+                "[generation] refusing unknown state format {}; leaving it untouched",
+                header.format_version
+            );
+            (State::default(), Some(header.format_version))
+        }
+        Err(error) => {
+            note!("[generation] the record is unreadable ({error}); starting without authority");
+            (State::default(), None)
+        }
+    }
+}
+
 pub struct Store {
     dir: PathBuf,
     active_manifest: PathBuf,
+    state_path: PathBuf,
     state: Mutex<State>,
+    future_format: Option<u64>,
+    #[cfg(test)]
+    write_failure: Mutex<Option<WriteBoundary>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteBoundary {
+    BeforeTemporary,
+    StorageFull,
+    AfterWrite,
+    AfterFileSync,
+    AfterRename,
+    AfterDirectorySync,
 }
 
 impl Store {
@@ -199,24 +289,20 @@ impl Store {
     /// litter in Application Support.
     pub fn open(dir: PathBuf) -> Self {
         let path = dir.join("state.json");
-        let state = match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<State>(&bytes) {
-                Ok(state) if state.format_version == FORMAT => state,
-                Ok(state) => {
-                    note!(
-                        "[generation] a record written by format {} cannot be read here; \
-                         starting over",
-                        state.format_version
-                    );
-                    State::default()
-                }
-                Err(e) => {
-                    note!("[generation] the record is unreadable ({e}); starting over");
-                    State::default()
-                }
-            },
-            Err(_) => State::default(),
+        let (mut state, future_format) = match fs::read(&path) {
+            Ok(bytes) => read_state(&bytes),
+            Err(_) => (State::default(), None),
         };
+        let state_path = if future_format.is_some() {
+            dir.join("state.compat-v1.json")
+        } else {
+            path
+        };
+        if future_format.is_some()
+            && let Ok(bytes) = fs::read(&state_path)
+        {
+            state = read_state(&bytes).0;
+        }
         let active_manifest = dir
             .parent()
             .unwrap_or_else(|| Path::new("."))
@@ -224,21 +310,39 @@ impl Store {
         Self {
             dir,
             active_manifest,
+            state_path,
             state: Mutex::new(state),
+            future_format,
+            #[cfg(test)]
+            write_failure: Mutex::new(None),
         }
     }
 
     fn save(&self, state: &State) -> bool {
-        let path = self.dir.join("state.json");
+        let path = &self.state_path;
         let write = || -> Result<()> {
             fs::create_dir_all(&self.dir)?;
-            let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
             let bytes =
                 serde_json::to_vec_pretty(state).map_err(|e| Error::Decode(e.to_string()))?;
-            fs::write(&tmp, &bytes)?;
-            fs::rename(&tmp, &path).inspect_err(|_| {
-                let _ = fs::remove_file(&tmp);
-            })?;
+            self.fail_write(WriteBoundary::BeforeTemporary)?;
+            let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let tmp = self
+                .dir
+                .join(format!("state.{}.{sequence}.tmp", std::process::id()));
+            let result = (|| -> Result<()> {
+                let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
+                self.fail_write(WriteBoundary::StorageFull)?;
+                file.write_all(&bytes)?;
+                self.fail_write(WriteBoundary::AfterWrite)?;
+                file.sync_all()?;
+                self.fail_write(WriteBoundary::AfterFileSync)?;
+                fs::rename(&tmp, path)?;
+                self.fail_write(WriteBoundary::AfterRename)?;
+                fs::File::open(&self.dir)?.sync_all()?;
+                self.fail_write(WriteBoundary::AfterDirectorySync)
+            })();
+            let _ = fs::remove_file(&tmp);
+            result?;
             Ok(())
         };
         if let Err(e) = write() {
@@ -246,6 +350,23 @@ impl Store {
             return false;
         }
         true
+    }
+
+    #[cfg(not(test))]
+    fn fail_write(&self, _boundary: WriteBoundary) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn fail_write(&self, boundary: WriteBoundary) -> Result<()> {
+        let mut failure = self.write_failure.lock().unwrap();
+        if *failure == Some(boundary) {
+            *failure = None;
+            return Err(Error::Io(std::io::Error::other(format!(
+                "injected state failure at {boundary:?}"
+            ))));
+        }
+        Ok(())
     }
 
     /// Artifacts that are absent, the wrong length, or the wrong content.
@@ -300,6 +421,9 @@ impl Store {
     ///
     /// [adopted]: Store::adopt
     pub fn stale(&self, offered: &str) -> bool {
+        if self.future_format.is_some() {
+            return false;
+        }
         self.state
             .lock()
             .unwrap()
@@ -364,14 +488,17 @@ impl Store {
     ) -> std::result::Result<(), RuntimeStateError> {
         validate_runtime_attempt(runtime, build, transformed)?;
         let mut state = self.state.lock().unwrap();
+        let before = state.clone();
         state.attempt = Some(RuntimeAttempt {
             runtime: runtime.to_owned(),
             build: build.map(str::to_owned),
             transformed,
         });
-        self.save(&state)
-            .then_some(())
-            .ok_or(RuntimeStateError::NotSaved)
+        if !self.save(&state) {
+            *state = before;
+            return Err(RuntimeStateError::NotSaved);
+        }
+        Ok(())
     }
 
     /// The derived module failed before gameplay, so remember to serve the
@@ -383,16 +510,16 @@ impl Store {
     ) -> std::result::Result<(), RuntimeStateError> {
         validate_runtime_attempt(runtime, Some(build), true)?;
         let mut state = self.state.lock().unwrap();
+        let before = state.clone();
         remember_disabled(&mut state, runtime, build);
-        // The page is about to retry the official module in the same launch.
-        state.attempt = Some(RuntimeAttempt {
-            runtime: runtime.to_owned(),
-            build: Some(build.to_owned()),
-            transformed: false,
-        });
-        self.save(&state)
-            .then_some(())
-            .ok_or(RuntimeStateError::NotSaved)
+        // Persist the derived failure on its own. The page records the official
+        // retry separately, immediately before that module can execute.
+        state.attempt = None;
+        if !self.save(&state) {
+            *state = before;
+            return Err(RuntimeStateError::NotSaved);
+        }
+        Ok(())
     }
 
     /// Recover an unproven launch without blaming an optional transform on the
@@ -420,17 +547,24 @@ impl Store {
                 })
             };
             if state.proven && live_is_expected {
-                state.previous = None;
-                self.save(&state);
+                let previous = state.previous.take();
+                if !self.save(&state) {
+                    state.previous = previous;
+                    return Recovery::None;
+                }
                 let _ = fs::remove_dir_all(self.dir.join("previous"));
             } else if !live_is_expected {
                 match self.restore_recorded(root, &previous) {
                     Ok(()) => {
+                        let before = state.clone();
                         state.current = Some(previous);
                         state.proven = true;
                         state.previous = None;
                         state.attempt = None;
-                        self.save(&state);
+                        if !self.save(&state) {
+                            *state = before;
+                            return Recovery::None;
+                        }
                         let _ = fs::remove_dir_all(self.dir.join("previous"));
                         return Recovery::InstallationRestored;
                     }
@@ -457,8 +591,12 @@ impl Store {
                 self.save(&state);
                 return Recovery::None;
             };
+            let before = state.clone();
             remember_disabled(&mut state, &attempt.runtime, &build);
-            self.save(&state);
+            if !self.save(&state) {
+                *state = before;
+                return Recovery::None;
+            }
             return Recovery::TransformDisabled {
                 runtime: attempt.runtime,
                 build,
@@ -469,12 +607,16 @@ impl Store {
             // A later unmodified attempt that did not is not evidence that an
             // ArenaNet patch is bad, and there is no unproven installation to
             // undo. Clear the completed attempt and keep the known client.
-            self.save(&state);
+            if !self.save(&state) {
+                state.attempt = Some(attempt);
+            }
             return Recovery::None;
         }
         let (Some(current), Some(previous)) = (state.current.clone(), state.previous.clone())
         else {
-            self.save(&state);
+            if !self.save(&state) {
+                state.attempt = Some(attempt);
+            }
             return Recovery::None;
         };
 
@@ -494,7 +636,9 @@ impl Store {
         state.proven = true;
         state.previous = None;
         state.attempt = None;
-        self.save(&state);
+        if !self.save(&state) {
+            return Recovery::None;
+        }
         let _ = fs::remove_dir_all(self.dir.join("previous"));
         Recovery::GenerationRolledBack(current.id)
     }
@@ -519,7 +663,13 @@ impl Store {
     /// Returns false only when a proven generation needed protection and could
     /// not be copied. A caller replacing a complete client should then keep it.
     pub fn stash(&self, root: &Path, names: &[&'static str]) -> bool {
+        if self.future_format.is_some() {
+            return false;
+        }
         let mut state = self.state.lock().unwrap();
+        if state.previous.is_some() {
+            return false;
+        }
         if !state.proven {
             return true;
         }
@@ -546,13 +696,21 @@ impl Store {
             return false;
         }
         let stash = self.dir.join("previous");
+        let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let staging = self.dir.join(format!("previous.{sequence}.tmp"));
         let mut copy = || -> Result<()> {
-            fs::create_dir_all(&stash)?;
+            fs::create_dir_all(&staging)?;
             for name in names {
-                fs::copy(root.join(name), stash.join(name))?;
+                fs::copy(root.join(name), staging.join(name))?;
+                fs::File::open(staging.join(name))?.sync_all()?;
             }
             let manifest = hash_file(&self.active_manifest)?;
-            fs::copy(&self.active_manifest, stash.join("manifest.cache"))?;
+            fs::copy(&self.active_manifest, staging.join("manifest.cache"))?;
+            fs::File::open(staging.join("manifest.cache"))?.sync_all()?;
+            fs::File::open(&staging)?.sync_all()?;
+            let _ = fs::remove_dir_all(&stash);
+            fs::rename(&staging, &stash)?;
+            fs::File::open(&self.dir)?.sync_all()?;
             current.manifest = Some(manifest);
             Ok(())
         };
@@ -560,13 +718,12 @@ impl Store {
             note!(
                 "[generation] could not stash the current client ({e}); a bad sync will not be undoable"
             );
-            let _ = fs::remove_dir_all(&stash);
+            let _ = fs::remove_dir_all(&staging);
             return false;
         }
         let prior_previous = state.previous.replace(current);
         if !self.save(&state) {
             state.previous = prior_previous;
-            let _ = fs::remove_dir_all(&stash);
             return false;
         }
         true
@@ -607,15 +764,16 @@ impl Store {
     /// then dies before its first frame restores what was already on disk and
     /// refuses, by name, the generation it just restored. A set that has booted
     /// here has not stopped having booted here.
-    pub fn record(&self, id: &str, root: &Path, names: &[&'static str]) {
+    pub fn record(&self, id: &str, root: &Path, names: &[&'static str]) -> bool {
         let Some((artifacts, manifest)) = weigh(root, names, &self.active_manifest) else {
-            return;
+            return false;
         };
         let mut state = self.state.lock().unwrap();
         let same = state
             .current
             .as_ref()
             .is_some_and(|current| current.id == id);
+        let before = state.clone();
         state.current = Some(Generation {
             id: id.to_owned(),
             artifacts,
@@ -627,7 +785,10 @@ impl Store {
             // And with nothing to undo, nothing to undo it with.
             state.previous = None;
         }
-        self.save(&state);
+        if !self.save(&state) {
+            *state = before;
+            return false;
+        }
         if state.proven {
             note!("[generation] client generation {id} reinstalled; it had already booted here");
         } else {
@@ -636,6 +797,7 @@ impl Store {
         if state.previous.is_none() {
             let _ = fs::remove_dir_all(self.dir.join("previous"));
         }
+        true
     }
 
     /// Take an installation that predates the record as the current set.
@@ -659,6 +821,7 @@ impl Store {
             return;
         };
         let mut state = self.state.lock().unwrap();
+        let before = state.clone();
         state.current = Some(Generation {
             id: ADOPTED.to_owned(),
             artifacts,
@@ -666,7 +829,10 @@ impl Store {
         });
         state.proven = true;
         state.attempt = None;
-        self.save(&state);
+        if !self.save(&state) {
+            *state = before;
+            return;
+        }
         note!("[generation] adopted the client already on disk; it is checked from now on");
     }
 
@@ -678,15 +844,20 @@ impl Store {
     pub fn prove(&self) {
         let mut state = self.state.lock().unwrap();
         if state.proven {
-            if state.attempt.take().is_some() {
-                self.save(&state);
+            let attempt = state.attempt.take();
+            if attempt.is_some() && !self.save(&state) {
+                state.attempt = attempt;
             }
             return;
         }
+        let before = state.clone();
         state.proven = true;
         state.previous = None;
         state.attempt = None;
-        self.save(&state);
+        if !self.save(&state) {
+            *state = before;
+            return;
+        }
         let id = state.current.as_ref().map_or("", |g| g.id.as_str());
         note!("[generation] client generation {id} reached a first frame; keeping it");
         let _ = fs::remove_dir_all(self.dir.join("previous"));
@@ -703,8 +874,19 @@ fn weigh(
     names: &[&'static str],
     active_manifest: &Path,
 ) -> Option<(BTreeMap<String, Artifact>, Artifact)> {
+    let synced = |path: &Path| {
+        fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .is_ok()
+    };
+    if !synced(root) || !synced(active_manifest.parent().unwrap_or(root)) {
+        return None;
+    }
     let mut artifacts = BTreeMap::new();
     for name in names {
+        if !synced(&root.join(name)) {
+            return None;
+        }
         match hash_file(&root.join(name)) {
             Ok(artifact) => {
                 artifacts.insert((*name).to_owned(), artifact);
@@ -714,6 +896,9 @@ fn weigh(
                 return None;
             }
         }
+    }
+    if !synced(active_manifest) {
+        return None;
     }
     let manifest = match hash_file(active_manifest) {
         Ok(manifest) => manifest,
@@ -741,16 +926,20 @@ fn validate_runtime_attempt(
         ));
     }
     if let Some(build) = build
-        && (build.len() != 64
-            || !build
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        && !valid_digest(build)
     {
         return Err(RuntimeStateError::Invalid(
             "runtime artifact must be a lowercase SHA-256".to_owned(),
         ));
     }
     Ok(())
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn remember_disabled(state: &mut State, runtime: &str, build: &str) {
@@ -775,11 +964,14 @@ fn remember_disabled(state: &mut State, runtime: &str, build: &str) {
 }
 
 fn copy_atomic(source: &Path, destination: &Path) -> Result<()> {
-    let temporary = destination.with_extension(format!("{}.tmp", std::process::id()));
+    let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = destination.with_extension(format!("{}.{sequence}.tmp", std::process::id()));
     fs::copy(source, &temporary)?;
+    fs::File::open(&temporary)?.sync_all()?;
     fs::rename(&temporary, destination).inspect_err(|_| {
         let _ = fs::remove_file(&temporary);
     })?;
+    fs::File::open(destination.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()?;
     Ok(())
 }
 
@@ -1073,6 +1265,75 @@ mod tests {
     }
 
     #[test]
+    fn a_post_rename_transform_error_cannot_invent_an_official_attempt() {
+        const BUILD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let temp = TempDir::new("generation-transform-post-rename");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "old");
+        store.stash(&root, &NAMES);
+        write_client(&root, "new");
+        store.record("new", &root, &NAMES);
+        store.record_attempt("jspi", Some(BUILD), true).unwrap();
+
+        *store.write_failure.lock().unwrap() = Some(WriteBoundary::AfterRename);
+        assert_eq!(
+            store.disable_transform("jspi", BUILD),
+            Err(RuntimeStateError::NotSaved)
+        );
+        drop(store);
+
+        let reopened = Store::open(state);
+        assert_eq!(reopened.recover(&root), Recovery::None);
+        assert!(!reopened.rejected("new"));
+        assert_eq!(
+            fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
+            "new:Gw.jspi.js"
+        );
+    }
+
+    #[test]
+    fn state_writes_fail_closed_at_every_durable_boundary() {
+        for boundary in [
+            WriteBoundary::BeforeTemporary,
+            WriteBoundary::StorageFull,
+            WriteBoundary::AfterWrite,
+            WriteBoundary::AfterFileSync,
+            WriteBoundary::AfterRename,
+            WriteBoundary::AfterDirectorySync,
+        ] {
+            let temp = TempDir::new("generation-state-boundary");
+            let root = temp.0.join("web");
+            let state = temp.0.join("state");
+            let store = proven(state.clone(), &root, "working");
+            *store.write_failure.lock().unwrap() = Some(boundary);
+            assert_eq!(
+                store.record_attempt("jspi", None, false),
+                Err(RuntimeStateError::NotSaved)
+            );
+            drop(store);
+            assert!(
+                serde_json::from_slice::<State>(&fs::read(state.join("state.json")).unwrap())
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn failed_generation_record_restores_in_memory_authority() {
+        let temp = TempDir::new("generation-record-failure");
+        let root = temp.0.join("web");
+        let store = proven(temp.0.join("state"), &root, "old");
+        write_client(&root, "new");
+        *store.write_failure.lock().unwrap() = Some(WriteBoundary::StorageFull);
+        assert!(!store.record("new", &root, &NAMES));
+        assert_eq!(
+            store.state.lock().unwrap().current.as_ref().unwrap().id,
+            "old"
+        );
+    }
+
+    #[test]
     fn a_later_transform_failure_is_not_hidden_by_a_proven_generation() {
         const BUILD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let temp = TempDir::new("generation-proven-transform");
@@ -1264,7 +1525,7 @@ mod tests {
         fs::create_dir(state.join("state.json")).unwrap();
 
         assert!(!store.stash(&root, &NAMES));
-        assert!(!state.join("previous").exists());
+        assert!(state.join("previous").is_dir());
         assert!(store.state.lock().unwrap().previous.is_none());
     }
 
