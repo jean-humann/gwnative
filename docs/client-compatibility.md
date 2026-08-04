@@ -10,6 +10,25 @@ The governing rule is:
 > Official ArenaNet client files are the availability path. Certification may
 > enable optional features, but it may never be required to start the game.
 
+## Support evidence contract
+
+[`support-matrix.json`](../support-matrix.json) is the machine-readable contract
+for Train A platform, runtime, rendering, fallback, offline, update, and
+rollback evidence. Its validator rejects missing cells, invented hosted runner
+labels, and pass claims without recorded evidence.
+
+The current official GitHub-hosted Apple Silicon inventory covers `macos-15`
+and `macos-26`. CI uses both: macOS 15 exercises the deployment floor with
+forced Asyncify, while macOS 26 exercises automatic selection and forced
+Asyncify, including direct and isolated rendering where applicable. GitHub
+does not currently publish a `macos-27` hosted image. Both macOS 27 cells
+therefore remain explicitly blocked until an authorized self-hosted canary runs
+automatic JSPI and forced Asyncify on the exact release commit. A release must
+not infer those cells from macOS 26 results.
+
+`lastEvidence` stays `null` until the named command or workflow actually runs.
+The matrix describes required proof; its presence is not itself a pass.
+
 The [architecture guide](architecture.md) describes the rest of the
 application. The [certification runbook](certification.md) describes how a new
 signed certificate is reviewed and published.

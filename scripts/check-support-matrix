@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Validate Train A's machine-readable platform and recovery evidence plan."""
+
+from __future__ import annotations
+
+import copy
+import json
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+MATRIX = ROOT / "support-matrix.json"
+HOSTED = {"macos-15", "macos-26"}
+REQUIRED = {
+    "deployment-floor-asyncify",
+    "macos-26-automatic",
+    "macos-26-asyncify",
+    "macos-27-jspi",
+    "macos-27-asyncify",
+    "unknown-certificate",
+    "corrupt-derived-module",
+    "official-fallback",
+    "jspi-to-asyncify-fresh-realm",
+    "offline-bundled-certificate",
+    "install-update",
+    "rollback",
+}
+RUNTIMES = {
+    "asyncify-forced",
+    "automatic",
+    "jspi-automatic",
+    "official-fallback",
+    "official-unmodified",
+    "jspi-then-asyncify",
+    "official-or-certified",
+    "not-applicable",
+}
+
+
+class MatrixError(RuntimeError):
+    pass
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise MatrixError(message)
+
+
+def validate(document: object) -> None:
+    require(isinstance(document, dict), "matrix root must be an object")
+    require(document.get("schemaVersion") == 1, "unsupported matrix schema")
+    inventory = document.get("runnerInventory")
+    require(isinstance(inventory, dict), "runnerInventory must be an object")
+    source = inventory.get("source", "")
+    require(
+        isinstance(source, str) and source.startswith("https://github.com/actions/runner-images"),
+        "runner inventory must cite GitHub's official image repository",
+    )
+    hosted = inventory.get("hosted")
+    require(isinstance(hosted, dict), "hosted runner inventory must be an object")
+    require(set(hosted) == HOSTED, "only verified macos-15 and macos-26 labels are hosted")
+    for label, detail in hosted.items():
+        require(detail.get("availability") == "available", f"{label} is not marked available")
+        require(detail.get("architecture") == "arm64", f"{label} must exercise arm64")
+
+    future = inventory.get("macos-27")
+    require(isinstance(future, dict), "macos-27 inventory entry is missing")
+    require(future.get("availability") == "unavailable", "macOS 27 is not a hosted pass")
+    require(future.get("runner") is None, "macOS 27 must not invent a hosted runner label")
+    require("releaseGate" in future, "unavailable macOS 27 needs an explicit release gate")
+
+    cells = document.get("cells")
+    require(isinstance(cells, list), "cells must be an array")
+    ids = [cell.get("id") for cell in cells if isinstance(cell, dict)]
+    require(len(ids) == len(cells), "every cell must be an object with an id")
+    require(len(ids) == len(set(ids)), "matrix cell ids must be unique")
+    require(set(ids) == REQUIRED, "matrix cells do not exactly cover Train A")
+
+    for cell in cells:
+        identifier = cell["id"]
+        require(cell.get("runtime") in RUNTIMES, f"{identifier} has an unknown runtime mode")
+        rendering = cell.get("rendering")
+        require(
+            isinstance(rendering, list) and set(rendering) <= {"direct", "isolated"},
+            f"{identifier} has an invalid rendering set",
+        )
+        evidence = cell.get("evidence")
+        require(
+            isinstance(evidence, list)
+            and evidence
+            and all(isinstance(command, str) and command for command in evidence),
+            f"{identifier} needs explicit evidence commands",
+        )
+        require(cell.get("lastEvidence") is None, f"{identifier} claims evidence not run here")
+        execution, runner = cell.get("execution"), cell.get("runner")
+        if execution == "hosted":
+            require(runner in HOSTED, f"{identifier} uses an unverified hosted runner")
+        elif execution == "manual-blocked":
+            require(identifier.startswith("macos-27-"), "only macOS 27 may be manual-blocked")
+            require(runner is None, f"{identifier} must not claim an unavailable runner")
+        else:
+            raise MatrixError(f"{identifier} has an invalid execution class")
+
+    by_id = {cell["id"]: cell for cell in cells}
+    require(
+        by_id["deployment-floor-asyncify"]["runner"] == "macos-15",
+        "deployment floor must run on macos-15",
+    )
+    for identifier in ("macos-27-jspi", "macos-27-asyncify"):
+        require(
+            by_id[identifier]["execution"] == "manual-blocked",
+            f"{identifier} must remain an explicit blocker",
+        )
+
+
+def self_test(document: dict) -> None:
+    validate(document)
+    bad = copy.deepcopy(document)
+    bad["runnerInventory"]["macos-27"]["runner"] = "macos-27"
+    try:
+        validate(bad)
+    except MatrixError:
+        pass
+    else:
+        raise MatrixError("self-test accepted an invented macOS 27 hosted label")
+
+    bad = copy.deepcopy(document)
+    bad["cells"][0]["lastEvidence"] = {"conclusion": "passed"}
+    try:
+        validate(bad)
+    except MatrixError:
+        pass
+    else:
+        raise MatrixError("self-test accepted an unevidenced pass claim")
+
+
+def main(arguments: list[str]) -> int:
+    if arguments not in ([], ["--self-test"]):
+        raise MatrixError("usage: scripts/check-support-matrix [--self-test]")
+    document = json.loads(MATRIX.read_bytes())
+    validate(document)
+    if arguments:
+        self_test(document)
+    print(f"support matrix: {len(document['cells'])} required cells, unavailable gates explicit")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except (OSError, ValueError, MatrixError) as error:
+        print(f"support matrix: {error}", file=sys.stderr)
+        raise SystemExit(1)
