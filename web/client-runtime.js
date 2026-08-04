@@ -89,8 +89,15 @@ export async function supportsJspi(
 export async function selectClient(
   wasm = WebAssembly,
   forced = globalThis.__gwnativeClientRuntime,
+  plan = { failedOfficial: [] },
 ) {
-  if (forced === 'asyncify') return CLIENTS.asyncify;
+  const failed = new Set(plan.failedOfficial ?? []);
+  if (forced === 'asyncify') {
+    if (failed.has('asyncify')) {
+      throw new Error('The forced Asyncify runtime already failed for these exact official bytes.');
+    }
+    return CLIENTS.asyncify;
+  }
 
   const jspi = await supportsJspi(wasm);
   if (forced === 'jspi' && !jspi) {
@@ -98,7 +105,39 @@ export async function selectClient(
       'JSPI was requested for this test, but this WKWebView failed its suspend/resume probe.',
     );
   }
-  return jspi ? CLIENTS.jspi : CLIENTS.asyncify;
+  if (jspi && !failed.has('jspi')) return CLIENTS.jspi;
+  if (!failed.has('asyncify')) return CLIENTS.asyncify;
+  throw new Error('No compatible official runtime remains after the exact recorded failures.');
+}
+
+/** Read the durable launch plan before selecting any glue in this realm. */
+export async function readRuntimePlan(options = {}) {
+  const send = options.fetch ?? fetch;
+  const token = options.token ?? globalThis.__gwnativeToken ?? '';
+  const deadlineMs = options.deadlineMs ?? RUNTIME_STATE_DEADLINE_MS;
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), deadlineMs);
+  try {
+    const response = await send('__runtime-plan', {
+      headers: { 'X-Gwnative-Token': token },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error((await response.text()) || `runtime plan failed: ${response.status}`);
+    }
+    const plan = await response.json();
+    if (
+      !plan
+      || Object.keys(plan).some((key) => key !== 'failedOfficial')
+      || !Array.isArray(plan.failedOfficial)
+      || plan.failedOfficial.some((runtime) => runtime !== 'jspi' && runtime !== 'asyncify')
+    ) {
+      throw new Error('the host returned an invalid runtime plan');
+    }
+    return { failedOfficial: [...new Set(plan.failedOfficial)] };
+  } finally {
+    clearTimeout(deadline);
+  }
 }
 
 /**
@@ -180,4 +219,28 @@ export async function deliverRuntimeProof(path, body, options = {}) {
     }
   }
   throw failure;
+}
+
+/**
+ * Persist an exact original-runtime failure, then leave the contaminated
+ * WKWebView behind. The host starts the successor before this page disappears.
+ */
+export async function transitionRuntimeFailure(launch, options = {}) {
+  const post = options.post ?? postRuntimeState;
+  const relaunch = options.relaunch;
+  const result = await post('__runtime-failed', { launch });
+  if (result?.outcome === 'exhausted') {
+    throw new Error('Both usable official runtimes are exhausted; no predecessor was removed.');
+  }
+  if (
+    result?.outcome !== 'predecessor-restored'
+    && !(result?.outcome === 'try-runtime' && result.runtime === 'asyncify')
+  ) {
+    throw new Error('the host returned an invalid runtime failure transition');
+  }
+  if (typeof relaunch !== 'function') {
+    throw new Error('runtime transition has no fresh-realm relaunch');
+  }
+  await relaunch();
+  return result;
 }

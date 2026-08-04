@@ -5,8 +5,10 @@ import {
   applyClientLimits,
   deliverRuntimeProof,
   postRuntimeState,
+  readRuntimePlan,
   selectClient,
   supportsJspi,
+  transitionRuntimeFailure,
 } from './client-runtime.js';
 
 const workingJspi = {
@@ -64,6 +66,75 @@ describe('client runtime selection', () => {
       selectClient({}, 'jspi'),
       /failed its suspend\/resume probe/,
     );
+  });
+
+  it('selects Asyncify in a fresh realm after the exact JSPI runtime failed', async () => {
+    assert.equal(
+      (await selectClient(workingJspi, undefined, { failedOfficial: ['jspi'] })).mode,
+      'asyncify',
+    );
+    assert.equal(
+      (await selectClient(workingJspi, 'jspi', { failedOfficial: ['jspi'] })).mode,
+      'asyncify',
+      'a bring-up preference cannot create a persisted crash loop',
+    );
+  });
+
+  it('refuses an exhausted or force-selected failed official runtime', async () => {
+    await assert.rejects(
+      selectClient(workingJspi, undefined, { failedOfficial: ['jspi', 'asyncify'] }),
+      /No compatible official runtime remains/,
+    );
+    await assert.rejects(
+      selectClient(workingJspi, 'asyncify', { failedOfficial: ['asyncify'] }),
+      /forced Asyncify runtime already failed/,
+    );
+  });
+
+  it('validates the host runtime plan before using it', async () => {
+    const response = (body) => ({
+      ok: true,
+      async json() { return body; },
+    });
+    assert.deepEqual(
+      await readRuntimePlan({
+        fetch: async () => response({ failedOfficial: ['jspi', 'jspi'] }),
+      }),
+      { failedOfficial: ['jspi'] },
+    );
+    await assert.rejects(
+      readRuntimePlan({ fetch: async () => response({ failedOfficial: ['native'] }) }),
+      /invalid runtime plan/,
+    );
+  });
+
+  it('persists an official failure before requesting a fresh WKWebView', async () => {
+    const order = [];
+    const launch = { runtime: 'jspi', mode: 'original', nonce: 'exact' };
+    const result = await transitionRuntimeFailure(launch, {
+      post: async (path, body) => {
+        order.push(['persist', path, body]);
+        return { outcome: 'try-runtime', runtime: 'asyncify' };
+      },
+      relaunch: async () => order.push(['relaunch']),
+    });
+    assert.deepEqual(result, { outcome: 'try-runtime', runtime: 'asyncify' });
+    assert.deepEqual(order, [
+      ['persist', '__runtime-failed', { launch }],
+      ['relaunch'],
+    ]);
+  });
+
+  it('does not relaunch when both runtimes are exhausted without a predecessor', async () => {
+    let relaunched = false;
+    await assert.rejects(
+      transitionRuntimeFailure({}, {
+        post: async () => ({ outcome: 'exhausted' }),
+        relaunch: async () => { relaunched = true; },
+      }),
+      /no predecessor was removed/,
+    );
+    assert.equal(relaunched, false);
   });
 
   it('applies only the independently selected JSPI certificate', () => {

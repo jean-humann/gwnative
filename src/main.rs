@@ -54,7 +54,7 @@ mod webview;
 mod window;
 mod ws;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use objc2_app_kit::{
@@ -397,6 +397,7 @@ fn main() {
         &invocation,
         paths.support_dir(),
         profile.website_data_store_id(),
+        (root, generations),
     );
 }
 
@@ -815,6 +816,7 @@ fn run_windowed(
     invocation: &cli::Invocation,
     support_dir: &Path,
     website_data_store_id: Option<&str>,
+    recovery: (PathBuf, Arc<generation::Store>),
 ) {
     let mtm = MainThreadMarker::new().expect("main thread");
     let app = NSApplication::sharedApplication(mtm);
@@ -874,7 +876,14 @@ fn run_windowed(
     commands::attach(&webview);
     // After the load has been asked for, which is fine: the delegate is
     // consulted when the navigation is decided, not when it is requested.
-    renderer::guard(mtm, &webview, &format!("http://{}", loopback.addr));
+    let (root, generations) = recovery;
+    renderer::guard(
+        mtm,
+        &webview,
+        &format!("http://{}", loopback.addr),
+        root,
+        generations,
+    );
     // Before `run`, because the first thing it decides — whether closing the
     // window quits — can be asked the moment the window appears.
     app::own_lifecycle(mtm, &webview);

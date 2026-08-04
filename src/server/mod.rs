@@ -871,4 +871,107 @@ mod tests {
             500
         );
     }
+
+    #[test]
+    fn cross_runtime_plan_is_exact_persisted_and_token_gated() {
+        const NONCE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const NEXT_NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let temp = TempDir::new("server-runtime-plan");
+        let dir = temp.0.clone();
+        let token = "test-token";
+        let generations = Arc::new(generation::Store::open(dir.join("generations")));
+        let names = [
+            "Gw.jspi.js",
+            "Gw.jspi.wasm",
+            "Gw.js",
+            "Gw.wasm",
+            "version.json",
+        ];
+        for name in names {
+            std::fs::write(dir.join(name), name).unwrap();
+        }
+        std::fs::write(dir.join("manifest.cache"), b"manifest").unwrap();
+        assert!(generations.record("test", &dir, &names));
+        let loopback = spawn(Config {
+            root: dir.clone(),
+            snapshot: None,
+            recorder: Recorder::open(dir.join("diagnostics")),
+            derived_wasm: wasm::DerivedModules::default(),
+            settings: Arc::new(settings::ScopedStore::single(settings::Store::open(
+                dir.join("settings.json"),
+            ))),
+            generations: Arc::clone(&generations),
+            tokens: capability_tokens(token),
+            port: PORT,
+            credential_account: "login".into(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            request(loopback.addr, "GET", "/__runtime-plan", None, "").0,
+            403
+        );
+        assert_eq!(
+            request(loopback.addr, "GET", "/__runtime-plan", Some(token), ""),
+            (200, r#"{"failedOfficial":[]}"#.to_owned())
+        );
+
+        let attempt = |runtime: &str, nonce: &str| {
+            request(
+                loopback.addr,
+                "POST",
+                "/__runtime",
+                Some(token),
+                &format!(
+                    r#"{{"runtime":"{runtime}","build":null,"transformed":false,"nonce":"{nonce}"}}"#
+                ),
+            )
+        };
+        let (status, jspi) = attempt("jspi", NONCE);
+        assert_eq!(status, 200);
+        let mut stale: serde_json::Value = serde_json::from_str(&jspi).unwrap();
+        stale["nonce"] = NEXT_NONCE.into();
+        assert_eq!(
+            request(
+                loopback.addr,
+                "POST",
+                "/__runtime-failed",
+                Some(token),
+                &format!(r#"{{"launch":{stale}}}"#),
+            )
+            .0,
+            400
+        );
+        assert_eq!(
+            request(
+                loopback.addr,
+                "POST",
+                "/__runtime-failed",
+                Some(token),
+                &format!(r#"{{"launch":{jspi}}}"#),
+            ),
+            (
+                200,
+                r#"{"outcome":"try-runtime","runtime":"asyncify"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            request(loopback.addr, "GET", "/__runtime-plan", Some(token), ""),
+            (200, r#"{"failedOfficial":["jspi"]}"#.to_owned())
+        );
+
+        let (status, asyncify) = attempt("asyncify", NEXT_NONCE);
+        assert_eq!(status, 200);
+        assert_eq!(
+            request(
+                loopback.addr,
+                "POST",
+                "/__runtime-failed",
+                Some(token),
+                &format!(r#"{{"launch":{asyncify}}}"#),
+            ),
+            (200, r#"{"outcome":"exhausted"}"#.to_owned())
+        );
+        assert!(!generations.rejected("test"));
+    }
 }

@@ -39,6 +39,8 @@
 //! back to the older one, and neither is in the public protocol.
 
 use std::cell::Cell;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use block2::DynBlock;
 use objc2::rc::Retained;
@@ -51,12 +53,17 @@ use objc2_web_kit::{
     WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKUIDelegate, WKWebView,
 };
 
+use crate::{app, generation, relaunch};
+
 pub struct Ivars {
     /// `http://127.0.0.1:38112`, scheme and authority and nothing else. See
     /// [`permits`] for what the absent trailing slash is doing.
     origin: String,
     /// Whether the one automatic reload has been spent.
     recovered: Cell<bool>,
+    root: PathBuf,
+    generations: Arc<generation::Store>,
+    runtime_fingerprint: Option<String>,
 }
 
 define_class!(
@@ -109,10 +116,40 @@ define_class!(
         fn terminated(&self, webview: &WKWebView) {
             if self.ivars().recovered.replace(true) {
                 note!("[renderer] the web content process died again; not reloading");
-                explain();
+                explain(
+                    "The game's renderer closed twice in a row, so it was not restarted again. \
+                     Quit and reopen Guild Wars to try once more.",
+                );
                 return;
             }
-            note!("[renderer] the web content process died; reloading");
+            let _ = self.ivars().generations.recover(&self.ivars().root);
+            let fingerprint = self
+                .ivars()
+                .generations
+                .runtime_fingerprint(&self.ivars().root);
+            if fingerprint != self.ivars().runtime_fingerprint {
+                note!("[renderer] the runtime context changed; starting a fresh app realm");
+                match relaunch::start() {
+                    Ok(()) => app::request_quit(),
+                    Err(reason) => {
+                        note!("[renderer] fresh-realm relaunch failed: {reason}");
+                        explain(
+                            "The renderer closed before the selected runtime was proven, and the \
+                             fresh-runtime restart could not be started. Quit and reopen Guild Wars \
+                             to continue the fallback safely.",
+                        );
+                    }
+                }
+                return;
+            }
+            if fingerprint.is_none() {
+                explain(
+                    "The renderer closed while its client files could not be verified. Quit and \
+                     reopen Guild Wars to avoid mixing runtime files.",
+                );
+                return;
+            }
+            note!("[renderer] the proven web content process died; reloading once");
             // `reload` rather than `reloadFromOrigin`: the artifacts are served
             // with `no-cache`, so they revalidate anyway, and reloading from
             // origin would throw away the compiled form of an 8.2 MB module
@@ -153,10 +190,19 @@ define_class!(
 );
 
 impl Guard {
-    fn new(mtm: MainThreadMarker, origin: String) -> Retained<Self> {
+    fn new(
+        mtm: MainThreadMarker,
+        origin: String,
+        root: PathBuf,
+        generations: Arc<generation::Store>,
+    ) -> Retained<Self> {
+        let runtime_fingerprint = generations.runtime_fingerprint(&root);
         let this = Self::alloc(mtm).set_ivars(Ivars {
             origin,
             recovered: Cell::new(false),
+            root,
+            generations,
+            runtime_fingerprint,
         });
         // SAFETY: `NSObject`'s designated initializer, on a freshly allocated
         // instance whose ivars are set.
@@ -192,17 +238,14 @@ fn permits(origin: &str, url: &str) -> bool {
 /// Nothing about the guard is involved: which crash this is has already been
 /// decided by the caller, and what is left is a modal that belongs to the
 /// application.
-fn explain() {
+fn explain(detail: &str) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
     let alert = NSAlert::new(mtm);
     alert.setAlertStyle(NSAlertStyle::Critical);
     alert.setMessageText(&NSString::from_str("Guild Wars stopped unexpectedly"));
-    alert.setInformativeText(&NSString::from_str(
-        "The game's renderer closed twice in a row, so it was not restarted \
-         again. Quit and reopen Guild Wars to try once more.",
-    ));
+    alert.setInformativeText(&NSString::from_str(detail));
     alert.runModal();
 }
 
@@ -221,8 +264,14 @@ thread_local! {
 ///
 /// `origin` is scheme and authority with no trailing slash, as
 /// `http://127.0.0.1:38112`.
-pub fn guard(mtm: MainThreadMarker, webview: &WKWebView, origin: &str) {
-    let guard = Guard::new(mtm, origin.to_owned());
+pub fn guard(
+    mtm: MainThreadMarker,
+    webview: &WKWebView,
+    origin: &str,
+    root: PathBuf,
+    generations: Arc<generation::Store>,
+) {
+    let guard = Guard::new(mtm, origin.to_owned(), root, generations);
     let object = ProtocolObject::from_ref(&*guard);
     // SAFETY: main thread, and the delegate is kept alive below for as long as
     // the process runs.
