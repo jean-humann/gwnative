@@ -3,7 +3,7 @@
 //! A menu item with no target is performed by whatever is on the responder
 //! chain, which is how cut, paste, full screen and quit are answered without
 //! this build implementing any of them. What is left over is the handful
-//! nobody else can answer — reload the page, write a problem report, mark a
+//! nobody else can answer — restart the game realm, write a problem report, mark a
 //! slowdown, open the settings panel, say what this application is — and each
 //! of those needs an
 //! Objective-C object to receive it. That object is the only reason this half
@@ -30,7 +30,7 @@ use objc2_foundation::{
 };
 use objc2_web_kit::WKWebView;
 
-use crate::{app, diagnostics, release, report, settings, updater, window};
+use crate::{app, diagnostics, relaunch, release, report, settings, updater, window};
 
 /// Whether a check is already running or already on screen.
 ///
@@ -133,17 +133,20 @@ define_class!(
             }
         }
 
-        /// Load the page again from the top.
+        /// Restart the page in a fresh native process.
         ///
         /// Deliberately unguarded. The key equivalent exists only because this
-        /// menu item does, so it is not an ambient browser shortcut — and reload
-        /// is the escape hatch for a client that has already stopped answering,
-        /// exactly when another modal would be in the way.
+        /// menu item does, so it is not an ambient browser shortcut — and a
+        /// fresh-process restart is the escape hatch for a client that has
+        /// already stopped answering, exactly when another modal would be in
+        /// the way.
         #[unsafe(method(gwReloadGame:))]
         fn reload_game(&self, _sender: Option<&AnyObject>) {
-            // SAFETY: main thread — AppKit sends menu actions there.
-            unsafe {
-                self.ivars().webview.reload();
+            match relaunch::start() {
+                Ok(()) => app::request_quit(),
+                Err(_) => {
+                    note!("[gwnative] fresh-process reload could not be started");
+                }
             }
         }
 

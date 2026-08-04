@@ -18,10 +18,10 @@
 //! killed — by the jetsam pressure that a 4.2 GB streaming game invites, or by
 //! a WebGL driver fault. WKWebView does not reload itself when that happens; it
 //! leaves a blank white view and no error, which reads exactly like the app
-//! hanging. One automatic reload turns that into a re-boot the player watches
-//! happen. Only one: a client that crashes its renderer on every boot would
-//! otherwise reload forever, and a loop is worse than a message, so the second
-//! one says what happened instead.
+//! hanging. One automatic fresh-process restart turns that into a re-boot the
+//! player watches happen. Its marker survives into the successor, so a client
+//! that crashes its renderer on every boot stops visibly instead of relaunching
+//! forever.
 //!
 //! **Pointer lock.** Holding the right button rotates the camera, and the page
 //! implements that by locking the pointer and integrating `movementX`/`Y` — the
@@ -59,7 +59,8 @@ pub struct Ivars {
     /// `http://127.0.0.1:38112`, scheme and authority and nothing else. See
     /// [`permits`] for what the absent trailing slash is doing.
     origin: String,
-    /// Whether the one automatic reload has been spent.
+    /// Whether this process already handled a termination callback. The
+    /// cross-process retry budget is carried by [`relaunch::recover_renderer`].
     recovered: Cell<bool>,
     root: PathBuf,
     generations: Arc<generation::Store>,
@@ -113,7 +114,7 @@ define_class!(
         }
 
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
-        fn terminated(&self, webview: &WKWebView) {
+        fn terminated(&self, _webview: &WKWebView) {
             if self.ivars().recovered.replace(true) {
                 note!("[renderer] the web content process died again; not reloading");
                 explain(
@@ -129,7 +130,7 @@ define_class!(
                 .runtime_fingerprint(&self.ivars().root);
             if fingerprint != self.ivars().runtime_fingerprint {
                 note!("[renderer] the runtime context changed; starting a fresh app realm");
-                match relaunch::start() {
+                match relaunch::recover_renderer() {
                     Ok(()) => app::request_quit(),
                     Err(reason) => {
                         note!("[renderer] fresh-realm relaunch failed: {reason}");
@@ -149,15 +150,14 @@ define_class!(
                 );
                 return;
             }
-            note!("[renderer] the proven web content process died; reloading once");
-            // `reload` rather than `reloadFromOrigin`: the artifacts are served
-            // with `no-cache`, so they revalidate anyway, and reloading from
-            // origin would throw away the compiled form of an 8.2 MB module
-            // that is almost certainly still correct.
-            //
-            // SAFETY: main thread, and the view outlives this call — WebKit
-            // holds it while delivering to its delegate.
-            let _ = unsafe { webview.reload() };
+            note!("[renderer] the proven web content process died; starting a fresh app realm");
+            match relaunch::recover_renderer() {
+                Ok(()) => app::request_quit(),
+                Err(_) => explain(
+                    "The game's renderer closed and a fresh restart could not be started. Quit and \
+                     reopen Guild Wars to continue safely.",
+                ),
+            }
         }
     }
 
@@ -259,8 +259,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Confine `webview` to `origin`, give it one free reload, and let it lock the
-/// pointer. Main thread.
+/// Confine `webview` to `origin`, give it one bounded fresh-process recovery,
+/// and let it lock the pointer. Main thread.
 ///
 /// `origin` is scheme and authority with no trailing slash, as
 /// `http://127.0.0.1:38112`.

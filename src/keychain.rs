@@ -455,7 +455,6 @@ pub fn offer(credentials: Credentials) -> Result<(), String> {
 
 /// Register the active profile credential before any diagnostic/export sink is
 /// opened, while preserving the page's one-shot read contract.
-#[expect(dead_code)]
 pub fn prime(account: &str) -> Result<(), String> {
     if offered()
         .lock()

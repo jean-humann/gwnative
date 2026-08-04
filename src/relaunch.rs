@@ -23,8 +23,16 @@
 use std::process::Command;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
 /// Set on the successor, and read by it to know that it is one.
 const MARKER: &str = "GWNATIVE_RELAUNCHING";
+
+/// Inherited only by the one successor created for a renderer-process crash.
+/// A second automatic recovery must stop visibly instead of starting an
+/// unbounded chain of fresh native processes.
+const RENDERER_RECOVERY: &str = "GWNATIVE_RENDERER_RECOVERY";
 
 /// How long a successor waits for its predecessor to let go of the lock.
 ///
@@ -43,18 +51,108 @@ pub fn is_successor() -> bool {
 
 /// Start another copy of this app, and report whether it got off the ground.
 ///
-/// The arguments are carried over so that a relaunched `serve` run still
-/// serves rather than opening a window. The environment is inherited for the
-/// same reason: every
+/// Non-credential arguments are carried over so that a relaunched `serve` run
+/// still serves rather than opening a window. The environment is inherited for
+/// the same reason: every
 /// switch this app reads from it — the port, the web root, the trace flags —
 /// is part of what this launch *is*, and a successor that quietly dropped them
 /// would be a different app wearing the same window.
 pub fn start() -> Result<(), String> {
+    start_with_renderer_recovery(false)
+}
+
+/// Start the single automatic successor allowed after WebKit's content process
+/// disappears. Ordinary user/settings/runtime relaunches clear this marker;
+/// only a repeated renderer crash consumes the same recovery budget.
+pub fn recover_renderer() -> Result<(), String> {
+    if std::env::var_os(RENDERER_RECOVERY).is_some() {
+        return Err("the automatic renderer recovery was already used".into());
+    }
+    start_with_renderer_recovery(true)
+}
+
+fn start_with_renderer_recovery(renderer_recovery: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("this app has no path on disk: {e}"))?;
-    Command::new(&exe)
-        .args(std::env::args_os().skip(1))
+    let mut command = Command::new(&exe);
+    command
+        .args(relaunch_args(std::env::args_os().skip(1)))
         .env(MARKER, "1")
+        // The original anonymous pipe belongs only to this process. Even if
+        // the parent still has a same-numbered descriptor open, the successor
+        // must not publish a second launch's capabilities into it.
+        .env_remove("GWNATIVE_CONTROL_FD");
+    if renderer_recovery {
+        command.env(RENDERER_RECOVERY, "1");
+    } else {
+        command.env_remove(RENDERER_RECOVERY);
+    }
+    command
         .spawn()
         .map(|child| note!("[relaunch] started pid {}", child.id()))
         .map_err(|e| format!("{} could not be started: {e}", exe.display()))
+}
+
+/// Carry launch behavior forward without copying invocation credentials into a
+/// successor process. A replacement must load the just-written Keychain value,
+/// and a clear must stay clear; replaying the original argv would do neither.
+fn relaunch_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let mut kept = Vec::new();
+    let mut omit_value = false;
+    for argument in args {
+        if omit_value {
+            wipe_argument(argument);
+            omit_value = false;
+            continue;
+        }
+        let bytes = argument.as_os_str().as_bytes();
+        if matches!(bytes, b"-email" | b"-password") {
+            omit_value = true;
+            wipe_argument(argument);
+        } else if bytes.starts_with(b"-email=") || bytes.starts_with(b"-password=") {
+            wipe_argument(argument);
+        } else {
+            kept.push(argument);
+        }
+    }
+    kept
+}
+
+#[cfg(unix)]
+fn wipe_argument(argument: std::ffi::OsString) {
+    let mut bytes = argument.into_vec();
+    crate::log::wipe(&mut bytes);
+}
+
+#[cfg(not(unix))]
+fn wipe_argument(argument: std::ffi::OsString) {
+    drop(argument);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    #[test]
+    fn successors_never_inherit_invocation_credentials() {
+        let args = [
+            "serve",
+            "-email",
+            "old@example.test",
+            "-password=old-password",
+            "--profile",
+            "benchmark",
+            "-password",
+            "second-password",
+            "--offline",
+        ]
+        .map(OsString::from);
+        assert_eq!(
+            relaunch_args(args),
+            ["serve", "--profile", "benchmark", "--offline"]
+                .map(OsString::from)
+                .to_vec()
+        );
+    }
 }
