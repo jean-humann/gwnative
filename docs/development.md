@@ -152,6 +152,7 @@ All runtime overrides are optional.
 | `GWNATIVE_WEB_ROOT` | Override the official client-artifact directory; the reviewed shell stays separate |
 | `GWNATIVE_PORT` | Override loopback port `38112` |
 | `GWNATIVE_CONTROL_FD` | Inherited anonymous-pipe descriptor for explicitly requested capabilities; never a token value |
+| `GWNATIVE_BENCHMARK_EPHEMERAL_WEBKIT` | Use a non-persistent WebKit store for the hermetic benchmark's fresh named profile; the runner records and sets this itself |
 | `GWNATIVE_TRACE_HTTP` | Log each loopback HTTP request |
 | `GWNATIVE_TRACE_SOCKETS` | Log socket direction, destination class, and frame sizes only |
 | `GWNATIVE_FRAME_AUDIT` | Value `1` enables animation-callback, draw, suspension and logical-swap correlation |
