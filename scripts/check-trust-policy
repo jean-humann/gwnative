@@ -207,8 +207,9 @@ def check_repository_policy() -> None:
     reserve = job_block(certify, "reserve")
     all_workflows = "\n".join(texts.values())
     environments = [value for text in texts.values() for value in yaml_scalars(text, "environment")]
-    require(set(environments) <= {"release", "certificate-publishing"}, "workflow selects a computed or unknown environment")
+    require(set(environments) <= {"release", "certificate-publishing", "macos-27-canary"}, "workflow selects a computed or unknown environment")
     require(environments.count("certificate-publishing") == 1, "certificate environment is available outside the signer")
+    require(environments.count("macos-27-canary") == 1, "macOS 27 canary environment is missing or reused")
     require(
         all_workflows.count("CERTIFICATE_PRIVATE_KEY") == sign.count("CERTIFICATE_PRIVATE_KEY")
         and sign.count("secrets.CERTIFICATE_PRIVATE_KEY") == 1,
