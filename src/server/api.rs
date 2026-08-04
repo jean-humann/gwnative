@@ -111,8 +111,10 @@ pub(super) fn serve(
             if let Some(store) = &context.snapshot {
                 store.seal_boot_list();
             }
-            context.generations.prove();
-            no_content(stream)?;
+            match context.generations.prove() {
+                Ok(()) => no_content(stream)?,
+                Err(error) => runtime_state_failure(stream, "record the first frame", error)?,
+            }
         }
         // The client has exited cleanly and there is nothing left on screen but
         // its last frame. Answered before quitting rather than after, because
@@ -358,6 +360,7 @@ struct RuntimeAttempt {
     runtime: String,
     build: Option<String>,
     transformed: bool,
+    nonce: String,
 }
 
 fn runtime_state_failure(
@@ -385,10 +388,15 @@ fn runtime_attempt(
                 &attempt.runtime,
                 attempt.build.as_deref(),
                 attempt.transformed,
+                &attempt.nonce,
             )
         });
     match recorded {
-        Ok(()) => no_content(stream),
+        Ok(identity) => json(
+            stream,
+            200,
+            &serde_json::to_vec(&identity).unwrap_or_default(),
+        ),
         Err(error) => runtime_state_failure(stream, "record a runtime attempt", error),
     }
 }
@@ -396,8 +404,7 @@ fn runtime_attempt(
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TransformFailure {
-    runtime: String,
-    build: String,
+    launch: generation::LaunchIdentity,
 }
 
 fn transform_failed(
@@ -410,7 +417,7 @@ fn transform_failed(
         .and_then(|failure| {
             context
                 .generations
-                .disable_transform(&failure.runtime, &failure.build)
+                .disable_launch_transform(&failure.launch)
         });
     match disabled {
         Ok(()) => no_content(stream),

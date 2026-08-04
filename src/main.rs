@@ -600,9 +600,9 @@ fn install_client(
              retrying the same official client unmodified",
             &build[..12]
         ),
-        generation::Recovery::GenerationRolledBack(refused) => note!(
-            "[gwnative] official client generation {refused} never reached a first frame; \
-             restored the client and manifest from before it"
+        generation::Recovery::RuntimeFailed(launch) => note!(
+            "[gwnative] official {} runtime failed before proof; keeping both official runtimes",
+            launch.runtime
         ),
     }
 

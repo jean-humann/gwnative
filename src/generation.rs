@@ -36,19 +36,16 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 
 use crate::error::{Error, Result};
+#[cfg(test)]
+use crate::generation_state::REJECTED_KEPT;
+use crate::generation_state::{
+    DISABLED_TRANSFORMS_KEPT, DisabledTransform, LaunchState, ProofState, State, bound_history,
+    read_state, runtime_artifacts, same_runtime_tuple, valid_digest,
+};
+pub use crate::generation_state::{LaunchIdentity, RuntimeMode};
 use crate::manifest::Manifest;
 
-const FORMAT: u32 = 1;
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-/// How many refused builds to remember.
-///
-/// Long enough that a bad build stays refused for as long as it is the current
-/// one, short enough that the list cannot grow without bound. A build that
-/// falls off the end is simply tried again, which is the right outcome once it
-/// is old enough that nobody is being offered it any more.
-const REJECTED_KEPT: usize = 8;
-const DISABLED_TRANSFORMS_KEPT: usize = 256;
 
 /// The id given to a client that was on the disk before the record existed.
 ///
@@ -76,66 +73,12 @@ pub struct Generation {
     pub(crate) manifest: Option<Artifact>,
 }
 
-/// What the page actually tried on the most recent launch.
-///
-/// A transformed failure says nothing about ArenaNet's original client, so it
-/// disables only that transform. An untransformed failure is the evidence that
-/// can justify rolling the official generation back.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RuntimeAttempt {
-    runtime: String,
-    /// Domain-separated SHA-256 of runtime, artifacts, transform ABI and
-    /// selected transform output.
-    build: Option<String>,
-    transformed: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DisabledTransform {
-    runtime: String,
-    /// Domain-separated SHA-256 of runtime, artifacts, transform ABI and
-    /// selected transform output.
-    build: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct State {
-    format_version: u32,
-    current: Option<Generation>,
-    /// Whether `current` has ever reported a first frame.
-    proven: bool,
-    /// The set `current` replaced, whose files are stashed in `previous/`.
-    previous: Option<Generation>,
-    rejected: Vec<String>,
-    #[serde(default)]
-    attempt: Option<RuntimeAttempt>,
-    #[serde(default)]
-    disabled_transforms: Vec<DisabledTransform>,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            format_version: FORMAT,
-            current: None,
-            proven: false,
-            previous: None,
-            rejected: Vec::new(),
-            attempt: None,
-            disabled_transforms: Vec::new(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Recovery {
     None,
     InstallationRestored,
     TransformDisabled { runtime: String, build: String },
-    GenerationRolledBack(String),
+    RuntimeFailed(LaunchIdentity),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -187,39 +130,6 @@ fn hash_file(path: &Path) -> Result<Artifact> {
     })
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StateHeader {
-    format_version: u64,
-}
-
-fn read_state(bytes: &[u8]) -> (State, Option<u64>) {
-    match serde_json::from_slice::<StateHeader>(bytes) {
-        Ok(header) if header.format_version == u64::from(FORMAT) => {
-            match serde_json::from_slice(bytes) {
-                Ok(state) => (state, None),
-                Err(error) => {
-                    note!(
-                        "[generation] the record is unreadable ({error}); starting without authority"
-                    );
-                    (State::default(), None)
-                }
-            }
-        }
-        Ok(header) => {
-            note!(
-                "[generation] refusing unknown state format {}; leaving it untouched",
-                header.format_version
-            );
-            (State::default(), Some(header.format_version))
-        }
-        Err(error) => {
-            note!("[generation] the record is unreadable ({error}); starting without authority");
-            (State::default(), None)
-        }
-    }
-}
-
 pub struct Store {
     dir: PathBuf,
     active_manifest: PathBuf,
@@ -233,11 +143,11 @@ pub struct Store {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WriteBoundary {
     BeforeTemporary,
-    StorageFull,
     AfterWrite,
     AfterFileSync,
     AfterRename,
     AfterDirectorySync,
+    StorageFull,
 }
 
 impl Store {
@@ -254,7 +164,7 @@ impl Store {
             Err(_) => (State::default(), None),
         };
         let state_path = if future_format.is_some() {
-            dir.join("state.compat-v1.json")
+            dir.join("state.compat-v2.json")
         } else {
             path
         };
@@ -445,36 +355,94 @@ impl Store {
         runtime: &str,
         build: Option<&str>,
         transformed: bool,
-    ) -> std::result::Result<(), RuntimeStateError> {
+        nonce: &str,
+    ) -> std::result::Result<LaunchIdentity, RuntimeStateError> {
         validate_runtime_attempt(runtime, build, transformed)?;
+        validate_launch_nonce(nonce)?;
         let mut state = self.state.lock().unwrap();
-        let before = state.clone();
-        state.attempt = Some(RuntimeAttempt {
+        let current = state.current.as_ref().ok_or_else(|| {
+            RuntimeStateError::Invalid("no installed generation can be launched".to_owned())
+        })?;
+        let (glue, wasm) = runtime_artifacts(runtime);
+        let artifact = |name: &str| {
+            current.artifacts.get(name).ok_or_else(|| {
+                RuntimeStateError::Invalid(format!("the installed generation has no {name}"))
+            })
+        };
+        let launch = LaunchIdentity {
+            generation_id: current.id.clone(),
             runtime: runtime.to_owned(),
-            build: build.map(str::to_owned),
-            transformed,
-        });
+            official_glue_sha256: artifact(glue)?.hash.clone(),
+            official_wasm_sha256: artifact(wasm)?.hash.clone(),
+            mode: if transformed {
+                RuntimeMode::Derived
+            } else {
+                RuntimeMode::Original
+            },
+            transform_abi: transformed.then_some(crate::wasm::TRANSFORM_ABI),
+            compatibility_id: transformed.then(|| build.unwrap().to_owned()),
+            nonce: nonce.to_owned(),
+        };
+        if state
+            .failed_runtimes
+            .iter()
+            .any(|failed| same_runtime_tuple(failed, &launch))
+        {
+            return Err(RuntimeStateError::Invalid(
+                "this exact runtime already failed".to_owned(),
+            ));
+        }
+        let previous = std::mem::replace(
+            &mut state.launch_state,
+            LaunchState::AttemptingRuntime(launch.clone()),
+        );
         if !self.save(&state) {
-            *state = before;
+            state.launch_state = previous;
+            return Err(RuntimeStateError::NotSaved);
+        }
+        Ok(launch)
+    }
+
+    /// The derived module failed before gameplay, so remember to serve the
+    /// exact official module for this runtime/artifact from now on.
+    pub fn disable_launch_transform(
+        &self,
+        failed: &LaunchIdentity,
+    ) -> std::result::Result<(), RuntimeStateError> {
+        let mut state = self.state.lock().unwrap();
+        let LaunchState::AttemptingRuntime(launch) = &state.launch_state else {
+            return Err(RuntimeStateError::Invalid(
+                "no derived runtime is being attempted".to_owned(),
+            ));
+        };
+        if launch != failed || launch.mode != RuntimeMode::Derived {
+            return Err(RuntimeStateError::Invalid(
+                "the transform failure does not match the active launch".to_owned(),
+            ));
+        }
+        let build = failed.compatibility_id.as_deref().ok_or_else(|| {
+            RuntimeStateError::Invalid("a derived launch has no compatibility identity".to_owned())
+        })?;
+        let previous_disabled = state.disabled_transforms.clone();
+        remember_disabled(&mut state, &failed.runtime, build);
+        state.launch_state = LaunchState::Idle;
+        if !self.save(&state) {
+            state.disabled_transforms = previous_disabled;
+            state.launch_state = LaunchState::AttemptingRuntime(failed.clone());
             return Err(RuntimeStateError::NotSaved);
         }
         Ok(())
     }
 
-    /// The derived module failed before gameplay, so remember to serve the
-    /// exact official module for this runtime/artifact from now on.
+    #[cfg(test)]
     pub fn disable_transform(
         &self,
         runtime: &str,
         build: &str,
     ) -> std::result::Result<(), RuntimeStateError> {
-        validate_runtime_attempt(runtime, Some(build), true)?;
         let mut state = self.state.lock().unwrap();
         let before = state.clone();
         remember_disabled(&mut state, runtime, build);
-        // Persist the derived failure on its own. The page records the official
-        // retry separately, immediately before that module can execute.
-        state.attempt = None;
         if !self.save(&state) {
             *state = before;
             return Err(RuntimeStateError::NotSaved);
@@ -499,17 +467,20 @@ impl Store {
         // predates this sync and remains a rollback target; keep it while the
         // current files are still exact, restore it only when they are not.
         if let Some(previous) = state.previous.clone() {
-            let live_is_expected = if state.proven {
+            let gameplay_proven = matches!(state.proof_state, Some(ProofState::GameplayProven(_)));
+            let live_is_expected = if gameplay_proven {
                 generation_matches(root, &self.active_manifest, &previous).is_ok()
             } else {
                 state.current.as_ref().is_some_and(|current| {
                     generation_matches(root, &self.active_manifest, current).is_ok()
                 })
             };
-            if state.proven && live_is_expected {
-                let previous = state.previous.take();
+            if gameplay_proven && live_is_expected {
+                let saved_previous = state.previous.take();
+                let saved_proof = state.previous_proof.take();
                 if !self.save(&state) {
-                    state.previous = previous;
+                    state.previous = saved_previous;
+                    state.previous_proof = saved_proof;
                     return Recovery::None;
                 }
                 let _ = fs::remove_dir_all(self.dir.join("previous"));
@@ -518,9 +489,9 @@ impl Store {
                     Ok(()) => {
                         let before = state.clone();
                         state.current = Some(previous);
-                        state.proven = true;
+                        state.proof_state = state.previous_proof.take();
+                        state.launch_state = LaunchState::Idle;
                         state.previous = None;
-                        state.attempt = None;
                         if !self.save(&state) {
                             *state = before;
                             return Recovery::None;
@@ -538,7 +509,7 @@ impl Store {
             }
         }
 
-        let Some(attempt) = state.attempt.take() else {
+        let LaunchState::AttemptingRuntime(launch) = state.launch_state.clone() else {
             return Recovery::None;
         };
         // A transform can arrive later than the official client generation
@@ -546,72 +517,31 @@ impl Store {
         // proven when this exact transform fails. Judge the transform before
         // consulting the generation proof so it cannot become permanently
         // crash-looped behind an older successful first frame.
-        if attempt.transformed {
-            let Some(build) = attempt.build else {
-                self.save(&state);
+        if launch.mode == RuntimeMode::Derived {
+            let Some(build) = launch.compatibility_id.clone() else {
                 return Recovery::None;
             };
             let before = state.clone();
-            remember_disabled(&mut state, &attempt.runtime, &build);
+            remember_disabled(&mut state, &launch.runtime, &build);
+            state.launch_state = LaunchState::Idle;
             if !self.save(&state) {
                 *state = before;
                 return Recovery::None;
             }
             return Recovery::TransformDisabled {
-                runtime: attempt.runtime,
+                runtime: launch.runtime,
                 build,
             };
         }
-        if state.proven {
-            // The exact installed generation has reached a first frame before.
-            // A later unmodified attempt that did not is not evidence that an
-            // ArenaNet patch is bad, and there is no unproven installation to
-            // undo. Clear the completed attempt and keep the known client.
-            if !self.save(&state) {
-                state.attempt = Some(attempt);
-            }
-            return Recovery::None;
-        }
-        let (Some(current), Some(previous)) = (state.current.clone(), state.previous.clone())
-        else {
-            if !self.save(&state) {
-                state.attempt = Some(attempt);
-            }
-            return Recovery::None;
-        };
-
-        if let Err(reason) = self.restore_recorded(root, &previous) {
-            note!("[generation] cannot roll back — {reason}");
-            self.save(&state);
-            return Recovery::None;
-        }
-
-        state.rejected.push(current.id.clone());
-        let excess = state.rejected.len().saturating_sub(REJECTED_KEPT);
-        state.rejected.drain(..excess);
-        state.current = Some(previous);
-        // The set being restored is one that booted here before, which is what
-        // being proven means. Nothing is left to fall back to, and nothing needs
-        // to be: the next sync stashes this one before replacing it.
-        state.proven = true;
-        state.previous = None;
-        state.attempt = None;
+        let before = state.clone();
+        state.failed_runtimes.push(launch.clone());
+        bound_history(&mut state);
+        state.launch_state = LaunchState::FailedRuntime(launch.clone());
         if !self.save(&state) {
+            *state = before;
             return Recovery::None;
         }
-        let _ = fs::remove_dir_all(self.dir.join("previous"));
-        Recovery::GenerationRolledBack(current.id)
-    }
-
-    #[cfg(test)]
-    fn roll_back(&self, root: &Path) -> Option<String> {
-        self.record_attempt("asyncify", None, false).unwrap();
-        match self.recover(root) {
-            Recovery::GenerationRolledBack(id) => Some(id),
-            Recovery::None
-            | Recovery::InstallationRestored
-            | Recovery::TransformDisabled { .. } => None,
-        }
+        Recovery::RuntimeFailed(launch)
     }
 
     /// Copy the current artifacts aside so a sync can be undone.
@@ -630,8 +560,8 @@ impl Store {
         if state.previous.is_some() {
             return false;
         }
-        if !state.proven {
-            return true;
+        if !matches!(state.proof_state, Some(ProofState::GameplayProven(_))) {
+            return state.current.is_none();
         }
         let Some(mut current) = state.current.clone() else {
             return true;
@@ -682,8 +612,11 @@ impl Store {
             return false;
         }
         let prior_previous = state.previous.replace(current);
+        let proof = state.proof_state.clone().unwrap();
+        let prior_previous_proof = state.previous_proof.replace(proof);
         if !self.save(&state) {
             state.previous = prior_previous;
+            state.previous_proof = prior_previous_proof;
             return false;
         }
         true
@@ -729,27 +662,32 @@ impl Store {
             return false;
         };
         let mut state = self.state.lock().unwrap();
-        let same = state
-            .current
-            .as_ref()
-            .is_some_and(|current| current.id == id);
-        let before = state.clone();
-        state.current = Some(Generation {
+        let generation = Generation {
             id: id.to_owned(),
             artifacts,
             manifest: Some(manifest),
-        });
-        state.proven = same && state.proven;
-        state.attempt = None;
-        if state.proven {
-            // And with nothing to undo, nothing to undo it with.
+        };
+        let same = state
+            .current
+            .as_ref()
+            .is_some_and(|current| current.id == id && current.artifacts == generation.artifacts);
+        let before = state.clone();
+        state.current = Some(generation);
+        if !same {
+            state.proof_state = Some(ProofState::InstalledUnproven);
+            state.failed_runtimes.clear();
+        }
+        state.launch_state = LaunchState::Idle;
+        let proven = same && matches!(state.proof_state, Some(ProofState::GameplayProven(_)));
+        if proven {
             state.previous = None;
+            state.previous_proof = None;
         }
         if !self.save(&state) {
             *state = before;
             return false;
         }
-        if state.proven {
+        if proven {
             note!("[generation] client generation {id} reinstalled; it had already booted here");
         } else {
             note!("[generation] client generation {id} installed, not yet proven");
@@ -768,9 +706,7 @@ impl Store {
     /// some future patch happens to replace it. Hashing it once is a single pass
     /// over nine megabytes and makes every later launch a real check.
     ///
-    /// Adopted proven, which is not a fiction: this set was here before the
-    /// process started, so either it has booted or the only thing to roll back
-    /// to is nothing at all. Its id is deliberately not a generation id — no manifest
+    /// Its id is deliberately not a generation id — no manifest
     /// can produce this string — because what is on the disk is known but which
     /// build it came from is not.
     pub fn adopt(&self, root: &Path, names: &[&'static str]) {
@@ -787,8 +723,8 @@ impl Store {
             artifacts,
             manifest: Some(manifest),
         });
-        state.proven = true;
-        state.attempt = None;
+        state.proof_state = Some(ProofState::InstalledUnproven);
+        state.launch_state = LaunchState::Idle;
         if !self.save(&state) {
             *state = before;
             return;
@@ -801,26 +737,25 @@ impl Store {
     /// Idempotent, and cheap when there is nothing to do: this is called from a
     /// request handler on a route the page hits once per launch, and every
     /// launch after the first finds the set already proven.
-    pub fn prove(&self) {
+    pub fn prove(&self) -> std::result::Result<(), RuntimeStateError> {
         let mut state = self.state.lock().unwrap();
-        if state.proven {
-            let attempt = state.attempt.take();
-            if attempt.is_some() && !self.save(&state) {
-                state.attempt = attempt;
-            }
-            return;
-        }
-        let before = state.clone();
-        state.proven = true;
-        state.previous = None;
-        state.attempt = None;
+        let LaunchState::AttemptingRuntime(launch) = state.launch_state.clone() else {
+            return Ok(());
+        };
+        let proof = state.proof_state.clone();
+        state.proof_state = Some(match proof {
+            Some(ProofState::GameplayProven(_)) => ProofState::GameplayProven(launch.clone()),
+            _ => ProofState::FirstFrameProven(launch.clone()),
+        });
+        state.launch_state = LaunchState::Idle;
         if !self.save(&state) {
-            *state = before;
-            return;
+            state.proof_state = proof;
+            state.launch_state = LaunchState::AttemptingRuntime(launch);
+            return Err(RuntimeStateError::NotSaved);
         }
         let id = state.current.as_ref().map_or("", |g| g.id.as_str());
-        note!("[generation] client generation {id} reached a first frame; keeping it");
-        let _ = fs::remove_dir_all(self.dir.join("previous"));
+        note!("[generation] client generation {id} reached a first frame");
+        Ok(())
     }
 }
 
@@ -895,11 +830,13 @@ fn validate_runtime_attempt(
     Ok(())
 }
 
-fn valid_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+fn validate_launch_nonce(nonce: &str) -> std::result::Result<(), RuntimeStateError> {
+    if !valid_digest(nonce) {
+        return Err(RuntimeStateError::Invalid(
+            "launch nonce must be 32 random bytes in lowercase hex".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn remember_disabled(state: &mut State, runtime: &str, build: &str) {
@@ -1005,6 +942,8 @@ mod tests {
         "version.json",
     ];
     const OFFERING_NAMES: [&str; 2] = ["Gw.jspi.js", "Gw.jspi.wasm"];
+    const BUILD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn write_client(root: &Path, flavour: &str) {
         fs::create_dir_all(root).unwrap();
@@ -1047,8 +986,21 @@ mod tests {
         write_client(root, flavour);
         let store = Store::open(dir);
         store.record(flavour, root, &NAMES);
-        store.prove();
+        let launch = attempt(&store, false);
+        {
+            let mut state = store.state.lock().unwrap();
+            state.proof_state = Some(ProofState::GameplayProven(launch));
+            state.launch_state = LaunchState::Idle;
+        }
+        let saved = store.state.lock().unwrap().clone();
+        store.save(&saved);
         store
+    }
+
+    fn attempt(store: &Store, transformed: bool) -> LaunchIdentity {
+        store
+            .record_attempt("jspi", Some(BUILD), transformed, NONCE)
+            .unwrap()
     }
 
     #[test]
@@ -1110,7 +1062,7 @@ mod tests {
         // And it is a rollback target, not a build waiting to be judged: a
         // launch that never reaches a frame must not undo the client the user
         // has been playing for months.
-        assert_eq!(store.roll_back(&root), None);
+        assert_eq!(store.recover(&root), Recovery::None);
 
         // Adoption happens once. A real build recorded later owns the slot.
         write_client(&root, "installed-long-ago");
@@ -1119,14 +1071,14 @@ mod tests {
         store.record("0123456789abcdef", &root, &NAMES);
         store.adopt(&root, &NAMES);
         assert_eq!(
-            store.roll_back(&root).as_deref(),
-            Some("0123456789abcdef"),
-            "adopt must not have overwritten the recorded build"
+            store.state.lock().unwrap().current.as_ref().unwrap().id,
+            "0123456789abcdef",
+            "adopt must not overwrite the recorded build"
         );
     }
 
     #[test]
-    fn a_build_that_never_booted_is_undone_and_refused_by_name() {
+    fn a_generation_never_durably_attempted_is_not_rejected() {
         let temp = TempDir::new("generation-rollback");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
@@ -1140,30 +1092,18 @@ mod tests {
         drop(store);
 
         let store = Store::open(state.clone());
-        assert_eq!(store.roll_back(&root).as_deref(), Some("new"));
+        assert_eq!(store.recover(&root), Recovery::None);
         assert_eq!(
             fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
-            "old:Gw.jspi.js",
-            "the working client should be back on disk"
+            "new:Gw.jspi.js",
+            "an installed generation with no launch record stays available"
         );
-        assert!(store.rejected("new"));
-        assert!(!store.rejected("old"));
+        assert!(!store.rejected("new"));
         assert!(store.unsound(&root, &NAMES).is_empty());
-
-        // And it stays refused across launches, which is the whole point: the
-        // service is still offering the same broken build.
-        let store = Store::open(state);
-        assert!(store.rejected("new"));
-        assert_eq!(
-            store.roll_back(&root),
-            None,
-            "there is nothing left to undo"
-        );
     }
 
     #[test]
     fn a_failed_transform_is_disabled_without_rolling_back_official_files() {
-        const BUILD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let temp = TempDir::new("generation-transform-fallback");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
@@ -1172,7 +1112,7 @@ mod tests {
         store.stash(&root, &NAMES);
         write_client(&root, "new");
         store.record("new", &root, &NAMES);
-        store.record_attempt("jspi", Some(BUILD), true).unwrap();
+        attempt(&store, true);
 
         assert_eq!(
             store.recover(&root),
@@ -1196,39 +1136,38 @@ mod tests {
 
         // The next launch serves the official module. Only if that attempt also
         // fails is the official generation itself eligible for rollback.
-        store.record_attempt("jspi", Some(BUILD), false).unwrap();
-        assert_eq!(
-            store.recover(&root),
-            Recovery::GenerationRolledBack("new".to_owned())
-        );
+        let official = attempt(&store, false);
+        assert_eq!(store.recover(&root), Recovery::RuntimeFailed(official));
         assert_eq!(
             fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
-            "old:Gw.jspi.js"
+            "new:Gw.jspi.js"
         );
         assert_eq!(
             fs::read_to_string(temp.0.join("manifest.cache")).unwrap(),
-            "old:manifest"
+            "new:manifest"
         );
     }
 
     #[test]
     fn runtime_state_is_not_acknowledged_without_a_durable_record() {
-        const BUILD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        use std::os::unix::fs::PermissionsExt as _;
+
         let temp = TempDir::new("generation-undurable-runtime-state");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
         let store = proven(state.clone(), &root, "working");
-        fs::remove_file(state.join("state.json")).unwrap();
-        fs::create_dir(state.join("state.json")).unwrap();
+        let launch = attempt(&store, true);
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o500)).unwrap();
 
         assert_eq!(
-            store.record_attempt("jspi", Some(BUILD), true),
+            store.record_attempt("jspi", Some(BUILD), true, NONCE),
             Err(RuntimeStateError::NotSaved),
         );
         assert_eq!(
-            store.disable_transform("jspi", BUILD),
+            store.disable_launch_transform(&launch),
             Err(RuntimeStateError::NotSaved),
         );
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]
@@ -1241,11 +1180,13 @@ mod tests {
         store.stash(&root, &NAMES);
         write_client(&root, "new");
         store.record("new", &root, &NAMES);
-        store.record_attempt("jspi", Some(BUILD), true).unwrap();
+        let launch = store
+            .record_attempt("jspi", Some(BUILD), true, NONCE)
+            .unwrap();
 
         *store.write_failure.lock().unwrap() = Some(WriteBoundary::AfterRename);
         assert_eq!(
-            store.disable_transform("jspi", BUILD),
+            store.disable_launch_transform(&launch),
             Err(RuntimeStateError::NotSaved)
         );
         drop(store);
@@ -1273,24 +1214,79 @@ mod tests {
             let root = temp.0.join("web");
             let state = temp.0.join("state");
             let store = proven(state.clone(), &root, "working");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let reader = std::thread::spawn({
+                let state = state.clone();
+                let barrier = barrier.clone();
+                move || {
+                    barrier.wait();
+                    (0..16).for_each(|_| drop(Store::open(state.clone())));
+                }
+            });
             *store.write_failure.lock().unwrap() = Some(boundary);
+            barrier.wait();
             assert_eq!(
-                store.record_attempt("jspi", None, false),
-                Err(RuntimeStateError::NotSaved)
+                store.record_attempt("jspi", Some(BUILD), true, NONCE),
+                Err(RuntimeStateError::NotSaved),
             );
             drop(store);
+            reader.join().unwrap();
             assert!(
                 serde_json::from_slice::<State>(&fs::read(state.join("state.json")).unwrap())
                     .is_ok()
             );
+            let reopened = Store::open(state);
+            let durable = matches!(
+                boundary,
+                WriteBoundary::AfterRename | WriteBoundary::AfterDirectorySync
+            );
+            assert_eq!(
+                matches!(
+                    reopened.state.lock().unwrap().launch_state,
+                    LaunchState::AttemptingRuntime(_)
+                ),
+                durable
+            );
         }
+    }
+
+    #[test]
+    fn post_rename_failures_never_delete_or_invent_runtime_evidence() {
+        let temp = TempDir::new("generation-post-rename");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "working");
+        *store.write_failure.lock().unwrap() = Some(WriteBoundary::AfterRename);
+        assert!(!store.stash(&root, &NAMES));
+        drop(store);
+        let store = Store::open(state.clone());
+        assert!(state.join("previous").is_dir());
+        assert!(store.state.lock().unwrap().previous.is_some());
+
+        assert_eq!(store.recover(&root), Recovery::None);
+        let launch = attempt(&store, true);
+        *store.write_failure.lock().unwrap() = Some(WriteBoundary::AfterRename);
+        assert_eq!(
+            store.disable_launch_transform(&launch),
+            Err(RuntimeStateError::NotSaved)
+        );
+        drop(store);
+        let store = Store::open(state);
+        assert_eq!(store.recover(&root), Recovery::None);
+        assert!(store.transform_disabled("jspi", BUILD));
+        assert!(matches!(
+            store.state.lock().unwrap().launch_state,
+            LaunchState::Idle
+        ));
     }
 
     #[test]
     fn failed_generation_record_restores_in_memory_authority() {
         let temp = TempDir::new("generation-record-failure");
         let root = temp.0.join("web");
-        let store = proven(temp.0.join("state"), &root, "old");
+        let state = temp.0.join("state");
+        let store = proven(state, &root, "old");
+        assert!(store.stash(&root, &NAMES));
         write_client(&root, "new");
         *store.write_failure.lock().unwrap() = Some(WriteBoundary::StorageFull);
         assert!(!store.record("new", &root, &NAMES));
@@ -1298,11 +1294,80 @@ mod tests {
             store.state.lock().unwrap().current.as_ref().unwrap().id,
             "old"
         );
+        assert_eq!(store.recover(&root), Recovery::InstallationRestored);
+    }
+
+    #[test]
+    fn proof_survives_attempts_and_exact_failures_are_bounded() {
+        let temp = TempDir::new("generation-proof-preserved");
+        let root = temp.0.join("web");
+        let state_dir = temp.0.join("state");
+        let store = proven(state_dir.clone(), &root, "working");
+        fs::write(root.join("Gw.js"), "official asyncify glue").unwrap();
+        fs::write(root.join("Gw.wasm"), "official asyncify wasm").unwrap();
+        {
+            let mut state = store.state.lock().unwrap();
+            let current = state.current.as_mut().unwrap();
+            current
+                .artifacts
+                .insert("Gw.js".to_owned(), hash_file(&root.join("Gw.js")).unwrap());
+            current.artifacts.insert(
+                "Gw.wasm".to_owned(),
+                hash_file(&root.join("Gw.wasm")).unwrap(),
+            );
+            assert!(store.save(&state));
+        }
+        let failed = attempt(&store, false);
+        assert!(matches!(
+            store.state.lock().unwrap().proof_state,
+            Some(ProofState::GameplayProven(_))
+        ));
+        assert_eq!(store.recover(&root), Recovery::RuntimeFailed(failed));
+        let asyncify = store
+            .record_attempt("asyncify", None, false, NONCE)
+            .unwrap();
+        assert_eq!(store.recover(&root), Recovery::RuntimeFailed(asyncify));
+        drop(store);
+        let store = Store::open(state_dir);
+        assert!(matches!(
+            store.record_attempt("jspi", Some(BUILD), false, NONCE),
+            Err(RuntimeStateError::Invalid(_))
+        ));
+        assert_eq!(store.state.lock().unwrap().failed_runtimes.len(), 2);
+    }
+
+    #[test]
+    fn future_state_keeps_unknown_official_launch_available_without_rewrite() {
+        let temp = TempDir::new("generation-format-migration");
+        let state = temp.0.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let future = br#"{"formatVersion":99,"opaque":{"doNot":"rewrite"}}"#;
+        fs::write(state.join("state.json"), future).unwrap();
+        let refused = Store::open(state.clone());
+        assert!(!refused.stale("anything"));
+        let root = temp.0.join("web");
+        write_client(&root, "unknown-official");
+        refused.adopt(&root, &NAMES);
+        assert!(
+            refused
+                .record_attempt("jspi", Some(BUILD), false, NONCE)
+                .is_ok()
+        );
+        assert_eq!(fs::read(state.join("state.json")).unwrap(), future);
+        assert!(state.join("state.compat-v2.json").is_file());
+        drop(refused);
+        assert!(matches!(
+            Store::open(state.clone())
+                .state
+                .lock()
+                .unwrap()
+                .launch_state,
+            LaunchState::AttemptingRuntime(_)
+        ));
     }
 
     #[test]
     fn a_later_transform_failure_is_not_hidden_by_a_proven_generation() {
-        const BUILD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let temp = TempDir::new("generation-proven-transform");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
@@ -1310,23 +1375,26 @@ mod tests {
 
         // A signed certificate can arrive after these official bytes have
         // already booted. Its first failed launch must still disable it.
-        store.record_attempt("asyncify", Some(BUILD), true).unwrap();
+        attempt(&store, true);
         assert!(matches!(
             store.recover(&root),
             Recovery::TransformDisabled { .. }
         ));
-        assert!(store.transform_disabled("asyncify", BUILD));
+        assert!(store.transform_disabled("jspi", BUILD));
 
         // A successful official retry clears the launch attempt even though
         // the generation proof was already true before this launch.
         store
-            .record_attempt("asyncify", Some(BUILD), false)
+            .record_attempt("jspi", Some(BUILD), false, NONCE)
             .unwrap();
-        store.prove();
+        store.prove().unwrap();
         drop(store);
         let store = Store::open(state);
         assert_eq!(store.recover(&root), Recovery::None);
-        assert!(store.state.lock().unwrap().attempt.is_none());
+        assert!(matches!(
+            store.state.lock().unwrap().proof_state,
+            Some(ProofState::GameplayProven(_))
+        ));
     }
 
     /// The other half of that sequence: the sync that never gets past the
@@ -1351,11 +1419,7 @@ mod tests {
         );
 
         let store = Store::open(state);
-        assert_eq!(
-            store.roll_back(&root),
-            None,
-            "there was never anything to undo"
-        );
+        assert_eq!(store.recover(&root), Recovery::None);
         assert!(store.unsound(&root, &NAMES).is_empty());
     }
 
@@ -1564,7 +1628,7 @@ mod tests {
 
         // And now the app dies before ever reaching a frame.
         let store = Store::open(state);
-        assert_eq!(store.roll_back(&root), None, "there is nothing to undo");
+        assert_eq!(store.recover(&root), Recovery::None);
         assert!(
             !store.rejected("shipped"),
             "this build booted here and has not stopped having booted here"
@@ -1582,14 +1646,15 @@ mod tests {
         store.stash(&root, &NAMES);
         write_client(&root, "new");
         store.record("new", &root, &NAMES);
-        store.prove();
+        attempt(&store, false);
+        store.prove().unwrap();
         assert!(
-            !state.join("previous").exists(),
-            "a proven build has nothing to fall back to and should not hold 8 MB open"
+            state.join("previous").exists(),
+            "first-frame proof must preserve the gameplay-proven predecessor"
         );
 
         let store = Store::open(state);
-        assert_eq!(store.roll_back(&root), None);
+        assert_eq!(store.recover(&root), Recovery::None);
         assert!(!store.rejected("new"));
         assert!(store.unsound(&root, &NAMES).is_empty());
     }
@@ -1604,18 +1669,14 @@ mod tests {
 
         // Unproven, but there is no previous set — a crash for an unrelated
         // reason must not leave the app with nothing to run.
-        assert_eq!(store.roll_back(&root), None);
+        let failed = attempt(&store, false);
+        assert_eq!(store.recover(&root), Recovery::RuntimeFailed(failed));
         assert!(store.unsound(&root, &NAMES).is_empty());
         assert!(!store.rejected("first"));
     }
 
-    /// The record is a file in Application Support, and this module opens by
-    /// saying what a year in Application Support does to files. One that still
-    /// parses as JSON but holds a truncated digest has to come back as a
-    /// mismatch — the thing `check` is for — rather than as a panic on the
-    /// launch path.
     #[test]
-    fn a_record_holding_a_truncated_digest_is_a_mismatch_not_a_crash() {
+    fn a_record_holding_a_truncated_digest_has_no_authority() {
         let temp = TempDir::new("generation-short-digest");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
@@ -1628,7 +1689,7 @@ mod tests {
         fs::write(&path, corrupt).unwrap();
 
         let store = Store::open(state);
-        assert_eq!(store.unsound(&root, &NAMES), NAMES.to_vec());
+        assert!(store.state.lock().unwrap().current.is_none());
     }
 
     /// Cut every recorded digest down to four characters, leaving the JSON
@@ -1650,33 +1711,25 @@ mod tests {
     }
 
     #[test]
-    fn refusals_do_not_accumulate_without_bound() {
+    fn persisted_histories_do_not_accumulate_without_bound() {
         let temp = TempDir::new("generation-refusals");
         let root = temp.0.join("web");
         let state = temp.0.join("state");
-        let store = proven(state, &root, "keeper");
-
-        for round in 0..REJECTED_KEPT + 3 {
-            store.stash(&root, &NAMES);
-            write_client(&root, &format!("bad{round}"));
-            store.record(&format!("bad{round}"), &root, &NAMES);
-            assert_eq!(
-                store.roll_back(&root).as_deref(),
-                Some(&*format!("bad{round}"))
-            );
+        let store = proven(state.clone(), &root, "keeper");
+        {
+            let mut saved = store.state.lock().unwrap();
+            saved.rejected = (0..REJECTED_KEPT + 3)
+                .map(|round| format!("bad{round}"))
+                .collect();
+            store.save(&saved);
         }
-
+        let store = Store::open(state);
         assert_eq!(store.state.lock().unwrap().rejected.len(), REJECTED_KEPT);
         assert!(
             !store.rejected("bad0"),
             "the oldest refusal should have aged out"
         );
         assert!(store.rejected(&format!("bad{}", REJECTED_KEPT + 2)));
-        assert_eq!(
-            fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
-            "keeper:Gw.jspi.js",
-            "every rollback should land on the one build that ever worked"
-        );
     }
 
     /// A manifest names the build it offers from what it already carries, so a
@@ -1739,10 +1792,10 @@ mod tests {
             before,
             "the active manifest digest is updated for the same client generation"
         );
-        assert!(
-            saved.proven,
-            "snapshot metadata does not unprove the client"
-        );
+        assert!(matches!(
+            saved.proof_state,
+            Some(ProofState::GameplayProven(_))
+        ));
     }
 
     /// What turns that id into a download. Until a build has been recorded here,

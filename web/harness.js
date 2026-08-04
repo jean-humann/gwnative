@@ -693,13 +693,13 @@ function reportRuntimeAttempt() {
     runtime: client.mode,
     build: window.__gwnativeClientBuild,
     transformed: window.__gwnativeTemplateSave === 'ready',
+    nonce: window.__gwnativeLaunchNonce,
   });
 }
 
 function reportTransformFailure() {
   return host.postRuntimeState('__transform-failed', {
-    runtime: client.mode,
-    build: window.__gwnativeClientBuild,
+    launch: window.__gwnativeLaunchIdentity,
   });
 }
 
