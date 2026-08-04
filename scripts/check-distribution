@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Validate licensing metadata and the release artifact boundary."""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from functools import lru_cache
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+NOTICE_FILES = ("LICENSE", "NOTICE.md", "THIRD-PARTY-NOTICES.md")
+
+
+class PolicyError(RuntimeError):
+    pass
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise PolicyError(message)
+
+
+@lru_cache(maxsize=1)
+def runtime_artifact_names() -> frozenset[str]:
+    """Read the release denylist from the runtime's authoritative constants."""
+    source = (ROOT / "src/patch.rs").read_text()
+    names: set[str] = set()
+    for constant in ("CLIENT_ARTIFACTS", "COMMON_ARTIFACTS"):
+        match = re.search(
+            rf"const {constant}[^=]*=\s*\[(.*?)\];", source, re.DOTALL
+        )
+        require(match is not None, f"could not read src/patch.rs {constant}")
+        names.update(re.findall(r'"([^"]+)"', match.group(1)))
+
+    snapshot = re.search(r'pub const SNAPSHOT[^=]*=\s*"([^"]+)";', source)
+    require(snapshot is not None, "could not read src/patch.rs SNAPSHOT")
+    names.add(snapshot.group(1))
+    require(names, "src/patch.rs declares no runtime artifacts")
+    return frozenset(name.lower() for name in names)
+
+
+def forbidden(path: Path) -> bool:
+    name = path.name.lower()
+    return name in runtime_artifact_names() or name.endswith(".dat")
+
+
+def display(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def require_same(left: Path, right: Path) -> None:
+    require(left.is_file(), f"missing {display(left)}")
+    require(right.is_file(), f"missing {display(right)}")
+    require(
+        left.read_bytes() == right.read_bytes(),
+        f"{display(left)} and {display(right)} differ",
+    )
+
+
+def source_files() -> list[Path]:
+    """List distributable source both in a checkout and a GitHub source archive."""
+    if (ROOT / ".git").exists():
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=ROOT,
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        return [ROOT / name.decode() for name in result.stdout.split(b"\0") if name]
+
+    ignored = {ROOT / "dist", ROOT / "target"}
+    return [
+        path
+        for path in ROOT.rglob("*")
+        if path.is_file() and not any(parent in path.parents for parent in ignored)
+    ]
+
+
+def check_repository() -> None:
+    require_same(ROOT / "LICENSE", ROOT / "LICENSES/GPL-3.0-only.txt")
+    require_same(
+        ROOT / "packaging/sparkle/LICENSE",
+        ROOT / "LICENSES/LicenseRef-Sparkle-2.9.4.txt",
+    )
+
+    required = (
+        *NOTICE_FILES,
+        "REUSE.toml",
+        "LICENSES/LicenseRef-ArenaNet-Proprietary.txt",
+    )
+    for name in required:
+        require((ROOT / name).is_file(), f"missing {name}")
+
+    cargo = (ROOT / "Cargo.toml").read_text()
+    require('license = "GPL-3.0-only"' in cargo, "Cargo.toml is not GPL-3.0-only")
+    require(
+        "GPL-3.0-only" in (ROOT / "packaging/Info.plist").read_text(),
+        "Info.plist does not disclose GPL-3.0-only",
+    )
+
+    source_forbidden = [
+        path.relative_to(ROOT) for path in source_files() if forbidden(path)
+    ]
+    require(
+        not source_forbidden,
+        "ArenaNet runtime/game artifacts are in the source distribution: "
+        + ", ".join(map(str, source_forbidden)),
+    )
+
+
+def check_bundle(app: Path) -> None:
+    resources = app / "Contents/Resources"
+    require(resources.is_dir(), f"not an application bundle: {app}")
+
+    for name in NOTICE_FILES:
+        bundled = resources / name
+        require(bundled.is_file(), f"bundle is missing Contents/Resources/{name}")
+        require(
+            bundled.read_bytes() == (ROOT / name).read_bytes(),
+            f"bundled {name} differs from the repository copy",
+        )
+
+    sparkle = app / "Contents/Frameworks/Sparkle.framework"
+    if sparkle.exists():
+        require_same(
+            ROOT / "packaging/sparkle/LICENSE",
+            resources / "Sparkle-LICENSE.txt",
+        )
+
+    bundled_forbidden = [
+        path.relative_to(app) for path in app.rglob("*") if forbidden(path)
+    ]
+    require(
+        not bundled_forbidden,
+        "ArenaNet runtime/game artifacts entered the bundle: "
+        + ", ".join(map(str, bundled_forbidden)),
+    )
+
+
+def self_test() -> None:
+    for name in runtime_artifact_names():
+        require(forbidden(Path(name.upper())), f"forbidden-name check missed {name}")
+    require(forbidden(Path("Gw.dat")), "game-data suffix check missed Gw.dat")
+    for name in ("harness.js", "index.html", "diagnostics.js"):
+        require(not forbidden(Path(name)), f"shell file was rejected: {name}")
+
+
+def main(arguments: list[str]) -> int:
+    app: Path | None = None
+    for argument in arguments:
+        if argument == "--self-test":
+            self_test()
+        elif app is None:
+            app = Path(argument).resolve()
+        else:
+            raise PolicyError("usage: scripts/check-distribution [--self-test] [bundle.app]")
+
+    check_repository()
+    if app is not None:
+        check_bundle(app)
+    print("distribution: GPL metadata, notices, and artifact boundary ok")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except (OSError, subprocess.CalledProcessError, PolicyError) as error:
+        print(f"distribution: {error}", file=sys.stderr)
+        raise SystemExit(1)

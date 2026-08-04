@@ -50,6 +50,12 @@ jobs:
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
+      - name: REUSE licensing metadata
+        uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6
+
+      - name: Distribution policy
+        run: python3 scripts/check-distribution --self-test
+
   check:
     # Apple Silicon, and the newest image GitHub offers. Both halves matter.
     #
@@ -143,6 +149,8 @@ jobs:
           test -f "dist/Guild Wars.app/Contents/Resources/AppIcon.icns"
           test -f "dist/Guild Wars.app/Contents/Resources/LICENSE"
           test -f "dist/Guild Wars.app/Contents/Resources/NOTICE.md"
+          test -f "dist/Guild Wars.app/Contents/Resources/THIRD-PARTY-NOTICES.md"
           test -f "dist/Guild Wars.app/Contents/MacOS/gwnative"
+          python3 scripts/check-distribution "dist/Guild Wars.app"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
             "dist/Guild Wars.app/Contents/Info.plist"

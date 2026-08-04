@@ -27,20 +27,15 @@ manager code is not a browser runtime and is not imported.
 The historical companion kernel and parts of the renderer, input, template,
 and WebAssembly transformation code have material GPL-3.0-only GWoNmac
 lineage. Parts of the renderer also descend from GPLv3 `gw_in_browser` code.
-They must not be published under the repository's current GPL-2.0-or-later
-claim. Distribution and companion implementation PRs are blocked until the
-repository records one of these valid outcomes:
-
-- distribute the combined work under GPL-3.0-only with explicit provenance,
-  copyright, third-party notices, corresponding source, and build scripts;
-- obtain compatible additional permission from the upstream author; or
-- replace it with a genuine clean-room implementation written without access
-  to the GPL implementation.
+The repository therefore distributes the combined work under GPL-3.0-only,
+records the affected paths and pinned upstream baselines in
+[`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md), and publishes the
+corresponding source and build scripts with every tagged release.
 
 GPL-3.0-or-later is not an accurate shortcut: it would grant later-version
-permission that the copied GPL-3.0-only expression does not carry. A license
-remediation must also keep ArenaNet client and game artifacts outside the
-distribution and preserve the existing Sparkle and asset notices.
+permission that the copied GPL-3.0-only expression does not carry. Release
+packaging also keeps ArenaNet client and game artifacts outside the
+distribution and preserves the separate Sparkle and asset notices.
 
 Reviewing architecture is not a clean-room rewrite, and a rewritten filename
 or reorganized functions do not erase derivation.

@@ -17,5 +17,9 @@ for script in \
 	sh -n "$script"
 done
 
-python3 -m py_compile scripts/benchmark scripts/check-docs scripts/client-certify
+python3 -m py_compile \
+	scripts/benchmark \
+	scripts/check-distribution \
+	scripts/check-docs \
+	scripts/client-certify
 echo "scripts: shell and Python syntax ok"

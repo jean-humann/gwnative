@@ -9,10 +9,11 @@ game data. Those files are downloaded from ArenaNet's services at runtime and
 require a valid game account. Use of the game and its services remains subject
 to ArenaNet's [User Agreement](https://www.arena.net/en/legal/user-agreement).
 
-The GPL-2.0-or-later licence covers gwnative's source code and original project
+The GPL-3.0-only licence covers gwnative's source code and original project
 material only. It does not grant rights to Guild Wars or Guild Wars Reforged
 names, client code, game data, artwork, audio, logos, or other proprietary
-material.
+material. Upstream-derived source and bundled dependencies are identified in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Application icon
 

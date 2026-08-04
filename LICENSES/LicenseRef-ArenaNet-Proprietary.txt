@@ -1,0 +1,12 @@
+ArenaNet client and game materials, including Guild Wars names, client code,
+game data, artwork, audio, logos, and other proprietary material, are owned by
+ArenaNet LLC, NCSOFT Corporation, or their respective rights holders.
+
+No licence to that material is granted by gwnative. Use remains subject to
+ArenaNet's User Agreement and Content Terms of Use:
+
+https://www.arena.net/en/legal/user-agreement
+https://www.arena.net/en/legal/content-terms-of-use
+
+This LicenseRef is a machine-readable marker for material excluded from the
+gwnative GPL-3.0-only grant. It does not replace or modify ArenaNet's terms.
