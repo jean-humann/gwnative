@@ -47,6 +47,9 @@ jobs:
         # workflow, so it cannot detect this class of failure by itself.
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
+      - name: Certificate trust policy
+        run: python3 scripts/check-trust-policy --self-test
+
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 

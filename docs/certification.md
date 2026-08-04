@@ -89,13 +89,15 @@ flowchart LR
     E -- "No" --> F["Finish without signing"]
     E -- "Yes" --> G["Fetch all 4 artifacts again"]
     G --> H["Require identical family and candidate SHA-256"]
-    H --> I["Isolated Ed25519 signer; no checkout"]
-    I --> J["Verify monotonic sequence and exact file scope"]
-    J --> K["Publish signed feed on main"]
-    K --> L["Installed apps cache it for next launch"]
+    H --> I["No-secret closed schema + transition validation"]
+    I --> R["Reserve sequence + candidate digest"]
+    R --> J["Isolated Ed25519 signer; no checkout"]
+    J --> K["Verify signature and exact 2-file scope"]
+    K --> L["Open certificate-only draft PR"]
+    L --> M["Reviewed merge updates installed apps"]
 ```
 
-The four stages have deliberately separate authority:
+The five stages have deliberately separate authority:
 
 1. The first no-secret macOS job fetches the official JSPI and Asyncify pairs,
    generates the candidate, exercises both transforms, validates the passive
@@ -104,14 +106,22 @@ The four stages have deliberately separate authority:
    both the family ID and the complete candidate-feed SHA-256 before uploading
    data for signing. An ArenaNet update between the two fetches therefore stops
    the run.
-3. A fresh `certificate-publishing` job receives only the reproduced JSON. It
-   checks the bounded schema and capability invariants, derives the compiled
-   public key from the private key, signs, and immediately verifies the result.
-   It never checks out or executes repository code.
-4. A no-secret publisher verifies the detached signature again, requires the
+3. A no-secret validator checks a closed schema at every nesting level, exact
+   capability invariants, family identity, consecutive sequence, and that the
+   candidate changes only the one reproduced family while retaining bounded
+   history. A separate repository-writer then atomically reserves that sequence
+   and candidate digest before the signing key can become available. A later
+   digest for the same pending sequence fails closed.
+4. A fresh `certificate-publishing` job receives only that validated JSON. It
+   derives the pinned public key from the private key, signs, and immediately
+   verifies the result. It never checks out repository code; after the key is
+   present it runs only fixed runner and OpenSSL commands over frozen data.
+5. A no-secret publisher verifies the detached signature again, requires the
    sequence to be exactly the current sequence plus one, stages exactly
-   `builds.json` and `builds.json.sig`, and publishes those two files. If `main`
-   advanced during the run, publication fails and the next poll retries.
+   `builds.json` and `builds.json.sig`, proves the one-commit diff contains only
+   those regular files, and opens a draft PR from a unique certificate branch.
+   The canonical per-sequence reservation ref remains authoritative across
+   retries; repository rules must reject deletion and non-fast-forward changes.
 
 A known identical family produces a byte-identical candidate, so the signing
 key and repository are untouched. A new family with unchanged reviewed anchors
@@ -146,9 +156,10 @@ signature. A downloaded or cached replacement must verify against the dedicated
 Ed25519 certificate public key compiled into the app. The corresponding private
 key exists only in the main-only `certificate-publishing` environment (and an
 operator's Keychain); candidate generation, ordinary CI, app releases and the
-publisher never receive or use it. Unattended publication makes the workflow
-on `main` part of the signing trust boundary, so changes to that workflow need
-the same review as changes to the compiled certificate verifier.
+validator/publisher never receive or use it. CODEOWNERS covers the workflow,
+key pin, certificate pair, signing scripts, and release path. Publication then
+requires the ordinary protected-branch checks and owner review; automation has
+no direct path to `main`.
 
 Feed `sequence` is monotonic. A validly signed lower sequence is ignored, a bad
 signature falls back to the bundled feed, and a refresh is written only after

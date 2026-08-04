@@ -21,5 +21,6 @@ python3 -m py_compile \
 	scripts/benchmark \
 	scripts/check-distribution \
 	scripts/check-docs \
+	scripts/check-trust-policy \
 	scripts/client-certify
 echo "scripts: shell and Python syntax ok"
