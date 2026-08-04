@@ -22,6 +22,7 @@ python3 -m py_compile \
 	scripts/benchmarklib.py \
 	scripts/check-distribution \
 	scripts/check-docs \
+	scripts/check-release-artifacts \
 	scripts/check-support-matrix \
 	scripts/check-trust-policy \
 	scripts/client-certify \
@@ -29,4 +30,5 @@ python3 -m py_compile \
 python3 -m unittest discover -s tests -p 'benchmark_test.py'
 python3 scripts/check-support-matrix --self-test
 scripts/sbom --self-test
+scripts/check-release-artifacts --self-test
 echo "scripts: shell and Python syntax ok"

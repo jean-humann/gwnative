@@ -57,6 +57,11 @@ there.
 `scripts/check-distribution` verifies the repository declarations and scans the
 finished bundle before signing. It rejects the official JSPI and Asyncify glue
 and WebAssembly modules, `Gw.snapshot`, `version.json`, and `*.dat` game data.
+`scripts/check-release-artifacts` applies the same inventory boundary after
+extracting the updater ZIP, disk image, and tagged source archive. Its
+deterministic fixtures also prove that a hash-mismatched update is refused,
+that refusal leaves the installed artifact untouched, and rollback restores
+the exact predecessor.
 The tagged GitHub release supplies the Corresponding Source through its source
 archives; `scripts/publish` always creates the release from that exact public
 tag.
