@@ -55,7 +55,8 @@ invalidate its signature. The bundle contains a shell seed that is copied to
 there.
 
 `scripts/check-distribution` verifies the repository declarations and scans the
-finished bundle before signing. It rejects the official JSPI and Asyncify glue
+finished bundle before signing. It requires the exact executable, resource,
+web-shell, framework, notice, icon, and SBOM inventory and rejects the official JSPI and Asyncify glue
 and WebAssembly modules, `Gw.snapshot`, `version.json`, and `*.dat` game data.
 `scripts/check-release-artifacts` applies the same inventory boundary after
 extracting the updater ZIP, disk image, and tagged source archive. Its
