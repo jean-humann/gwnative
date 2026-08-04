@@ -16,6 +16,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
+import { TextDecoder, TextEncoder } from 'node:util';
+import { runInNewContext } from 'node:vm';
 
 const web = dirname(fileURLToPath(import.meta.url));
 const read = (name) => readFileSync(join(web, name), 'utf8');
@@ -79,15 +81,89 @@ describe('the page', () => {
   it('scrubs active credentials before console and host diagnostics', () => {
     const harness = read('harness.js');
     assert.ok(
-      harness.indexOf('const protectedDiagnostics') < harness.indexOf("for (const level of ['log'"),
+      harness.indexOf('const protectedDiagnostics') < harness.indexOf('const CONSOLE_METHODS'),
       'tokens must be protected before console forwarding is installed',
     );
     assert.match(harness, /pending\.push\(scrubDiagnostic\(line\)\)/);
     assert.match(harness, /original\(\.\.\.scrubbed\)/);
+    assert.match(harness, /logBuf\.push\(scrubbed\.join\(' '\)\)/);
+    assert.match(harness, /containsDiagnosticSpelling\(variant, protectedValue, budget\)/);
+    assert.match(harness, /decodeJsonDiagnosticLayer\(variant\)/);
+    assert.match(harness, /decodePercentDiagnosticLayer\(variant, true\)/);
+    assert.match(harness, /window\.__gwnativeLaunchNonce/);
+    assert.match(harness, /'dirxml'.*'table'.*'trace'/s);
     assert.match(harness, /response\.json\(\)\.then\(protectCredentials\)/);
     assert.match(
       harness,
       /protectCredentials\(\{ username, password \}\);\s*const response = await credentials\('PUT'/,
     );
+    assert.match(harness, /const MAX_CREDENTIAL_DIAGNOSTICS = 18/);
+    assert.match(harness, /if \(suppressPageDiagnostics\) return ''/);
+    assert.doesNotMatch(harness, /credential-realm/);
+    assert.match(harness, /if \(launch\.transformed === true\)/);
+    assert.match(harness, /host\.deliverRuntimeProof\('__runtime', launch\)/);
+    assert.match(harness, /host\.deliverRuntimeProof\('__transform-failed'/);
+  });
+
+  it('cancels raw WebKit exception output after queuing only scrubbed text', () => {
+    const harness = read('harness.js');
+    const prefix = harness.slice(
+      harness.indexOf('const LOG_LINES'),
+      harness.indexOf('// Keep the main loop'),
+    );
+    const listeners = new Map();
+    const printed = [];
+    const consoleMethods = [
+      'log', 'info', 'debug', 'warn', 'error', 'dir', 'dirxml', 'table', 'trace',
+      'group', 'groupCollapsed', 'groupEnd', 'clear', 'count', 'countReset',
+      'assert', 'time', 'timeLog', 'timeEnd', 'timeStamp', 'profile', 'profileEnd',
+    ];
+    const context = {
+      window: {
+        __gwnativeToken: 'browser-token',
+        __gwnativeGamePublisherToken: 'publisher-token',
+        __gwnativeLaunchNonce: 'launch-nonce-canary',
+        addEventListener: (name, callback) => listeners.set(name, callback),
+      },
+      console: Object.fromEntries(
+        consoleMethods.map((level) => [level, (...values) => printed.push([level, ...values])]),
+      ),
+      TextDecoder,
+      TextEncoder,
+      setTimeout: () => 1,
+      fetch: () => Promise.resolve(),
+    };
+    runInNewContext(
+      `${prefix}\nthis.audit = { protectCredentials, scrubDiagnostic, pending };`,
+      context,
+    );
+    const secret = 'page exception-canary';
+    context.audit.protectCredentials({ username: 'player', password: secret });
+    for (const spelling of [
+      'page+exception-canary',
+      '%70age%20exception%2Dcanary',
+      'page \\u0065xception-canary',
+      'page \\\\u0065xception-canary',
+      '%6c%61%75%6e%63%68%2d%6e%6f%6e%63%65%2d%63%61%6e%61%72%79',
+    ]) {
+      assert.equal(context.audit.scrubDiagnostic(spelling), '', spelling);
+    }
+    assert.equal(context.audit.scrubDiagnostic('x'.repeat(1024 * 1024 + 1)), '');
+    for (const [name, event] of [
+      ['error', { message: secret, filename: 'client.js', lineno: 1 }],
+      ['unhandledrejection', { reason: new Error(secret) }],
+    ]) {
+      let prevented = false;
+      listeners.get(name)({ ...event, preventDefault: () => { prevented = true; } });
+      assert.equal(prevented, true, `${name} default output was not cancelled`);
+    }
+    assert.deepEqual([...context.audit.pending].slice(-2), ['', '']);
+    for (const level of consoleMethods.filter((name) => name !== 'assert')) {
+      context.console[level](secret, { password: secret });
+    }
+    context.console.assert(false, secret);
+    context.console.assert(true, secret);
+    assert.ok(printed.flat(2).every((value) => !String(value).includes(secret)));
+    assert.ok([...context.audit.pending].every((value) => !String(value).includes(secret)));
   });
 });

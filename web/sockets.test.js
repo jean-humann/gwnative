@@ -13,8 +13,9 @@ describe('socket callback audit', () => {
     class FakeWebSocket {
       static OPEN = 1;
 
-      constructor(url) {
+      constructor(url, protocols) {
         this.url = url;
+        this.protocols = protocols;
         this.readyState = 0;
         transport = this;
       }
@@ -25,6 +26,7 @@ describe('socket callback audit', () => {
     globalThis.location = new URL('http://127.0.0.1:38112/');
     globalThis.WebSocket = FakeWebSocket;
     globalThis.window = globalThis;
+    globalThis.__gwnativeToken = 'socket-token-canary';
     try {
       const sockets = createSockets({
         log() {},
@@ -40,17 +42,27 @@ describe('socket callback audit', () => {
         },
       });
       const socket = sockets.connect('1.2.3.4:6112');
-      assert.equal(
-        new URL(transport.url).searchParams.get('launch'),
-        JSON.stringify({ nonce: 'exact-launch' }),
-      );
+      const gameTransport = transport;
+      assert.equal(new URL(gameTransport.url).searchParams.has('launch'), false);
+      assert.equal(new URL(gameTransport.url).searchParams.has('token'), false);
+      assert.deepEqual(gameTransport.protocols, [
+        'gwnative',
+        'gwnative-token.socket-token-canary',
+        'gwnative-launch.eyJub25jZSI6ImV4YWN0LWxhdW5jaCJ9',
+      ]);
+      sockets.connect('www.guildwars.com:443');
+      const webTransport = transport;
+      assert.deepEqual(webTransport.protocols, [
+        'gwnative',
+        'gwnative-token.socket-token-canary',
+      ]);
       socket.onopen = () => calls.push(['game', 'open']);
       socket.onmessage = () => calls.push(['game', 'message']);
       socket.onclose = () => calls.push(['game', 'close']);
 
-      transport.onmessage({ data: JSON.stringify({ type: 'open' }) });
-      transport.onmessage({ data: new Uint8Array([1, 2, 3]).buffer });
-      transport.onclose({ code: 1000 });
+      gameTransport.onmessage({ data: JSON.stringify({ type: 'open' }) });
+      gameTransport.onmessage({ data: new Uint8Array([1, 2, 3]).buffer });
+      gameTransport.onclose({ code: 1000 });
 
       assert.deepEqual(calls, [
         ['begin', 'socket-open'],
@@ -67,6 +79,7 @@ describe('socket callback audit', () => {
       globalThis.location = previousLocation;
       globalThis.WebSocket = previousWebSocket;
       globalThis.window = previousWindow;
+      delete globalThis.__gwnativeToken;
     }
   });
 });
