@@ -87,6 +87,9 @@ def check_archive_inventory(path: Path) -> None:
 def extract_archive(path: Path, destination: Path) -> None:
     check_archive_inventory(path)
     if zipfile.is_zipfile(path):
+        if platform.system() == "Darwin":
+            subprocess.run(["ditto", "-x", "-k", str(path), str(destination)], check=True)
+            return
         with zipfile.ZipFile(path) as archive:
             archive.extractall(destination)
         return
@@ -137,7 +140,19 @@ def check_bundle(path: Path) -> None:
 def check_zip(path: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="gwnative-zip-") as directory:
         extracted = Path(directory)
+        roots = {
+            PurePosixPath(name.replace("\\", "/")).parts[0]
+            for name in archive_members(path)
+            if PurePosixPath(name.replace("\\", "/")).parts
+        }
+        require(
+            roots <= {"Guild Wars.app", "__MACOSX"}
+            and "Guild Wars.app" in roots,
+            f"updater ZIP has unexpected top-level entries: {sorted(roots)}",
+        )
         extract_archive(path, extracted)
+        visible = {item.name for item in extracted.iterdir() if item.name != "__MACOSX"}
+        require(visible == {"Guild Wars.app"}, "updater ZIP inventory is not exact")
         check_bundle(find_product_app(extracted))
 
 
@@ -161,6 +176,16 @@ def check_dmg(path: Path) -> None:
             stdout=subprocess.DEVNULL,
         )
         try:
+            visible = {item.name for item in mountpoint.iterdir()}
+            require(
+                visible == {"Applications", "Guild Wars.app"},
+                f"disk image inventory is not exact: {sorted(visible)}",
+            )
+            applications = mountpoint / "Applications"
+            require(
+                applications.is_symlink() and os.readlink(applications) == "/Applications",
+                "disk image Applications link is not exact",
+            )
             for candidate in mountpoint.rglob("*"):
                 require(
                     not forbidden_name(candidate.name),
@@ -250,6 +275,14 @@ def self_test() -> None:
         expect_failure(
             lambda: check_archive_inventory(unsafe_zip),
             "self-test accepted an official client artifact in an archive",
+        )
+        extra_zip = root / "extra.zip"
+        with zipfile.ZipFile(extra_zip, "w") as archive:
+            archive.writestr("Guild Wars.app/Contents/Resources/NOTICE.md", "fixture")
+            archive.writestr("unexpected.txt", "fixture")
+        expect_failure(
+            lambda: check_zip(extra_zip),
+            "self-test accepted an unexpected updater ZIP entry",
         )
 
         active, candidate, previous = root / "active", root / "candidate", root / "previous"

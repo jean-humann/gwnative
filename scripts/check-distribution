@@ -118,6 +118,13 @@ def check_bundle(app: Path) -> None:
     resources = app / "Contents/Resources"
     require(resources.is_dir(), f"not an application bundle: {app}")
 
+    executable_root = app / "Contents/MacOS"
+    require(executable_root.is_dir(), "bundle is missing Contents/MacOS")
+    require(
+        {path.name for path in executable_root.iterdir()} == {"gwnative"},
+        "bundle executable inventory is not exactly gwnative",
+    )
+
     for name in NOTICE_FILES:
         bundled = resources / name
         require(bundled.is_file(), f"bundle is missing Contents/Resources/{name}")
@@ -132,6 +139,48 @@ def check_bundle(app: Path) -> None:
             ROOT / "packaging/sparkle/LICENSE",
             resources / "Sparkle-LICENSE.txt",
         )
+
+    expected_resources = {
+        "AppIcon.icns",
+        *NOTICE_FILES,
+        "gwnative.cdx.json",
+        "web",
+    }
+    if sparkle.exists():
+        expected_resources.add("Sparkle-LICENSE.txt")
+    actual_resources = {path.name for path in resources.iterdir()}
+    require(
+        actual_resources == expected_resources,
+        "bundle resource inventory differs: "
+        f"missing={sorted(expected_resources - actual_resources)}, "
+        f"extra={sorted(actual_resources - expected_resources)}",
+    )
+    require_same(ROOT / "packaging/AppIcon.icns", resources / "AppIcon.icns")
+
+    expected_web = {
+        path.name: path
+        for pattern in ("*.js", "*.html")
+        for path in (ROOT / "web").glob(pattern)
+        if not path.name.endswith(".test.js") and not forbidden(path)
+    }
+    bundled_web = resources / "web"
+    require(bundled_web.is_dir(), "bundle is missing its web shell")
+    actual_web = {path.name: path for path in bundled_web.iterdir() if path.is_file()}
+    require(
+        actual_web.keys() == expected_web.keys(),
+        "bundled web shell inventory is not exact",
+    )
+    for name, source in expected_web.items():
+        require_same(source, actual_web[name])
+
+    framework_root = app / "Contents/Frameworks"
+    if sparkle.exists():
+        require(
+            {path.name for path in framework_root.iterdir()} == {"Sparkle.framework"},
+            "bundle contains an unexpected framework",
+        )
+    else:
+        require(not framework_root.exists(), "empty or unexpected Frameworks directory")
 
     sbom = resources / "gwnative.cdx.json"
     require(sbom.is_file(), "bundle is missing Contents/Resources/gwnative.cdx.json")
