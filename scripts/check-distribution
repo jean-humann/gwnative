@@ -133,6 +133,10 @@ def check_bundle(app: Path) -> None:
             resources / "Sparkle-LICENSE.txt",
         )
 
+    sbom = resources / "gwnative.cdx.json"
+    require(sbom.is_file(), "bundle is missing Contents/Resources/gwnative.cdx.json")
+    subprocess.run([str(ROOT / "scripts/sbom"), "--check", str(sbom)], check=True)
+
     bundled_forbidden = [
         path.relative_to(app) for path in app.rglob("*") if forbidden(path)
     ]

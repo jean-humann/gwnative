@@ -131,6 +131,11 @@ if [ -d packaging/sparkle/Sparkle.framework ] && [ -f packaging/sparkle/public-k
 		"$app/Contents/Info.plist" >/dev/null
 fi
 
+# Ship a deterministic CycloneDX inventory of every locked Rust package and
+# the vendored Sparkle framework. It is generated from repository-owned inputs
+# after the payload is assembled and checked byte-for-byte below.
+scripts/sbom --output "$app/Contents/Resources/gwnative.cdx.json"
+
 # Inspect the finished payload before signing seals it. This is deliberately in
 # the shared bundle path rather than only in CI: local releases and tagged
 # releases get the same fail-closed check, and downloaded client/game files can
