@@ -146,7 +146,7 @@ All runtime overrides are optional.
 | --- | --- |
 | `GWNATIVE_ACCESS_KEY` | Override the public patch-service client key |
 | `GWNATIVE_PATCH_ROOT` | Override the patch service base URL |
-| `GWNATIVE_WEB_ROOT` | Override the web shell and client-artifact directory |
+| `GWNATIVE_WEB_ROOT` | Override the official client-artifact directory; the reviewed shell stays separate |
 | `GWNATIVE_PORT` | Override loopback port `38112` |
 | `GWNATIVE_PRINT_TOKEN` | Print the injected host-route token to stderr |
 | `GWNATIVE_PRINT_GAME_TOKEN` | Print a token limited to read-only public game-state routes |
