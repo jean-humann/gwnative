@@ -44,9 +44,9 @@ pub struct Response {
     /// Names lower-cased. One entry per name: CFNetwork's header dictionary
     /// merges repeated headers into a single comma-joined value, so a response
     /// carrying several `Set-Cookie` lines arrives here as one. None of the
-    /// current callers splits one back apart — the proxy forwards the merged
-    /// value and the patch client only reads `content-length` — but a caller
-    /// that ever needs the individual values will not find them here.
+    /// current callers splits one back apart — the proxy discards cookie state
+    /// and the patch client only reads `content-length` — but a caller that ever
+    /// needs the individual values will not find them here.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }

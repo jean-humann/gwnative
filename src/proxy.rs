@@ -41,9 +41,10 @@ pub const MAX_BODY: usize = 8 * 1024 * 1024;
 /// Sent by the browser or meaningful only to the hop that received them.
 /// `x-gwnative-token` is ours and authorises reading the saved password: it has
 /// no business upstream even though the page has no reason to send it.
-const REQUEST_DROP: [&str; 8] = [
+const REQUEST_DROP: [&str; 9] = [
     "connection",
     "content-length",
+    "cookie",
     "host",
     "keep-alive",
     "origin",
@@ -54,12 +55,13 @@ const REQUEST_DROP: [&str; 8] = [
 
 /// Upstream's transport framing describes its connection, not ours, and its
 /// content policy describes its origin, not the page's.
-const RESPONSE_DROP: [&str; 7] = [
+const RESPONSE_DROP: [&str; 8] = [
     "connection",
     "content-encoding",
     "content-length",
     "content-security-policy",
     "content-security-policy-report-only",
+    "set-cookie",
     "transfer-encoding",
     "x-content-type-options",
 ];
@@ -68,6 +70,20 @@ pub struct Reply {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+fn drop_header(name: &str, blocked: &[&str]) -> bool {
+    blocked.iter().any(|item| name.eq_ignore_ascii_case(item))
+}
+
+fn upstream_request_headers(headers: &[(String, String)]) -> Vec<(&str, &str)> {
+    let mut forwarded = headers
+        .iter()
+        .filter(|(name, _)| !drop_header(name, &REQUEST_DROP))
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    forwarded.push(("accept-encoding", "identity"));
+    forwarded
 }
 
 /// The host a route label stands for, or `None` if it is not one of the five.
@@ -101,12 +117,7 @@ pub fn forward(
     // Identity last so it wins if the page sent an accept-encoding of its own:
     // the bodies here are already compressed or small, and decoding one
     // transfer layer only to re-frame it below buys nothing.
-    let mut forwarded: Vec<(&str, &str)> = headers
-        .iter()
-        .filter(|(name, _)| !REQUEST_DROP.contains(&name.as_str()))
-        .map(|(name, value)| (name.as_str(), value.as_str()))
-        .collect();
-    forwarded.push(("accept-encoding", "identity"));
+    let forwarded = upstream_request_headers(headers);
 
     // Redirects are not followed — the transport hands the 3xx back — so a
     // redirect that leaves the allowlisted host is refused below instead of
@@ -122,7 +133,7 @@ pub fn forward(
 
     let mut out = Vec::new();
     for (name, value) in response.headers {
-        if RESPONSE_DROP.contains(&name.as_str()) {
+        if drop_header(&name, &RESPONSE_DROP) {
             continue;
         }
         if name == "location" {
@@ -201,6 +212,31 @@ mod tests {
         for (route, host) in ROUTES {
             assert_eq!(host.split('.').next(), Some(route));
         }
+    }
+
+    #[test]
+    fn cookie_state_never_crosses_the_five_route_proxy() {
+        let offered = [
+            ("Cookie".into(), "a=1".into()),
+            ("cOoKiE".into(), "b=2".into()),
+            ("X-Gwnative-Token".into(), "sentinel".into()),
+            ("accept".into(), "application/json".into()),
+        ];
+        for route in ["account", "webgate"] {
+            assert!(host(route).is_some());
+            assert_eq!(
+                upstream_request_headers(&offered),
+                [
+                    ("accept", "application/json"),
+                    ("accept-encoding", "identity")
+                ]
+            );
+        }
+        for name in ["set-cookie", "Set-Cookie", "sEt-CoOkIe"] {
+            assert!(drop_header(name, &RESPONSE_DROP));
+        }
+        assert!(!drop_header("set-cookie", &REQUEST_DROP));
+        assert!(!drop_header("cookie", &RESPONSE_DROP));
     }
 
     #[test]
