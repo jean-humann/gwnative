@@ -111,6 +111,34 @@ fn upstream_request_headers(headers: &[(String, String)]) -> Vec<(&str, &str)> {
     forwarded
 }
 
+/// The one protected request body the host must deliberately transmit.
+///
+/// Saved credentials are useful only when the login form reaches NCSoft's
+/// fixed HTTPS endpoint. They remain forbidden from every URL, query, header,
+/// other route or method, redirect, diagnostic, and response.
+fn allows_protected_login_body(route: &str, method: &str) -> bool {
+    route == "webgate" && method == "POST"
+}
+
+fn admit_proxy_request(
+    route: &str,
+    method: &str,
+    url: &str,
+    forwarded: &[(&str, &str)],
+    body: &[u8],
+) -> Option<crate::log::UntrustedLease> {
+    let metadata = std::iter::once(url.as_bytes()).chain(
+        forwarded
+            .iter()
+            .flat_map(|(name, value)| [name.as_bytes(), value.as_bytes()]),
+    );
+    if allows_protected_login_body(route, method) {
+        crate::log::admit_untrusted_parts(metadata)
+    } else {
+        crate::log::admit_untrusted_parts(metadata.chain(std::iter::once(body)))
+    }
+}
+
 /// The host a route label stands for, or `None` if it is not one of the five.
 pub fn host(route: &str) -> Option<&'static str> {
     ROUTES
@@ -148,14 +176,7 @@ pub fn forward(
     // redirect that leaves the allowlisted host is refused below instead of
     // quietly fetched. A 401 is an answer the client knows how to render; it
     // arrives here as a status like any other and reaches the page intact.
-    let parts = std::iter::once(url.as_bytes())
-        .chain(
-            forwarded
-                .iter()
-                .flat_map(|(name, value)| [name.as_bytes(), value.as_bytes()]),
-        )
-        .chain(std::iter::once(body));
-    let Some(lease) = crate::log::admit_untrusted_parts(parts) else {
+    let Some(lease) = admit_proxy_request(route, method, &url, &forwarded, body) else {
         crate::log::wipe_string(&mut url);
         return Err("protected request material was not forwarded".into());
     };
@@ -354,12 +375,55 @@ mod tests {
                 &[("x-canary".into(), secret.into())],
                 b"",
             ),
-            forward("webgate", "/", "", "POST", &[], br#"{"password":"z9Q"}"#),
+            forward("account", "/", "", "POST", &[], br#"{"password":"z9Q"}"#),
         ] {
             assert_eq!(
                 result.err().as_deref(),
                 Some("protected request material was not forwarded")
             );
         }
+    }
+
+    #[test]
+    fn protected_login_body_exception_is_exact_and_metadata_stays_guarded() {
+        let secret = "webgate-body-only-canary-7bB9xQ";
+        let _registration = crate::log::register(&[secret]).unwrap();
+        let body = format!(r#"{{"password":"{secret}"}}"#);
+        let webgate = "https://webgate.ncplatform.net/login";
+
+        assert!(allows_protected_login_body("webgate", "POST"));
+        for (route, method) in [
+            ("webgate", "GET"),
+            ("webgate", "PUT"),
+            ("account", "POST"),
+            ("help", "POST"),
+            ("store", "POST"),
+            ("www", "POST"),
+        ] {
+            assert!(!allows_protected_login_body(route, method));
+            assert!(admit_proxy_request(route, method, webgate, &[], body.as_bytes()).is_none());
+        }
+
+        assert!(admit_proxy_request("webgate", "POST", webgate, &[], body.as_bytes()).is_some());
+        assert!(
+            admit_proxy_request(
+                "webgate",
+                "POST",
+                &format!("{webgate}?password={secret}"),
+                &[],
+                body.as_bytes(),
+            )
+            .is_none()
+        );
+        assert!(
+            admit_proxy_request(
+                "webgate",
+                "POST",
+                webgate,
+                &[("x-login", secret)],
+                body.as_bytes(),
+            )
+            .is_none()
+        );
     }
 }
