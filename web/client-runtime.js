@@ -148,6 +148,7 @@ export async function postRuntimeState(path, body, options = {}) {
     if (!response.ok) {
       throw new Error((await response.text()) || `${path} failed: ${response.status}`);
     }
+    return response.status === 204 ? null : response.json();
   } finally {
     clearTimeout(deadline);
   }

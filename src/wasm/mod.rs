@@ -26,6 +26,7 @@ use sha2::Digest;
 
 use crate::generation;
 
+pub const TRANSFORM_ABI: u32 = certificate::TRANSFORM_ABI;
 pub use certificate::Runtime;
 use certificate::{CertificateFeed, Selected};
 

@@ -59,21 +59,21 @@ const ADOPTED: &str = "adopted";
 /// One artifact, as it was written.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artifact {
-    size: u64,
+    pub(crate) size: u64,
     /// Lowercase SHA-256 of the whole file. Not the manifest's hash, which
     /// covers chunks rather than the assembled result.
-    hash: String,
+    pub(crate) hash: String,
 }
 
 /// A set of client artifacts that belong together.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Generation {
     /// Manifest-derived patch-generation identity. See the module docs.
-    id: String,
-    artifacts: BTreeMap<String, Artifact>,
+    pub(crate) id: String,
+    pub(crate) artifacts: BTreeMap<String, Artifact>,
     /// The active manifest that describes this generation's snapshot.
     #[serde(default)]
-    manifest: Option<Artifact>,
+    pub(crate) manifest: Option<Artifact>,
 }
 
 /// What the page actually tried on the most recent launch.
@@ -89,46 +89,6 @@ struct RuntimeAttempt {
     /// selected transform output.
     build: Option<String>,
     transformed: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LaunchIdentity {
-    pub generation_id: String,
-    pub runtime: String,
-    pub official_glue_sha256: String,
-    pub official_wasm_sha256: String,
-    pub mode: RuntimeMode,
-    pub transform_abi: Option<u32>,
-    pub compatibility_id: Option<String>,
-    pub nonce: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RuntimeMode {
-    Original,
-    Derived,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", content = "launch", rename_all = "kebab-case")]
-enum ProofState {
-    InstalledUnproven,
-    LegacyFirstFrame,
-    FirstFrameProven(LaunchIdentity),
-    GameplayProven(LaunchIdentity),
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", content = "launch", rename_all = "kebab-case")]
-enum LaunchState {
-    #[default]
-    Idle,
-    AttemptingRuntime(LaunchIdentity),
-    FailedRuntime(LaunchIdentity),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1037,7 +997,14 @@ mod tests {
     use super::*;
     use crate::scratch::TempDir;
 
-    const NAMES: [&str; 2] = ["Gw.jspi.js", "Gw.jspi.wasm"];
+    const NAMES: [&str; 5] = [
+        "Gw.jspi.js",
+        "Gw.jspi.wasm",
+        "Gw.js",
+        "Gw.wasm",
+        "version.json",
+    ];
+    const OFFERING_NAMES: [&str; 2] = ["Gw.jspi.js", "Gw.jspi.wasm"];
 
     fn write_client(root: &Path, flavour: &str) {
         fs::create_dir_all(root).unwrap();
@@ -1056,7 +1023,7 @@ mod tests {
     /// The two knobs are the two things [`identify`] reads besides the name: how
     /// long each artifact is, and what its chunks hash to.
     fn offering(sizes: [u64; 2], chunks: [char; 2]) -> Manifest {
-        let files: Vec<String> = NAMES
+        let files: Vec<String> = OFFERING_NAMES
             .iter()
             .zip(sizes)
             .zip(chunks)
@@ -1718,19 +1685,19 @@ mod tests {
     /// the same build, a patch would ship and nothing would install it.
     #[test]
     fn a_manifest_offering_different_bytes_offers_a_different_build() {
-        let shipped = identify(&offering([16, 16], ['a', 'b']), &NAMES).unwrap();
+        let shipped = identify(&offering([16, 16], ['a', 'b']), &OFFERING_NAMES).unwrap();
 
         // The same manifest again — the ordinary launch, where nothing has
         // changed and nothing should be fetched.
         assert_eq!(
-            identify(&offering([16, 16], ['a', 'b']), &NAMES).unwrap(),
+            identify(&offering([16, 16], ['a', 'b']), &OFFERING_NAMES).unwrap(),
             shipped
         );
 
         // Different content at the same length, which is what a patch to one
         // artifact usually looks like and what a size check cannot see.
         assert_ne!(
-            identify(&offering([16, 16], ['a', 'c']), &NAMES).unwrap(),
+            identify(&offering([16, 16], ['a', 'c']), &OFFERING_NAMES).unwrap(),
             shipped
         );
 
@@ -1738,7 +1705,7 @@ mod tests {
         // would publish but which must not collide either — the size is in the
         // digest for exactly this reason.
         assert_ne!(
-            identify(&offering([16, 32], ['a', 'b']), &NAMES).unwrap(),
+            identify(&offering([16, 32], ['a', 'b']), &OFFERING_NAMES).unwrap(),
             shipped
         );
 
