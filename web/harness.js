@@ -11,19 +11,123 @@ var Module;
 const LOG_LINES = 400;
 const logBuf = [];
 const protectedDiagnostics = new Set(
-  [window.__gwnativeToken, window.__gwnativeGamePublisherToken]
+  [window.__gwnativeToken, window.__gwnativeGamePublisherToken, window.__gwnativeLaunchNonce]
     .filter((value) => typeof value === 'string' && value !== ''),
 );
+const MAX_CREDENTIAL_DIAGNOSTICS = 18;
+const credentialDiagnostics = new Set();
+let suppressPageDiagnostics = false;
 const protectCredentials = (credentials) => {
+  // Client code can retain an object after a Keychain update or clear. Keep a
+  // bounded realm history; if it is exhausted, suppress every diagnostic for
+  // the rest of this realm instead of forgetting an exposed value.
   for (const value of [credentials?.username, credentials?.password]) {
-    if (typeof value === 'string' && value !== '') protectedDiagnostics.add(value);
+    if (typeof value !== 'string' || value === '' || credentialDiagnostics.has(value)) continue;
+    if (credentialDiagnostics.size === MAX_CREDENTIAL_DIAGNOSTICS) {
+      suppressPageDiagnostics = true;
+      break;
+    }
+    credentialDiagnostics.add(value);
   }
   return credentials;
 };
+const diagnosticEncoder = new TextEncoder();
+const diagnosticDecoder = new TextDecoder('utf-8', { fatal: true });
+const hexByte = (byte) => {
+  if (byte >= 48 && byte <= 57) return byte - 48;
+  if (byte >= 65 && byte <= 70) return byte - 65 + 10;
+  if (byte >= 97 && byte <= 102) return byte - 97 + 10;
+  return -1;
+};
+const containsDiagnosticSpelling = (text, protectedValue, budget) => {
+  const offered = diagnosticEncoder.encode(text);
+  const expected = diagnosticEncoder.encode(protectedValue);
+  for (const form of [false, true]) {
+    for (let start = 0; start < offered.length; start += 1) {
+      let at = start;
+      let matched = true;
+      for (const wanted of expected) {
+        budget.steps += 1;
+        if (budget.steps > 8 * 1024 * 1024) return true;
+        if (at >= offered.length) {
+          matched = false;
+          break;
+        }
+        const high = offered[at] === 37 ? hexByte(offered[at + 1]) : -1;
+        const low = high >= 0 ? hexByte(offered[at + 2]) : -1;
+        const actual = high >= 0 && low >= 0
+          ? (high << 4) | low
+          : form && offered[at] === 43 ? 32 : offered[at];
+        if (actual !== wanted) {
+          matched = false;
+          break;
+        }
+        at += high >= 0 && low >= 0 ? 3 : 1;
+      }
+      if (matched) return true;
+    }
+  }
+  return false;
+};
+const decodeJsonDiagnosticLayer = (text) => {
+  let changed = false;
+  const simple = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
+  const decoded = text.replace(/\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})/g, (escape) => {
+    changed = true;
+    return escape[1] === 'u'
+      ? String.fromCharCode(Number.parseInt(escape.slice(2), 16))
+      : simple[escape[1]];
+  });
+  return changed ? decoded : null;
+};
+const decodePercentDiagnosticLayer = (text, form) => {
+  const input = diagnosticEncoder.encode(text);
+  const output = [];
+  let changed = false;
+  for (let at = 0; at < input.length; at += 1) {
+    const high = input[at] === 37 ? hexByte(input[at + 1]) : -1;
+    const low = high >= 0 ? hexByte(input[at + 2]) : -1;
+    if (high >= 0 && low >= 0) {
+      output.push((high << 4) | low);
+      at += 2;
+      changed = true;
+    } else if (form && input[at] === 43) {
+      output.push(32);
+      changed = true;
+    } else {
+      output.push(input[at]);
+    }
+  }
+  if (!changed) return { decoded: null, unsafe: false };
+  try {
+    return { decoded: diagnosticDecoder.decode(Uint8Array.from(output)), unsafe: false };
+  } catch {
+    return { decoded: null, unsafe: true };
+  }
+};
+const MAX_DIAGNOSTIC_VARIANTS = 32;
 const scrubDiagnostic = (value) => {
-  let text = String(value);
-  for (const protectedValue of protectedDiagnostics) {
-    text = text.replaceAll(protectedValue, '<redacted>');
+  if (suppressPageDiagnostics) return '';
+  const text = String(value);
+  if (text.length > 1024 * 1024) return '';
+  const variants = [text];
+  const seen = new Set(variants);
+  const budget = { steps: 0 };
+  for (let index = 0; index < variants.length; index += 1) {
+    const variant = variants[index];
+    for (const protectedValue of [...protectedDiagnostics, ...credentialDiagnostics]) {
+      if (containsDiagnosticSpelling(variant, protectedValue, budget)) return '';
+    }
+    const json = decodeJsonDiagnosticLayer(variant);
+    const uri = decodePercentDiagnosticLayer(variant, false);
+    const form = decodePercentDiagnosticLayer(variant, true);
+    if (uri.unsafe || form.unsafe) return '';
+    for (const next of [json, uri.decoded, form.decoded]) {
+      if (next === null || seen.has(next)) continue;
+      if (variants.length === MAX_DIAGNOSTIC_VARIANTS) return '';
+      seen.add(next);
+      variants.push(next);
+    }
   }
   return text;
 };
@@ -65,16 +169,39 @@ const forward = (line) => {
 // host terminal sees only the harness's own half of the story. Installed here,
 // above the first caller, so `log` below can just use console and not forward a
 // second copy of its own.
-for (const level of ['log', 'warn', 'error']) {
+const CONSOLE_METHODS = [
+  'log', 'info', 'debug', 'warn', 'error', 'dir', 'dirxml', 'table', 'trace',
+  'group', 'groupCollapsed', 'groupEnd', 'clear', 'count', 'countReset',
+  'assert', 'time', 'timeLog', 'timeEnd', 'timeStamp', 'profile', 'profileEnd',
+];
+for (const level of CONSOLE_METHODS) {
+  if (typeof console[level] !== 'function') continue;
   const original = console[level].bind(console);
   console[level] = (...values) => {
+    if (level === 'assert') {
+      const [condition, ...details] = values;
+      if (condition) return;
+      const scrubbed = details.map(scrubDiagnostic);
+      original(false, ...scrubbed);
+      forward(`[assert] ${scrubbed.join(' ')}`);
+      return;
+    }
     const scrubbed = values.map(scrubDiagnostic);
     original(...scrubbed);
     forward(level === 'log' ? scrubbed.join(' ') : `[${level}] ${scrubbed.join(' ')}`);
   };
 }
-window.addEventListener('error', (e) => forward(`[uncaught] ${e.message} @ ${e.filename}:${e.lineno}`));
-window.addEventListener('unhandledrejection', (e) => forward(`[unhandled] ${e.reason}`));
+window.addEventListener('error', (e) => {
+  forward(`[uncaught] ${e.message} @ ${e.filename}:${e.lineno}`);
+  // WebKit's default handler writes the original event to its own console,
+  // bypassing the wrapped console methods above. Cancel it after our scrubbed
+  // copy is queued so credential-bearing exception text has one sink, not two.
+  e.preventDefault();
+});
+window.addEventListener('unhandledrejection', (e) => {
+  forward(`[unhandled] ${e.reason}`);
+  e.preventDefault();
+});
 
 // Keep the main loop turning when the window is not on screen.
 //
@@ -179,8 +306,9 @@ let bootRescueActive = true;
 
 const statusEl = () => document.getElementById('status');
 const log = (...values) => {
-  console.log(...values);
-  logBuf.push(values.map(String).join(' '));
+  const scrubbed = values.map(scrubDiagnostic);
+  console.log(...scrubbed);
+  logBuf.push(scrubbed.join(' '));
   if (logBuf.length > LOG_LINES) logBuf.splice(0, logBuf.length - LOG_LINES);
   const el = document.getElementById('log');
   if (el && el.style.display !== 'none') {
@@ -224,7 +352,8 @@ const status = (text, fraction = null, detail = '', force = false) => {
 const fail = (text) => {
   status(text, null, '', true);
   log('[err]', text);
-  recovery?.showFailure(text, log);
+  recovery?.showFailure(text, log, () =>
+    typeof host?.relaunchApp === 'function' ? host.relaunchApp() : location.reload());
 };
 
 // Long enough for a loopback round trip several times over, short enough that
@@ -369,7 +498,7 @@ const readSaved = () => {
   saved ??= credentials('GET').then((response) => {
     // Distinguished from a failure here rather than at the call: "nothing
     // saved" is a value worth caching, and a first launch legitimately has it.
-    if (response.status === 404) return null;
+    if (response.status === 404) return protectCredentials(null);
     if (!response.ok) throw new Error(`credential read failed: ${response.status}`);
     return response.json().then(protectCredentials);
   });
@@ -580,9 +709,14 @@ Module = {
       return stored;
     },
     async storeCredentials(username, password) {
+      const previous = await readSaved().catch(() => null);
       protectCredentials({ username, password });
       const response = await credentials('PUT', { username, password });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        const reason = await response.text();
+        protectCredentials(previous);
+        throw new Error(reason);
+      }
       // Held rather than re-read: the host now has exactly this, and a client
       // that signs out and back in within one session should not pay for the
       // keychain twice.
@@ -724,16 +858,18 @@ function appendGlue() {
 }
 
 function reportRuntimeAttempt() {
-  return host.postRuntimeState('__runtime', {
+  const transformed = window.__gwnativeTemplateSave === 'ready';
+  const launch = {
     runtime: client.mode,
-    build: window.__gwnativeClientBuild,
-    transformed: window.__gwnativeTemplateSave === 'ready',
+    build: transformed ? window.__gwnativeClientBuild : null,
+    transformed,
     nonce: window.__gwnativeLaunchNonce,
-  });
+  };
+  return host.deliverRuntimeProof('__runtime', launch).then(() => launch);
 }
 
 function reportTransformFailure() {
-  return host.postRuntimeState('__transform-failed', {
+  return host.deliverRuntimeProof('__transform-failed', {
     launch: window.__gwnativeLaunchIdentity,
   });
 }
@@ -748,7 +884,7 @@ function runtimeFailedBeforeProof(reason) {
   status('Trying the other official runtime…');
   const launch = window.__gwnativeLaunchIdentity;
   runtimeTransition = (async () => {
-    if (launch.mode === 'derived') {
+    if (launch.transformed === true) {
       await reportTransformFailure();
       await host.relaunchApp();
       return;

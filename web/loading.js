@@ -4,7 +4,8 @@
 // way forward except quitting and relaunching, which is the same thing the
 // player had already tried. Most of these failures are transient — a range
 // request that lost its connection, a module fetch that raced the server
-// coming up — so a reload fixes them, and the player has no way to know that.
+// coming up — so a fresh-process restart fixes them, and the player has no way
+// to know that.
 //
 // The overlay's markup lives in index.html rather than being built here,
 // because one of the failures this has to survive is "a module could not be
@@ -81,8 +82,9 @@ const RESET_WARNING =
  *
  * @param {string} text What went wrong, in the player's terms.
  * @param {(...values: unknown[]) => void} log
+ * @param {() => unknown} restart
  */
-export function showFailure(text, log) {
+export function showFailure(text, log, restart = () => location.reload()) {
   const panel = el('failure');
   const message = el('failure-text');
   // No overlay in the document means an older index.html; the status line the
@@ -94,9 +96,20 @@ export function showFailure(text, log) {
   note('');
   panel.hidden = false;
 
+  const retry = async () => {
+    actions([]);
+    note('Restarting Guild Wars…');
+    try {
+      await restart();
+    } catch (error) {
+      note(`Guild Wars could not be restarted: ${error}`);
+      actions([{ label: 'Try again', run: retry }]);
+    }
+  };
+
   const offer = () =>
     actions([
-      { label: 'Try again', run: () => location.reload() },
+      { label: 'Try again', run: retry },
       {
         label: 'Reset game data…',
         danger: true,
@@ -117,14 +130,16 @@ export function showFailure(text, log) {
   const reset = async () => {
     actions([]);
     note('Deleting game data…');
+    let count;
     try {
-      const count = await wipe();
-      log?.(`reset ${count} database(s); reloading`);
-      location.reload();
+      count = await wipe();
     } catch (error) {
       note(`The game data could not be deleted: ${error}`);
-      actions([{ label: 'Try again', run: () => location.reload() }]);
+      actions([{ label: 'Try again', run: retry }]);
+      return;
     }
+    log?.(`reset ${count} database(s); restarting`);
+    await retry();
   };
 
   offer();

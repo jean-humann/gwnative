@@ -51,14 +51,20 @@ export function createSockets({ log, audit, launchIdentity }) {
     const url = new URL('__socket', location.href);
     url.protocol = 'ws:';
     url.searchParams.set('to', destination);
-    // A WebSocket handshake carries no headers this side can set, so this one
-    // route takes its token in the query string. The host accepts it there for
-    // the same reason.
-    url.searchParams.set('token', window.__gwnativeToken ?? '');
+    // WebSocket exposes no arbitrary request headers, but subprotocols are
+    // request headers. Keep the capability out of the URL and ask the host to
+    // select only the fixed, non-secret protocol name.
+    const token = window.__gwnativeToken ?? '';
+    const protocols = ['gwnative', `gwnative-token.${token}`];
     const launch = launchIdentity?.();
-    if (launch) url.searchParams.set('launch', JSON.stringify(launch));
-
-    const ws = new WebSocket(url);
+    const port = Number.parseInt(destination.match(/:(\d+)$/)?.[1] ?? '', 10);
+    if (launch && port === 6112) {
+      const bytes = new TextEncoder().encode(JSON.stringify(launch));
+      const encoded = btoa(String.fromCharCode(...bytes))
+        .replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+      protocols.push(`gwnative-launch.${encoded}`);
+    }
+    const ws = new WebSocket(url, protocols);
     ws.binaryType = 'arraybuffer';
 
     // The client may send before the TCP connection is up: it treats connect()

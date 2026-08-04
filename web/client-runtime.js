@@ -125,16 +125,16 @@ export async function readRuntimePlan(options = {}) {
     if (!response.ok) {
       throw new Error((await response.text()) || `runtime plan failed: ${response.status}`);
     }
-    const plan = await response.json();
-    if (
-      !plan
-      || Object.keys(plan).some((key) => key !== 'failedOfficial')
-      || !Array.isArray(plan.failedOfficial)
-      || plan.failedOfficial.some((runtime) => runtime !== 'jspi' && runtime !== 'asyncify')
-    ) {
+    if (response.status < 220 || response.status > 223) {
       throw new Error('the host returned an invalid runtime plan');
     }
-    return { failedOfficial: [...new Set(plan.failedOfficial)] };
+    const mask = response.status - 220;
+    return {
+      failedOfficial: [
+        ...(mask & 1 ? ['jspi'] : []),
+        ...(mask & 2 ? ['asyncify'] : []),
+      ],
+    };
   } finally {
     clearTimeout(deadline);
   }
@@ -188,7 +188,15 @@ export async function postRuntimeState(path, body, options = {}) {
     if (!response.ok) {
       throw new Error((await response.text()) || `${path} failed: ${response.status}`);
     }
-    return response.status === 204 ? null : response.json();
+    if (path === '__runtime-failed') {
+      if (response.status === 224) return { outcome: 'try-runtime', runtime: 'asyncify' };
+      if (response.status === 225) return { outcome: 'predecessor-restored' };
+      if (response.status === 226) return { outcome: 'exhausted' };
+    }
+    if (response.status !== 204) {
+      throw new Error(`the host returned an invalid ${path} acknowledgement`);
+    }
+    return null;
   } finally {
     clearTimeout(deadline);
   }
@@ -226,9 +234,13 @@ export async function deliverRuntimeProof(path, body, options = {}) {
  * WKWebView behind. The host starts the successor before this page disappears.
  */
 export async function transitionRuntimeFailure(launch, options = {}) {
-  const post = options.post ?? postRuntimeState;
+  const post = options.post ?? ((path, body) => postRuntimeState(path, body, options));
   const relaunch = options.relaunch;
-  const result = await post('__runtime-failed', { launch });
+  const result = await deliverRuntimeProof('__runtime-failed', { launch }, {
+    post,
+    wait: options.wait,
+    delays: options.delays,
+  });
   if (result?.outcome === 'exhausted') {
     throw new Error('Both usable official runtimes are exhausted; no predecessor was removed.');
   }

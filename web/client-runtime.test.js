@@ -92,19 +92,35 @@ describe('client runtime selection', () => {
   });
 
   it('validates the host runtime plan before using it', async () => {
-    const response = (body) => ({
+    const response = (status) => ({
       ok: true,
-      async json() { return body; },
+      status,
     });
     assert.deepEqual(
       await readRuntimePlan({
-        fetch: async () => response({ failedOfficial: ['jspi', 'jspi'] }),
+        fetch: async () => response(221),
       }),
       { failedOfficial: ['jspi'] },
     );
     await assert.rejects(
-      readRuntimePlan({ fetch: async () => response({ failedOfficial: ['native'] }) }),
+      readRuntimePlan({ fetch: async () => response(227) }),
       /invalid runtime plan/,
+    );
+  });
+
+  it('decodes bodyless runtime transition acknowledgements', async () => {
+    const send = (status) => async () => ({ ok: true, status });
+    assert.deepEqual(
+      await postRuntimeState('__runtime-failed', {}, { fetch: send(224) }),
+      { outcome: 'try-runtime', runtime: 'asyncify' },
+    );
+    assert.deepEqual(
+      await postRuntimeState('__runtime-failed', {}, { fetch: send(225) }),
+      { outcome: 'predecessor-restored' },
+    );
+    assert.deepEqual(
+      await postRuntimeState('__runtime-failed', {}, { fetch: send(226) }),
+      { outcome: 'exhausted' },
     );
   });
 
@@ -123,6 +139,24 @@ describe('client runtime selection', () => {
       ['persist', '__runtime-failed', { launch }],
       ['relaunch'],
     ]);
+  });
+
+  it('retries the exact runtime failure after a lost acknowledgement', async () => {
+    const launch = { runtime: 'jspi', transformed: false, nonce: 'exact' };
+    const claims = [];
+    let relaunched = 0;
+    await transitionRuntimeFailure(launch, {
+      delays: [0, 0],
+      post: async (path, body) => {
+        claims.push([path, body]);
+        if (claims.length === 1) throw new Error('acknowledgement lost');
+        return { outcome: 'try-runtime', runtime: 'asyncify' };
+      },
+      relaunch: async () => { relaunched += 1; },
+    });
+    assert.equal(claims.length, 2);
+    assert.ok(claims.every(([path, body]) => path === '__runtime-failed' && body.launch === launch));
+    assert.equal(relaunched, 1);
   });
 
   it('does not relaunch when both runtimes are exhausted without a predecessor', async () => {
@@ -240,6 +274,21 @@ describe('client runtime selection', () => {
     assert.deepEqual(waits, [10, 20]);
     assert.equal(calls.length, 3);
     assert.ok(calls.every(({ path, sent }) => path === '__booted' && sent === body));
+  });
+
+  it('retries a durably recorded initial attempt before executing glue', async () => {
+    const claim = { runtime: 'jspi', build: null, transformed: false, nonce: 'exact' };
+    const calls = [];
+    await deliverRuntimeProof('__runtime', claim, {
+      delays: [0, 0],
+      post: async (path, body) => {
+        calls.push([path, body]);
+        if (calls.length === 1) throw new Error('204 lost');
+        return null;
+      },
+    });
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(([path, body]) => path === '__runtime' && body === claim));
   });
 
   it('stops proof retry after the bounded attempt set', async () => {

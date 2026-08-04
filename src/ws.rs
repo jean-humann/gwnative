@@ -98,21 +98,51 @@ fn accept_key(key: &str) -> String {
 /// Complete the upgrade. The caller has already parsed the request and checked
 /// that it asked for a WebSocket.
 pub fn accept(stream: &mut TcpStream, key: &str) -> std::io::Result<()> {
-    let response = format!(
+    stream.write_all(handshake(key).as_bytes())?;
+    stream.flush()
+}
+
+fn handshake(key: &str) -> String {
+    format!(
         "HTTP/1.1 101 Switching Protocols\r\n\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
-         Sec-WebSocket-Accept: {}\r\n\r\n",
+         Sec-WebSocket-Accept: {}\r\n\
+         Sec-WebSocket-Protocol: gwnative\r\n\r\n",
         accept_key(key)
-    );
-    stream.write_all(response.as_bytes())?;
-    stream.flush()
+    )
 }
 
 fn read_exact(reader: &mut impl Read, n: usize) -> std::io::Result<Vec<u8>> {
     let mut buf = vec![0u8; n];
-    reader.read_exact(&mut buf)?;
-    Ok(buf)
+    match reader.read_exact(&mut buf) {
+        Ok(()) => Ok(buf),
+        Err(error) => {
+            crate::log::wipe(&mut buf);
+            Err(error)
+        }
+    }
+}
+
+#[derive(Default)]
+struct WipingBuffer(Vec<u8>);
+
+impl Drop for WipingBuffer {
+    fn drop(&mut self) {
+        crate::log::wipe(&mut self.0);
+    }
+}
+
+fn text_message(mut bytes: Vec<u8>) -> String {
+    match String::from_utf8(std::mem::take(&mut bytes)) {
+        Ok(text) => text,
+        Err(error) => {
+            let mut bytes = error.into_bytes();
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            crate::log::wipe(&mut bytes);
+            text
+        }
+    }
 }
 
 /// Read one message from `reader`, reassembling continuation frames and
@@ -126,7 +156,7 @@ fn read_message_with(
     reader: &mut impl Read,
     pong: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
 ) -> std::io::Result<Option<Message>> {
-    let mut payload = Vec::new();
+    let mut payload = WipingBuffer::default();
     let mut kind = 0u8;
 
     loop {
@@ -157,7 +187,7 @@ fn read_message_with(
                 "unmasked client frame",
             ));
         }
-        if len > MAX_MESSAGE || payload.len().saturating_add(len) > MAX_MESSAGE {
+        if len > MAX_MESSAGE || payload.0.len().saturating_add(len) > MAX_MESSAGE {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "websocket message too large",
@@ -171,23 +201,32 @@ fn read_message_with(
         }
 
         match opcode {
-            CLOSE => return Ok(Some(Message::Close)),
+            CLOSE => {
+                crate::log::wipe(&mut body);
+                return Ok(Some(Message::Close));
+            }
             // Control frames may be interleaved with a fragmented message, so
             // handle them without disturbing the payload being assembled.
             PING => {
-                pong(&body)?;
+                let result = pong(&body);
+                crate::log::wipe(&mut body);
+                result?;
                 continue;
             }
-            PONG => continue,
+            PONG => {
+                crate::log::wipe(&mut body);
+                continue;
+            }
             0 => {}
             other => kind = other,
         }
 
-        payload.extend_from_slice(&body);
+        payload.0.extend_from_slice(&body);
+        crate::log::wipe(&mut body);
         if fin {
             return Ok(Some(match kind {
-                TEXT => Message::Text(String::from_utf8_lossy(&payload).into_owned()),
-                _ => Message::Binary(payload),
+                TEXT => Message::Text(text_message(std::mem::take(&mut payload.0))),
+                _ => Message::Binary(std::mem::take(&mut payload.0)),
             }));
         }
     }
@@ -211,8 +250,9 @@ fn write_frame(stream: &mut impl Write, opcode: u8, payload: &[u8]) -> std::io::
     // One write_all per frame: two would let a concurrent writer interleave a
     // frame between this header and its payload.
     head.extend_from_slice(payload);
-    stream.write_all(&head)?;
-    stream.flush()
+    let result = stream.write_all(&head).and_then(|()| stream.flush());
+    crate::log::wipe(&mut head);
+    result
 }
 
 #[cfg(test)]
@@ -234,6 +274,13 @@ mod tests {
             accept_key("x3JJHMbDL1EzLkh9GBhXDw=="),
             "HSmrc0sMlYUkAGmm5OPpG2HaGWk="
         );
+    }
+
+    #[test]
+    fn handshake_selects_only_the_non_secret_protocol() {
+        let response = handshake("dGhlIHNhbXBsZSBub25jZQ==");
+        assert!(response.contains("Sec-WebSocket-Protocol: gwnative\r\n"));
+        assert!(!response.contains("gwnative-token."));
     }
 
     /// Build a client frame the way a browser does: masked, with the length in
