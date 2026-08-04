@@ -516,11 +516,11 @@ pub fn wipe_string(value: &mut String) {
 }
 
 /// A transient sensitive text allocation that clears itself on every exit.
-#[expect(dead_code)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub struct SecretText(String);
 
 impl SecretText {
-    #[expect(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn new(value: String) -> Self {
         Self(value)
     }

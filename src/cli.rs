@@ -9,7 +9,40 @@
 
 use std::ffi::OsString;
 use std::fmt;
+use std::ops::Deref;
 use std::path::PathBuf;
+
+/// Own every UTF-8 command-line allocation until parsing is complete, then
+/// overwrite it. `-password VALUE` otherwise leaves the source `String`
+/// behind after copying its bytes into [`Secret`].
+struct WipingArgs(Vec<String>);
+
+impl Deref for WipingArgs {
+    type Target = [String];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for WipingArgs {
+    fn drop(&mut self) {
+        for value in &mut self.0 {
+            crate::log::wipe_string(value);
+        }
+    }
+}
+
+fn wipe_os_string(value: OsString) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut bytes = value.into_vec();
+        crate::log::wipe(&mut bytes);
+    }
+    #[cfg(not(unix))]
+    drop(value);
+}
 
 /// The operation this invocation performs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,7 +97,7 @@ impl fmt::Debug for Secret {
 
 impl Drop for Secret {
     fn drop(&mut self) {
-        self.0.fill(0);
+        crate::log::wipe(&mut self.0);
     }
 }
 
@@ -81,6 +114,14 @@ pub struct LegacyOptions {
     pub performance: bool,
     pub no_patch_ui: bool,
     pub reset_preferences: bool,
+}
+
+impl Drop for LegacyOptions {
+    fn drop(&mut self) {
+        if let Some(email) = self.email.as_mut() {
+            crate::log::wipe_string(email);
+        }
+    }
 }
 
 /// Why a recognised option is not an exact implementation of the Windows
@@ -154,6 +195,17 @@ impl Invocation {
     /// later navigation. The page already fetches saved credentials from the
     /// one-shot host capability, so invocation credentials use that path too.
     pub fn take_credentials(&mut self) -> Option<(String, String)> {
+        if !matches!(self.command, Command::Run | Command::Serve)
+            || self.legacy.email.is_none()
+            || self.legacy.password.is_none()
+        {
+            if let Some(mut username) = self.legacy.email.take() {
+                crate::log::wipe_string(&mut username);
+            }
+            // `Secret::drop` wipes an incomplete or command-inapplicable value.
+            self.legacy.password = None;
+            return None;
+        }
         let username = self.legacy.email.take()?;
         let password = self.legacy.password.as_mut()?.take()?;
         self.legacy.password = None;
@@ -254,14 +306,18 @@ where
     I: IntoIterator<Item = S>,
     S: Into<OsString>,
 {
-    let args = args
-        .into_iter()
-        .map(Into::into)
-        .map(|arg| {
-            arg.into_string()
-                .map_err(|arg| usage_error(&arg.to_string_lossy()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut collected = WipingArgs(Vec::new());
+    for raw in args.into_iter() {
+        let raw: OsString = raw.into();
+        match raw.into_string() {
+            Ok(value) => collected.0.push(value),
+            Err(value) => {
+                wipe_os_string(value);
+                return Err(value_error("argument", "is not valid Unicode"));
+            }
+        }
+    }
+    let args = collected;
 
     let mut invocation = Invocation::default();
     let mut command_seen = false;
@@ -769,6 +825,16 @@ fn answer(message: &str) -> Exit {
 }
 
 fn usage_error(argument: &str) -> Exit {
+    let argument = if let Some((option, _)) = argument
+        .split_once('=')
+        .filter(|(name, _)| name.starts_with('-'))
+    {
+        format!("{option}=<value omitted>")
+    } else if argument.starts_with('-') {
+        "<unknown option omitted>".to_owned()
+    } else {
+        "<argument omitted>".to_owned()
+    };
     Exit {
         message: format!("gwnative: unrecognised argument \"{argument}\"\n\n{USAGE}"),
         failed: true,
@@ -1071,6 +1137,17 @@ mod tests {
     }
 
     #[test]
+    fn unknown_inline_values_are_not_echoed() {
+        let error = parse_str(&["--password=credential-canary"]).unwrap_err();
+        assert!(!error.message.contains("credential-canary"));
+        assert!(error.message.contains("--password=<value omitted>"));
+
+        let error = parse_str(&["credential-canary"]).unwrap_err();
+        assert!(!error.message.contains("credential-canary"));
+        assert!(error.message.contains("<argument omitted>"));
+    }
+
+    #[test]
     fn cache_options_never_hide_behind_an_early_return() {
         for args in [
             &["sync", "--cache", "/tmp/chunks"][..],
@@ -1133,7 +1210,8 @@ mod tests {
     fn unknown_arguments_are_refused() {
         let exit = parse_str(&["--sync"]).unwrap_err();
         assert!(exit.failed);
-        assert!(exit.message.contains("--sync"));
+        assert!(!exit.message.contains("--sync"));
+        assert!(exit.message.contains("<unknown option omitted>"));
     }
 
     #[test]

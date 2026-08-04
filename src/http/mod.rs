@@ -18,7 +18,10 @@ mod response;
 
 use std::path::{Component, Path, PathBuf};
 
-pub use request::{MAX_BODY_BYTES, Request, parse_range, read_request, token_matches};
+#[expect(unused_imports)]
+pub use request::{
+    MAX_BODY_BYTES, Request, WipingReader, parse_range, read_request, token_matches,
+};
 pub use response::{
     BODY_BUFFER, POLICY, etag, json, no_content, policy, respond, respond_head,
     respond_not_modified, respond_proxy, respond_static, respond_streaming, text,

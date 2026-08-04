@@ -250,9 +250,23 @@ pub fn respond_proxy(stream: &mut TcpStream, reply: &proxy::Reply) -> std::io::R
         let _ = write!(head, "{name}: {value}\r\n");
     }
     head.push_str("\r\n");
-    stream.write_all(head.as_bytes())?;
-    stream.write_all(&reply.body)?;
-    stream.flush()
+    let Some(lease) = crate::log::admit_untrusted_parts([head.as_bytes(), &reply.body]) else {
+        crate::log::wipe_string(&mut head);
+        let empty = format!(
+            "HTTP/1.1 {} Proxied\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            reply.status
+        );
+        return stream
+            .write_all(empty.as_bytes())
+            .and_then(|_| stream.flush());
+    };
+    let result = stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(&reply.body))
+        .and_then(|_| stream.flush());
+    drop(lease);
+    crate::log::wipe_string(&mut head);
+    result
 }
 
 /// A HEAD: the head a GET would have carried, and no body by definition.
@@ -263,4 +277,33 @@ pub fn respond_head(
 ) -> std::io::Result<()> {
     respond_streaming(stream, 200, "application/octet-stream", length, extra)?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read as _;
+    use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+
+    use super::*;
+
+    #[test]
+    fn protected_proxy_headers_and_bodies_are_never_written() {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let secret = "proxy-response-canary";
+        let _registration = crate::log::register(&[secret]).unwrap();
+        let reply = crate::proxy::Reply {
+            status: 200,
+            headers: vec![("x-upstream".into(), secret.into())],
+            body: secret.as_bytes().to_vec(),
+        };
+
+        respond_proxy(&mut server, &reply).unwrap();
+        drop(server);
+        let mut wire = String::new();
+        client.read_to_string(&mut wire).unwrap();
+        assert!(!wire.contains(secret), "protected response leaked: {wire}");
+        assert!(wire.contains("Content-Length: 0"), "{wire}");
+    }
 }
