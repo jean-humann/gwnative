@@ -474,12 +474,11 @@ Module = {
           '[warn] certified client could not instantiate; retrying ArenaNet’s exact module:',
           error,
         );
-        await reportTransformFailure().catch((reportError) => {
-          log('[warn] could not persist the transform fallback:', reportError);
-        });
+        await reportTransformFailure();
         window.__gwnativeTemplateSave = 'failed';
         window.__gwnativeEnhancements = 'off';
         window.__gwnativeEnhancementManifest = null;
+        window.__gwnativeLaunchIdentity = await reportRuntimeAttempt();
         result = await instantiate(`${url}?gwnative-original=1`);
       }
       performance.mark('gw.wasm.instantiate.end');
@@ -1072,9 +1071,10 @@ function reportTransformFailure() {
     // Only now has the launch actually attempted a client. A player who closes
     // the app before this point must not make the next launch reject or roll
     // back a generation it never ran.
-    await reportRuntimeAttempt();
+    window.__gwnativeLaunchIdentity = await reportRuntimeAttempt();
   } catch (error) {
-    log('[warn] could not record the runtime attempt:', error);
+    fail(`The runtime launch could not be recorded: ${error?.message ?? error}`);
+    return;
   }
   appendGlue();
 })();
