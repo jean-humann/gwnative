@@ -366,14 +366,7 @@ fn settings(request: &Request, stream: &mut TcpStream, context: &Context) -> std
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RuntimeAttempt {
-    runtime: String,
-    build: Option<String>,
-    transformed: bool,
-    nonce: String,
-}
+type RuntimeAttempt = generation::LaunchClaim;
 
 fn runtime_state_failure(
     stream: &mut TcpStream,
@@ -395,7 +388,13 @@ fn runtime_attempt(
 ) -> std::io::Result<()> {
     let recorded = serde_json::from_slice::<RuntimeAttempt>(&request.body)
         .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
-        .and_then(|attempt| {
+        .and_then(|mut attempt| {
+            if !attempt.transformed
+                && let Some(build) = attempt.build.as_mut()
+            {
+                crate::log::wipe_string(build);
+                attempt.build = None;
+            }
             context.generations.record_attempt(
                 &attempt.runtime,
                 attempt.build.as_deref(),

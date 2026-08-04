@@ -1,5 +1,5 @@
-//! Which client generation is on disk, whether it has ever reached a first frame,
-//! and what to go back to when it has not.
+//! Which client generation is on disk, whether its exact launch reached both a
+//! first frame and ArenaNet gameplay, and what to go back to when it has not.
 //!
 //! Two problems, one record.
 //!
@@ -15,9 +15,10 @@
 //! a first frame. The page records whether it attempted gwnative's optional
 //! transform or ArenaNet's exact module. A transformed failure disables only
 //! that runtime/artifact transform. A freshly synced official set is not trusted
-//! until an unmodified attempt reports a first frame; until then the set and
-//! manifest it replaced are kept beside it. Only a failed unmodified attempt
-//! restores that pair and refuses the offered generation by identity.
+//! until an unmodified attempt reports a first frame and an accepted gameplay
+//! socket. Until both, the set and manifest it replaced are kept beside it.
+//! Only a failed unmodified attempt restores that pair and refuses the offered
+//! generation by identity.
 //!
 //! The two identities are deliberately different things. A generation's `id`
 //! says *which patch generation* this is and comes from the manifest's chunk
@@ -86,6 +87,43 @@ pub enum RuntimeFailure {
     TryRuntime(&'static str),
     PredecessorRestored,
     Exhausted,
+}
+
+/// The page's minimal claim about the launch it just asked the host to record.
+/// Native state remains the only owner of artifact hashes and generation
+/// authority; the browser never needs those values echoed back in an API body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+pub struct LaunchClaim {
+    pub runtime: String,
+    pub build: Option<String>,
+    pub transformed: bool,
+    pub nonce: String,
+}
+
+impl Drop for LaunchClaim {
+    fn drop(&mut self) {
+        crate::log::wipe_string(&mut self.runtime);
+        if let Some(build) = self.build.as_mut() {
+            crate::log::wipe_string(build);
+        }
+        crate::log::wipe_string(&mut self.nonce);
+    }
+}
+
+impl LaunchClaim {
+    #[allow(dead_code)]
+    fn matches(&self, launch: &LaunchIdentity) -> bool {
+        self.runtime == launch.runtime
+            && self.nonce == launch.nonce
+            && self.transformed == (launch.mode == RuntimeMode::Derived)
+            && if self.transformed {
+                self.build == launch.compatibility_id
+            } else {
+                self.build.is_none() && launch.compatibility_id.is_none()
+            }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -802,9 +840,9 @@ impl Store {
     /// Writing the same generation again is not a new generation. Both the
     /// `sync` command and a repair can do it. Calling either of those unproven
     /// arms a rollback whose target is a copy of the same set, so an app that
-    /// then dies before its first frame restores what was already on disk and
-    /// refuses, by name, the generation it just restored. A set that has booted
-    /// here has not stopped having booted here.
+    /// then dies before gameplay proof restores what was already on disk and
+    /// refuses, by name, the generation it just restored. A gameplay-proven set
+    /// has not stopped being proven merely because it was reinstalled.
     pub fn record(&self, id: &str, root: &Path, names: &[&'static str]) -> bool {
         let Some((artifacts, manifest)) = weigh(root, names, &self.active_manifest) else {
             return false;
@@ -837,7 +875,9 @@ impl Store {
             return false;
         }
         if proven {
-            note!("[generation] client generation {id} reinstalled; it had already booted here");
+            note!(
+                "[generation] client generation {id} reinstalled; it had already reached gameplay here"
+            );
         } else {
             note!("[generation] client generation {id} installed, not yet proven");
         }
@@ -885,7 +925,7 @@ impl Store {
     ///
     /// Idempotent, and cheap when there is nothing to do: this is called from a
     /// request handler on a route the page hits once per launch, and every
-    /// launch after the first finds the set already proven.
+    /// launch after the first can repeat the renderer milestone idempotently.
     pub fn prove_first_frame(
         &self,
         claimed: &LaunchIdentity,
@@ -938,6 +978,26 @@ impl Store {
             LaunchState::Idle => state.last_first_frame.clone(),
             LaunchState::FailedRuntime(_) => None,
         }
+    }
+
+    /// Resolve an unprivileged page claim to the exact native identity active
+    /// now. A stale nonce, different runtime, or mismatched derived build has
+    /// no authority and yields nothing.
+    #[allow(dead_code)]
+    pub fn resolve_launch_claim(&self, claim: &LaunchClaim) -> Option<LaunchIdentity> {
+        self.launch_for_gameplay()
+            .filter(|launch| claim.matches(launch))
+    }
+
+    /// Whether an exact duplicate attempt is still awaiting settlement. A
+    /// duplicate after first-frame proof belongs to a new document and must use
+    /// a fresh native process rather than reopening evidence from the old one.
+    #[allow(dead_code)]
+    pub fn attempting_claim(&self, claim: &LaunchClaim) -> bool {
+        matches!(
+            &self.state.lock().unwrap().launch_state,
+            LaunchState::AttemptingRuntime(launch) if claim.matches(launch)
+        )
     }
 
     pub fn prove_gameplay(
@@ -1033,6 +1093,11 @@ fn validate_runtime_attempt(
     if transformed && build.is_none() {
         return Err(RuntimeStateError::Invalid(
             "a transformed runtime must name its artifact".to_owned(),
+        ));
+    }
+    if !transformed && build.is_some() {
+        return Err(RuntimeStateError::Invalid(
+            "an original runtime must not name a derived artifact".to_owned(),
         ));
     }
     if let Some(build) = build
@@ -1227,7 +1292,7 @@ mod tests {
 
     fn attempt(store: &Store, transformed: bool) -> LaunchIdentity {
         store
-            .record_attempt("jspi", Some(BUILD), transformed, NONCE)
+            .record_attempt("jspi", transformed.then_some(BUILD), transformed, NONCE)
             .unwrap()
     }
 
@@ -1690,7 +1755,7 @@ mod tests {
         drop(store);
         let store = Store::open(state_dir);
         assert!(matches!(
-            store.record_attempt("jspi", Some(BUILD), false, NONCE),
+            store.record_attempt("jspi", None, false, NONCE),
             Err(RuntimeStateError::Invalid(_))
         ));
         assert_eq!(store.state.lock().unwrap().failed_runtimes.len(), 2);
@@ -1708,11 +1773,7 @@ mod tests {
         let root = temp.0.join("web");
         write_client(&root, "unknown-official");
         refused.adopt(&root, &NAMES);
-        assert!(
-            refused
-                .record_attempt("jspi", Some(BUILD), false, NONCE)
-                .is_ok()
-        );
+        assert!(refused.record_attempt("jspi", None, false, NONCE).is_ok());
         assert_eq!(fs::read(state.join("state.json")).unwrap(), future);
         assert!(state.join("state.compat-v2.json").is_file());
         drop(refused);
@@ -1744,9 +1805,7 @@ mod tests {
 
         // A successful official retry clears the launch attempt even though
         // the generation proof was already true before this launch.
-        let launch = store
-            .record_attempt("jspi", Some(BUILD), false, NONCE)
-            .unwrap();
+        let launch = store.record_attempt("jspi", None, false, NONCE).unwrap();
         store.prove_first_frame(&launch).unwrap();
         drop(store);
         let store = Store::open(state);
@@ -2053,7 +2112,7 @@ mod tests {
         let second = store
             .record_attempt(
                 "jspi",
-                Some(BUILD),
+                None,
                 false,
                 "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
             )

@@ -124,6 +124,24 @@ impl Module {
         serde_json::to_string(&self.runtimes).unwrap_or_else(|_| "{}".to_owned())
     }
 
+    /// Exact compatibility identities for derived modules this launch actually
+    /// prepared. The loopback runtime contract uses the same native facts the
+    /// document-start injection does, so a page cannot nominate an arbitrary
+    /// credential-shaped build string for durable generation state.
+    #[allow(dead_code)]
+    pub fn prepared_transforms(&self) -> BTreeMap<String, String> {
+        self.runtimes
+            .iter()
+            .filter(|(_, module)| module.template_save == "ready")
+            .filter_map(|(runtime, module)| {
+                module
+                    .build
+                    .as_ref()
+                    .map(|build| ((*runtime).to_owned(), build.clone()))
+            })
+            .collect()
+    }
+
     pub fn logs(&self) {
         for (runtime, module) in &self.runtimes {
             note!(

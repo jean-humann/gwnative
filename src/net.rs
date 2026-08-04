@@ -14,6 +14,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// services. Nothing else is a legitimate destination for this client.
 const ALLOWED_PORTS: [u16; 3] = [6112, 80, 443];
 
+/// Host identity behind a syntactically valid Guild Wars gameplay endpoint.
+/// A numeric identity still needs provenance from this process's allowlisted
+/// DNS resolver before it can count as generation proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum GameplayPeer {
+    Address(IpAddr),
+    AllowedName,
+}
+
 /// The only zones this client has any business asking about. Game
 /// infrastructure lives under the first; the web services under the second.
 const ALLOWED_DOMAINS: [&str; 2] = ["arenanetworks.com", "guildwars.com"];
@@ -91,6 +101,24 @@ fn parse_destination(destination: &str) -> Result<(String, u16), NetError> {
         return Err(NetError::PortNotAllowed(port));
     }
     Ok((host, port))
+}
+
+/// Classify a port-6112 endpoint without granting a numeric address any
+/// provenance. Direct names are independently constrained to the outbound
+/// allowlist; addresses are checked against host-owned resolution history by
+/// the socket registry.
+#[allow(dead_code)]
+pub(crate) fn gameplay_peer(destination: &str) -> Option<GameplayPeer> {
+    let (host, port) = parse_destination(destination).ok()?;
+    if port != 6112 {
+        return None;
+    }
+    let host = normalize(&host);
+    match host.parse::<IpAddr>() {
+        Ok(address) => Some(GameplayPeer::Address(address)),
+        Err(_) if allowed_name(&host) => Some(GameplayPeer::AllowedName),
+        Err(_) => None,
+    }
 }
 
 /// Reject anything that is not routable on the public internet. This is what
@@ -395,6 +423,26 @@ mod tests {
             parse_destination("[2001:db8::1]:443").unwrap(),
             ("2001:db8::1".to_owned(), 443)
         );
+    }
+
+    #[test]
+    fn gameplay_classification_requires_the_game_port_and_an_allowed_identity() {
+        assert_eq!(
+            gameplay_peer("1.2.3.4:6112"),
+            Some(GameplayPeer::Address("1.2.3.4".parse().unwrap()))
+        );
+        assert_eq!(
+            gameplay_peer("[2001:4860::1]:6112"),
+            Some(GameplayPeer::Address("2001:4860::1".parse().unwrap()))
+        );
+        assert_eq!(
+            gameplay_peer("auth.arenanetworks.com:6112"),
+            Some(GameplayPeer::AllowedName)
+        );
+        assert_eq!(gameplay_peer("attacker.example:6112"), None);
+        assert_eq!(gameplay_peer("www.guildwars.com:443"), None);
+        assert_eq!(gameplay_peer("file1.arenanetworks.com:80"), None);
+        assert_eq!(gameplay_peer("missing-port"), None);
     }
 
     #[test]
