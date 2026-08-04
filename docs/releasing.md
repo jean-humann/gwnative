@@ -34,11 +34,13 @@ The script:
 3. substitutes package and monotonic build versions into `Info.plist`;
 4. copies the web shell, excluding live client artifacts and tests;
 5. installs GPL, provenance, proprietary-material, and Sparkle notices;
-6. rejects any ArenaNet client or game artifact in the finished payload;
-7. installs and thins Sparkle when a public update key is configured;
-8. copies the dSYM beside the app;
-9. signs nested code from the inside out when an identity is available; and
-10. verifies signed bundles.
+6. generates and verifies a deterministic CycloneDX 1.6 SBOM from the locked
+   Rust graph and vendored Sparkle framework;
+7. rejects any ArenaNet client or game artifact in the finished payload;
+8. installs and thins Sparkle when a public update key is configured;
+9. copies the dSYM beside the app;
+10. signs nested code from the inside out when an identity is available; and
+11. verifies signed bundles.
 
 Without an identity, the script emits a warning and leaves a runnable unsigned
 local bundle. Release packaging does not permit that fallback.

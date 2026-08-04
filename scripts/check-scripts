@@ -24,7 +24,9 @@ python3 -m py_compile \
 	scripts/check-docs \
 	scripts/check-support-matrix \
 	scripts/check-trust-policy \
-	scripts/client-certify
+	scripts/client-certify \
+	scripts/sbom
 python3 -m unittest discover -s tests -p 'benchmark_test.py'
 python3 scripts/check-support-matrix --self-test
+scripts/sbom --self-test
 echo "scripts: shell and Python syntax ok"
