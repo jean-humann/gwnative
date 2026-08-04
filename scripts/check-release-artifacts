@@ -175,6 +175,29 @@ def check_dmg(path: Path) -> None:
             )
 
 
+def check_lineage(
+    manifest: Path, app: Path, archive: Path, image: Path, appcast: Path, tag: str
+) -> None:
+    subprocess.run(
+        [
+            str(ROOT / "scripts/release-manifest"),
+            "--tag",
+            tag,
+            "--bundle",
+            str(app),
+            "--zip",
+            str(archive),
+            "--dmg",
+            str(image),
+            "--appcast",
+            str(appcast),
+            "--check",
+            str(manifest),
+        ],
+        check=True,
+    )
+
+
 def install_candidate(active: Path, candidate: Path, expected: str, previous: Path) -> None:
     require(sha256(candidate) == expected, "candidate hash does not match its manifest")
     shutil.copy2(active, previous)
@@ -252,6 +275,9 @@ def main(arguments: list[str]) -> int:
     parser.add_argument("--bundle", type=Path, action="append", default=[])
     parser.add_argument("--zip", type=Path, action="append", default=[])
     parser.add_argument("--dmg", type=Path, action="append", default=[])
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--appcast", type=Path)
+    parser.add_argument("--tag")
     options = parser.parse_args(arguments)
 
     if options.self_test:
@@ -264,8 +290,27 @@ def main(arguments: list[str]) -> int:
         check_zip(path.resolve())
     for path in options.dmg:
         check_dmg(path.resolve())
+    if options.manifest is not None:
+        require(len(options.bundle) == 1, "lineage check requires exactly one --bundle")
+        require(len(options.zip) == 1, "lineage check requires exactly one --zip")
+        require(len(options.dmg) == 1, "lineage check requires exactly one --dmg")
+        require(options.appcast is not None, "lineage check requires --appcast")
+        require(options.tag is not None, "lineage check requires --tag")
+        check_lineage(
+            options.manifest.resolve(),
+            options.bundle[0].resolve(),
+            options.zip[0].resolve(),
+            options.dmg[0].resolve(),
+            options.appcast.resolve(),
+            options.tag,
+        )
     require(
-        options.self_test or options.source or options.bundle or options.zip or options.dmg,
+        options.self_test
+        or options.source
+        or options.bundle
+        or options.zip
+        or options.dmg
+        or options.manifest,
         "provide --self-test, --source, --bundle, --zip, or --dmg",
     )
     print("release artifacts: inventory and update/rollback gates ok")

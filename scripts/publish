@@ -94,7 +94,24 @@ else
 fi
 
 SPARKLE_PRIVATE_KEY=${SPARKLE_PRIVATE_KEY:-} scripts/appcast "$zip" "$notes"
-gh release upload "$tag" "$root/dist/appcast.xml" --clobber
+
+# Tie the reviewed tag to the signed/stapled app, updater archive, disk image,
+# and generated feed before any of them becomes public. GitHub supplies source
+# archives automatically, so validate an exact local `git archive` fixture as
+# the last Corresponding Source gate.
+source_archive=$root/dist/gwnative-$version-source.tar
+git archive --format=tar --prefix="gwnative-$version/" "$tag" -o "$source_archive"
+scripts/check-release-artifacts --source "$source_archive"
+rm -f "$source_archive"
+
+scripts/release-manifest --tag "$tag"
+scripts/check-release-artifacts \
+	--bundle "$root/dist/Guild Wars.app" \
+	--zip "$zip" --dmg "$dmg" \
+	--appcast "$root/dist/appcast.xml" \
+	--manifest "$root/dist/release-manifest.json" --tag "$tag"
+gh release upload "$tag" "$root/dist/appcast.xml" \
+	"$root/dist/release-manifest.json" --clobber
 
 # ------------------------------------------------------------------- live ---
 # --latest is explicit rather than implied: it is the flag that decides what

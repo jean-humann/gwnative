@@ -9,7 +9,7 @@ changes public GitHub state and the update feed seen by installed applications.
 | --- | --- | --- |
 | Bundle | `scripts/bundle` | `dist/Guild Wars.app` |
 | Release package | `scripts/release` | notarized `.dmg`, updater `.zip`, and dSYM |
-| Publish | `scripts/publish vX.Y.Z` | GitHub release and signed `appcast.xml` |
+| Publish | `scripts/publish vX.Y.Z` | GitHub release, signed `appcast.xml`, and hash-lineage manifest |
 
 The required platform and recovery evidence is declared in
 [`support-matrix.json`](../support-matrix.json). `macos-15` and `macos-26` are
@@ -62,6 +62,10 @@ extracting the updater ZIP, disk image, and tagged source archive. Its
 deterministic fixtures also prove that a hash-mismatched update is refused,
 that refusal leaves the installed artifact untouched, and rollback restores
 the exact predecessor.
+Before publication, `scripts/release-manifest` records the reviewed tag and
+commit plus SHA-256 and size values for the finished app tree, binary, plist,
+SBOM, updater ZIP, DMG, and appcast. It also verifies that the appcast enclosure
+names and sizes that exact ZIP. The manifest is uploaded beside the artifacts.
 The tagged GitHub release supplies the Corresponding Source through its source
 archives; `scripts/publish` always creates the release from that exact public
 tag.
