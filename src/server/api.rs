@@ -16,8 +16,52 @@ use std::time::Duration;
 
 use super::{Context, Flow, tracing};
 use crate::chunks::ChunkStore;
-use crate::http::{Request, json, no_content, respond, text, token_matches};
+use crate::http::{
+    Request, json as raw_json, no_content, respond as raw_respond, text as raw_text, token_matches,
+};
 use crate::{app, cache, diagnostics, disk, dock, generation, keychain, net, relaunch, ws};
+
+const RUNTIME_PLAN_BASE: u16 = 220;
+const RUNTIME_TRY_ASYNCIFY: u16 = 224;
+const RUNTIME_PREDECESSOR_RESTORED: u16 = 225;
+const RUNTIME_EXHAUSTED: u16 = 226;
+
+fn empty_response(stream: &mut TcpStream, code: u16, content_type: &str) -> std::io::Result<()> {
+    raw_respond(stream, code, content_type, b"", &[])
+}
+
+/// Guard every ordinary API body at the final write boundary. Suppression
+/// preserves the original status: turning a refused credential update into a
+/// 204 would make the page cache a value that Keychain never stored.
+fn json(stream: &mut TcpStream, code: u16, body: &[u8]) -> std::io::Result<()> {
+    if let Some(_lease) = crate::log::admit_host_output(body) {
+        raw_json(stream, code, body)
+    } else {
+        empty_response(stream, code, "application/json")
+    }
+}
+
+fn text(stream: &mut TcpStream, code: u16, message: &str) -> std::io::Result<()> {
+    if let Some(_lease) = crate::log::admit_host_output(message.as_bytes()) {
+        raw_text(stream, code, message)
+    } else {
+        empty_response(stream, code, "text/plain")
+    }
+}
+
+fn respond(
+    stream: &mut TcpStream,
+    code: u16,
+    content_type: &str,
+    body: &[u8],
+    extra: &[(&str, String)],
+) -> std::io::Result<()> {
+    if let Some(_lease) = crate::log::admit_host_output(body) {
+        raw_respond(stream, code, content_type, body, extra)
+    } else {
+        raw_respond(stream, code, content_type, b"", extra)
+    }
+}
 
 fn authorized(request: &Request, context: &Context) -> bool {
     let offered = request.offered_token();
@@ -29,6 +73,17 @@ fn authorized(request: &Request, context: &Context) -> bool {
         ("PUT", "__game/v1/state") => token_matches(&context.tokens.game_publisher, offered),
         _ => token_matches(&context.tokens.browser, offered),
     }
+}
+
+/// These closed, exact launch-state schemas carry only values already selected
+/// and validated by the host. They remain usable when a short password happens
+/// to equal protocol vocabulary such as `jspi` or `original`; malformed input
+/// is never persisted and receives an empty error body.
+fn runtime_control(path: &str) -> bool {
+    matches!(
+        path,
+        "__runtime" | "__runtime-failed" | "__transform-failed" | "__booted"
+    )
 }
 
 /// Answer a `__` route.
@@ -57,6 +112,27 @@ pub(super) fn serve(
         return Ok(Some(flow));
     }
 
+    // Credential input is the one intentional secret-bearing host contract.
+    // Runtime control has a closed exact schema described above. Every other
+    // body must be rejected before it can reach settings, metrics, generation
+    // files, reports, or another durable/memory sink.
+    let _untrusted_lease = if request.path != "__credentials"
+        && !runtime_control(&request.path)
+        && !request.body.is_empty()
+    {
+        let Some(lease) = crate::log::admit_untrusted(&request.body) else {
+            if matches!(request.path.as_str(), "__report" | "__diag") {
+                no_content(stream)?;
+            } else {
+                empty_response(stream, 400, "text/plain")?;
+            }
+            return Ok(Some(flow));
+        };
+        Some(lease)
+    } else {
+        None
+    };
+
     // Every arm answers and falls out to `flow`, bar the two that decide the
     // connection's fate themselves.
     match request.path.as_str() {
@@ -72,7 +148,7 @@ pub(super) fn serve(
             context.recorder.page(&batch);
             no_content(stream)?;
         }
-        "__dns" => dns(request, stream)?,
+        "__dns" => dns(request, stream, context)?,
         "__credentials" => credentials(request, stream, context)?,
         "__settings" => settings(request, stream, context)?,
         "__runtime-plan" if request.method == "GET" => runtime_plan(stream, context)?,
@@ -109,20 +185,18 @@ pub(super) fn serve(
             Some(store) => prefetch(request, stream, store)?,
             None => no_snapshot(request, stream)?,
         },
-        // The harness says the first frame is up. Two things follow from that.
-        // Everything the store read before now is what booting costs, so that
-        // is the list worth warming next time — and the client on disk has just
-        // proved it runs here, which is the only evidence a freshly synced
-        // build can offer and the thing the generation record is waiting for.
-        // Deliberately one route: a second one would be a second chance to
-        // disagree about what "it booted" means.
+        // The harness says the first frame is up. Seal the boot working set and
+        // record renderer/runtime viability for this exact launch. This alone
+        // does not retire a rollback predecessor: only a separately accepted,
+        // launch-bound ArenaNet gameplay socket promotes the generation.
         "__booted" if request.method == "POST" => booted(request, stream, context)?,
         // The client has exited cleanly and there is nothing left on screen but
         // its last frame. Answered before quitting rather than after, because
         // `terminate:` runs the flush and the reply would otherwise race it.
         "__quit" if request.method == "POST" => {
-            no_content(stream)?;
+            let acknowledged = no_content(stream);
             app::request_quit();
+            acknowledged?;
             return Ok(Some(Flow::Close));
         }
         // Ask the *next* launch to start from an empty cache. Deliberately not
@@ -152,8 +226,9 @@ pub(super) fn serve(
         // be told so rather than left looking at a closing app.
         "__relaunch" if request.method == "POST" => match relaunch::start() {
             Ok(()) => {
-                no_content(stream)?;
+                let acknowledged = no_content(stream);
                 app::request_quit();
+                acknowledged?;
                 return Ok(Some(Flow::Close));
             }
             Err(reason) => {
@@ -208,10 +283,7 @@ fn game_state(request: &Request, stream: &mut TcpStream, context: &Context) -> s
                 Err(_) => return text(stream, 400, "waitMs must be an unsigned integer"),
             };
             match context.game_api.state_json_after(after, wait_ms) {
-                Some(state) => {
-                    let state = crate::log::redact(&String::from_utf8_lossy(&state));
-                    json(stream, 200, state.as_bytes())
-                }
+                Some(state) => json(stream, 200, &state),
                 None => text(stream, 404, "no newer game state is available"),
             }
         }
@@ -251,10 +323,15 @@ fn no_snapshot(request: &Request, stream: &mut TcpStream) -> std::io::Result<()>
 
 /// The game asks for an address before it dials. Answering here keeps name
 /// resolution on the host, where the public-unicast policy lives.
-fn dns(request: &Request, stream: &mut TcpStream) -> std::io::Result<()> {
-    let name = request.param("name").unwrap_or_default();
-    match net::resolve(&name) {
+fn dns(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
+    let mut name = request.param("name").unwrap_or_default();
+    let Some(_lease) = crate::log::admit_untrusted(name.as_bytes()) else {
+        crate::log::wipe_string(&mut name);
+        return text(stream, 400, "protected name was not resolved");
+    };
+    let result = match net::resolve(&name) {
         Ok(address) => {
+            context.sockets.resolved_allowed_name(address);
             if tracing() {
                 note!("[dns] {name} -> {address}");
             }
@@ -262,9 +339,11 @@ fn dns(request: &Request, stream: &mut TcpStream) -> std::io::Result<()> {
         }
         Err(e) => {
             note!("[dns] {name}: {e}");
-            text(stream, 502, &e.to_string())
+            text(stream, 502, "name could not be resolved")
         }
-    }
+    };
+    crate::log::wipe_string(&mut name);
+    result
 }
 
 /// Saved login, gated with every other `__` route — which is what makes the
@@ -284,7 +363,7 @@ fn credentials(
                     keychain::SecretBuffer::default()
                 });
                 note!("[credentials] read from protected storage");
-                json(stream, 200, body.as_ref())
+                raw_json(stream, 200, body.as_ref())
             }
             // Not an error: a first launch has nothing saved, and the client
             // treats "none" as "ask the player".
@@ -294,33 +373,62 @@ fn credentials(
             }
         },
         "PUT" => {
-            let stored = serde_json::from_slice(&request.body)
-                .map_err(|e| e.to_string())
-                .and_then(|c: keychain::Credentials| {
-                    keychain::store(&context.credential_account, &c)
-                });
-            match stored {
-                Ok(_) => {
-                    note!("[credentials] saved to the keychain");
-                    no_content(stream)
+            let credentials = match serde_json::from_slice::<keychain::Credentials>(&request.body) {
+                Ok(credentials) => credentials,
+                Err(_) => {
+                    note!("[credentials] malformed credential input was not saved");
+                    return text(stream, 400, "credentials were not saved");
                 }
-                Err(e) => {
-                    note!("[credentials] not saved: {e}");
-                    text(stream, 400, &e)
+            };
+            let stored = keychain::store(&context.credential_account, &credentials);
+            match stored {
+                Ok(replaced) => {
+                    note!("[credentials] saved to the keychain");
+                    let acknowledged = no_content(stream);
+                    restart_after_credential_change(
+                        replaced || crate::log::untrusted_sinks_disabled(),
+                    );
+                    acknowledged
+                }
+                Err(_) => {
+                    note!("[credentials] were not saved");
+                    let result = text(stream, 400, "credentials were not saved");
+                    // A failed replacement can still leave the old immutable
+                    // renderer object alive beside the submitted value. The
+                    // protection layer closes arbitrary sinks in that case;
+                    // restart after answering so a retry cannot strand normal
+                    // login, DNS, or socket traffic in the closed process.
+                    restart_after_credential_change(crate::log::untrusted_sinks_disabled());
+                    result
                 }
             }
         }
         "DELETE" => match keychain::clear(&context.credential_account) {
-            Ok(_) => {
+            Ok(replaced) => {
                 note!("[credentials] cleared");
-                no_content(stream)
+                let acknowledged = no_content(stream);
+                restart_after_credential_change(replaced || crate::log::untrusted_sinks_disabled());
+                acknowledged
             }
-            Err(e) => {
-                note!("[credentials] not cleared: {e}");
-                text(stream, 500, &e)
+            Err(_) => {
+                note!("[credentials] were not cleared");
+                text(stream, 500, "credentials were not cleared")
             }
         },
         _ => not_allowed(stream, "GET, PUT, DELETE"),
+    }
+}
+
+fn restart_after_credential_change(changed: bool) {
+    if !changed {
+        return;
+    }
+    // The prior immutable renderer credential may remain reachable. A fresh
+    // process is the boundary that lets ordinary login/DNS/gameplay traffic
+    // continue without retaining old plaintext or reopening arbitrary sinks.
+    match relaunch::start() {
+        Ok(()) => app::request_quit(),
+        Err(_) => note!("[credentials] fresh-process restart could not be started"),
     }
 }
 
@@ -366,8 +474,6 @@ fn settings(request: &Request, stream: &mut TcpStream, context: &Context) -> std
     }
 }
 
-type RuntimeAttempt = generation::LaunchClaim;
-
 fn runtime_state_failure(
     stream: &mut TcpStream,
     action: &str,
@@ -378,7 +484,9 @@ fn runtime_state_failure(
         generation::RuntimeStateError::NotSaved => 500,
     };
     note!("[generation] could not {action}: {error}");
-    text(stream, status, &error.to_string())
+    // The detailed reason remains in guarded host diagnostics. Do not reflect
+    // request fields, and keep failure status while untrusted sinks are off.
+    empty_response(stream, status, "text/plain")
 }
 
 fn runtime_attempt(
@@ -386,47 +494,35 @@ fn runtime_attempt(
     stream: &mut TcpStream,
     context: &Context,
 ) -> std::io::Result<()> {
-    let recorded = serde_json::from_slice::<RuntimeAttempt>(&request.body)
-        .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
-        .and_then(|mut attempt| {
-            if !attempt.transformed
-                && let Some(build) = attempt.build.as_mut()
-            {
-                crate::log::wipe_string(build);
-                attempt.build = None;
-            }
-            context.generations.record_attempt(
-                &attempt.runtime,
-                attempt.build.as_deref(),
-                attempt.transformed,
-                &attempt.nonce,
-            )
+    let recorded = serde_json::from_slice::<generation::LaunchClaim>(&request.body)
+        .map_err(|_| {
+            generation::RuntimeStateError::Invalid("malformed runtime attempt".to_string())
+        })
+        .and_then(|attempt| {
+            context
+                .launch
+                .record_attempt(&attempt, &context.generations)
         });
     match recorded {
-        Ok(identity) => json(
-            stream,
-            200,
-            &serde_json::to_vec(&identity).unwrap_or_default(),
-        ),
+        // The page already owns the four claim fields. A bodyless acknowledgement
+        // avoids reflecting native generation/artifact identity and cannot
+        // collide with an active credential value.
+        Ok(_) => no_content(stream),
         Err(error) => runtime_state_failure(stream, "record a runtime attempt", error),
     }
 }
 
 fn runtime_plan(stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
-    json(
-        stream,
-        200,
-        &serde_json::to_vec(&serde_json::json!({
-            "failedOfficial": context.generations.failed_runtime_modes(),
-        }))
-        .unwrap_or_default(),
-    )
+    let failed = context.generations.failed_runtime_modes();
+    let mask = u16::from(failed.iter().any(|runtime| runtime == "jspi"))
+        | (u16::from(failed.iter().any(|runtime| runtime == "asyncify")) << 1);
+    empty_response(stream, RUNTIME_PLAN_BASE + mask, "application/octet-stream")
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RuntimeFailureClaim {
-    launch: generation::LaunchIdentity,
+    launch: generation::LaunchClaim,
 }
 
 fn runtime_failed(
@@ -435,27 +531,32 @@ fn runtime_failed(
     context: &Context,
 ) -> std::io::Result<()> {
     let settled = serde_json::from_slice::<RuntimeFailureClaim>(&request.body)
-        .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
+        .map_err(|_| {
+            generation::RuntimeStateError::Invalid("malformed runtime failure".to_string())
+        })
         .and_then(|claim| {
-            context
-                .generations
-                .record_runtime_failure(&claim.launch, &context.root)
+            context.launch.record_runtime_failure(
+                &claim.launch,
+                &context.generations,
+                &context.root,
+            )
         });
     match settled {
-        Ok(generation::RuntimeFailure::TryRuntime(runtime)) => json(
-            stream,
-            200,
-            &serde_json::to_vec(&serde_json::json!({
-                "outcome": "try-runtime",
-                "runtime": runtime,
-            }))
-            .unwrap_or_default(),
-        ),
-        Ok(generation::RuntimeFailure::PredecessorRestored) => {
-            json(stream, 200, br#"{"outcome":"predecessor-restored"}"#)
+        Ok(generation::RuntimeFailure::TryRuntime("asyncify")) => {
+            empty_response(stream, RUNTIME_TRY_ASYNCIFY, "application/octet-stream")
         }
+        Ok(generation::RuntimeFailure::TryRuntime(_)) => runtime_state_failure(
+            stream,
+            "record a runtime failure",
+            generation::RuntimeStateError::Invalid("unsupported runtime transition".into()),
+        ),
+        Ok(generation::RuntimeFailure::PredecessorRestored) => empty_response(
+            stream,
+            RUNTIME_PREDECESSOR_RESTORED,
+            "application/octet-stream",
+        ),
         Ok(generation::RuntimeFailure::Exhausted) => {
-            json(stream, 200, br#"{"outcome":"exhausted"}"#)
+            empty_response(stream, RUNTIME_EXHAUSTED, "application/octet-stream")
         }
         Err(error) => runtime_state_failure(stream, "record a runtime failure", error),
     }
@@ -464,21 +565,36 @@ fn runtime_failed(
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TransformFailure {
-    launch: generation::LaunchIdentity,
+    launch: generation::LaunchClaim,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FirstFrameProof {
-    launch: generation::LaunchIdentity,
+    launch: generation::LaunchClaim,
 }
 
 fn booted(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
     let proved = serde_json::from_slice::<FirstFrameProof>(&request.body)
-        .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
+        .map_err(|_| {
+            generation::RuntimeStateError::Invalid("malformed first-frame proof".to_string())
+        })
         .and_then(|proof| {
-            context.generations.prove_first_frame(&proof.launch)?;
-            Ok(proof.launch)
+            if !context.launch.matches_active(&proof.launch) {
+                return Err(generation::RuntimeStateError::Invalid(
+                    "first-frame proof is not bound to this host launch".into(),
+                ));
+            }
+            let launch = context
+                .generations
+                .resolve_launch_claim(&proof.launch)
+                .ok_or_else(|| {
+                    generation::RuntimeStateError::Invalid(
+                        "first-frame proof does not match the active launch".into(),
+                    )
+                })?;
+            context.generations.prove_first_frame(&launch)?;
+            Ok(launch)
         });
     match proved {
         Ok(launch) => {
@@ -498,11 +614,13 @@ fn transform_failed(
     context: &Context,
 ) -> std::io::Result<()> {
     let disabled = serde_json::from_slice::<TransformFailure>(&request.body)
-        .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
+        .map_err(|_| {
+            generation::RuntimeStateError::Invalid("malformed transform failure".to_string())
+        })
         .and_then(|failure| {
             context
-                .generations
-                .disable_launch_transform(&failure.launch)
+                .launch
+                .disable_transform(&failure.launch, &context.generations)
         });
     match disabled {
         Ok(()) => no_content(stream),

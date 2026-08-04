@@ -100,14 +100,12 @@ pub fn admit_untrusted_parts<'a>(
 /// the retired immutable page value is intentionally no longer retained in the
 /// registry. Required control replies use fixed, bodyless acknowledgements and
 /// therefore do not need this exception.
-#[expect(dead_code)]
 pub fn admit_host_output(bytes: &[u8]) -> Option<UntrustedLease> {
     let lease = lease_epoch();
     let registry = secrets().lock().unwrap_or_else(|e| e.into_inner());
     host_output_allowed(&registry, bytes).then_some(lease)
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 fn host_output_allowed(registry: &Registry, bytes: &[u8]) -> bool {
     !registry.untrusted_sinks_disabled && !registry_contains(registry, bytes)
 }
@@ -136,7 +134,6 @@ pub fn disable_untrusted_sinks() {
         .untrusted_sinks_disabled = true;
 }
 
-#[expect(dead_code)]
 pub fn untrusted_sinks_disabled() -> bool {
     secrets()
         .lock()
@@ -602,7 +599,7 @@ mod tests {
 
     #[test]
     fn structured_redaction_remains_valid_json() {
-        let _registration = super::register(&["::canary::", "quoted\"credential"]).unwrap();
+        let _registration = super::register(&[":", "quoted\"credential"]).unwrap();
         let encoded = super::redact_json(&serde_json::json!({
             "line": "quoted\\\"credential",
         }));
