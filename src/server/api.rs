@@ -76,7 +76,9 @@ pub(super) fn serve(
         "__dns" => dns(request, stream)?,
         "__credentials" => credentials(request, stream, context)?,
         "__settings" => settings(request, stream, context)?,
+        "__runtime-plan" if request.method == "GET" => runtime_plan(stream, context)?,
         "__runtime" if request.method == "POST" => runtime_attempt(request, stream, context)?,
+        "__runtime-failed" if request.method == "POST" => runtime_failed(request, stream, context)?,
         "__transform-failed" if request.method == "POST" => {
             transform_failed(request, stream, context)?
         }
@@ -398,6 +400,55 @@ fn runtime_attempt(
             &serde_json::to_vec(&identity).unwrap_or_default(),
         ),
         Err(error) => runtime_state_failure(stream, "record a runtime attempt", error),
+    }
+}
+
+fn runtime_plan(stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
+    json(
+        stream,
+        200,
+        &serde_json::to_vec(&serde_json::json!({
+            "failedOfficial": context.generations.failed_runtime_modes(),
+        }))
+        .unwrap_or_default(),
+    )
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeFailureClaim {
+    launch: generation::LaunchIdentity,
+}
+
+fn runtime_failed(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+) -> std::io::Result<()> {
+    let settled = serde_json::from_slice::<RuntimeFailureClaim>(&request.body)
+        .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
+        .and_then(|claim| {
+            context
+                .generations
+                .record_runtime_failure(&claim.launch, &context.root)
+        });
+    match settled {
+        Ok(generation::RuntimeFailure::TryRuntime(runtime)) => json(
+            stream,
+            200,
+            &serde_json::to_vec(&serde_json::json!({
+                "outcome": "try-runtime",
+                "runtime": runtime,
+            }))
+            .unwrap_or_default(),
+        ),
+        Ok(generation::RuntimeFailure::PredecessorRestored) => {
+            json(stream, 200, br#"{"outcome":"predecessor-restored"}"#)
+        }
+        Ok(generation::RuntimeFailure::Exhausted) => {
+            json(stream, 200, br#"{"outcome":"exhausted"}"#)
+        }
+        Err(error) => runtime_state_failure(stream, "record a runtime failure", error),
     }
 }
 

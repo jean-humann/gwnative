@@ -12,6 +12,8 @@ const LOG_LINES = 400;
 const logBuf = [];
 let client;
 let frameAudit = null;
+let firstFramePresented = false;
+let runtimeTransition = null;
 let bootProof = Promise.resolve(true);
 window.gwFlushBootProof = async () => {
   const booted = await bootProof;
@@ -406,6 +408,7 @@ Module = {
       preserveDrawingBuffer: window.__gwnativePreserveDrawingBuffer === true,
       frameIsolation: window.__gwnativeFrameIsolation === true,
       firstFrame: () => {
+        firstFramePresented = true;
         performance.mark('gw.frame.first-submit');
         // The boot is survived; frame delivery goes back to stock. See the
         // requestAnimationFrame wrapper above.
@@ -510,7 +513,7 @@ Module = {
       log('wasm instantiated');
       gameInstance = result.instance;
       success(result.instance, result.module);
-    })().catch((error) => fail(`The game client could not start: ${error}`));
+    })().catch(runtimeFailedBeforeProof);
 
     return {};   // signals that instantiation is in flight
   },
@@ -635,13 +638,13 @@ Module = {
   },
 
   onAbort(reason) {
-    fail(`The game client stopped unexpectedly: ${reason}`);
+    runtimeFailedBeforeProof(reason);
   },
 
   onExit(code) {
     log('wasm exited:', code);
     if (code !== 0) {
-      fail('The game client stopped unexpectedly.');
+      runtimeFailedBeforeProof(`the client exited with status ${code}`);
       return;
     }
     // The player chose Exit inside the game. Without this the window stays open
@@ -698,7 +701,7 @@ function appendGlue() {
   log('loading', src, `(wasm: ${client.wasm}, runtime: ${client.mode})…`);
   const script = document.createElement('script');
   script.src = src;
-  script.onerror = () => fail('The game client could not be loaded.');
+  script.onerror = () => runtimeFailedBeforeProof('the game client glue could not be loaded');
   document.body.appendChild(script);
 }
 
@@ -714,6 +717,27 @@ function reportRuntimeAttempt() {
 function reportTransformFailure() {
   return host.postRuntimeState('__transform-failed', {
     launch: window.__gwnativeLaunchIdentity,
+  });
+}
+
+function runtimeFailedBeforeProof(reason) {
+  const message = reason?.message ?? String(reason);
+  if (firstFramePresented || !window.__gwnativeLaunchIdentity) {
+    fail(`The game client stopped unexpectedly: ${message}`);
+    return;
+  }
+  if (runtimeTransition) return;
+  status('Trying the other official runtime…');
+  const launch = window.__gwnativeLaunchIdentity;
+  runtimeTransition = (async () => {
+    if (launch.mode === 'derived') {
+      await reportTransformFailure();
+      await host.relaunchApp();
+      return;
+    }
+    await host.transitionRuntimeFailure(launch, { relaunch: host.relaunchApp });
+  })().catch((error) => {
+    fail(`The game client could not start: ${error?.message ?? error}`);
   });
 }
 
@@ -786,7 +810,12 @@ function reportTransformFailure() {
   // a newer bundled WebKit while this process still uses the system framework,
   // and checking a browser installed elsewhere would select the wrong client.
   try {
-    client = await host.selectClient();
+    const plan = await host.readRuntimePlan();
+    client = await host.selectClient(
+      WebAssembly,
+      window.__gwnativeClientRuntime,
+      plan,
+    );
   } catch (error) {
     log(`[err] client runtime selection failed: ${error}`);
     return fail(`The requested game runtime is unavailable: ${error}`);

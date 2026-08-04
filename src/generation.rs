@@ -81,6 +81,13 @@ pub enum Recovery {
     RuntimeFailed(LaunchIdentity),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeFailure {
+    TryRuntime(&'static str),
+    PredecessorRestored,
+    Exhausted,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum RuntimeStateError {
     Invalid(String),
@@ -345,6 +352,43 @@ impl Store {
             .iter()
             .any(|disabled| disabled.runtime == runtime && disabled.build == build)
     }
+
+    /// Exact official runtime modes already observed failing for the installed
+    /// generation. The page combines this durable fact with a fresh functional
+    /// JSPI probe; neither OS version nor API presence enters the decision.
+    pub fn failed_runtime_modes(&self) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        let Some(current) = &state.current else {
+            return Vec::new();
+        };
+        ["jspi", "asyncify"]
+            .into_iter()
+            .filter(|runtime| {
+                state.failed_runtimes.iter().any(|failed| {
+                    failed.generation_id == current.id
+                        && failed.mode == RuntimeMode::Original
+                        && failed.runtime == *runtime
+                })
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Exact process-cached runtime inputs, only while the recorded client is live.
+    pub fn runtime_fingerprint(&self, root: &Path) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        let current = state.current.as_ref()?;
+        generation_matches(root, &self.active_manifest, current).ok()?;
+        let bytes = serde_json::to_vec(&(
+            current,
+            &state.launch_state,
+            &state.failed_runtimes,
+            &state.disabled_transforms,
+        ))
+        .ok()?;
+        Some(hex::encode(sha2::Sha256::digest(bytes)))
+    }
+
     /// Record the runtime that is about to execute.
     ///
     /// Called immediately before the page appends ArenaNet's glue. A launch
@@ -436,6 +480,93 @@ impl Store {
         Ok(())
     }
 
+    /// Record an exact original-runtime failure before leaving its contaminated
+    /// realm. JSPI gets one fresh-realm Asyncify attempt. Only exact failures of
+    /// both official pairs may restore and reject the installed generation.
+    pub fn record_runtime_failure(
+        &self,
+        failed: &LaunchIdentity,
+        root: &Path,
+    ) -> std::result::Result<RuntimeFailure, RuntimeStateError> {
+        let mut state = self.state.lock().unwrap();
+        let LaunchState::AttemptingRuntime(active) = &state.launch_state else {
+            return Err(RuntimeStateError::Invalid(
+                "no official runtime is awaiting a failure result".to_owned(),
+            ));
+        };
+        if active != failed || failed.mode != RuntimeMode::Original {
+            return Err(RuntimeStateError::Invalid(
+                "runtime failure does not match the active official launch".to_owned(),
+            ));
+        }
+        self.fail_official_runtime(&mut state, root, failed)
+    }
+
+    fn fail_official_runtime(
+        &self,
+        state: &mut State,
+        root: &Path,
+        failed: &LaunchIdentity,
+    ) -> std::result::Result<RuntimeFailure, RuntimeStateError> {
+        let before = state.clone();
+        let already_recorded = state
+            .failed_runtimes
+            .iter()
+            .any(|prior| same_runtime_tuple(prior, failed));
+        if !already_recorded {
+            state.failed_runtimes.push(failed.clone());
+            bound_history(state);
+        }
+        let failed_state = LaunchState::FailedRuntime(failed.clone());
+        let state_changed = state.launch_state != failed_state || !already_recorded;
+        state.launch_state = failed_state;
+        state.last_first_frame = None;
+        if state_changed && !self.save(state) {
+            *state = before;
+            return Err(RuntimeStateError::NotSaved);
+        }
+
+        let jspi_failed = official_mode_failed(state, &failed.generation_id, "jspi");
+        let asyncify_failed = official_mode_failed(state, &failed.generation_id, "asyncify");
+        if failed.runtime == "jspi" && !asyncify_failed {
+            return Ok(RuntimeFailure::TryRuntime("asyncify"));
+        }
+        if !jspi_failed || !asyncify_failed {
+            return Ok(RuntimeFailure::Exhausted);
+        }
+
+        let Some(previous) = state.previous.clone() else {
+            // Never remove or reject the only complete official client.
+            return Ok(RuntimeFailure::Exhausted);
+        };
+        if let Err(reason) = self.restore_recorded(root, &previous) {
+            note!(
+                "[generation] both runtimes failed, but the predecessor could not be restored: {reason}"
+            );
+            return Ok(RuntimeFailure::Exhausted);
+        }
+        let before_restore = state.clone();
+        let rejected = state.current.as_ref().map(|current| current.id.clone());
+        state.current = Some(previous);
+        state.proof_state = state.previous_proof.take();
+        state.last_first_frame = None;
+        state.launch_state = LaunchState::Idle;
+        state.previous = None;
+        state.failed_runtimes.clear();
+        if let Some(rejected) = rejected
+            && !state.rejected.contains(&rejected)
+        {
+            state.rejected.push(rejected);
+        }
+        bound_history(state);
+        if !self.save(state) {
+            *state = before_restore;
+            return Err(RuntimeStateError::NotSaved);
+        }
+        let _ = fs::remove_dir_all(self.dir.join("previous"));
+        Ok(RuntimeFailure::PredecessorRestored)
+    }
+
     #[cfg(test)]
     pub fn disable_transform(
         &self,
@@ -486,11 +617,22 @@ impl Store {
                 match self.restore_recorded(root, &previous) {
                     Ok(()) => {
                         let before = state.clone();
+                        let rejected = state.current.as_ref().and_then(|current| {
+                            both_official_modes_failed(&state, &current.id)
+                                .then(|| current.id.clone())
+                        });
                         state.current = Some(previous);
                         state.proof_state = state.previous_proof.take();
                         state.last_first_frame = None;
                         state.launch_state = LaunchState::Idle;
                         state.previous = None;
+                        state.failed_runtimes.clear();
+                        if let Some(rejected) = rejected
+                            && !state.rejected.contains(&rejected)
+                        {
+                            state.rejected.push(rejected);
+                            bound_history(&mut state);
+                        }
                         if !self.save(&state) {
                             *state = before;
                             return Recovery::None;
@@ -508,7 +650,18 @@ impl Store {
             }
         }
 
-        let LaunchState::AttemptingRuntime(launch) = state.launch_state.clone() else {
+        let launch = match state.launch_state.clone() {
+            LaunchState::AttemptingRuntime(launch) | LaunchState::FailedRuntime(launch) => launch,
+            LaunchState::Idle => return Recovery::None,
+        };
+        if matches!(state.launch_state, LaunchState::FailedRuntime(_)) {
+            return match self.fail_official_runtime(&mut state, root, &launch) {
+                Ok(RuntimeFailure::PredecessorRestored) => Recovery::InstallationRestored,
+                Ok(_) => Recovery::RuntimeFailed(launch),
+                Err(_) => Recovery::None,
+            };
+        }
+        let LaunchState::AttemptingRuntime(_) = state.launch_state else {
             return Recovery::None;
         };
         // A transform can arrive later than the official client generation
@@ -532,15 +685,11 @@ impl Store {
                 build,
             };
         }
-        let before = state.clone();
-        state.failed_runtimes.push(launch.clone());
-        bound_history(&mut state);
-        state.launch_state = LaunchState::FailedRuntime(launch.clone());
-        if !self.save(&state) {
-            *state = before;
-            return Recovery::None;
+        match self.fail_official_runtime(&mut state, root, &launch) {
+            Ok(RuntimeFailure::PredecessorRestored) => Recovery::InstallationRestored,
+            Ok(_) => Recovery::RuntimeFailed(launch),
+            Err(_) => Recovery::None,
         }
-        Recovery::RuntimeFailed(launch)
     }
 
     /// Copy the current artifacts aside so a sync can be undone.
@@ -905,6 +1054,19 @@ fn validate_launch_nonce(nonce: &str) -> std::result::Result<(), RuntimeStateErr
     Ok(())
 }
 
+fn official_mode_failed(state: &State, generation_id: &str, runtime: &str) -> bool {
+    state.failed_runtimes.iter().any(|launch| {
+        launch.generation_id == generation_id
+            && launch.mode == RuntimeMode::Original
+            && launch.runtime == runtime
+    })
+}
+
+fn both_official_modes_failed(state: &State, generation_id: &str) -> bool {
+    official_mode_failed(state, generation_id, "jspi")
+        && official_mode_failed(state, generation_id, "asyncify")
+}
+
 fn remember_disabled(state: &mut State, runtime: &str, build: &str) {
     if let Some(position) = state
         .disabled_transforms
@@ -1069,6 +1231,136 @@ mod tests {
             .unwrap()
     }
 
+    fn attempt_runtime(store: &Store, runtime: &str, nonce: &str) -> LaunchIdentity {
+        store.record_attempt(runtime, None, false, nonce).unwrap()
+    }
+
+    #[test]
+    fn both_exact_official_failures_restore_and_reject_only_the_candidate() {
+        let temp = TempDir::new("generation-cross-runtime");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "old");
+        assert!(store.stash(&root, &NAMES));
+        write_client(&root, "new");
+        assert!(store.record("new", &root, &NAMES));
+        let candidate_realm = store.runtime_fingerprint(&root);
+
+        let jspi = attempt_runtime(&store, "jspi", NONCE);
+        assert_eq!(
+            store.record_runtime_failure(&jspi, &root).unwrap(),
+            RuntimeFailure::TryRuntime("asyncify")
+        );
+        assert_eq!(store.failed_runtime_modes(), ["jspi"]);
+        assert_ne!(store.runtime_fingerprint(&root), candidate_realm);
+        let asyncify = attempt_runtime(&store, "asyncify", &"cc".repeat(32));
+        assert_eq!(
+            store.record_runtime_failure(&asyncify, &root).unwrap(),
+            RuntimeFailure::PredecessorRestored
+        );
+        assert!(store.rejected("new"));
+        assert!(!store.rejected("old"));
+        assert!(store.failed_runtime_modes().is_empty());
+        assert_ne!(store.runtime_fingerprint(&root), candidate_realm);
+        assert_eq!(fs::read_to_string(root.join("Gw.js")).unwrap(), "old:Gw.js");
+
+        drop(store);
+        let reopened = Store::open(state);
+        assert_eq!(reopened.recover(&root), Recovery::None);
+        assert_eq!(
+            reopened.state.lock().unwrap().current.as_ref().unwrap().id,
+            "old"
+        );
+    }
+
+    #[test]
+    fn exhausted_runtimes_never_remove_the_only_official_client() {
+        let temp = TempDir::new("generation-only-client-runtime-failures");
+        let root = temp.0.join("web");
+        write_client(&root, "only");
+        let store = Store::open(temp.0.join("state"));
+        assert!(store.record("only", &root, &NAMES));
+        let jspi = attempt_runtime(&store, "jspi", NONCE);
+        assert_eq!(
+            store.record_runtime_failure(&jspi, &root).unwrap(),
+            RuntimeFailure::TryRuntime("asyncify")
+        );
+        let asyncify = attempt_runtime(&store, "asyncify", &"dd".repeat(32));
+        assert_eq!(
+            store.record_runtime_failure(&asyncify, &root).unwrap(),
+            RuntimeFailure::Exhausted
+        );
+        assert_eq!(store.failed_runtime_modes(), ["jspi", "asyncify"]);
+        let exhausted_realm = store.runtime_fingerprint(&root);
+        assert_eq!(store.recover(&root), Recovery::RuntimeFailed(asyncify));
+        assert_eq!(store.runtime_fingerprint(&root), exhausted_realm);
+        assert!(!store.rejected("only"));
+        assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
+    #[test]
+    fn an_undurable_runtime_failure_cannot_authorize_a_realm_change() {
+        let temp = TempDir::new("generation-runtime-failure-durability");
+        let root = temp.0.join("web");
+        let store = proven(temp.0.join("state"), &root, "working");
+        let jspi = attempt_runtime(&store, "jspi", NONCE);
+        *store.write_failure.lock().unwrap() = Some(WriteBoundary::StorageFull);
+        assert_eq!(
+            store.record_runtime_failure(&jspi, &root),
+            Err(RuntimeStateError::NotSaved)
+        );
+        assert!(store.failed_runtime_modes().is_empty());
+        assert!(matches!(
+            store.state.lock().unwrap().launch_state,
+            LaunchState::AttemptingRuntime(_)
+        ));
+    }
+
+    #[test]
+    fn restart_finishes_a_crash_between_predecessor_restore_and_state_commit() {
+        let temp = TempDir::new("generation-runtime-restore-crash");
+        let root = temp.0.join("web");
+        let state_dir = temp.0.join("state");
+        let store = proven(state_dir.clone(), &root, "old");
+        assert!(store.stash(&root, &NAMES));
+        write_client(&root, "new");
+        assert!(store.record("new", &root, &NAMES));
+        let jspi = attempt_runtime(&store, "jspi", NONCE);
+        assert_eq!(
+            store.record_runtime_failure(&jspi, &root).unwrap(),
+            RuntimeFailure::TryRuntime("asyncify")
+        );
+        let asyncify = attempt_runtime(&store, "asyncify", &"ee".repeat(32));
+        {
+            let mut state = store.state.lock().unwrap();
+            state.failed_runtimes.push(asyncify.clone());
+            state.launch_state = LaunchState::FailedRuntime(asyncify);
+            bound_history(&mut state);
+            assert!(store.save(&state));
+            store
+                .restore_recorded(&root, state.previous.as_ref().unwrap())
+                .unwrap();
+        }
+        drop(store);
+
+        let reopened = Store::open(state_dir.clone());
+        assert_eq!(reopened.recover(&root), Recovery::InstallationRestored);
+        assert!(reopened.rejected("new"));
+        assert!(reopened.failed_runtime_modes().is_empty());
+        drop(reopened);
+        assert_eq!(
+            Store::open(state_dir)
+                .state
+                .lock()
+                .unwrap()
+                .current
+                .as_ref()
+                .unwrap()
+                .id,
+            "old"
+        );
+    }
+
     #[test]
     fn presence_is_not_soundness() {
         let temp = TempDir::new("generation-soundness");
@@ -1179,6 +1471,7 @@ mod tests {
         write_client(&root, "new");
         store.record("new", &root, &NAMES);
         attempt(&store, true);
+        let derived_realm = store.runtime_fingerprint(&root);
 
         assert_eq!(
             store.recover(&root),
@@ -1187,6 +1480,7 @@ mod tests {
                 build: BUILD.to_owned(),
             }
         );
+        assert_ne!(store.runtime_fingerprint(&root), derived_realm);
         assert!(store.transform_disabled("jspi", BUILD));
         assert!(!store.rejected("new"));
         assert_eq!(
