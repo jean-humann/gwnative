@@ -412,7 +412,7 @@ impl Client {
         if let Some(known) = known {
             headers.push(("If-None-Match", known));
         }
-        let response =
+        let mut response =
             transport::fetch("GET", url, &headers, None, REQUEST_TIMEOUT).map_err(|detail| {
                 Error::Transport {
                     url: url.to_owned(),
@@ -462,7 +462,7 @@ impl Client {
             });
         }
         Ok(Fetched {
-            body: Some(response.body),
+            body: Some(std::mem::take(&mut response.body)),
             validator,
         })
     }

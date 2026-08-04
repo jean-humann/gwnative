@@ -51,6 +51,16 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+impl Drop for Response {
+    fn drop(&mut self) {
+        for (name, value) in &mut self.headers {
+            crate::log::wipe_string(name);
+            crate::log::wipe_string(value);
+        }
+        crate::log::wipe(&mut self.body);
+    }
+}
+
 define_class!(
     // SAFETY:
     // - NSObject has no subclassing requirements.

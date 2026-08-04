@@ -599,7 +599,7 @@ mod tests {
 
     #[test]
     fn structured_redaction_remains_valid_json() {
-        let _registration = super::register(&[":", "quoted\"credential"]).unwrap();
+        let _registration = super::register(&["::canary::", "quoted\"credential"]).unwrap();
         let encoded = super::redact_json(&serde_json::json!({
             "line": "quoted\\\"credential",
         }));

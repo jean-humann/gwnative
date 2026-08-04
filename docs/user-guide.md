@@ -207,26 +207,30 @@ more detailed structured rendering state described in
 
 When the client fails to boot, the overlay offers:
 
-- **Try again** — reload the page and retry transient failures.
+- **Try again** — restart in a fresh app process and retry transient failures.
 - **Reset game data…** — delete the current WebKit origin's IndexedDB data,
-  keep downloaded chunks, and reload.
+  keep downloaded chunks, and restart.
 - **Show log** — open the diagnostics overlay.
 
 ### Newly downloaded client does not run
 
 Client artifacts are checked by length and SHA-256 at launch. A newly installed
-set remains *unproven* until it reports a first frame. If a certified transform
-fails first, only that exact runtime transform is disabled and the same
-ArenaNet module is retried unmodified. If the unmodified client then also fails,
-gwnative restores the previous artifact set and its manifest and remembers the
-rejected patch generation. On a first install, where there is no previous set,
-the only available client is retained. Running `gwnative sync` explicitly
-retries a rejected generation.
+set keeps its rollback predecessor until the same launch both reports a first
+frame and opens an allowed ArenaNet gameplay connection. First frame proves the
+renderer/runtime path only; it does not retire the predecessor by itself. If a
+certified transform fails before that frame, only that exact runtime transform
+is disabled and a fresh app process retries the same ArenaNet runtime
+unmodified. If an official runtime fails, the host durably records the outcome
+before a fresh process tries the next official runtime or the restored
+predecessor. A lost acknowledgement is retried for the exact launch claim. On a
+first install, where there is no previous set, the only available client is
+retained. Running `gwnative sync` explicitly retries a rejected generation.
 
 ### Renderer disappears
 
-If WebKit terminates the web content process, gwnative reloads once. A second
-termination becomes a visible error instead of an infinite reload loop.
+If WebKit terminates the web content process, gwnative starts one fresh app
+process. The recovery marker follows that successor, so a second termination
+becomes a visible error instead of an infinite relaunch loop.
 
 ### Saved login is missing
 
