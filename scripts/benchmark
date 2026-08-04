@@ -41,6 +41,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Sequence
 
 import benchmarklib
 
@@ -61,9 +62,6 @@ def reference_root() -> Path:
 # costs a few milliseconds; twice a second is frequent enough to catch the peak
 # of a boot that takes tens of seconds and cheap enough not to be in the way.
 SAMPLE_SECONDS = 0.5
-
-MIB = 1024 * 1024
-
 
 # --------------------------------------------------------------------------
 # Reading the machine
@@ -277,8 +275,8 @@ class Run:
     source_end: benchmarklib.TreeState | None = None
     source_clone_method: str | None = None
     forbidden: list[str] = field(default_factory=list)
-    #: Session logs that were already on disk before this launch, so a warm run
-    #: on a real profile reads its own session and not every previous one.
+    #: Session logs already present in an approved fixture, so the clone reads
+    #: this launch's session and not the fixture's earlier ones.
     prior_sessions: set[Path] = field(default_factory=set)
 
     @property
@@ -688,9 +686,8 @@ def read_events(run: Run) -> None:
     """
     diagnostics = run.user_data / "diagnostics"
     files = sorted(diagnostics.glob("session-*.jsonl")) if diagnostics.exists() else []
-    # On the warm route the directory holds every session this profile has ever
-    # had, and each one has its own `frame.firstSubmit` at its own `tsUs`. Only
-    # the files that were not there before this launch describe this launch.
+    # An approved fixture can hold earlier sessions, each with its own clock.
+    # Only files created in this disposable clone describe this launch.
     files = [path for path in files if path not in run.prior_sessions]
     if not files:
         run.notes.append("no session JSONL was written")
@@ -790,10 +787,6 @@ def run_reference(root: Path, seconds: float, fixture: Path | None = None) -> Ru
 # --------------------------------------------------------------------------
 # The report
 # --------------------------------------------------------------------------
-
-
-def mib(value: float) -> str:
-    return f"{value / MIB:,.0f}"
 
 
 RUNTIME_LINE = re.compile(r"client runtime:\s*(jspi|asyncify)", re.I)
@@ -943,212 +936,6 @@ def analysis(raw: list[dict], applications: Sequence[str]) -> dict:
             "first-frame values are reported per build but not compared"
         )
     return result
-
-
-def table(rows: list[tuple[str, str, str]]) -> str:
-    widths = [max(len(row[i]) for row in rows) for i in range(3)]
-    out = []
-    for index, row in enumerate(rows):
-        out.append(
-            f"  {row[0].ljust(widths[0])}   {row[1].rjust(widths[1])}   {row[2].rjust(widths[2])}"
-        )
-        if index == 0:
-            out.append("  " + "-" * (sum(widths) + 6))
-    return "\n".join(out)
-
-
-def report(runs: dict[str, Run], seconds: float, warm: bool = False) -> str:
-    native = runs.get("gwnative")
-    reference = runs.get("reference")
-    out: list[str] = []
-
-    start = "Installed profile" if warm else "Blank install"
-    out.append("")
-    out.append(f"{start}, {seconds:.0f} seconds of runtime each, same machine, same hour.")
-    out.append("")
-
-    def pair(label: str, a, b, fmt=str) -> tuple[str, str, str]:
-        return (
-            label,
-            fmt(a) if native else "—",
-            fmt(b) if reference else "—",
-        )
-
-    def frame(run: Run | None) -> str:
-        if not run:
-            return "—"
-        value = run.first_frame_ms
-        return f"{value:,.0f}" if value is not None else "not reached"
-
-    rows = [("", "gwnative", "reference")]
-    rows.append(("page load to first frame (ms)", frame(native), frame(reference)))
-    rows.append(
-        pair(
-            "phys footprint, whole tree (MiB)",
-            native.footprint_now if native else 0,
-            reference.footprint_now if reference else 0,
-            mib,
-        )
-    )
-    rows.append(
-        pair(
-            "  its peak, summed (MiB)",
-            native.footprint_peak if native else 0,
-            reference.footprint_peak if reference else 0,
-            mib,
-        )
-    )
-    rows.append(
-        pair(
-            "resident, whole tree (MiB)",
-            native.final_rss if native else 0,
-            reference.final_rss if reference else 0,
-            mib,
-        )
-    )
-    rows.append(
-        pair(
-            "  its peak (MiB)",
-            native.peak_rss if native else 0,
-            reference.peak_rss if reference else 0,
-            mib,
-        )
-    )
-    rows.append(
-        pair(
-            "CPU seconds, whole tree",
-            native.cpu if native else 0,
-            reference.cpu if reference else 0,
-            lambda v: f"{v:.1f}",
-        )
-    )
-    rows.append(
-        pair(
-            "processes at peak",
-            native.peak_processes if native else 0,
-            reference.peak_processes if reference else 0,
-        )
-    )
-    # Omitted on the warm route, where it is not measured: the same walk over a
-    # real profile would count everything every earlier session left, which is
-    # not what this row has ever meant.
-    if not warm:
-        rows.append(
-            pair(
-                # The scratch home for one, the scratch user-data-dir for the
-                # other: each is the whole of what that build writes.
-                "written to a blank profile (MiB)",
-                native.disk_bytes if native else 0,
-                reference.disk_bytes if reference else 0,
-                mib,
-            )
-        )
-    out.append(table(rows))
-    out.append("")
-    out.append("  Physical footprint is the row to compare, and resident is printed under it")
-    out.append("  only so that the gap between them is visible. Resident counts shared clean")
-    out.append("  pages — system frameworks, mapped once and charged to every process that")
-    out.append("  touches them — which neither build caused to exist and neither would give")
-    out.append("  back by exiting. Ranked on resident, the winner is whichever one linked")
-    out.append("  less of macOS. Footprint comes from `vmmap --summary`, and its peak is a")
-    out.append("  high-water mark the kernel has kept since each process started rather than")
-    out.append("  anything this script sampled.")
-    out.append("")
-    out.append("  Every figure covers the whole process tree. Both builds keep most of their")
-    out.append("  memory outside the process that was launched, so a reading of that process")
-    out.append("  alone describes neither of them.")
-    out.append("")
-
-    for run in runs.values():
-        out.append(f"{run.app}")
-        out.append("")
-        if run.stages:
-            for name, at in sorted(run.stages.items(), key=lambda kv: kv[1]):
-                out.append(f"  {at / 1000:8.2f}s  {name}")
-        else:
-            out.append("  (nothing it printed matched a known stage)")
-        out.append("")
-        if run.footprints:
-            out.append("  where the memory was, per process (footprint now / its peak):")
-            for name, now, peak in sorted(run.footprints.values(), key=lambda f: -f[1]):
-                out.append(f"    {mib(now).rjust(6)} / {mib(peak).rjust(6)} MiB  {name}")
-            out.append("")
-        largest = list(run.by_command.items())[:6]
-        if largest:
-            out.append("  resident at its largest, by process:")
-            for name, value in largest:
-                out.append(f"    {mib(value).rjust(6)} MiB  {name}")
-            out.append("")
-        if run.inside:
-            out.append("  its own account of the session:")
-            for line in json.dumps(run.inside, indent=2, sort_keys=True).splitlines():
-                out.append(f"    {line}")
-            out.append("")
-        for note in run.notes:
-            out.append(f"  note: {note}")
-        if run.notes:
-            out.append("")
-
-    out.append("What these numbers do not cover:")
-    out.append("")
-    if warm:
-        out.append("  * Two profiles, not one starting point. Each build reads the install it")
-        out.append("    actually has on this machine, and neither was made to match the other:")
-        out.append("    how much of the 4.2 GB image each has already cached is whatever")
-        out.append("    previous sessions left. That is the honest version of this route — a")
-        out.append("    player's second launch is not a controlled experiment either — but it")
-        out.append("    means the row to compare is time to first frame, not bytes on disk.")
-        out.append("  * Both find their saved login, which is the point rather than a flaw:")
-        out.append("    this is the launch a returning player gets. gwnative reads the login")
-        out.append("    keychain and the reference reads its encrypted file under userData, so")
-        out.append("    what is compared there is a keychain read against a file read.")
-        out.append("  * Whatever each profile answered to the launcher's download question")
-        out.append("    stands; nothing is seeded. A profile part-way through the full 4.2 GB")
-        out.append("    download is still fetching during the window, and its CPU and network")
-        out.append("    rows carry that.")
-        out.append("  * Nothing is written into either profile by this script, but the builds")
-        out.append("    themselves write as they always do — a session log, and any chunk the")
-        out.append("    client asks for and does not have.")
-    else:
-        out.append("  * The two are given a blank install by different means, because they take")
-        out.append("    the home directory from different places. gwnative reads $HOME and gets a")
-        out.append("    scratch one. Chromium reads the password database and ignores $HOME, so")
-        out.append("    the reference gets --user-data-dir instead — everything it writes lives")
-        out.append("    under it, and it also takes the single-instance lock with it, so a copy")
-        out.append("    already open on the real profile cannot turn the launch into a silent")
-        out.append("    successful exit.")
-        out.append("  * Saved logins are not comparable and are not compared. gwnative reads the")
-        out.append("    login keychain, which is per-user and does not follow $HOME, so it finds")
-        out.append("    a login a blank machine would not have. The reference keeps its own")
-        out.append("    encrypted credential file under userData for an unpackaged run,")
-        out.append("    which the blank profile does not have. One starts at character select,")
-        out.append("    the other at a login box. Neither downloads anything on the strength of")
-        out.append("    it, so what this costs is a keychain read against a file read.")
-        out.append("  * Both were seeded with dataStrategy=quick, because the launcher asks that")
-        out.append("    question before either renders anything and a benchmark cannot answer it.")
-        out.append("    A first launch that chose the full 4.2 GB download is a different, and")
-        out.append("    network-bound, measurement.")
-    out.append("  * Only the first-frame row is a like-for-like comparison of a moment. Both")
-    out.append("    builds time it themselves, from the page load, and both are quoted as")
-    out.append("    they report it. The stage timelines below it are each build's own, on")
-    out.append("    each build's own clock, and the two do not have all the same stages.")
-    if not warm:
-        out.append("  * Bytes written are a function of how far the client got, not a fixed cost of")
-        out.append("    installing. Both stream the game image on demand, so a longer window writes")
-        out.append("    more. The figure is comparable between the two only because they were given")
-        out.append("    the same window on the same network.")
-    out.append("  * The summed peak footprint is a ceiling, not a reading. Nothing says the")
-    out.append("    renderer was at its largest in the instant the GPU process was, and the")
-    out.append("    kernel keeps one high-water mark per process rather than one for a tree.")
-    out.append("  * gwnative's own `footprintMiB` is the host process alone. The wasm heap, the")
-    out.append("    GL resources and every JS object live in the web content process, which")
-    out.append("    that figure cannot see. The tree readings above can.")
-    out.append("  * WebKit keys its storage root by bundle identifier, so a run of the bare")
-    out.append("    binary and a run of the signed bundle do not share one:")
-    out.append("    ~/Library/WebKit/gwnative and ~/Library/WebKit/com.gwnative.app. This")
-    out.append("    measures the binary.")
-    out.append("")
-    return "\n".join(out)
 
 
 def main() -> int:
