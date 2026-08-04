@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""Fail-closed policy checks for certificate signing and publication."""
+from __future__ import annotations
+import copy
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import NoReturn
+ROOT = Path(__file__).resolve().parent.parent
+MAX_FEED_BYTES = 4 * 1024 * 1024
+MAX_FAMILIES = 256
+ALLOWED_PUBLICATION_PATHS = (
+    "certificates/builds.json",
+    "certificates/builds.json.sig",
+)
+HASH = re.compile(r"[0-9a-f]{64}\Z")
+BRIDGE_KINDS = {"ensureDirectory", "findFiles", "fileBaseName", "deleteFile", "fileExists"}
+class PolicyError(RuntimeError):
+    pass
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise PolicyError(message)
+def exact_keys(value: object, expected: set[str], label: str) -> dict[str, object]:
+    require(type(value) is dict, f"{label} must be an object")
+    value = value  # type: ignore[assignment]
+    require(set(value) == expected, f"{label} has missing or unknown fields")
+    return value  # type: ignore[return-value]
+def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        require(key not in value, f"JSON object repeats {key!r}")
+        value[key] = item
+    return value
+def decode_json(data: bytes) -> object:
+    return json.loads(data, object_pairs_hook=unique_object)
+def integer(value: object, label: str, maximum: int = (1 << 64) - 1) -> int:
+    require(type(value) is int and 0 <= value <= maximum, f"{label} is invalid")
+    return value  # type: ignore[return-value]
+def digest(value: object, label: str) -> str:
+    require(type(value) is str and HASH.fullmatch(value) is not None, f"{label} is invalid")
+    return value
+def validate_call_site(value: object) -> None:
+    site = exact_keys(
+        value,
+        {"localFunction", "callerBodySha256", "occurrence", "expectedTargetCalls"},
+        "call site",
+    )
+    integer(site["localFunction"], "local function")
+    digest(site["callerBodySha256"], "caller body hash")
+    occurrence = integer(site["occurrence"], "call occurrence")
+    expected = integer(site["expectedTargetCalls"], "expected call count")
+    require(expected > 0 and occurrence < expected, "call occurrence is out of range")
+def validate_template(value: object) -> None:
+    template = exact_keys(value, {"outputSha256", "importCount", "carrierImport", "bridges"}, "template")
+    digest(template["outputSha256"], "template output hash")
+    imports = integer(template["importCount"], "import count", (1 << 32) - 1)
+    carrier = integer(template["carrierImport"], "carrier import", (1 << 32) - 1)
+    require(imports > 0 and carrier < imports, "template import indices are invalid")
+    bridges = template["bridges"]
+    require(type(bridges) is list and len(bridges) == len(BRIDGE_KINDS), "bridge set is incomplete")
+    kinds: set[str] = set()
+    for value in bridges:
+        bridge = exact_keys(
+            value,
+            {"kind", "stubFunction", "stubBodySha256", "callSites"},
+            "bridge",
+        )
+        kind = bridge["kind"]
+        require(type(kind) is str and kind in BRIDGE_KINDS and kind not in kinds, "bridge kind is invalid")
+        kinds.add(kind)
+        integer(bridge["stubFunction"], "stub function")
+        digest(bridge["stubBodySha256"], "stub body hash")
+        sites = bridge["callSites"]
+        require(type(sites) is list and len(sites) > 0, "bridge call sites are empty")
+        for site in sites:
+            validate_call_site(site)
+def validate_layout(value: object) -> None:
+    layout = exact_keys(
+        value, {"snapshotAbi", "snapshotBytes", "cursorSnapshotAbi", "cursorSnapshotBytes", "layoutWords",
+                "dataSha256", "elementSha256", "sharedGlobalPrefixSha256", "sharedGlobalCount"}, "layout",
+    )
+    require(integer(layout["snapshotAbi"], "snapshot ABI", (1 << 32) - 1) == 1 and integer(layout["snapshotBytes"], "snapshot bytes", (1 << 32) - 1) == 64, "snapshot ABI is invalid")
+    require(integer(layout["cursorSnapshotAbi"], "cursor snapshot ABI", (1 << 32) - 1) == 1 and integer(layout["cursorSnapshotBytes"], "cursor snapshot bytes", (1 << 32) - 1) == 4160, "cursor snapshot ABI is invalid")
+    words = layout["layoutWords"]
+    require(type(words) is list and len(words) == 29, "layout words are invalid")
+    for word in words:
+        integer(word, "layout word", (1 << 32) - 1)
+    digest(layout["dataSha256"], "data hash")
+    digest(layout["elementSha256"], "element hash")
+    digest(layout["sharedGlobalPrefixSha256"], "shared global hash")
+    require(integer(layout["sharedGlobalCount"], "shared global count", (1 << 32) - 1) > 0, "shared global proof is empty")
+def family_identity(runtimes: list[object]) -> str:
+    by_name = {runtime["runtime"]: runtime for runtime in runtimes}  # type: ignore[index]
+    value = hashlib.sha256(b"gwnative-artifact-family-v1\0")
+    for name in ("jspi", "asyncify"):
+        runtime = by_name[name]
+        value.update(name.encode())
+        value.update(b"\0")
+        value.update(bytes.fromhex(runtime["wasmSha256"]))
+        value.update(bytes.fromhex(runtime["glueSha256"]))
+    return value.hexdigest()
+def validate_family(value: object) -> str:
+    family = exact_keys(value, {"familyId", "layout", "runtimes"}, "family")
+    family_id = digest(family["familyId"], "family ID")
+    layout = family["layout"]
+    if layout is not None:
+        validate_layout(layout)
+    runtimes = family["runtimes"]
+    require(type(runtimes) is list and len(runtimes) == 2, "family must contain both runtimes")
+    names: set[str] = set()
+    for value in runtimes:
+        runtime = exact_keys(value, {"runtime", "wasmSha256", "glueSha256", "template", "passiveEnhancements"}, "runtime")
+        name = runtime["runtime"]
+        require(type(name) is str and name in {"jspi", "asyncify"} and name not in names, "runtime set is invalid")
+        names.add(name)
+        digest(runtime["wasmSha256"], "wasm hash")
+        digest(runtime["glueSha256"], "glue hash")
+        validate_template(runtime["template"])
+        require(type(runtime["passiveEnhancements"]) is bool, "passive eligibility is invalid")
+        require(runtime["passiveEnhancements"] == (layout is not None), "passive eligibility and layout disagree")
+    require(names == {"jspi", "asyncify"}, "family has a mixed runtime set")
+    require(family_identity(runtimes) == family_id, "family ID does not match its artifacts")
+    return family_id
+def validate_feed(value: object) -> dict[str, object]:
+    feed = exact_keys(value, {"schemaVersion", "sequence", "transformAbi", "families"}, "feed")
+    require(integer(feed["schemaVersion"], "schema version", (1 << 32) - 1) == 1, "schema version is unsupported")
+    require(integer(feed["sequence"], "sequence") >= 1, "sequence is invalid")
+    require(integer(feed["transformAbi"], "transform ABI", (1 << 32) - 1) == 3, "transform ABI is unsupported")
+    families = feed["families"]
+    require(type(families) is list and 0 < len(families) <= MAX_FAMILIES, "family count is invalid")
+    seen: set[str] = set()
+    for family in families:
+        family_id = validate_family(family)
+        require(family_id not in seen, "family ID is duplicated")
+        seen.add(family_id)
+    return feed
+def read_feed(path: Path) -> tuple[dict[str, object], bytes]:
+    require(path.is_file() and not path.is_symlink(), f"{path} is not a regular feed")
+    data = path.read_bytes()
+    require(0 < len(data) <= MAX_FEED_BYTES, f"{path} is oversized or empty")
+    try:
+        value = decode_json(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PolicyError(f"{path} is not valid JSON: {error}") from error
+    return validate_feed(value), data
+def validate_transition(
+    base_path: Path,
+    candidate_path: Path,
+    expected_family_id: str,
+    expected_sha256: str,
+) -> None:
+    digest(expected_family_id, "expected family ID")
+    digest(expected_sha256, "expected candidate hash")
+    base, _ = read_feed(base_path)
+    candidate, data = read_feed(candidate_path)
+    require(hashlib.sha256(data).hexdigest() == expected_sha256, "candidate hash changed after reproduction")
+    require(candidate["sequence"] == base["sequence"] + 1, "candidate is replayed or non-consecutive")
+    candidate_families = candidate["families"]
+    matches = [family for family in candidate_families if family["familyId"] == expected_family_id]
+    require(len(matches) == 1 and candidate_families[-1] == matches[0], "expected family is not the unique newest attestation")
+    expected = [family for family in base["families"] if family["familyId"] != expected_family_id]
+    expected.append(matches[0])
+    require(candidate_families == expected[-MAX_FAMILIES:], "candidate alters certificate history")
+def run_git(repo: Path, *arguments: str) -> str:
+    return subprocess.run(["git", *arguments], cwd=repo, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+def check_publish_paths(repo: Path, base: str, head: str) -> None:
+    run_git(repo, "merge-base", "--is-ancestor", base, head)
+    require(run_git(repo, "rev-list", "--count", f"{base}..{head}") == "1", "publication must be one commit")
+    changed = tuple(
+        sorted(run_git(repo, "diff", "--no-renames", "--name-only", base, head).splitlines())
+    )
+    require(changed == ALLOWED_PUBLICATION_PATHS, "publication must change exactly the signed certificate pair")
+    for path in ALLOWED_PUBLICATION_PATHS:
+        entry = run_git(repo, "ls-tree", head, "--", path).split()
+        require(len(entry) >= 4 and entry[0] == "100644" and entry[1] == "blob", f"{path} is not a regular file")
+def job_block(workflow: str, name: str) -> str:
+    match = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)", workflow)
+    require(match is not None, f"certificate workflow has no {name} job")
+    return match.group(1)
+def yaml_scalars(text: str, key: str) -> list[str]:
+    prefix = rf'(?m)^\s*(?:-\s*)?(?:{key}|"{key}"|\'{key}\')\s*:'
+    occurrences, matches = re.findall(prefix, text), re.findall(prefix + r'\s*(?:"([^"\n]+)"|\'([^\'\n]+)\'|([^\s#]+))', text)
+    require(len(matches) == len(occurrences), f"{key} must use a literal scalar")
+    return [next(value for value in match if value) for match in matches]
+def check_action_pins(paths: list[Path]) -> dict[Path, str]:
+    texts = {path: path.read_text() for path in paths}
+    for path, value in texts.items():
+        require(re.search(r'(?:\{|,)\s*(?:uses|"uses"|\'uses\')\s*:', value) is None, f"{path}: flow-style uses is forbidden")
+        for action in yaml_scalars(value, "uses"):
+            require(re.fullmatch(r"[^@]+@[0-9a-f]{40}", action) is not None, f"{path}: action is not pinned: {action}")
+    return texts
+def check_repository_policy() -> None:
+    workflows = [
+        *sorted((ROOT / ".github/workflows").glob("*.yml")),
+        *sorted((ROOT / ".github/workflows").glob("*.yaml")),
+    ]
+    texts = check_action_pins(workflows)
+    certify = texts[ROOT / ".github/workflows/certify.yml"]
+    sign = job_block(certify, "sign")
+    publish = job_block(certify, "publish")
+    validate = job_block(certify, "validate")
+    reserve = job_block(certify, "reserve")
+    all_workflows = "\n".join(texts.values())
+    environments = [value for text in texts.values() for value in yaml_scalars(text, "environment")]
+    require(set(environments) <= {"release", "certificate-publishing"}, "workflow selects a computed or unknown environment")
+    require(environments.count("certificate-publishing") == 1, "certificate environment is available outside the signer")
+    require(
+        all_workflows.count("CERTIFICATE_PRIVATE_KEY") == sign.count("CERTIFICATE_PRIVATE_KEY")
+        and sign.count("secrets.CERTIFICATE_PRIVATE_KEY") == 1,
+        "certificate key is referenced outside its one signing job",
+    )
+    require("actions/checkout" not in sign and "contents: write" not in sign, "signer can execute checkout code or write contents")
+    require("CERTIFICATE_PRIVATE_KEY" in sign and "certificate-publishing" in sign, "signer is not isolated behind its environment")
+    pin = re.search(r"CERTIFICATE_PUBLIC_KEY:\s*([^\s]+)", sign)
+    require(
+        pin is not None
+        and pin.group(1) == (ROOT / "certificates/public-key.txt").read_text().strip(),
+        "signer public-key pin differs from the application pin",
+    )
+    require(re.search(r"tojson\s*\(\s*secrets\s*\)|secrets\s*\[|\$\{\{\s*secrets\s*}}", all_workflows, re.I) is None, "workflow exposes secrets indirectly")
+    require(not re.search(r"\b(git|gh|curl|wget|python|node|eval|source)\b", sign), "signer can run repository or network tools")
+    require("CERTIFICATE_PRIVATE_KEY" not in validate + reserve + publish, "non-signer job can access the certificate key")
+    require("contents: write" in reserve and "environment:" not in reserve, "reservation combines write and signing authority")
+    require("certificate-reservations/sequence-$sequence" in reserve and 'git push origin "$commit:$reservation_ref" || true' in reserve, "reservation does not create the canonical per-sequence ledger ref")
+    require("contents: write" in publish and "pull-requests: write" in publish, "publisher lacks narrow PR authority")
+    require("environment:" not in publish, "publisher can access environment secrets")
+    require("check-trust-policy check-publish" in publish, "publisher does not enforce the path allowlist")
+    require("gh pr create" in publish and "--draft" in publish, "publisher does not open a draft PR")
+    pushes = [line.strip() for line in re.findall(r"(?m)^\s*git\s+push\b[^\n]*", certify)]
+    require(pushes == ['git push origin "$commit:$reservation_ref" || true', 'git push origin "HEAD:refs/heads/$branch"'], "certificate workflow has an unrecognized push target")
+    for path in ALLOWED_PUBLICATION_PATHS:
+        require(path in publish, f"publisher does not name {path}")
+    owners = (ROOT / ".github/CODEOWNERS").read_text().splitlines()
+    owned = {line.split()[0] for line in owners if line.strip() and not line.lstrip().startswith("#")}
+    required = {
+        "/.github/CODEOWNERS",
+        "/.github/workflows/*",
+        "/certificates/*",
+        "/scripts/*",
+        "/packaging/sparkle/*",
+    }
+    require(required <= owned, "CODEOWNERS omits a certificate/release trust path")
+def expect_failure(action, label: str) -> None:
+    try:
+        action()
+    except (PolicyError, subprocess.CalledProcessError):
+        return
+    raise PolicyError(f"self-test accepted {label}")
+def self_test_schema() -> None:
+    base = validate_feed(decode_json((ROOT / "certificates/builds.json").read_bytes()))
+    candidate = copy.deepcopy(base)
+    candidate["sequence"] += 1
+    family = copy.deepcopy(candidate["families"][0])
+    family["runtimes"].reverse()
+    candidate["families"] = [family]
+    expected_id = family["familyId"]
+    def check_against(base_value: object, value: object, family_id: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base_path = root / "base.json"
+            candidate_path = root / "candidate.json"
+            base_path.write_text(json.dumps(base_value))
+            data = json.dumps(value).encode()
+            candidate_path.write_bytes(data)
+            validate_transition(base_path, candidate_path, family_id, hashlib.sha256(data).hexdigest())
+    def check(value: object) -> None:
+        check_against(base, value, expected_id)
+    check(candidate)
+    replay = copy.deepcopy(candidate)
+    replay["sequence"] = base["sequence"]
+    expect_failure(lambda: check(replay), "replayed feed")
+    malformed = copy.deepcopy(candidate)
+    malformed["unknown"] = True
+    expect_failure(lambda: check(malformed), "unknown field")
+    mixed = copy.deepcopy(candidate)
+    mixed["families"][0]["runtimes"][1]["runtime"] = mixed["families"][0]["runtimes"][0]["runtime"]
+    expect_failure(lambda: check(mixed), "mixed runtime family")
+    broken_hash = copy.deepcopy(candidate)
+    broken_hash["families"][0]["runtimes"][0]["wasmSha256"] = "00"
+    expect_failure(lambda: check(broken_hash), "malformed hash")
+    fractional = copy.deepcopy(candidate)
+    fractional["sequence"] = 3.5
+    expect_failure(lambda: check(fractional), "fractional sequence")
+    duplicate = json.dumps(candidate).replace(
+        f'"sequence": {candidate["sequence"]}',
+        f'"sequence": {candidate["sequence"]}, "sequence": {candidate["sequence"]}',
+        1,
+    )
+    expect_failure(lambda: decode_json(duplicate.encode()), "duplicate JSON member")
+    with tempfile.TemporaryDirectory() as directory:
+        workflow = Path(directory) / "unpinned.yaml"
+        workflow.write_text('steps:\n  - "uses": actions/checkout@main\n')
+        expect_failure(lambda: check_action_pins([workflow]), "quoted unpinned .yaml action")
+        workflow.write_text("steps:\n  - { uses: actions/checkout@main }\n"); expect_failure(lambda: check_action_pins([workflow]), "flow-style action")
+    expect_failure(lambda: require(yaml_scalars('environment: ${{ inputs.name }}\n', "environment") == ["release"], "computed"), "computed environment")
+    history = copy.deepcopy(base)
+    older = copy.deepcopy(history["families"][0])
+    older["runtimes"][0]["wasmSha256"] = "1" * 64
+    older["familyId"] = family_identity(older["runtimes"])
+    history["families"].append(older)
+    equivocated = copy.deepcopy(history)
+    equivocated["sequence"] += 1
+    newest = copy.deepcopy(equivocated["families"][0])
+    equivocated["families"] = [equivocated["families"][1], newest]
+    equivocated["families"][0]["layout"]["layoutWords"][0] += 1
+    expect_failure(
+        lambda: check_against(history, equivocated, newest["familyId"]),
+        "equivocated history",
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        base_path = root / "base.json"
+        candidate_path = root / "candidate.json"
+        base_path.write_text(json.dumps(base))
+        candidate_path.write_bytes(b" " * (MAX_FEED_BYTES + 1))
+        expect_failure(
+            lambda: validate_transition(base_path, candidate_path, expected_id, "0" * 64),
+            "oversized feed",
+        )
+def self_test_paths() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        repo = Path(directory)
+        run_git(repo, "init", "-q")
+        run_git(repo, "config", "user.name", "policy")
+        run_git(repo, "config", "user.email", "policy@example.invalid")
+        run_git(repo, "config", "commit.gpgsign", "false")
+        run_git(repo, "config", "core.filemode", "true")
+        for path in ALLOWED_PUBLICATION_PATHS:
+            target = repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("old\n")
+        run_git(repo, "add", ".")
+        run_git(repo, "commit", "-qm", "base")
+        base = run_git(repo, "rev-parse", "HEAD")
+        def commit(label: str, kind: str) -> str:
+            run_git(repo, "switch", "-q", "--detach", base)
+            targets = [repo / path for path in ALLOWED_PUBLICATION_PATHS]
+            for target in targets if kind != "missing" else targets[:1]:
+                target.write_text(label + "\n")
+            if kind == "extra":
+                (repo / "unexpected").write_text("no\n")
+            elif kind == "symlink":
+                targets[0].unlink()
+                targets[0].symlink_to("elsewhere")
+            elif kind == "mode":
+                targets[0].chmod(0o755)
+            elif kind == "rename":
+                targets[0].rename(repo / "certificates/renamed.json")
+            run_git(repo, "add", "-A")
+            run_git(repo, "commit", "-qm", label)
+            return run_git(repo, "rev-parse", "HEAD")
+        valid = commit("valid", "valid")
+        check_publish_paths(repo, base, valid)
+        for kind in ("extra", "missing", "symlink", "mode", "rename"):
+            head = commit(kind, kind)
+            expect_failure(lambda head=head: check_publish_paths(repo, base, head), kind)
+        run_git(repo, "switch", "-q", "--detach", valid)
+        for path in ALLOWED_PUBLICATION_PATHS:
+            (repo / path).write_text("second\n")
+        run_git(repo, "commit", "-qam", "second")
+        second = run_git(repo, "rev-parse", "HEAD")
+        expect_failure(lambda: check_publish_paths(repo, base, second), "second commit")
+def usage() -> NoReturn:
+    raise PolicyError(
+        "usage: scripts/check-trust-policy [--self-test | "
+        "validate-transition BASE CANDIDATE FAMILY_ID SHA256 | check-publish BASE HEAD]"
+    )
+def main(arguments: list[str]) -> int:
+    if not arguments:
+        check_repository_policy()
+        validate_feed(decode_json((ROOT / "certificates/builds.json").read_bytes()))
+    elif arguments == ["--self-test"]:
+        check_repository_policy()
+        self_test_schema()
+        self_test_paths()
+    elif len(arguments) == 5 and arguments[0] == "validate-transition":
+        validate_transition(Path(arguments[1]), Path(arguments[2]), arguments[3], arguments[4])
+    elif len(arguments) == 3 and arguments[0] == "check-publish":
+        check_publish_paths(ROOT, arguments[1], arguments[2])
+    else:
+        usage()
+    print("trust policy: certificate schema, authority split, and publication scope ok")
+    return 0
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except (OSError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError, PolicyError) as error:
+        print(f"trust policy: {error}", file=sys.stderr)
+        raise SystemExit(1)

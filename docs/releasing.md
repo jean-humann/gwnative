@@ -203,8 +203,13 @@ The secrets are:
 
 The separate `certificate-publishing` environment is restricted to `main`,
 requires review, and contains only `CERTIFICATE_PRIVATE_KEY`, a base64-encoded
-PKCS#8 Ed25519 key. Certificate signing runs in a fresh job that neither checks
-out nor executes repository code; the following no-secret job opens the PR.
+PKCS#8 Ed25519 key. A no-secret job first validates the closed schema and exact
+transition. Certificate signing then runs in a fresh no-checkout job; once its
+key is available, only fixed runner and OpenSSL commands execute over the
+validated data. Before signing, a no-secret writer reserves one candidate
+digest for the next sequence, preventing duplicate or equivocated signatures.
+The following no-secret job opens a certificate-only draft PR. GitHub holds the
+bot-created PR's CI run until a write user approves it.
 
 The workflow creates a temporary Keychain, imports the identity and public
 intermediate chain, grants access only to signing tools, stores the notarization

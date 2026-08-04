@@ -208,20 +208,20 @@ flowchart LR
     D --> E{"Candidate differs?"}
     E -- "No" --> M["Finish"]
     E -- "Yes" --> F["Second fetch + exact reproduction"]
-    F --> G["Fresh signer job; no checkout"]
-    G --> H["Signed JSON + detached Ed25519 signature"]
-    H --> I["Verify signature, sequence and 2-file scope"]
-    I --> J["Publish certificate files to main"]
-    J --> K["Existing apps refresh for next launch"]
+    F --> G["Validate + reserve one sequence digest"]
+    G --> H["Fresh signer job; no checkout"]
+    H --> I["Signed JSON + detached Ed25519 signature"]
+    I --> J["Verify exact 2-file scope + open draft PR"]
+    J --> K["Reviewed merge refreshes installed apps"]
 ```
 
 The private key is available only to the main-only signer job. Candidate jobs
-compile repository code but receive no secret. The signer receives only the
-reproduced JSON, checks its bounded schema and verifies that its private key
-derives the public key compiled into the app. The publisher receives only the
-signed pair and has no secret. It refuses a non-consecutive sequence, any base
-branch movement during the run, or a staged path outside the two certificate
-files; a later poll safely retries.
+compile repository code but receive no secret. A no-secret writer reserves one
+candidate digest on a canonical per-sequence ref before the signer receives the
+validated JSON and checks that its private key derives the compiled public key.
+The no-secret publisher verifies the signed pair, consecutive sequence, and
+exact two-file commit before opening a draft PR. Reservation refs must reject
+deletion and non-fast-forward updates; an identical later poll safely resumes.
 
 ## Failure outcome matrix
 
