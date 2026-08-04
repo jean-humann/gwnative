@@ -396,8 +396,10 @@ impl Store {
             &mut state.launch_state,
             LaunchState::AttemptingRuntime(launch.clone()),
         );
+        let previous_frame = state.last_first_frame.take();
         if !self.save(&state) {
             state.launch_state = previous;
+            state.last_first_frame = previous_frame;
             return Err(RuntimeStateError::NotSaved);
         }
         Ok(launch)
@@ -468,13 +470,9 @@ impl Store {
         // current files are still exact, restore it only when they are not.
         if let Some(previous) = state.previous.clone() {
             let gameplay_proven = matches!(state.proof_state, Some(ProofState::GameplayProven(_)));
-            let live_is_expected = if gameplay_proven {
-                generation_matches(root, &self.active_manifest, &previous).is_ok()
-            } else {
-                state.current.as_ref().is_some_and(|current| {
-                    generation_matches(root, &self.active_manifest, current).is_ok()
-                })
-            };
+            let live_is_expected = state.current.as_ref().is_some_and(|current| {
+                generation_matches(root, &self.active_manifest, current).is_ok()
+            });
             if gameplay_proven && live_is_expected {
                 let saved_previous = state.previous.take();
                 let saved_proof = state.previous_proof.take();
@@ -490,6 +488,7 @@ impl Store {
                         let before = state.clone();
                         state.current = Some(previous);
                         state.proof_state = state.previous_proof.take();
+                        state.last_first_frame = None;
                         state.launch_state = LaunchState::Idle;
                         state.previous = None;
                         if !self.save(&state) {
@@ -675,6 +674,7 @@ impl Store {
         state.current = Some(generation);
         if !same {
             state.proof_state = Some(ProofState::InstalledUnproven);
+            state.last_first_frame = None;
             state.failed_runtimes.clear();
         }
         state.launch_state = LaunchState::Idle;
@@ -732,30 +732,96 @@ impl Store {
         note!("[generation] adopted the client already on disk; it is checked from now on");
     }
 
-    /// The page reached a first frame, so the current set works here.
+    /// Acknowledge the exact launch whose renderer presented a first frame.
     ///
     /// Idempotent, and cheap when there is nothing to do: this is called from a
     /// request handler on a route the page hits once per launch, and every
     /// launch after the first finds the set already proven.
-    pub fn prove(&self) -> std::result::Result<(), RuntimeStateError> {
+    pub fn prove_first_frame(
+        &self,
+        claimed: &LaunchIdentity,
+    ) -> std::result::Result<(), RuntimeStateError> {
         let mut state = self.state.lock().unwrap();
-        let LaunchState::AttemptingRuntime(launch) = state.launch_state.clone() else {
+        if state.launch_state == LaunchState::Idle
+            && state.last_first_frame.as_ref() == Some(claimed)
+        {
             return Ok(());
+        }
+        let LaunchState::AttemptingRuntime(launch) = state.launch_state.clone() else {
+            return Err(RuntimeStateError::Invalid(
+                "no matching runtime is awaiting first-frame proof".to_owned(),
+            ));
         };
+        if &launch != claimed {
+            return Err(RuntimeStateError::Invalid(
+                "first-frame proof does not match the active launch".to_owned(),
+            ));
+        }
         let proof = state.proof_state.clone();
+        let first_frame = state.last_first_frame.clone();
         state.proof_state = Some(match proof {
-            Some(ProofState::GameplayProven(_)) => ProofState::GameplayProven(launch.clone()),
+            Some(ProofState::GameplayProven(ref proven)) => {
+                ProofState::GameplayProven(proven.clone())
+            }
             _ => ProofState::FirstFrameProven(launch.clone()),
         });
         state.launch_state = LaunchState::Idle;
+        state.last_first_frame = Some(launch.clone());
         if !self.save(&state) {
             state.proof_state = proof;
             state.launch_state = LaunchState::AttemptingRuntime(launch);
+            state.last_first_frame = first_frame;
             return Err(RuntimeStateError::NotSaved);
         }
         let id = state.current.as_ref().map_or("", |g| g.id.as_str());
         note!("[generation] client generation {id} reached a first frame");
         Ok(())
+    }
+
+    /// Promote the latest first-frame proof after this session opens an
+    /// allowed ArenaNet TCP connection. The socket is host-owned and tied to
+    /// this loopback server's capability token and exact launch identity, so a
+    /// page from an older session cannot nominate a newer launch.
+    pub fn launch_for_gameplay(&self) -> Option<LaunchIdentity> {
+        let state = self.state.lock().unwrap();
+        match &state.launch_state {
+            LaunchState::AttemptingRuntime(launch) => Some(launch.clone()),
+            LaunchState::Idle => state.last_first_frame.clone(),
+            LaunchState::FailedRuntime(_) => None,
+        }
+    }
+
+    pub fn prove_gameplay(
+        &self,
+        observed: &LaunchIdentity,
+    ) -> std::result::Result<bool, RuntimeStateError> {
+        let mut state = self.state.lock().unwrap();
+        let Some(launch) = state.last_first_frame.clone() else {
+            return Ok(false);
+        };
+        if &launch != observed {
+            return Ok(false);
+        }
+        let eligible = match &state.proof_state {
+            Some(ProofState::FirstFrameProven(proven)) => proven == &launch,
+            Some(ProofState::GameplayProven(_)) => true,
+            _ => false,
+        };
+        if !eligible {
+            return Ok(false);
+        }
+        if state.proof_state == Some(ProofState::GameplayProven(launch.clone())) {
+            return Ok(true);
+        }
+        let proof = state
+            .proof_state
+            .replace(ProofState::GameplayProven(launch));
+        if !self.save(&state) {
+            state.proof_state = proof;
+            return Err(RuntimeStateError::NotSaved);
+        }
+        note!("[generation] the current client reached an ArenaNet game connection");
+        Ok(true)
     }
 }
 
@@ -1384,10 +1450,10 @@ mod tests {
 
         // A successful official retry clears the launch attempt even though
         // the generation proof was already true before this launch.
-        store
+        let launch = store
             .record_attempt("jspi", Some(BUILD), false, NONCE)
             .unwrap();
-        store.prove().unwrap();
+        store.prove_first_frame(&launch).unwrap();
         drop(store);
         let store = Store::open(state);
         assert_eq!(store.recover(&root), Recovery::None);
@@ -1646,8 +1712,27 @@ mod tests {
         store.stash(&root, &NAMES);
         write_client(&root, "new");
         store.record("new", &root, &NAMES);
-        attempt(&store, false);
-        store.prove().unwrap();
+        let launch = attempt(&store, false);
+        let mut stale = launch.clone();
+        stale.nonce = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into();
+        assert!(matches!(
+            store.prove_first_frame(&stale),
+            Err(RuntimeStateError::Invalid(_))
+        ));
+        let mut wrong_runtime = launch.clone();
+        wrong_runtime.runtime = "asyncify".into();
+        assert!(matches!(
+            store.prove_first_frame(&wrong_runtime),
+            Err(RuntimeStateError::Invalid(_))
+        ));
+        let mut wrong_artifact = launch.clone();
+        wrong_artifact.official_wasm_sha256 = "ee".repeat(32);
+        assert!(matches!(
+            store.prove_first_frame(&wrong_artifact),
+            Err(RuntimeStateError::Invalid(_))
+        ));
+        store.prove_first_frame(&launch).unwrap();
+        store.prove_first_frame(&launch).unwrap();
         assert!(
             state.join("previous").exists(),
             "first-frame proof must preserve the gameplay-proven predecessor"
@@ -1657,6 +1742,50 @@ mod tests {
         assert_eq!(store.recover(&root), Recovery::None);
         assert!(!store.rejected("new"));
         assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
+    #[test]
+    fn a_game_connection_retires_only_the_proven_predecessor() {
+        let temp = TempDir::new("generation-gameplay-proof");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "old");
+        store.stash(&root, &NAMES);
+        write_client(&root, "new");
+        store.record("new", &root, &NAMES);
+        let launch = attempt(&store, false);
+        store.prove_first_frame(&launch).unwrap();
+        assert!(store.prove_gameplay(&launch).unwrap());
+        let second = store
+            .record_attempt(
+                "jspi",
+                Some(BUILD),
+                false,
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            )
+            .unwrap();
+        assert!(
+            !store.prove_gameplay(&launch).unwrap(),
+            "sessions must not be mixed"
+        );
+        store.prove_first_frame(&second).unwrap();
+        assert!(
+            matches!(
+                store.prove_first_frame(&launch),
+                Err(RuntimeStateError::Invalid(_))
+            ),
+            "an older acknowledgement must not become idempotent again"
+        );
+        assert!(store.prove_gameplay(&second).unwrap());
+        drop(store);
+
+        let store = Store::open(state.clone());
+        assert_eq!(store.recover(&root), Recovery::None);
+        assert!(!state.join("previous").exists());
+        assert!(matches!(
+            store.state.lock().unwrap().proof_state,
+            Some(ProofState::GameplayProven(ref proven)) if proven == &second
+        ));
     }
 
     #[test]

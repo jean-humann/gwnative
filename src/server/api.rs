@@ -12,6 +12,7 @@
 
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::{Context, Flow, tracing};
 use crate::chunks::ChunkStore;
@@ -79,6 +80,13 @@ pub(super) fn serve(
         "__transform-failed" if request.method == "POST" => {
             transform_failed(request, stream, context)?
         }
+        "__proof-flush" if request.method == "POST" => {
+            if context.sockets.flush_proofs(Duration::from_millis(1500)) {
+                no_content(stream)?;
+            } else {
+                text(stream, 503, "proof persistence did not finish before quit")?;
+            }
+        }
         "__game/v1" => game_description(request, stream, context)?,
         "__game/v1/state" => game_state(request, stream, context)?,
         "__game/v1/actions" => text(
@@ -86,7 +94,7 @@ pub(super) fn serve(
             409,
             "no write operation is certified for this client build",
         )?,
-        "__socket" => return socket(request, stream, flow).map(Some),
+        "__socket" => return socket(request, stream, context, flow).map(Some),
         "__diag" => diag(request, stream, context)?,
         "__resident" => match &context.snapshot {
             Some(store) => resident(stream, store)?,
@@ -107,15 +115,7 @@ pub(super) fn serve(
         // build can offer and the thing the generation record is waiting for.
         // Deliberately one route: a second one would be a second chance to
         // disagree about what "it booted" means.
-        "__booted" => {
-            if let Some(store) = &context.snapshot {
-                store.seal_boot_list();
-            }
-            match context.generations.prove() {
-                Ok(()) => no_content(stream)?,
-                Err(error) => runtime_state_failure(stream, "record the first frame", error)?,
-            }
-        }
+        "__booted" if request.method == "POST" => booted(request, stream, context)?,
         // The client has exited cleanly and there is nothing left on screen but
         // its last frame. Answered before quitting rather than after, because
         // `terminate:` runs the flush and the reply would otherwise race it.
@@ -407,6 +407,31 @@ struct TransformFailure {
     launch: generation::LaunchIdentity,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FirstFrameProof {
+    launch: generation::LaunchIdentity,
+}
+
+fn booted(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
+    let proved = serde_json::from_slice::<FirstFrameProof>(&request.body)
+        .map_err(|error| generation::RuntimeStateError::Invalid(error.to_string()))
+        .and_then(|proof| {
+            context.generations.prove_first_frame(&proof.launch)?;
+            Ok(proof.launch)
+        });
+    match proved {
+        Ok(launch) => {
+            if let Some(store) = &context.snapshot {
+                store.seal_boot_list();
+            }
+            context.sockets.first_frame_proven(&launch);
+            no_content(stream)
+        }
+        Err(error) => runtime_state_failure(stream, "record the first frame", error),
+    }
+}
+
 fn transform_failed(
     request: &Request,
     stream: &mut TcpStream,
@@ -427,7 +452,12 @@ fn transform_failed(
 
 /// The upgrade to a game socket. The only route that answers with something
 /// other than a response: past here the connection has stopped being HTTP.
-fn socket(request: &Request, stream: &mut TcpStream, flow: Flow) -> std::io::Result<Flow> {
+fn socket(
+    request: &Request,
+    stream: &mut TcpStream,
+    context: &Context,
+    flow: Flow,
+) -> std::io::Result<Flow> {
     if !request.wants_websocket() {
         respond(
             stream,
@@ -439,8 +469,12 @@ fn socket(request: &Request, stream: &mut TcpStream, flow: Flow) -> std::io::Res
         return Ok(flow);
     }
     let destination = request.param("to").unwrap_or_default();
+    let gameplay_launch = request
+        .param("launch")
+        .and_then(|launch| serde_json::from_str(&launch).ok())
+        .and_then(|launch| context.sockets.bind_gameplay(&launch));
     ws::accept(stream, request.websocket_key.as_deref().unwrap_or(""))?;
-    Ok(Flow::Bridge(destination))
+    Ok(Flow::Bridge(destination, gameplay_launch))
 }
 
 /// Which chunks are already on disk, one bit each. The launcher draws from this

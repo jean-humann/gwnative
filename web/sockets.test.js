@@ -28,6 +28,7 @@ describe('socket callback audit', () => {
     try {
       const sockets = createSockets({
         log() {},
+        launchIdentity: () => ({ nonce: 'exact-launch' }),
         audit: {
           beginExternalCallback(kind) {
             calls.push(['begin', kind]);
@@ -39,6 +40,10 @@ describe('socket callback audit', () => {
         },
       });
       const socket = sockets.connect('1.2.3.4:6112');
+      assert.equal(
+        new URL(transport.url).searchParams.get('launch'),
+        JSON.stringify({ nonce: 'exact-launch' }),
+      );
       socket.onopen = () => calls.push(['game', 'open']);
       socket.onmessage = () => calls.push(['game', 'message']);
       socket.onclose = () => calls.push(['game', 'close']);

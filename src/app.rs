@@ -50,10 +50,14 @@ const GRACE_MS: u32 = 1000;
 /// never resolves would otherwise never reply, and an app that refuses to quit
 /// is worse than one that quits a moment early.
 const FLUSH_SCRIPT: &str = "\
-    const flush = window.gwFlushFilesystem?.(); \
-    if (!flush) return 'no filesystem'; \
+    const files = window.gwFlushFilesystem?.(); \
+    const proof = Promise.resolve(window.gwFlushBootProof?.() ?? true).catch(() => false); \
+    const flush = files \
+      ? Promise.all([files, proof]).then(([fileOk, proofOk]) => \
+          fileOk ? (proofOk ? 'flushed' : 'proof failed') : 'failed') \
+      : proof.then((ok) => (ok ? 'no filesystem' : 'proof failed')); \
     const timeout = new Promise((resolve) => setTimeout(() => resolve('timed out'), TIMEOUT)); \
-    return await Promise.race([flush.then((ok) => (ok ? 'flushed' : 'failed')), timeout]);";
+    return await Promise.race([flush, timeout]);";
 
 pub struct Ivars {
     /// The page to pull the flush from.

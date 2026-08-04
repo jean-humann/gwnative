@@ -174,10 +174,11 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
     // `spawn` in the same process would be a second origin, which is exactly
     // what `instance` exists to prevent.
     let _ = POLICY.set(policy(addr));
+    let sockets = Arc::new(Registry::new(Arc::clone(&generations)));
     let context = Arc::new(Context {
         root,
         snapshot,
-        sockets: Arc::default(),
+        sockets,
         recorder: Arc::clone(&recorder),
         derived_wasm,
         settings: Arc::clone(&settings),
@@ -260,7 +261,7 @@ enum Flow {
     Close,
     /// The page upgraded this connection to a socket bridge. It has stopped
     /// being HTTP, so [`serve`] hands both halves to `sockets` and stops.
-    Bridge(String),
+    Bridge(String, Option<generation::LaunchIdentity>),
 }
 
 impl Flow {
@@ -303,7 +304,7 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
         match handle(&mut reader, &mut stream, context)? {
             Flow::Keep => {}
             Flow::Close => return Ok(()),
-            Flow::Bridge(destination) => {
+            Flow::Bridge(destination, gameplay_launch) => {
                 // A game socket is idle for long stretches by design, so the
                 // HTTP idle timeout must not follow it across the upgrade.
                 stream.set_read_timeout(None)?;
@@ -311,7 +312,13 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
                 // The reader goes too: anything the peer sent after the request
                 // head is already inside its buffer, and a fresh reader over the
                 // same socket would drop those bytes.
-                sockets::bridge(reader, stream, &destination, &context.sockets);
+                sockets::bridge(
+                    reader,
+                    stream,
+                    &destination,
+                    gameplay_launch,
+                    &context.sockets,
+                );
                 return Ok(());
             }
         }
@@ -808,6 +815,51 @@ mod tests {
             204
         );
         assert!(generations.transform_disabled("jspi", BUILD));
+
+        let original = format!(
+            r#"{{"runtime":"jspi","build":"{BUILD}","transformed":false,"nonce":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}"#
+        );
+        let (status, launch) = request(loopback.addr, "POST", "/__runtime", Some(token), &original);
+        assert_eq!(status, 200);
+        let proof = format!(r#"{{"launch":{launch}}}"#);
+        assert_eq!(
+            request(loopback.addr, "POST", "/__booted", None, &proof).0,
+            403
+        );
+        let mut stale: serde_json::Value = serde_json::from_str(&launch).unwrap();
+        stale["nonce"] = BUILD.into();
+        assert_eq!(
+            request(
+                loopback.addr,
+                "POST",
+                "/__booted",
+                Some(token),
+                &format!(r#"{{"launch":{stale}}}"#),
+            )
+            .0,
+            400
+        );
+        assert_eq!(
+            request(loopback.addr, "POST", "/__booted", Some(token), &proof).0,
+            204
+        );
+        assert_eq!(
+            request(loopback.addr, "POST", "/__booted", Some(token), &proof).0,
+            204,
+            "a lost acknowledgement must be safe to retry"
+        );
+        assert_eq!(
+            request(
+                loopback.addr,
+                "POST",
+                "/__booted",
+                Some(token),
+                &format!(r#"{{"launch":{stale}}}"#),
+            )
+            .0,
+            400,
+            "different data is not an idempotent duplicate"
+        );
 
         // A valid request is a server failure, not an acknowledgement, when the
         // journal cannot make the attempt durable. The page must not execute
