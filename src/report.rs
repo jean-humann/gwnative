@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn an_active_non_email_secret_does_not_reach_an_export() {
         let dir = TempDir::new("report-active-secret");
-        crate::log::remember("report-canary-password");
+        let _registration = crate::log::register(&["report-canary-password"]).unwrap();
         fs::write(
             dir.0.join("gwnative.jsonl"),
             r#"{"kind":"page","line":"report-canary-password"}"#,

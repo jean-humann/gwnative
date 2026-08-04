@@ -85,8 +85,10 @@ fn main() {
             std::process::exit(i32::from(exit.failed) * 2);
         }
     };
-    if let Some((username, password)) = invocation.take_credentials() {
-        keychain::offer(keychain::Credentials::new(username, password));
+    if let Some((username, password)) = invocation.take_credentials()
+        && let Err(error) = keychain::Credentials::new(username, password).and_then(keychain::offer)
+    {
+        note!("[credentials] invocation values were refused: {error}");
     }
     for notice in &invocation.notices {
         note!(
@@ -355,9 +357,7 @@ fn main() {
         game_reader: session_token(),
         game_publisher: session_token(),
     };
-    crate::log::remember(&tokens.browser);
-    crate::log::remember(&tokens.game_reader);
-    crate::log::remember(&tokens.game_publisher);
+    crate::log::set_capabilities(&[&tokens.browser, &tokens.game_reader, &tokens.game_publisher]);
     let loopback = match server::spawn(server::Config {
         root: root.clone(),
         shell_root,

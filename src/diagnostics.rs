@@ -415,8 +415,14 @@ impl Recorder {
         // The page is handed credentials by the official login contract, so
         // arbitrary page text is not a safe diagnostic merely because it
         // crossed the loopback boundary. Scrub before the raw JSONL exists.
-        let mut line = crate::log::redact(&record.to_string());
-        line.push('\n');
+        let Ok(mut line) = serde_json::to_vec(record) else {
+            return;
+        };
+        line.push(b'\n');
+        let Some(_lease) = crate::log::admit_untrusted(&line) else {
+            crate::log::wipe(&mut line);
+            return;
+        };
         let mut slot = self.file.lock().unwrap();
         // Reopened rather than held across a rotation, and checked by length
         // rather than by counting what this process wrote, so that a file left
@@ -438,10 +444,11 @@ impl Recorder {
         // wanted; surviving a power cut is not worth waking the disk once a
         // second for the life of the session.
         if let Some(file) = slot.as_mut()
-            && file.write_all(line.as_bytes()).is_err()
+            && file.write_all(&line).is_err()
         {
             *slot = None;
         }
+        crate::log::wipe(&mut line);
     }
 
     fn rotate(&self) {
@@ -735,7 +742,7 @@ mod tests {
     fn active_credentials_are_scrubbed_before_jsonl() {
         let dir = TempDir::new("diag-secret");
         let recorder = Recorder::open(dir.0.clone());
-        crate::log::remember("console-canary-credential");
+        let _registration = crate::log::register(&["console-canary-credential"]).unwrap();
         recorder.page(
             "console console-canary-credential\nprintErr console-canary-credential\n\
              exception console-canary-credential",
@@ -745,9 +752,9 @@ mod tests {
             "body": "console-canary-credential"
         }));
 
-        let body = fs::read_to_string(dir.0.join("gwnative.jsonl")).unwrap();
+        let body = fs::read_to_string(dir.0.join("gwnative.jsonl")).unwrap_or_default();
         assert!(!body.contains("console-canary-credential"), "{body}");
-        assert_eq!(body.matches("<redacted>").count(), 4);
+        assert!(body.is_empty(), "protected records must be omitted: {body}");
     }
 
     /// One test rather than two, because [`BURST`] is process-wide and two tests

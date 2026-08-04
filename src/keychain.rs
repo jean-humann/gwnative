@@ -44,7 +44,7 @@ use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
 };
 use security_framework_sys::keychain::SecKeychainSetUserInteractionAllowed;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Shown in Keychain Access as the item's name, so it says what it is.
@@ -180,22 +180,82 @@ fn stably_signed() -> bool {
     code.check_validity(Flags::NONE, &requirement).is_ok()
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 pub struct Credentials {
     pub username: String,
     pub password: String,
+    #[serde(skip)]
+    _registration: crate::log::Registration,
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct SecretField(String);
+
+impl SecretField {
+    fn take(mut self) -> String {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for SecretField {
+    fn drop(&mut self) {
+        crate::log::wipe_string(&mut self.0);
+        #[cfg(test)]
+        FIELD_WIPED.with(|count| count.set(count.get() + 1));
+    }
+}
+
+impl<'de> Deserialize<'de> for Credentials {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            username: SecretField,
+            password: SecretField,
+        }
+        // Start the transition before the first field allocation. Existing
+        // untrusted sink writes finish before a newly received credential can
+        // become active, and none can be admitted between parsing and its
+        // exact-value registration.
+        let _transition = crate::log::credential_transition();
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new_registered(wire.username.take(), wire.password.take())
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl Credentials {
-    pub fn new(username: String, password: String) -> Self {
-        let credentials = Self { username, password };
-        credentials.remember();
-        credentials
+    pub fn new(username: String, password: String) -> Result<Self, String> {
+        let _transition = crate::log::credential_transition();
+        Self::new_registered(username, password)
     }
 
-    fn remember(&self) {
-        crate::log::remember(&self.username);
-        crate::log::remember(&self.password);
+    /// Construct while the caller holds the exclusive credential epoch.
+    fn new_registered(mut username: String, mut password: String) -> Result<Self, String> {
+        if username.len() > MAX_FIELD || password.len() > MAX_FIELD {
+            crate::log::wipe_string(&mut username);
+            crate::log::wipe_string(&mut password);
+            return Err("credentials are too long to store".into());
+        }
+        if crate::log::conflicts_capability(&[&username, &password]) {
+            crate::log::wipe_string(&mut username);
+            crate::log::wipe_string(&mut password);
+            return Err("credentials conflict with this launch; restart and try again".into());
+        }
+        let registration = match crate::log::register(&[&username, &password]) {
+            Ok(registration) => registration,
+            Err(error) => {
+                crate::log::wipe_string(&mut username);
+                crate::log::wipe_string(&mut password);
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            username,
+            password,
+            _registration: registration,
+        })
     }
 }
 
@@ -238,6 +298,7 @@ impl Drop for SecretBuffer {
 #[cfg(test)]
 thread_local! {
     static WIPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FIELD_WIPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Bound well above any real account name or password. A caller that sends more
@@ -347,22 +408,90 @@ fn offered() -> &'static Mutex<Option<Credentials>> {
     OFFERED.get_or_init(|| Mutex::new(None))
 }
 
+#[derive(Default)]
+struct Protection {
+    current: Option<crate::log::Registration>,
+}
+
+fn protection() -> &'static Mutex<Protection> {
+    static PROTECTION: OnceLock<Mutex<Protection>> = OnceLock::new();
+    PROTECTION.get_or_init(|| Mutex::new(Protection::default()))
+}
+
+fn remember_current(credentials: &Credentials) -> Result<bool, String> {
+    let _transition = crate::log::credential_transition();
+    let values = [credentials.username.as_str(), credentials.password.as_str()];
+    let mut protection = protection().lock().unwrap_or_else(|e| e.into_inner());
+    if protection
+        .current
+        .as_ref()
+        .is_some_and(|registration| registration.matches(&values))
+    {
+        return Ok(false);
+    }
+    let registration = crate::log::register(&values).inspect_err(|_| {
+        // The renderer constructed this value before this call. If it cannot
+        // be registered, no native output remains safe for this process.
+        crate::log::disable_untrusted_sinks();
+    })?;
+    let replaced = protection.current.is_some();
+    if replaced {
+        // The renderer may retain the previous immutable object after update.
+        // Disable diagnostic/export sinks and arbitrary request bodies for the
+        // rest of the process before dropping and wiping its exact-value
+        // registration. Only relaunch resets this.
+        crate::log::disable_untrusted_sinks();
+    }
+    protection.current = Some(registration);
+    Ok(replaced)
+}
+
 /// Put invocation-only credentials behind the same one-shot route as Keychain.
-pub fn offer(credentials: Credentials) {
+pub fn offer(credentials: Credentials) -> Result<(), String> {
+    let _ = remember_current(&credentials)?;
     *offered().lock().unwrap_or_else(|e| e.into_inner()) = Some(credentials);
+    Ok(())
+}
+
+/// Register the active profile credential before any diagnostic/export sink is
+/// opened, while preserving the page's one-shot read contract.
+#[expect(dead_code)]
+pub fn prime(account: &str) -> Result<(), String> {
+    if offered()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+    {
+        return Ok(());
+    }
+    let loaded = load_from(&System(account));
+    if let Some(credentials) = loaded.as_ref() {
+        let _ = remember_current(credentials)?;
+    }
+    let mut pending = offered().lock().unwrap_or_else(|e| e.into_inner());
+    if pending.is_none() {
+        *pending = loaded;
+    }
+    Ok(())
 }
 
 pub fn load(account: &str) -> Option<Credentials> {
-    offered()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .or_else(|| load_from(&System(account)))
+    let offered = offered().lock().unwrap_or_else(|e| e.into_inner()).take();
+    let credentials = offered.or_else(|| load_from(&System(account)));
+    match credentials {
+        Some(credentials) if remember_current(&credentials).is_ok() => Some(credentials),
+        // Never hand the renderer a value that native sinks cannot continue to
+        // recognize after this temporary owner is dropped.
+        Some(_) | None => None,
+    }
 }
 
-pub fn store(account: &str, credentials: &Credentials) -> Result<(), String> {
-    credentials.remember();
-    store_in(&System(account), credentials)
+pub fn store(account: &str, credentials: &Credentials) -> Result<bool, String> {
+    // Reserve protection before persistence. A failed/lost response leaves the
+    // caller holding both old and new objects, so both must remain registered.
+    let replaced = remember_current(credentials)?;
+    store_in(&System(account), credentials)?;
+    Ok(replaced)
 }
 
 pub fn encode(credentials: &Credentials) -> Result<SecretBuffer, String> {
@@ -373,9 +502,18 @@ pub fn encode(credentials: &Credentials) -> Result<SecretBuffer, String> {
 
 /// Deleting what was never there is the caller's intended end state, so a
 /// missing item is not an error worth reporting.
-pub fn clear(account: &str) -> Result<(), String> {
-    *offered().lock().unwrap_or_else(|e| e.into_inner()) = None;
-    clear_in(&System(account))
+pub fn clear(account: &str) -> Result<bool, String> {
+    let _transition = crate::log::credential_transition();
+    let mut pending = offered().lock().unwrap_or_else(|e| e.into_inner());
+    let mut protection = protection().lock().unwrap_or_else(|e| e.into_inner());
+    clear_in(&System(account))?;
+    *pending = None;
+    let replaced = protection.current.is_some();
+    if replaced {
+        crate::log::disable_untrusted_sinks();
+    }
+    protection.current = None;
+    Ok(replaced)
 }
 
 fn clear_in(vault: &impl Vault) -> Result<(), String> {
@@ -410,14 +548,11 @@ fn load_from(vault: &impl Vault) -> Option<Credentials> {
         }
     };
     match serde_json::from_slice::<Credentials>(raw.as_ref()) {
-        Ok(credentials) => {
-            credentials.remember();
-            Some(credentials)
-        }
+        Ok(credentials) => Some(credentials),
         // An item that will not parse is one this app cannot use, and leaving it
         // in place would fail the same way on every launch.
-        Err(e) => {
-            note!("[keychain] stored login is unreadable ({e}); discarding it");
+        Err(_) => {
+            note!("[keychain] stored login is unreadable; discarding it");
             let _ = vault.delete();
             None
         }
@@ -428,7 +563,6 @@ fn store_in(vault: &impl Vault, credentials: &Credentials) -> Result<(), String>
     if credentials.username.len() > MAX_FIELD || credentials.password.len() > MAX_FIELD {
         return Err("credentials are too long to store".into());
     }
-    credentials.remember();
     let encoded = encode(credentials)?;
     match vault.set(encoded.as_ref()) {
         Ok(()) => Ok(()),
@@ -536,10 +670,7 @@ mod tests {
     }
 
     fn credentials() -> Credentials {
-        Credentials {
-            username: "player@example.com".into(),
-            password: "not a real one".into(),
-        }
+        Credentials::new("player@example.com".into(), "not a real one".into()).unwrap()
     }
 
     fn reset_wiped() {
@@ -582,6 +713,15 @@ mod tests {
             drop(load_from(&vault));
             assert_eq!(wiped(), 1, "one raw keychain owner on every exit");
         }
+    }
+
+    #[test]
+    fn a_field_allocated_before_parse_failure_is_wiped() {
+        FIELD_WIPED.with(|count| count.set(0));
+        assert!(
+            serde_json::from_slice::<Credentials>(br#"{"username":"partial-canary"}"#).is_err()
+        );
+        assert_eq!(FIELD_WIPED.with(std::cell::Cell::get), 1);
     }
 
     #[test]
@@ -746,11 +886,19 @@ mod tests {
     #[test]
     fn an_absurd_field_is_refused_before_it_reaches_the_keychain() {
         let vault = Fake::default();
-        let long = Credentials {
-            username: "a".repeat(MAX_FIELD + 1),
-            password: String::new(),
-        };
-        assert!(store_in(&vault, &long).is_err());
+        assert!(Credentials::new("a".repeat(MAX_FIELD + 1), String::new()).is_err());
         assert!(vault.calls().is_empty());
+    }
+
+    #[test]
+    fn credential_registration_lives_only_as_long_as_its_owner() {
+        let credentials = Credentials::new(
+            "transient-account-canary".into(),
+            "transient-password-canary".into(),
+        )
+        .unwrap();
+        assert!(crate::log::contains_secret(b"transient-password-canary"));
+        drop(credentials);
+        assert!(!crate::log::contains_secret(b"transient-password-canary"));
     }
 }
