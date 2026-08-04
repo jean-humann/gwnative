@@ -989,7 +989,6 @@ impl Store {
     /// Whether an exact duplicate attempt is still awaiting settlement. A
     /// duplicate after first-frame proof belongs to a new document and must use
     /// a fresh native process rather than reopening evidence from the old one.
-    #[allow(dead_code)]
     pub fn attempting_claim(&self, claim: &LaunchClaim) -> bool {
         matches!(
             &self.state.lock().unwrap().launch_state,

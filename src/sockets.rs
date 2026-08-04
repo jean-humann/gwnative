@@ -82,7 +82,6 @@ impl Registry {
     /// resolver. The client normally discards the name and later dials only
     /// the dotted quad, so this host-owned provenance is what distinguishes a
     /// real game endpoint from an arbitrary public server on port 6112.
-    #[allow(dead_code)]
     pub fn resolved_allowed_name(&self, address: Ipv4Addr) {
         let address = IpAddr::V4(address);
         let mut resolved = self.resolved_gameplay.lock().unwrap();

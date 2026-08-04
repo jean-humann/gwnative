@@ -35,6 +35,16 @@ pub(super) fn serve(
     context: &Context,
 ) -> std::io::Result<Flow> {
     let flow = Flow::after(request);
+    // Paths and queries reach filesystem lookup, proxy URL construction, and
+    // host diagnostics. Hold the credential generation stable across that
+    // complete operation, and refuse even encoded protected spellings before
+    // any of those sinks observes them.
+    let Some(_request_lease) =
+        crate::log::admit_untrusted_parts([request.path.as_bytes(), request.query.as_bytes()])
+    else {
+        text(stream, 404, "not found")?;
+        return Ok(flow);
+    };
 
     if request.path == SNAPSHOT
         && let Some(store) = &context.snapshot
@@ -119,10 +129,11 @@ fn forward(
         return Ok(flow);
     }
     // Upstream wants the tail rooted; the caller's split left the slash behind.
-    let tail = format!("/{tail}");
+    let tail = crate::log::SecretText::new(format!("/{tail}"));
+    let tail_text = tail.as_ref();
     match proxy::forward(
         route,
-        &tail,
+        tail_text,
         &request.query,
         &request.method,
         &request.headers,
@@ -130,7 +141,7 @@ fn forward(
     ) {
         Ok(reply) => {
             note!(
-                "[proxy] {} /{route}{tail} -> {}",
+                "[proxy] {} /{route}{tail_text} -> {}",
                 request.method,
                 reply.status
             );
@@ -140,7 +151,7 @@ fn forward(
             Ok(Flow::Close)
         }
         Err(e) => {
-            note!("[proxy] {} /{route}{tail}: {e}", request.method);
+            note!("[proxy] {} /{route}{tail_text}: {e}", request.method);
             text(stream, 502, "proxy error")?;
             Ok(flow)
         }

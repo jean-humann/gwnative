@@ -177,7 +177,6 @@ pub struct LaunchContract {
 }
 
 #[derive(Default)]
-#[allow(dead_code)]
 enum LaunchAdmission {
     #[default]
     Fresh,
@@ -186,7 +185,6 @@ enum LaunchAdmission {
     Failed(generation::LaunchClaim, generation::RuntimeFailure),
 }
 
-#[allow(dead_code)]
 impl LaunchContract {
     pub fn new(nonce: String, transforms: BTreeMap<String, String>) -> Self {
         Self {
@@ -580,8 +578,11 @@ mod tests {
         }
     }
 
-    fn launch_contract() -> LaunchContract {
-        LaunchContract::new("test-launch-nonce".to_owned(), BTreeMap::new())
+    const TEST_LAUNCH_NONCE: &str =
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+    fn launch_contract(nonce: &str) -> LaunchContract {
+        LaunchContract::new(nonce.to_owned(), BTreeMap::new())
     }
 
     /// The settings route end to end, over a real socket.
@@ -614,7 +615,7 @@ mod tests {
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             tokens: capability_tokens(token),
-            launch: launch_contract(),
+            launch: launch_contract(TEST_LAUNCH_NONCE),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -661,13 +662,97 @@ mod tests {
 
         // What a later launch reads is the point of the whole route.
         assert_eq!(
-            settings::Store::open(file).get().data_strategy,
+            settings::Store::open(file.clone()).get().data_strategy,
             Some(settings::DataStrategy::Full),
         );
 
         // A name nobody serves is named as such, rather than refused by the
         // static file server as though it might have been a path.
         assert_eq!(request(addr, "GET", "/__nonesuch", auth, "").0, 404);
+
+        // Error prose and successful JSON both pass through the same final
+        // response guard. A request-supplied active credential must not be
+        // reflected by either path.
+        let canary = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let _registration = crate::log::register(&[canary]).unwrap();
+        let (status, body) = request(
+            addr,
+            "PUT",
+            "/__settings",
+            auth,
+            &format!(r#"{{"touchMode":"{canary}"}}"#),
+        );
+        assert_eq!(status, 400);
+        assert!(body.is_empty(), "protected error response leaked: {body}");
+
+        let (status, body) = request(
+            addr,
+            "PUT",
+            "/__settings",
+            auth,
+            &format!(r#"{{"compatibilityNoticeSeenFor":"{canary}"}}"#),
+        );
+        assert_eq!(status, 400);
+        assert!(body.is_empty(), "protected JSON response leaked: {body}");
+
+        let escaped_canary = "\\u0065".repeat(canary.len());
+        let (status, body) = request(
+            addr,
+            "PUT",
+            "/__settings",
+            auth,
+            &format!(r#"{{"compatibilityNoticeSeenFor":"{escaped_canary}"}}"#),
+        );
+        assert_eq!(status, 400);
+        assert!(
+            body.is_empty(),
+            "JSON-escaped credential was accepted: {body}"
+        );
+
+        let encoded_name = canary
+            .bytes()
+            .map(|byte| format!("%{byte:02x}"))
+            .collect::<String>();
+        let (status, body) = request(
+            addr,
+            "GET",
+            &format!("/__dns?name={encoded_name}"),
+            auth,
+            "",
+        );
+        assert_eq!(status, 400);
+        assert!(
+            !body.contains(canary),
+            "protected DNS response leaked: {body}"
+        );
+
+        let (status, body) = request(
+            addr,
+            "PUT",
+            "/__credentials",
+            auth,
+            &format!(r#"{{"username":"{canary}"}}"#),
+        );
+        assert_eq!(status, 400);
+        assert!(
+            !body.contains(canary),
+            "malformed credential input was reflected: {body}"
+        );
+
+        for path in [format!("/{canary}"), format!("/{encoded_name}")] {
+            let (status, body) = request(addr, "GET", &path, None, "");
+            assert_eq!(status, 404);
+            assert!(
+                !body.contains(canary),
+                "protected path was reflected: {body}"
+            );
+        }
+        drop(_registration);
+
+        let persisted = settings::Store::open(file.clone()).get();
+        assert_eq!(persisted.compatibility_notice_seen_for, None);
+        let (_, body) = request(addr, "GET", "/__settings", auth, "");
+        assert!(!body.contains(canary), "protected value persisted: {body}");
     }
 
     #[test]
@@ -688,7 +773,7 @@ mod tests {
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             tokens: capability_tokens(browser),
-            launch: launch_contract(),
+            launch: launch_contract(TEST_LAUNCH_NONCE),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -813,7 +898,7 @@ mod tests {
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             tokens: capability_tokens(token),
-            launch: launch_contract(),
+            launch: launch_contract(TEST_LAUNCH_NONCE),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -864,7 +949,7 @@ mod tests {
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             tokens: capability_tokens(token),
-            launch: launch_contract(),
+            launch: launch_contract(TEST_LAUNCH_NONCE),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -929,7 +1014,7 @@ mod tests {
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             tokens: capability_tokens("test-token"),
-            launch: launch_contract(),
+            launch: launch_contract(TEST_LAUNCH_NONCE),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -977,7 +1062,10 @@ mod tests {
             ))),
             generations: Arc::clone(&generations),
             tokens: capability_tokens(token),
-            launch: launch_contract(),
+            launch: LaunchContract::new(
+                BUILD.to_owned(),
+                BTreeMap::from([("jspi".to_owned(), BUILD.to_owned())]),
+            ),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -1003,34 +1091,78 @@ mod tests {
             .0,
             400
         );
-        let (status, identity) =
-            request(loopback.addr, "POST", "/__runtime", Some(token), &attempt);
-        assert_eq!(status, 200);
+
+        let canary = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let registration = crate::log::register(&[canary]).unwrap();
+        for claim in [
+            format!(r#"{{"runtime":"jspi","build":null,"transformed":false,"nonce":"{canary}"}}"#),
+            format!(
+                r#"{{"runtime":"jspi","build":"{canary}","transformed":true,"nonce":"{BUILD}"}}"#
+            ),
+        ] {
+            assert_eq!(
+                request(loopback.addr, "POST", "/__runtime", Some(token), &claim),
+                (400, String::new())
+            );
+        }
+        drop(registration);
+        assert!(
+            !std::fs::read_to_string(dir.join("generations/state.json"))
+                .unwrap()
+                .contains(canary),
+            "an unowned runtime field reached durable state"
+        );
+
+        // The page must not execute glue when the host could not make this
+        // first attempt durable. Restore the fixture and prove a retry can then
+        // become the one admitted launch for this process.
+        let state_path = dir.join("generations/state.json");
+        let saved_state = std::fs::read(&state_path).unwrap();
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir(&state_path).unwrap();
+        assert_eq!(
+            request(loopback.addr, "POST", "/__runtime", Some(token), &attempt).0,
+            500
+        );
+        std::fs::remove_dir(&state_path).unwrap();
+        std::fs::write(&state_path, saved_state).unwrap();
+
+        let (status, body) = request(loopback.addr, "POST", "/__runtime", Some(token), &attempt);
+        assert_eq!((status, body), (204, String::new()));
+        let unarmed = format!(
+            r#"{{"runtime":"asyncify","build":null,"transformed":false,"nonce":"{BUILD}"}}"#
+        );
+        assert_eq!(
+            request(loopback.addr, "POST", "/__runtime", Some(token), &unarmed),
+            (400, String::new()),
+            "one page realm cannot nominate a second runtime"
+        );
         assert_eq!(
             request(
                 loopback.addr,
                 "POST",
                 "/__transform-failed",
                 Some(token),
-                &format!(r#"{{"launch":{identity}}}"#)
+                &format!(r#"{{"launch":{attempt}}}"#)
             )
             .0,
             204
         );
         assert!(generations.transform_disabled("jspi", BUILD));
 
-        let original = format!(
-            r#"{{"runtime":"jspi","build":"{BUILD}","transformed":false,"nonce":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}"#
+        let original =
+            format!(r#"{{"runtime":"jspi","build":null,"transformed":false,"nonce":"{BUILD}"}}"#);
+        assert_eq!(
+            request(loopback.addr, "POST", "/__runtime", Some(token), &original),
+            (204, String::new())
         );
-        let (status, launch) = request(loopback.addr, "POST", "/__runtime", Some(token), &original);
-        assert_eq!(status, 200);
-        let proof = format!(r#"{{"launch":{launch}}}"#);
+        let proof = format!(r#"{{"launch":{original}}}"#);
         assert_eq!(
             request(loopback.addr, "POST", "/__booted", None, &proof).0,
             403
         );
-        let mut stale: serde_json::Value = serde_json::from_str(&launch).unwrap();
-        stale["nonce"] = BUILD.into();
+        let mut stale: serde_json::Value = serde_json::from_str(&original).unwrap();
+        stale["nonce"] = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into();
         assert_eq!(
             request(
                 loopback.addr,
@@ -1062,16 +1194,6 @@ mod tests {
             .0,
             400,
             "different data is not an idempotent duplicate"
-        );
-
-        // A valid request is a server failure, not an acknowledgement, when the
-        // journal cannot make the attempt durable. The page must not execute
-        // glue after this response.
-        std::fs::remove_file(dir.join("generations/state.json")).unwrap();
-        std::fs::create_dir(dir.join("generations/state.json")).unwrap();
-        assert_eq!(
-            request(loopback.addr, "POST", "/__runtime", Some(token), &attempt).0,
-            500
         );
     }
 
@@ -1106,7 +1228,7 @@ mod tests {
             ))),
             generations: Arc::clone(&generations),
             tokens: capability_tokens(token),
-            launch: launch_contract(),
+            launch: launch_contract(NONCE),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -1118,22 +1240,18 @@ mod tests {
         );
         assert_eq!(
             request(loopback.addr, "GET", "/__runtime-plan", Some(token), ""),
-            (200, r#"{"failedOfficial":[]}"#.to_owned())
+            (220, String::new())
         );
 
         let attempt = |runtime: &str, nonce: &str| {
-            request(
-                loopback.addr,
-                "POST",
-                "/__runtime",
-                Some(token),
-                &format!(
-                    r#"{{"runtime":"{runtime}","build":null,"transformed":false,"nonce":"{nonce}"}}"#
-                ),
-            )
+            let claim = format!(
+                r#"{{"runtime":"{runtime}","build":null,"transformed":false,"nonce":"{nonce}"}}"#
+            );
+            let response = request(loopback.addr, "POST", "/__runtime", Some(token), &claim);
+            (response.0, claim)
         };
         let (status, jspi) = attempt("jspi", NONCE);
-        assert_eq!(status, 200);
+        assert_eq!(status, 204);
         let mut stale: serde_json::Value = serde_json::from_str(&jspi).unwrap();
         stale["nonce"] = NEXT_NONCE.into();
         assert_eq!(
@@ -1155,27 +1273,28 @@ mod tests {
                 Some(token),
                 &format!(r#"{{"launch":{jspi}}}"#),
             ),
-            (
-                200,
-                r#"{"outcome":"try-runtime","runtime":"asyncify"}"#.to_owned()
-            )
+            (224, String::new())
         );
-        assert_eq!(
-            request(loopback.addr, "GET", "/__runtime-plan", Some(token), ""),
-            (200, r#"{"failedOfficial":["jspi"]}"#.to_owned())
-        );
-
-        let (status, asyncify) = attempt("asyncify", NEXT_NONCE);
-        assert_eq!(status, 200);
         assert_eq!(
             request(
                 loopback.addr,
                 "POST",
                 "/__runtime-failed",
                 Some(token),
-                &format!(r#"{{"launch":{asyncify}}}"#),
+                &format!(r#"{{"launch":{jspi}}}"#),
             ),
-            (200, r#"{"outcome":"exhausted"}"#.to_owned())
+            (224, String::new()),
+            "a lost transition acknowledgement is an exact idempotent retry"
+        );
+        assert_eq!(
+            request(loopback.addr, "GET", "/__runtime-plan", Some(token), ""),
+            (221, String::new())
+        );
+
+        assert_eq!(
+            attempt("asyncify", NONCE).0,
+            400,
+            "the Asyncify attempt belongs to the relaunched process"
         );
         assert!(!generations.rejected("test"));
     }
