@@ -10,6 +10,7 @@
 //! what build, what settings, and the tail of the log underneath it, redacted
 //! and written beside the original so the raw file is still one click away.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,16 @@ const TAIL_RECORDS: usize = 400;
 /// Where a redacted value went.
 const REDACTED: &str = "<redacted>";
 
+#[derive(serde::Deserialize)]
+struct RecordKind<'a> {
+    #[serde(borrow)]
+    kind: Cow<'a, str>,
+}
+
+fn is_session(line: &str) -> bool {
+    serde_json::from_str::<RecordKind<'_>>(line).is_ok_and(|record| record.kind == "session")
+}
+
 /// Write a report next to the diagnostics log and return where it went.
 pub fn write(recorder: &Recorder, profile: &settings::Settings) -> std::io::Result<PathBuf> {
     let now = SystemTime::now()
@@ -39,13 +50,32 @@ pub fn write(recorder: &Recorder, profile: &settings::Settings) -> std::io::Resu
     let path = recorder
         .dir()
         .join(format!("problem-report-{}.txt", stamp(now, Format::File)));
-    fs::write(&path, compose(recorder.dir(), profile, now))?;
+    let mut body = compose(recorder.dir(), profile, now);
+    let written = if let Some(_lease) = crate::log::admit_untrusted(body.as_bytes()) {
+        fs::write(&path, body.as_bytes())
+    } else {
+        // Preserve the existing route contract while making a suppressed
+        // export content-free. The complete composed allocation is wiped below.
+        fs::write(&path, b"")
+    };
+    crate::log::wipe_string(&mut body);
+    written?;
     Ok(path)
 }
 
 /// Build the text. Separated from writing it so the shape can be tested without
 /// a filesystem being the subject of the test.
 fn compose(dir: &Path, profile: &settings::Settings, now: u64) -> String {
+    let mut raw = compose_raw(dir, profile, now);
+    // Environment and settings are composed outside the line-by-line log
+    // scrubber. Guard the complete artifact before it becomes an export, and
+    // wipe the unguarded allocation on both the allowed and suppressed paths.
+    let protected = crate::log::redact(&raw);
+    crate::log::wipe_string(&mut raw);
+    protected
+}
+
+fn compose_raw(dir: &Path, profile: &settings::Settings, now: u64) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Guild Wars problem report");
     let _ = writeln!(out, "Written {}", stamp(now, Format::Readable));
@@ -75,18 +105,35 @@ fn compose(dir: &Path, profile: &settings::Settings, now: u64) -> String {
     );
     let _ = writeln!(out);
     match fs::read_to_string(&log) {
-        Ok(body) => {
-            let lines: Vec<&str> = body.lines().filter(|line| !line.is_empty()).collect();
-            let tail = lines.len().saturating_sub(TAIL_RECORDS);
-            if tail > 0 {
-                let _ = writeln!(out, "  ({tail} earlier records not included)");
+        Ok(mut body) => {
+            {
+                let lines: Vec<&str> = body.lines().filter(|line| !line.is_empty()).collect();
+                let current = lines.iter().rposition(|line| is_session(line));
+                if let Some(current) = current {
+                    let lines = &lines[current..];
+                    let tail = lines.len().saturating_sub(TAIL_RECORDS);
+                    if tail > 0 {
+                        let _ = writeln!(
+                            out,
+                            "  ({tail} earlier current-session records not included)"
+                        );
+                    }
+                    for line in &lines[tail..] {
+                        // Current active values and the permanent post-update
+                        // suppression state cover this session. Page text from
+                        // older sessions is deliberately never exported.
+                        let mut protected = crate::log::redact(line);
+                        let _ = writeln!(out, "{}", redact(&protected));
+                        crate::log::wipe_string(&mut protected);
+                    }
+                } else {
+                    let _ = writeln!(
+                        out,
+                        "  No current-session marker; historical records omitted"
+                    );
+                }
             }
-            for line in &lines[tail..] {
-                // Active-value redaction covers credentials and capabilities;
-                // the shape-based pass remains useful for an older log whose
-                // account is no longer active in this process.
-                let _ = writeln!(out, "{}", redact(&crate::log::redact(line)));
-            }
+            crate::log::wipe_string(&mut body);
         }
         // Said in the report rather than refused: everything above it is still
         // worth sending, and "there was no log" is itself a finding.
@@ -124,10 +171,10 @@ fn describe(out: &mut String, value: &serde_json::Value) {
 /// forever. A cheap shape match against the one identifier this application ever
 /// sees is the right trade.
 ///
-/// Deliberately not a general secret scrubber. The password never reaches the
-/// page — it goes from the keychain into the client over a route that does not
-/// log — and pretending to catch things this does not catch would be worse than
-/// saying plainly what it does.
+/// This is deliberately only the historical shape pass. Credentials do reach
+/// the page/client, so current-session records and the complete export also go
+/// through the exact active-value guard. The shape pass remains for an older
+/// account name whose registration no longer exists.
 fn redact(line: &str) -> String {
     if !line.contains('@') {
         return line.to_owned();
@@ -218,13 +265,26 @@ mod tests {
         let _registration = crate::log::register(&["report-canary-password"]).unwrap();
         fs::write(
             dir.0.join("gwnative.jsonl"),
-            r#"{"kind":"page","line":"report-canary-password"}"#,
+            "{\"kind\":\"session\"}\n{\"kind\":\"page\",\"line\":\"report-canary-password\"}",
         )
         .unwrap();
 
         let text = compose(&dir.0, &settings::Settings::default(), 0);
         assert!(!text.contains("report-canary-password"), "{text}");
         assert!(text.contains(REDACTED), "{text}");
+    }
+
+    #[test]
+    fn active_values_in_report_metadata_suppress_the_artifact() {
+        let dir = TempDir::new("report-metadata-secret");
+        let secret = "report-settings-canary-92841";
+        let _registration = crate::log::register(&[secret]).unwrap();
+        let profile = settings::Settings {
+            compatibility_notice_seen_for: Some(secret.to_owned()),
+            ..settings::Settings::default()
+        };
+
+        assert_eq!(compose(&dir.0, &profile, 0), "");
     }
 
     #[test]
@@ -244,7 +304,7 @@ mod tests {
         let dir = TempDir::new("report-shape");
         fs::write(
             dir.0.join("gwnative.jsonl"),
-            "{\"kind\":\"sample\",\"cpuPercent\":12}\n{\"kind\":\"page\",\"line\":\"hi\"}\n",
+            "{\"kind\":\"session\"}\n{\"kind\":\"sample\",\"cpuPercent\":12}\n{\"kind\":\"page\",\"line\":\"hi\"}\n",
         )
         .unwrap();
 
@@ -262,16 +322,38 @@ mod tests {
     #[test]
     fn only_the_tail_of_a_long_log_is_carried() {
         let dir = TempDir::new("report-tail");
-        let body: String = (0..TAIL_RECORDS + 50)
-            .map(|n| format!("{{\"n\":{n}}}\n"))
+        let body: String = std::iter::once("{\"kind\":\"session\"}\n".to_owned())
+            .chain((0..TAIL_RECORDS + 50).map(|n| format!("{{\"n\":{n}}}\n")))
             .collect();
         fs::write(dir.0.join("gwnative.jsonl"), body).unwrap();
 
         let text = compose(&dir.0, &settings::Settings::default(), 0);
-        assert!(text.contains("(50 earlier records not included)"), "{text}");
+        assert!(
+            text.contains("(51 earlier current-session records not included)"),
+            "{text}"
+        );
         assert!(!text.contains("{\"n\":49}"), "the oldest are gone");
         assert!(text.contains("{\"n\":50}"), "and the tail is all there");
         assert!(text.contains(&format!("{{\"n\":{}}}", TAIL_RECORDS + 49)));
+    }
+
+    #[test]
+    fn page_text_from_a_previous_session_is_never_exported() {
+        let dir = TempDir::new("report-prior-session");
+        let stale = "stale-password-from-an-older-build";
+        fs::write(
+            dir.0.join("gwnative.jsonl"),
+            format!(
+                "{{\"kind\":\"page\",\"line\":\"{stale}\"}}\n\
+                 {{\"kind\":\"session\"}}\n\
+                 {{\"kind\":\"page\",\"line\":\"current warning\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        let text = compose(&dir.0, &settings::Settings::default(), 0);
+        assert!(!text.contains(stale), "{text}");
+        assert!(text.contains("current warning"), "{text}");
     }
 
     #[test]

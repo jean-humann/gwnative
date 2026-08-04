@@ -21,7 +21,6 @@ use crate::{app, cache, diagnostics, disk, dock, generation, keychain, net, rela
 
 fn authorized(request: &Request, context: &Context) -> bool {
     let offered = request.offered_token();
-    let offered = offered.as_deref();
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "__game/v1" | "__game/v1/state") => {
             token_matches(&context.tokens.browser, offered)

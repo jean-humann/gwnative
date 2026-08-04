@@ -8,6 +8,93 @@
 
 use std::io::{self, BufRead, Read};
 
+use base64::Engine as _;
+
+/// A buffered reader that overwrites bytes as soon as `BufRead` consumes them.
+#[cfg_attr(not(test), expect(dead_code))]
+pub struct WipingReader<R> {
+    inner: R,
+    buffer: Box<[u8; 8192]>,
+    pos: usize,
+    cap: usize,
+}
+
+impl<R> WipingReader<R> {
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn new(inner: R) -> Self {
+        Self {
+            inner,
+            buffer: Box::new([0; 8192]),
+            pos: 0,
+            cap: 0,
+        }
+    }
+}
+
+impl<R: Read> Read for WipingReader<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        let available = self.fill_buf()?;
+        let count = available.len().min(out.len());
+        out[..count].copy_from_slice(&available[..count]);
+        self.consume(count);
+        Ok(count)
+    }
+}
+
+impl<R: Read> BufRead for WipingReader<R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.pos == self.cap {
+            crate::log::wipe(&mut self.buffer[..self.cap]);
+            self.pos = 0;
+            self.cap = self.inner.read(&mut self.buffer[..])?;
+        }
+        Ok(&self.buffer[self.pos..self.cap])
+    }
+
+    fn consume(&mut self, amount: usize) {
+        let end = (self.pos + amount).min(self.cap);
+        crate::log::wipe(&mut self.buffer[self.pos..end]);
+        self.pos = end;
+    }
+}
+
+impl<R> Drop for WipingReader<R> {
+    fn drop(&mut self) {
+        crate::log::wipe(&mut self.buffer[..]);
+    }
+}
+
+struct WipingString(String);
+
+impl WipingString {
+    fn new() -> Self {
+        Self(String::new())
+    }
+}
+
+impl std::ops::Deref for WipingString {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for WipingString {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for WipingString {
+    fn drop(&mut self) {
+        crate::log::wipe_string(&mut self.0);
+    }
+}
+
 pub struct Request {
     pub method: String,
     pub path: String,
@@ -18,6 +105,7 @@ pub struct Request {
     /// anything here asks of it.
     upgrade: Option<String>,
     pub websocket_key: Option<String>,
+    websocket_protocol: Option<String>,
     pub token: Option<String>,
     /// The validator the page already holds for a static file, if any.
     pub if_none_match: Option<String>,
@@ -41,15 +129,39 @@ impl Request {
         })
     }
 
-    /// The token the caller offered, by header or by query string.
+    /// The token the caller offered, by header or WebSocket subprotocol.
     ///
     /// The header is the right place for it and is what every `fetch` here
-    /// uses. The query string exists for one caller: a browser `WebSocket`
-    /// cannot set request headers, so `__socket` — the route that bridges to
-    /// arbitrary outbound TCP, and therefore the one most worth gating — has
-    /// nowhere else to carry it. Nothing logs the query string.
-    pub fn offered_token(&self) -> Option<String> {
-        self.token.clone().or_else(|| self.param("token"))
+    /// uses. A browser WebSocket cannot set request headers, so it offers a
+    /// prefixed capability as a subprotocol; unlike a query it never enters a
+    /// URL, navigation history, or URL-bearing diagnostic.
+    pub fn offered_token(&self) -> Option<&str> {
+        self.token.as_deref().or_else(|| {
+            self.websocket_protocol
+                .as_deref()?
+                .split(',')
+                .find_map(|part| part.trim().strip_prefix("gwnative-token."))
+        })
+    }
+
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn websocket_launch(&self) -> Option<crate::log::SecretText> {
+        let encoded = self
+            .websocket_protocol
+            .as_deref()?
+            .split(',')
+            .find_map(|part| part.trim().strip_prefix("gwnative-launch."))?;
+        let mut bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .ok()?;
+        match String::from_utf8(std::mem::take(&mut bytes)) {
+            Ok(value) => Some(crate::log::SecretText::new(value)),
+            Err(error) => {
+                let mut bytes = error.into_bytes();
+                crate::log::wipe(&mut bytes);
+                None
+            }
+        }
     }
 
     pub fn wants_websocket(&self) -> bool {
@@ -57,6 +169,35 @@ impl Request {
             .as_deref()
             .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
             && self.websocket_key.is_some()
+            && self
+                .websocket_protocol
+                .as_deref()
+                .is_some_and(|protocols| protocols.split(',').any(|part| part.trim() == "gwnative"))
+    }
+}
+
+impl Drop for Request {
+    fn drop(&mut self) {
+        crate::log::wipe(&mut self.body);
+        crate::log::wipe_string(&mut self.method);
+        crate::log::wipe_string(&mut self.path);
+        crate::log::wipe_string(&mut self.query);
+        for value in [
+            &mut self.range,
+            &mut self.upgrade,
+            &mut self.websocket_key,
+            &mut self.websocket_protocol,
+            &mut self.token,
+            &mut self.if_none_match,
+        ] {
+            if let Some(value) = value.as_mut() {
+                crate::log::wipe_string(value);
+            }
+        }
+        for (name, value) in &mut self.headers {
+            crate::log::wipe_string(name);
+            crate::log::wipe_string(value);
+        }
     }
 }
 
@@ -97,7 +238,15 @@ fn percent_decode(value: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    match String::from_utf8(out) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            let mut bytes = error.into_bytes();
+            let decoded = String::from_utf8_lossy(&bytes).into_owned();
+            crate::log::wipe(&mut bytes);
+            decoded
+        }
+    }
 }
 
 /// The byte the two hex digits at `at` spell, if that is what they are.
@@ -132,6 +281,7 @@ const MAX_HEADERS: usize = 100;
 /// and the connection is going to close after the error so nothing needs to be
 /// drained.
 fn bounded_line(reader: &mut impl BufRead, line: &mut String, limit: usize) -> io::Result<usize> {
+    crate::log::wipe_string(line);
     line.clear();
     if limit == 0 {
         return Err(io::Error::new(
@@ -152,29 +302,38 @@ fn bounded_line(reader: &mut impl BufRead, line: &mut String, limit: usize) -> i
 /// Read one request, or `None` if the peer closed the connection first — which
 /// on a kept-alive connection is the ordinary way an exchange ends, not a fault.
 pub fn read_request(reader: &mut impl BufRead) -> std::io::Result<Option<Request>> {
-    let mut line = String::new();
+    let mut line = WipingString::new();
     let mut head_bytes = bounded_line(reader, &mut line, MAX_REQUEST_LINE_BYTES)?;
     if head_bytes == 0 {
         return Ok(None);
     }
 
-    let mut close = false;
-    let mut range = None;
-    let mut content_length = 0usize;
-    let mut upgrade = None;
-    let mut websocket_key = None;
-    let mut token = None;
-    let mut if_none_match = None;
-    let mut headers = Vec::new();
-    let mut header = String::new();
+    // Construct the wiping owner before parsing anything sensitive so every
+    // `?` and limit error below clears the copies accumulated so far.
+    let mut request = Request {
+        method: String::new(),
+        path: String::new(),
+        query: String::new(),
+        range: None,
+        content_length: 0,
+        upgrade: None,
+        websocket_key: None,
+        websocket_protocol: None,
+        token: None,
+        if_none_match: None,
+        headers: Vec::new(),
+        body: Vec::new(),
+        close: false,
+    };
+    let mut header = WipingString::new();
     loop {
         let remaining = MAX_REQUEST_HEAD_BYTES.saturating_sub(head_bytes);
         let read = bounded_line(reader, &mut header, MAX_HEADER_LINE_BYTES.min(remaining))?;
         head_bytes += read;
-        if read == 0 || header == "\r\n" || header == "\n" {
+        if read == 0 || header.as_str() == "\r\n" || header.as_str() == "\n" {
             break;
         }
-        if headers.len() == MAX_HEADERS {
+        if request.headers.len() == MAX_HEADERS {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "too many HTTP headers",
@@ -186,48 +345,37 @@ pub fn read_request(reader: &mut impl BufRead) -> std::io::Result<Option<Request
         let name = name.to_ascii_lowercase();
         let value = value.trim().to_owned();
         match name.as_str() {
-            "range" => range = Some(value.clone()),
-            "content-length" => content_length = value.parse().unwrap_or(0),
-            "upgrade" => upgrade = Some(value.clone()),
-            "sec-websocket-key" => websocket_key = Some(value.clone()),
-            "x-gwnative-token" => token = Some(value.clone()),
-            "if-none-match" => if_none_match = Some(value.clone()),
-            "connection" => close = value.eq_ignore_ascii_case("close"),
+            "range" => request.range = Some(value.clone()),
+            "content-length" => request.content_length = value.parse().unwrap_or(0),
+            "upgrade" => request.upgrade = Some(value.clone()),
+            "sec-websocket-key" => request.websocket_key = Some(value.clone()),
+            "sec-websocket-protocol" => request.websocket_protocol = Some(value.clone()),
+            "x-gwnative-token" => request.token = Some(value.clone()),
+            "if-none-match" => request.if_none_match = Some(value.clone()),
+            "connection" => request.close = value.eq_ignore_ascii_case("close"),
             _ => {}
         }
-        headers.push((name, value));
+        request.headers.push((name, value));
     }
 
     let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("GET").to_owned();
+    request.method = parts.next().unwrap_or("GET").to_owned();
     let target = parts.next().unwrap_or("/");
     let (path, query) = match target.split_once('?') {
         Some((path, rest)) => (path, rest.split('#').next().unwrap_or("")),
         None => (target.split('#').next().unwrap_or("/"), ""),
     };
+    request.path = path.trim_start_matches('/').to_owned();
+    request.query = query.to_owned();
 
     // A body larger than the cap cannot be drained safely — reading it is the
     // denial of service it would be refusing — so the caller closes instead.
-    let mut body = Vec::new();
-    if content_length > 0 && content_length <= MAX_BODY_BYTES {
-        body.resize(content_length, 0);
-        reader.read_exact(&mut body)?;
+    if request.content_length > 0 && request.content_length <= MAX_BODY_BYTES {
+        request.body.resize(request.content_length, 0);
+        reader.read_exact(&mut request.body)?;
     }
 
-    Ok(Some(Request {
-        method,
-        path: path.trim_start_matches('/').to_owned(),
-        query: query.to_owned(),
-        range,
-        content_length,
-        upgrade,
-        websocket_key,
-        token,
-        if_none_match,
-        headers,
-        body,
-        close,
-    }))
+    Ok(Some(request))
 }
 
 /// Compare in time that does not depend on how many bytes matched, so a caller
@@ -324,8 +472,8 @@ mod tests {
     /// wide. Reading the escape by slicing the `str` lands inside that character
     /// and panics, which under this crate's `panic = "abort"` is the whole
     /// process. Anything that can open a socket to the loopback server can send
-    /// this, and `offered_token` decodes the query before any token is checked,
-    /// so it was reachable without one.
+    /// this, so it remains covered even though capabilities no longer use a
+    /// query parameter.
     fn query(q: &str) -> Request {
         let wire = format!("GET /__socket?{q} HTTP/1.1\r\n\r\n");
         read_request(&mut std::io::BufReader::new(wire.as_bytes()))
@@ -335,17 +483,17 @@ mod tests {
 
     #[test]
     fn a_multibyte_character_after_a_percent_is_data_not_a_crash() {
-        assert_eq!(query("token=%a€").offered_token().as_deref(), Some("%a€"));
-        assert_eq!(query("token=%€x").offered_token().as_deref(), Some("%€x"));
+        assert_eq!(query("token=%a€").param("token").as_deref(), Some("%a€"));
+        assert_eq!(query("token=%€x").param("token").as_deref(), Some("%€x"));
         assert_eq!(
-            query("token=a%9éb").offered_token().as_deref(),
+            query("token=a%9éb").param("token").as_deref(),
             Some("a%9éb")
         );
         // The same shape at the very end of the string, where there are not two
         // bytes left to read at all.
-        assert_eq!(query("token=abc%").offered_token().as_deref(), Some("abc%"));
+        assert_eq!(query("token=abc%").param("token").as_deref(), Some("abc%"));
         assert_eq!(
-            query("token=abc%4").offered_token().as_deref(),
+            query("token=abc%4").param("token").as_deref(),
             Some("abc%4")
         );
     }
@@ -353,20 +501,47 @@ mod tests {
     #[test]
     fn a_real_escape_still_decodes() {
         assert_eq!(
-            query("token=a%2Fb%2fc").offered_token().as_deref(),
+            query("token=a%2Fb%2fc").param("token").as_deref(),
             Some("a/b/c")
         );
         assert_eq!(
-            query("token=one+two").offered_token().as_deref(),
+            query("token=one+two").param("token").as_deref(),
             Some("one two")
         );
         // `from_str_radix` took a sign; a pct-encoded octet is two hex digits.
-        assert_eq!(query("token=%+1").offered_token().as_deref(), Some("% 1"));
+        assert_eq!(query("token=%+1").param("token").as_deref(), Some("% 1"));
         // The header still wins over the query string when both are offered.
         assert_eq!(
             query("token=fromquery").param("token").as_deref(),
             Some("fromquery")
         );
+    }
+
+    #[test]
+    fn websocket_capability_comes_from_a_subprotocol_not_the_url() {
+        let wire = b"GET /__socket?to=1.2.3.4%3A6112 HTTP/1.1\r\n\
+            Upgrade: websocket\r\nSec-WebSocket-Key: key\r\n\
+            Sec-WebSocket-Protocol: gwnative, gwnative-token.socket-canary, \
+            gwnative-launch.eyJub25jZSI6ImV4YWN0LWxhdW5jaCJ9\r\n\r\n";
+        let request = read_request(&mut std::io::BufReader::new(&wire[..]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.offered_token(), Some("socket-canary"));
+        assert_eq!(
+            request.websocket_launch().as_ref().map(AsRef::as_ref),
+            Some(r#"{"nonce":"exact-launch"}"#)
+        );
+        assert!(!request.query.contains("socket-canary"));
+        assert!(!request.query.contains("exact-launch"));
+    }
+
+    #[test]
+    fn consumed_wire_bytes_are_overwritten_immediately() {
+        let mut reader = WipingReader::new(std::io::Cursor::new(b"credential-canary"));
+        let seen = reader.fill_buf().unwrap().len();
+        assert!(seen > 0);
+        reader.consume(seen);
+        assert!(reader.buffer[..seen].iter().all(|byte| *byte == 0));
     }
 
     #[test]
