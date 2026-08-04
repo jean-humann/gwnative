@@ -245,7 +245,14 @@ pub fn make(
     invocation: &cli::Invocation,
 ) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
-    if let Some(identifier) = origin.website_data_store_id {
+    if env_flag("GWNATIVE_BENCHMARK_EPHEMERAL_WEBKIT") {
+        // Benchmark profiles must disappear with the process. A fresh named
+        // profile isolates Keychain and native state; this non-persistent store
+        // does the same for cookies, IndexedDB, caches, and service workers
+        // without leaving a random WKWebsiteDataStore UUID on the real Mac.
+        let data_store = unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm) };
+        unsafe { config.setWebsiteDataStore(&data_store) };
+    } else if let Some(identifier) = origin.website_data_store_id {
         let identifier =
             NSUUID::initWithUUIDString(NSUUID::alloc(), &NSString::from_str(identifier))
                 .expect("profile descriptors validate WebKit data-store UUIDs");
