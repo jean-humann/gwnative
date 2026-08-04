@@ -126,6 +126,14 @@ def declared_source(root: Path, application: str) -> dict[str, object]:
         raise Refusal("warm fixture marker does not match this application")
     if not isinstance(value.get("sceneReadiness"), str) or not value["sceneReadiness"]:
         raise Refusal("warm fixture marker needs an exact scene/readiness limitation")
+    if application == "gwnative":
+        profile = value.get("profile")
+        if not isinstance(profile, str):
+            raise Refusal("gwnative warm fixture marker needs a benchmark profile")
+        keychain_account(profile)
+    forbidden = value.get("forbiddenCanaries", [])
+    if not isinstance(forbidden, list) or not all(isinstance(item, str) for item in forbidden):
+        raise Refusal("warm fixture forbiddenCanaries must be a string array")
     return value
 
 
@@ -163,6 +171,24 @@ def clone_declared_fixture(source: Path, destination: Path, application: str) ->
         raise Refusal(f"warm destination already exists: {destination}")
     method = _copy_on_write(source, destination)
     return WarmClone(before, destination, method, marker)
+
+
+def remap_gwnative_profile(home: Path, existing: str) -> str:
+    """Give a cloned profile a fresh native and Keychain identity."""
+    keychain_account(existing)
+    fresh = profile_id()
+    profiles = home / "Library/Application Support/gwnative/profiles"
+    source, destination = profiles / existing, profiles / fresh
+    descriptor = source / "profile.json"
+    try:
+        profile = json.loads(descriptor.read_bytes())
+        profile["id"] = fresh
+        profile["displayName"] = "Hermetic benchmark"
+        source.rename(destination)
+        (destination / "profile.json").write_text(json.dumps(profile, indent=2) + "\n")
+    except (OSError, ValueError, TypeError) as error:
+        raise Refusal(f"warm fixture profile cannot be remapped: {error}") from error
+    return fresh
 
 
 def file_sha256(path: Path) -> str:
