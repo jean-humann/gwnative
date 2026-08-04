@@ -19,8 +19,10 @@ done
 
 python3 -m py_compile \
 	scripts/benchmark \
+	scripts/benchmarklib.py \
 	scripts/check-distribution \
 	scripts/check-docs \
 	scripts/check-trust-policy \
 	scripts/client-certify
+python3 -m unittest discover -s tests -p 'benchmark_test.py'
 echo "scripts: shell and Python syntax ok"
