@@ -22,7 +22,7 @@
       "rendering": ["direct", "isolated"],
       "execution": "hosted",
       "runner": "macos-15",
-      "evidence": ["cargo test", "node --test web/client-runtime.test.js web/presentation-barrier.test.js"],
+      "evidence": ["cargo test", "node --test web/client-runtime.test.js web/presentation-barrier.test.js", "swift scripts/webkit-runtime-probe.swift"],
       "lastEvidence": null
     },
     {
@@ -32,7 +32,7 @@
       "rendering": ["direct", "isolated"],
       "execution": "hosted",
       "runner": "macos-26",
-      "evidence": ["cargo test", "node --test web/client-runtime.test.js web/presentation-barrier.test.js"],
+      "evidence": ["cargo test", "node --test web/client-runtime.test.js web/presentation-barrier.test.js", "swift scripts/webkit-runtime-probe.swift"],
       "lastEvidence": null
     },
     {
@@ -42,7 +42,7 @@
       "rendering": ["direct", "isolated"],
       "execution": "hosted",
       "runner": "macos-26",
-      "evidence": ["node --test web/client-runtime.test.js web/presentation-barrier.test.js"],
+      "evidence": ["node --test web/client-runtime.test.js web/presentation-barrier.test.js", "swift scripts/webkit-runtime-probe.swift"],
       "lastEvidence": null
     },
     {
@@ -52,7 +52,7 @@
       "rendering": ["direct", "isolated"],
       "execution": "manual-blocked",
       "runner": null,
-      "evidence": ["authorized macos-27-canary.yml on an arm64 macOS 27 host"],
+      "evidence": ["authorized macos-27-canary.yml on an arm64 macOS 27 host", "swift scripts/webkit-runtime-probe.swift --require-jspi"],
       "lastEvidence": null
     },
     {
@@ -62,7 +62,7 @@
       "rendering": ["direct", "isolated"],
       "execution": "manual-blocked",
       "runner": null,
-      "evidence": ["authorized macos-27-canary.yml on an arm64 macOS 27 host"],
+      "evidence": ["authorized macos-27-canary.yml on an arm64 macOS 27 host", "swift scripts/webkit-runtime-probe.swift --require-jspi"],
       "lastEvidence": null
     },
     {

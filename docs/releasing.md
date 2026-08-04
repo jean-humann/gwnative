@@ -200,6 +200,13 @@ through the `release` environment. Repository settings should enforce:
 - required reviewers; and
 - a deployment branch/tag policy restricted to release tags.
 
+Before the release environment can be reached, a no-secret preflight requires
+a successful manually authorized `macos-27-canary.yml` run whose `head_sha` is
+the exact release commit. The canary runs only on an enrolled Apple Silicon
+macOS 27 host behind the `macos-27-canary` environment. It downloads no game
+client, performs no gameplay automation, and does not turn its deterministic
+runtime probes into a live-game claim.
+
 Confirm the protection rules instead of assuming the workflow line provides
 them:
 
@@ -274,7 +281,10 @@ JSON settings profile mirrors them for the web settings panel.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on Apple Silicon `macos-26`:
+`.github/workflows/ci.yml` runs on the verified Apple Silicon `macos-15` and
+`macos-26` images. The former proves the deployment floor with forced-Asyncify
+and rendering probes; the latter runs the complete suite, including automatic
+runtime selection and both rendering paths:
 
 - formatting;
 - Clippy with warnings denied;

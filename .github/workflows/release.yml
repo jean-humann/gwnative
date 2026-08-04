@@ -49,17 +49,44 @@ on:
         default: false
 
 permissions:
-  # To create the release and upload the disk image to it. Nothing else — the
-  # default token grants far more, and this job needs none of it.
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  macos_27_gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 1
+
+      - name: Require an authorized macOS 27 canary for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected=$(git rev-parse HEAD)
+          runs=$(gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/macos-27-canary.yml/runs" \
+            -f head_sha="$expected" -f status=completed -f per_page=100)
+          accepted=$(printf '%s' "$runs" | jq --arg sha "$expected" \
+            '[.workflow_runs[] | select(.event == "workflow_dispatch" and .conclusion == "success" and .head_sha == $sha)] | length')
+          test "$accepted" -ge 1
+
   release:
+    needs: macos_27_gate
     runs-on: macos-26
+    permissions:
+      contents: write
     # The approval gate. See the note at the top of this file.
     environment: release
     timeout-minutes: 60
