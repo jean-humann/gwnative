@@ -18,7 +18,6 @@ const ALLOWED_PORTS: [u16; 3] = [6112, 80, 443];
 /// A numeric identity still needs provenance from this process's allowlisted
 /// DNS resolver before it can count as generation proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum GameplayPeer {
     Address(IpAddr),
     AllowedName,
@@ -107,7 +106,6 @@ fn parse_destination(destination: &str) -> Result<(String, u16), NetError> {
 /// provenance. Direct names are independently constrained to the outbound
 /// allowlist; addresses are checked against host-owned resolution history by
 /// the socket registry.
-#[allow(dead_code)]
 pub(crate) fn gameplay_peer(destination: &str) -> Option<GameplayPeer> {
     let (host, port) = parse_destination(destination).ok()?;
     if port != 6112 {

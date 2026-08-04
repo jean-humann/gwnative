@@ -11,7 +11,6 @@ use std::io::{self, BufRead, Read};
 use base64::Engine as _;
 
 /// A buffered reader that overwrites bytes as soon as `BufRead` consumes them.
-#[cfg_attr(not(test), expect(dead_code))]
 pub struct WipingReader<R> {
     inner: R,
     buffer: Box<[u8; 8192]>,
@@ -20,7 +19,6 @@ pub struct WipingReader<R> {
 }
 
 impl<R> WipingReader<R> {
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn new(inner: R) -> Self {
         Self {
             inner,
@@ -144,7 +142,6 @@ impl Request {
         })
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn websocket_launch(&self) -> Option<crate::log::SecretText> {
         let encoded = self
             .websocket_protocol

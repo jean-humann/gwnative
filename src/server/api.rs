@@ -529,11 +529,17 @@ fn socket(
         return Ok(flow);
     }
     let destination = request.param("to").unwrap_or_default();
-    let gameplay_launch = request
-        .param("launch")
-        .and_then(|launch| serde_json::from_str(&launch).ok())
-        .and_then(|launch| context.sockets.bind_gameplay(&launch));
-    ws::accept(stream, request.websocket_key.as_deref().unwrap_or(""))?;
+    let gameplay_launch = request.websocket_launch().and_then(|launch| {
+        serde_json::from_str::<generation::LaunchClaim>(launch.as_ref())
+            .ok()
+            .filter(|launch| context.launch.matches_active(launch))
+            .and_then(|launch| context.sockets.bind_gameplay(&destination, &launch))
+    });
+    if let Err(error) = ws::accept(stream, request.websocket_key.as_deref().unwrap_or("")) {
+        let mut destination = destination;
+        crate::log::wipe_string(&mut destination);
+        return Err(error);
+    }
     Ok(Flow::Bridge(destination, gameplay_launch))
 }
 

@@ -5,17 +5,15 @@
 //! receive windows provide backpressure. Nothing accumulates in the host, so
 //! there is no application buffer or byte cap to get wrong.
 
-// Anonymous because `io::Write` is here too and both spell `write!`; the
-// compiler picks by receiver, and only the hex trace uses this one.
-use std::fmt::Write as _;
-use std::io::{BufReader, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, TcpStream};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
 use crate::generation;
+use crate::http::WipingReader;
 use crate::net;
 use crate::qos;
 use crate::ws::{self, BINARY, Message, Sink, TEXT};
@@ -31,6 +29,7 @@ const MAX_SOCKETS: usize = 64;
 
 pub struct Registry {
     open: AtomicUsize,
+    resolved_gameplay: Mutex<Vec<IpAddr>>,
     gameplay_observed: Mutex<Vec<generation::LaunchIdentity>>,
     generations: Arc<generation::Store>,
     pending_proofs: Arc<PendingProofs>,
@@ -72,9 +71,26 @@ impl Registry {
     pub fn new(generations: Arc<generation::Store>) -> Self {
         Self {
             open: AtomicUsize::new(0),
+            resolved_gameplay: Mutex::new(Vec::new()),
             gameplay_observed: Mutex::new(Vec::new()),
             generations,
             pending_proofs: Arc::new(PendingProofs::default()),
+        }
+    }
+
+    /// Remember an address returned by this process's allowlisted ArenaNet DNS
+    /// resolver. The client normally discards the name and later dials only
+    /// the dotted quad, so this host-owned provenance is what distinguishes a
+    /// real game endpoint from an arbitrary public server on port 6112.
+    #[allow(dead_code)]
+    pub fn resolved_allowed_name(&self, address: Ipv4Addr) {
+        let address = IpAddr::V4(address);
+        let mut resolved = self.resolved_gameplay.lock().unwrap();
+        if !resolved.contains(&address) {
+            resolved.push(address);
+            if resolved.len() > 64 {
+                resolved.remove(0);
+            }
         }
     }
 
@@ -83,9 +99,19 @@ impl Registry {
     /// the socket; it merely has no authority to prove a different session.
     pub fn bind_gameplay(
         &self,
-        claimed: &generation::LaunchIdentity,
+        destination: &str,
+        claimed: &generation::LaunchClaim,
     ) -> Option<generation::LaunchIdentity> {
-        (self.generations.launch_for_gameplay().as_ref() == Some(claimed)).then(|| claimed.clone())
+        let permitted = match net::gameplay_peer(destination)? {
+            net::GameplayPeer::AllowedName => true,
+            net::GameplayPeer::Address(address) => {
+                self.resolved_gameplay.lock().unwrap().contains(&address)
+            }
+        };
+        if !permitted {
+            return None;
+        }
+        self.generations.resolve_launch_claim(claimed)
     }
 
     fn settle_gameplay_proof(self: &Arc<Self>, launch: generation::LaunchIdentity) {
@@ -173,24 +199,37 @@ impl Drop for Slot {
 /// socket failed is lost at the one moment it is worth having. `serde_json`
 /// already builds every other JSON body in this crate and knows the rest of the
 /// escapes.
-fn error_frame(message: &str) -> String {
-    serde_json::json!({ "type": "error", "message": message }).to_string()
+fn error_frame(message: &str) -> Option<String> {
+    String::from_utf8(crate::log::redact_json(
+        &serde_json::json!({ "type": "error", "message": message }),
+    )?)
+    .ok()
 }
 
-/// Per-packet tracing, off unless `GWNATIVE_TRACE_SOCKETS` is set.
-///
-/// `=hex` additionally prints the head of each frame, which is what tells a
-/// heartbeat apart from a request that went unanswered. It stops at
-/// [`TRACE_HEAD`] bytes: the login exchange carries the account password, and a
-/// trace is exactly the kind of thing a bug report carries off the machine.
-/// A Guild Wars packet header fits well inside that, so the cap costs nothing.
-const TRACE_HEAD: usize = 16;
+fn send_error(sink: &Sink, message: &str) {
+    let Some(mut frame) = error_frame(message) else {
+        return;
+    };
+    if let Some(_lease) = crate::log::admit_untrusted(frame.as_bytes()) {
+        let _ = sink.send(TEXT, frame.as_bytes());
+    }
+    crate::log::wipe_string(&mut frame);
+}
+
+fn wipe_error(error: &mut net::NetError) {
+    match error {
+        net::NetError::BadDestination(value)
+        | net::NetError::NameNotAllowed(value)
+        | net::NetError::Resolve(value)
+        | net::NetError::Connect(value) => crate::log::wipe_string(value),
+        net::NetError::PortNotAllowed(_) | net::NetError::NotPublicUnicast(_) => {}
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Trace {
     Off,
     Sizes,
-    Hex,
 }
 
 static TRACE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
@@ -204,32 +243,21 @@ fn tracing() -> Trace {
     if TRACE_OVERRIDE.load(Ordering::Relaxed) != 0 {
         return Trace::Sizes;
     }
-    *MODE.get_or_init(|| match std::env::var("GWNATIVE_TRACE_SOCKETS") {
-        Err(_) => Trace::Off,
-        Ok(value) if value.eq_ignore_ascii_case("hex") => Trace::Hex,
-        Ok(_) => Trace::Sizes,
+    *MODE.get_or_init(|| {
+        if std::env::var_os("GWNATIVE_TRACE_SOCKETS").is_some() {
+            Trace::Sizes
+        } else {
+            Trace::Off
+        }
     })
 }
 
-/// One trace line: direction, length, and — in hex mode — the capped head.
-fn trace(destination: &str, direction: &str, data: &[u8]) {
+/// One trace line: direction, destination class, and length. Packet bytes are
+/// never diagnostics: the login exchange can carry the account password.
+fn trace(direction: &str, data: &[u8]) {
     match tracing() {
         Trace::Off => {}
-        Trace::Sizes => note!("[socket] {destination}: {direction} {}", data.len()),
-        Trace::Hex => {
-            let head = &data[..data.len().min(TRACE_HEAD)];
-            // Folded rather than collected from `format!`, which would allocate
-            // a String per byte to build one string of `2 * TRACE_HEAD` chars.
-            let hex = head.iter().fold(String::new(), |mut out, b| {
-                let _ = write!(out, "{b:02x}");
-                out
-            });
-            let elided = if data.len() > head.len() { "…" } else { "" };
-            note!(
-                "[socket] {destination}: {direction} {} {hex}{elided}",
-                data.len()
-            );
-        }
+        Trace::Sizes => note!("[socket] game: {direction} {}", data.len()),
     }
 }
 
@@ -239,7 +267,7 @@ fn trace(destination: &str, direction: &str, data: &[u8]) {
 /// WebSocket handshake itself; an `open` or `error` text frame carries it
 /// instead. Every later frame is binary and maps one-to-one onto TCP payload.
 pub fn bridge(
-    mut reader: BufReader<TcpStream>,
+    mut reader: WipingReader<TcpStream>,
     page: TcpStream,
     destination: &str,
     gameplay_launch: Option<generation::LaunchIdentity>,
@@ -254,16 +282,24 @@ pub fn bridge(
     });
 
     let Some(_slot) = registry.claim() else {
-        let _ = sink.send(TEXT, error_frame("too many open sockets").as_bytes());
+        send_error(&sink, "too many open sockets");
         sink.close();
         return;
     };
 
-    let game = match net::connect(destination) {
+    let Some(destination_lease) = crate::log::admit_untrusted(destination.as_bytes()) else {
+        send_error(&sink, "connection refused by host policy");
+        sink.close();
+        return;
+    };
+    let connected = net::connect(destination);
+    drop(destination_lease);
+    let game = match connected {
         Ok(stream) => stream,
-        Err(e) => {
+        Err(mut e) => {
             note!("[socket] {destination}: {e}");
-            let _ = sink.send(TEXT, error_frame(&e.to_string()).as_bytes());
+            send_error(&sink, "connection refused by host policy");
+            wipe_error(&mut e);
             sink.close();
             return;
         }
@@ -289,7 +325,6 @@ pub fn bridge(
             }
         };
         let counter = Arc::clone(&downstream);
-        let destination = destination.to_owned();
         thread::spawn(move || {
             // This carries the game's own traffic to and from ArenaNet; a frame
             // of added latency here is a frame the player waits.
@@ -300,11 +335,17 @@ pub fn bridge(
                     Ok(0) => break,
                     Ok(n) if sink.send(BINARY, &buffer[..n]).is_ok() => {
                         counter.fetch_add(n, Ordering::Relaxed);
-                        trace(&destination, "down", &buffer[..n]);
+                        trace("down", &buffer[..n]);
+                        crate::log::wipe(&mut buffer[..n]);
                     }
-                    _ => break,
+                    Ok(n) => {
+                        crate::log::wipe(&mut buffer[..n]);
+                        break;
+                    }
+                    Err(_) => break,
                 }
             }
+            crate::log::wipe(&mut buffer);
             // Whichever direction ends first tears down the pair, so the peer
             // thread's blocking read returns instead of leaking a thread.
             sink.close();
@@ -317,18 +358,24 @@ pub fn bridge(
     let mut sent = 0usize;
     loop {
         match ws::read_message(&mut reader, &sink) {
-            Ok(Some(Message::Binary(data))) => {
+            Ok(Some(Message::Binary(mut data))) => {
                 sent += data.len();
-                trace(destination, "up", &data);
-                if game.write_all(&data).is_err() {
+                trace("up", &data);
+                let written = game.write_all(&data);
+                crate::log::wipe(&mut data);
+                if written.is_err() {
                     break;
                 }
             }
             // Control frames travel host→page only. One arriving the other way
             // means the two sides disagree about the protocol, so say so rather
             // than dropping it into the TCP stream as if it were packet data.
-            Ok(Some(Message::Text(text))) => {
-                note!("[socket] {destination}: unexpected control frame from page: {text}");
+            Ok(Some(Message::Text(mut text))) => {
+                note!(
+                    "[socket] game: unexpected control frame from page ({} bytes)",
+                    text.len()
+                );
+                crate::log::wipe_string(&mut text);
             }
             Ok(Some(Message::Close) | None) => break,
             Err(e) => {
@@ -353,6 +400,7 @@ pub fn bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::TempDir;
 
     #[test]
     fn clean_quit_waits_for_a_pending_proof_but_remains_bounded() {
@@ -372,6 +420,44 @@ mod tests {
         drop(job);
     }
 
+    #[test]
+    fn gameplay_binding_requires_host_owned_arenanet_provenance() {
+        const NAMES: [&str; 2] = ["Gw.jspi.js", "Gw.jspi.wasm"];
+        const NONCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let temp = TempDir::new("socket-gameplay-class");
+        let root = temp.0.join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        for name in NAMES {
+            std::fs::write(root.join(name), name).unwrap();
+        }
+        std::fs::write(temp.0.join("manifest.cache"), b"manifest").unwrap();
+        let generations = Arc::new(generation::Store::open(temp.0.join("generations")));
+        assert!(generations.record("current", &root, &NAMES));
+        let launch = generations
+            .record_attempt("jspi", None, false, NONCE)
+            .unwrap();
+        let claim = generation::LaunchClaim {
+            runtime: launch.runtime.clone(),
+            build: None,
+            transformed: false,
+            nonce: launch.nonce.clone(),
+        };
+        let registry = Registry::new(generations);
+
+        assert_eq!(registry.bind_gameplay("1.2.3.4:6112", &claim), None);
+        assert_eq!(registry.bind_gameplay("8.8.8.8:6112", &claim), None);
+        assert_eq!(
+            registry.bind_gameplay("auth.arenanetworks.com:6112", &claim),
+            Some(launch.clone())
+        );
+        registry.resolved_allowed_name("1.2.3.4".parse().unwrap());
+        assert_eq!(registry.bind_gameplay("1.2.3.4:6112", &claim), Some(launch));
+        assert_eq!(
+            registry.bind_gameplay("www.guildwars.com:443", &claim),
+            None
+        );
+    }
+
     /// The page parses this frame to find out why its socket never opened, so a
     /// destination that makes the frame unparseable costs it the diagnosis —
     /// `?to=` is where the destination comes from, and a query string carries
@@ -385,7 +471,7 @@ mod tests {
             "malformed destination: \u{1}\u{2}\u{3}",
             "resolve failed: naïve.example.com",
         ] {
-            let frame = error_frame(message);
+            let frame = error_frame(message).unwrap();
             let parsed: serde_json::Value =
                 serde_json::from_str(&frame).unwrap_or_else(|e| panic!("{frame:?}: {e}"));
             assert_eq!(parsed["type"], "error");
@@ -393,5 +479,30 @@ mod tests {
             // offending bytes would also parse.
             assert_eq!(parsed["message"], message);
         }
+    }
+
+    #[test]
+    fn protected_socket_destinations_are_refused_before_dialing() {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (page, _) = listener.accept().unwrap();
+        let reader = WipingReader::new(page.try_clone().unwrap());
+        let temp = TempDir::new("socket-protected-destination");
+        let registry = Arc::new(Registry::new(Arc::new(generation::Store::open(
+            temp.0.join("generations"),
+        ))));
+        let secret = "socket-prefix-canary:6112";
+        let _registration = crate::log::register(&[secret]).unwrap();
+
+        bridge(reader, page, secret, None, &registry);
+        let mut wire = Vec::new();
+        client.read_to_end(&mut wire).unwrap();
+        assert!(
+            !wire
+                .windows(secret.len())
+                .any(|part| part == secret.as_bytes()),
+            "protected destination reached a socket response"
+        );
+        crate::log::wipe(&mut wire);
     }
 }
