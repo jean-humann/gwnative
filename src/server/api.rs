@@ -301,7 +301,7 @@ fn credentials(
                     keychain::store(&context.credential_account, &c)
                 });
             match stored {
-                Ok(()) => {
+                Ok(_) => {
                     note!("[credentials] saved to the keychain");
                     no_content(stream)
                 }
@@ -312,7 +312,7 @@ fn credentials(
             }
         }
         "DELETE" => match keychain::clear(&context.credential_account) {
-            Ok(()) => {
+            Ok(_) => {
                 note!("[credentials] cleared");
                 no_content(stream)
             }
