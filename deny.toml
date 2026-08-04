@@ -19,7 +19,7 @@ wildcards = "deny"
 confidence-threshold = 0.93
 allow = [
     "Apache-2.0",
-    "GPL-2.0-or-later",
+    "GPL-3.0-only",
     "MIT",
     "Unicode-3.0",
 ]

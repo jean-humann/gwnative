@@ -17,6 +17,7 @@
 /web/Gw.jspi.*
 /web/Gw.js
 /web/Gw.wasm
+/web/Gw.snapshot
 /web/version.json
 *.dat
 

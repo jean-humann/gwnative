@@ -138,6 +138,7 @@ are in the [development guide](docs/development.md).
 | [Release guide](docs/releasing.md) | Bundling, signing, notarization, Sparkle, CI, and publication |
 | [Contributing](CONTRIBUTING.md) | Change workflow and documentation expectations |
 | [Legal notice](NOTICE.md) | Unofficial-project disclosure, game-material ownership, and trademarks |
+| [Third-party notices](THIRD-PARTY-NOTICES.md) | Upstream provenance, modified-source paths, and bundled dependency notices |
 
 The application also ships an offline user guide under **Help → Guild Wars
 Guide**. It describes the exact build currently running; this repository's user
@@ -145,7 +146,8 @@ guide adds developer-facing paths and recovery details.
 
 ## Licence
 
-The gwnative source code is distributed under GPL-2.0-or-later. That licence
-does not cover Guild Wars names, client code, game data, artwork, audio, logos,
-or other proprietary material. See [LICENSE](LICENSE) and the
-[legal notice](NOTICE.md).
+gwnative's source code and original project material are distributed under
+GPL-3.0-only. That licence does not cover Guild Wars names, client code, game
+data, artwork, audio, logos, or other proprietary material. See
+[LICENSE](LICENSE), the [legal notice](NOTICE.md), and the
+[third-party notices](THIRD-PARTY-NOTICES.md).

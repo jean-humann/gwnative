@@ -26,10 +26,12 @@ The script:
 2. creates `dist/Guild Wars.app`;
 3. substitutes package and monotonic build versions into `Info.plist`;
 4. copies the web shell, excluding live client artifacts and tests;
-5. installs and thins Sparkle when a public update key is configured;
-6. copies the dSYM beside the app;
-7. signs nested code from the inside out when an identity is available; and
-8. verifies signed bundles.
+5. installs GPL, provenance, proprietary-material, and Sparkle notices;
+6. rejects any ArenaNet client or game artifact in the finished payload;
+7. installs and thins Sparkle when a public update key is configured;
+8. copies the dSYM beside the app;
+9. signs nested code from the inside out when an identity is available; and
+10. verifies signed bundles.
 
 Without an identity, the script emits a warning and leaves a runnable unsigned
 local bundle. Release packaging does not permit that fallback.
@@ -42,6 +44,13 @@ The packaged app never patches `Contents/Resources/web` in place. That would
 invalidate its signature. The bundle contains a shell seed that is copied to
 `~/Library/Application Support/gwnative/web`; live client artifacts are fetched
 there.
+
+`scripts/check-distribution` verifies the repository declarations and scans the
+finished bundle before signing. It rejects the official JSPI and Asyncify glue
+and WebAssembly modules, `Gw.snapshot`, `version.json`, and `*.dat` game data.
+The tagged GitHub release supplies the Corresponding Source through its source
+archives; `scripts/publish` always creates the release from that exact public
+tag.
 
 Signed local bundles use the hardened runtime plus
 `packaging/debug.entitlements` (`get-task-allow`) and no trusted timestamp.
