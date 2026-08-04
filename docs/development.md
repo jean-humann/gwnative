@@ -56,17 +56,20 @@ Use `scripts/client-certify WEB_ROOT` for the guarded certification
 workflow rather than invoking `certify` directly. See
 [Client artifact certification](certification.md).
 
-`serve` prints the bound address and session token on one line, then parks:
+`serve` prints only the bound address, then parks:
 
 ```text
-127.0.0.1:38112 <token>
+127.0.0.1:38112
 ```
 
-Use it to exercise the snapshot and gated host routes without a window. A
-windowed tool that only consumes the public game API should set
-`GWNATIVE_PRINT_GAME_TOKEN=1`; that token cannot reach credentials, settings,
-process controls, or state publication. `GWNATIVE_PRINT_TOKEN=1` is the
-deliberate full-authority escape for diagnostics requiring other host routes.
+Use it to exercise public content without a window. A tool that needs a gated
+route must create an anonymous pipe, inherit the write descriptor into the
+child, and set `GWNATIVE_CONTROL_FD` to that descriptor number. The child writes
+newline-delimited `browser`, `game-reader`, and `launch-nonce` records to the
+pipe and closes it; stdout/stderr and the environment never contain the values.
+The reader capability cannot reach credentials, settings, process controls, or
+state publication. See `scripts/benchmark` for the descriptor lifecycle and
+`pass_fds` setup. There is deliberately no print-token escape.
 
 ## Code signing and the Keychain
 
@@ -148,10 +151,9 @@ All runtime overrides are optional.
 | `GWNATIVE_PATCH_ROOT` | Override the patch service base URL |
 | `GWNATIVE_WEB_ROOT` | Override the official client-artifact directory; the reviewed shell stays separate |
 | `GWNATIVE_PORT` | Override loopback port `38112` |
-| `GWNATIVE_PRINT_TOKEN` | Print the injected host-route token to stderr |
-| `GWNATIVE_PRINT_GAME_TOKEN` | Print a token limited to read-only public game-state routes |
+| `GWNATIVE_CONTROL_FD` | Inherited anonymous-pipe descriptor for explicitly requested capabilities; never a token value |
 | `GWNATIVE_TRACE_HTTP` | Log each loopback HTTP request |
-| `GWNATIVE_TRACE_SOCKETS` | Log socket frame sizes; value `hex` also logs at most the first 16 bytes |
+| `GWNATIVE_TRACE_SOCKETS` | Log socket direction, destination class, and frame sizes only |
 | `GWNATIVE_FRAME_AUDIT` | Value `1` enables animation-callback, draw, suspension and logical-swap correlation |
 | `GWNATIVE_PREFER_60_FPS` | Value `1` leaves WebKit's near-60-FPS preference at its default for a diagnostic comparison |
 | `GWNATIVE_PRESERVE_DRAWING_BUFFER` | Value `1` preserves WebGL pixels after presentation for an activation-flash comparison; diagnostic only |
@@ -166,8 +168,9 @@ All runtime overrides are optional.
 timestamped hardened-runtime signature without debug entitlements. Do not use it
 as a normal development mode.
 
-Socket hex traces are deliberately capped because early game packets can carry
-credentials. Prefer size-only tracing unless the packet header is required.
+Socket payload tracing is absent because early game packets can carry
+credentials, chat, and other private data. Only direction, destination class,
+and byte counts are available.
 Detailed frame auditing wraps every WebGL framebuffer-write import (draw,
 clear, or blit) and is for controlled reproduction only. See
 [Rendering diagnostics](rendering-diagnostics.md).
@@ -223,7 +226,8 @@ clear, quit, and relaunch. `src/server/content.rs` owns static content, the
 derived module, snapshot byte ranges, the embedded companion module, and the
 closed HTTP proxy.
 
-When testing `serve`, send the printed token as:
+When testing `serve`, read the capability explicitly requested through the
+anonymous control pipe described above, then send it as:
 
 ```text
 X-Gwnative-Token: <token>

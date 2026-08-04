@@ -524,15 +524,16 @@ fn refresh(cache: &Path, minimum_sequence: u64) -> Outcome<()> {
         concat!("gwnative/", env!("CARGO_PKG_VERSION")),
     )];
     let get = |url: &str, limit: usize| -> Outcome<Vec<u8>> {
-        let response = crate::transport::fetch("GET", url, HEADERS, None, Duration::from_secs(5))
-            .map_err(|e| format!("{url}: {e}"))?;
+        let mut response =
+            crate::transport::fetch("GET", url, HEADERS, None, Duration::from_secs(5))
+                .map_err(|e| format!("{url}: {e}"))?;
         if response.status != 200 {
             return Err(format!("{url}: HTTP {}", response.status));
         }
         if response.body.len() > limit {
             return Err(format!("{url}: response is too large"));
         }
-        Ok(response.body)
+        Ok(std::mem::take(&mut response.body))
     };
     let feed = get(REMOTE_FEED, MAX_FEED_BYTES)?;
     let signature = get(REMOTE_SIGNATURE, MAX_SIGNATURE_BYTES)?;

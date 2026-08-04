@@ -76,13 +76,18 @@ launcher, settings UI, and metrics.
     module state at document start.
 14. Create the WKWebView, window, menu, native event bridges, renderer recovery,
     and application lifecycle delegate.
-15. Mark the client generation proven and seal the boot chunk list when the
-    page reports its first frame.
+15. Record renderer/runtime viability and seal the boot chunk list when the
+    page reports its first frame. Promote the generation and retire its rollback
+    predecessor only after an allowed ArenaNet gameplay socket for that exact
+    launch is also accepted. A numeric game endpoint counts only when this
+    process previously obtained it through its allowlisted name resolver.
 
 The `sync` command exits after artifact installation unless full-image work was
 also requested. `repair` verifies and fills game-image chunks without changing
 the client. Both exit before a window is created. The `serve` command stops
-after the loopback starts and prints `<address> <session-token>` on stdout.
+after the loopback starts and prints only `<address>` on stdout. A supervising
+tool must request capabilities through the anonymous inherited control pipe
+described below; tokens never share stdout or stderr with diagnostics.
 
 ## Loopback origin and trust model
 
@@ -109,11 +114,14 @@ with `__` therefore require fresh random tokens with disjoint authority:
 - an injection-only publisher token can only `PUT /__game/v1/state`.
 
 The browser and publisher tokens are injected through `WKUserScript`; the
-reader token is never injected or served. A windowed external tool can request
-only that reader token with `GWNATIVE_PRINT_GAME_TOKEN=1`. The browser token is
-printed only by the explicit `GWNATIVE_PRINT_TOKEN` diagnostic escape, while
-`serve` prints it for full host-route testing. The game-state shell performs no
-memory observation itself and exposes no product action capability.
+reader token is never injected or served. An explicit supervisor can create an
+anonymous pipe, pass only its write descriptor in `GWNATIVE_CONTROL_FD`, and
+inherit that descriptor into the child. The host validates the descriptor
+before opening anything else, writes `browser`, `game-reader`, and
+`launch-nonce` records, then closes its end. `scripts/benchmark` is the reference
+implementation. No environment variable contains a token, and no diagnostic
+print escape exists. The game-state shell performs no memory observation itself
+and exposes no product action capability.
 
 Content requests are intentionally not token-gated because the generated client
 cannot attach a custom header. Their authority is narrow instead:
@@ -171,7 +179,9 @@ Artifact presence is not treated as integrity:
 - launch checks the record and stages a complete replacement set when any
   artifact is unsound or the offered generation is newer;
 - the offered generation ID is derived from manifest data before download; and
-- a newly installed generation is unproven until `POST /__booted`.
+- a newly installed generation keeps its rollback predecessor until both a
+  launch-bound `POST /__booted` and an accepted ArenaNet gameplay socket are
+  durably recorded.
 
 Before replacing a proven set, gwnative verifies and saves its files and active
 manifest, then requires the rollback record to persist before touching live
@@ -190,6 +200,14 @@ Transform refusals and generation refusals are bounded. A damaged installed
 copy may retry a refused generation when no alternative exists, an explicit
 `sync` can retry one deliberately, and first install never deletes its only
 client merely because an unrelated boot failure occurred.
+
+First frame is deliberately only renderer/runtime evidence. It does not by
+itself prove that the client can enter the service, and it never deletes the
+rollback copy. The host binds the first allowed gameplay connection to the
+same native launch identity, and requires a numeric endpoint to have come from
+an allowlisted ArenaNet/Guild Wars DNS answer recorded by this process. Only
+the conjunction of those independently observed milestones promotes the
+generation.
 
 ## Game-image storage
 
@@ -296,10 +314,11 @@ races `requestAnimationFrame` with a 16 ms timer so an occluded boot continues
 to drive client work. After first frame the native frame callback is restored;
 game animation and audio retain WebKit's normal timing.
 
-The renderer guard reloads once if WebKit terminates the content process. The
-window layer validates persisted geometry against current display work areas,
-restores mode separately from the normal frame, and reports the active display's
-refresh-rate ceiling.
+The renderer guard starts one fresh app process if WebKit terminates the content
+process. A successor marker bounds that automatic recovery across processes.
+The window layer validates persisted geometry against current display work
+areas, restores mode separately from the normal frame, and reports the active
+display's refresh-rate ceiling.
 
 ## Diagnostics
 

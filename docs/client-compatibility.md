@@ -2,7 +2,7 @@
 
 This document is the review model for keeping Guild Wars playable when ArenaNet
 publishes a new web client. It covers the complete path from patch discovery to
-first frame, including crash recovery, JSPI/Asyncify selection, optional
+first frame and an accepted gameplay connection, including crash recovery, JSPI/Asyncify selection, optional
 transforms, signed certificates, and the exact points where gwnative falls back.
 
 The governing rule is:
@@ -43,9 +43,12 @@ flowchart TD
     O --> T{"First frame?"}
     R --> T
     S --> T
-    T -- "Yes" --> U["Prove installed generation"]
-    T -- "No, transformed" --> V["Next launch disables only that exact transform"]
-    T -- "No, official + unproven" --> W["Next launch restores previous files + manifest and rejects generation"]
+    T -- "Yes" --> U["Record renderer/runtime proof"]
+    U --> Y{"Allowed gameplay socket for this launch?"}
+    Y -- "Yes" --> Z["Promote generation and retire predecessor"]
+    Y -- "Not yet" --> U
+    T -- "No, transformed" --> V["Durably disable exact transform; fresh process runs official pair"]
+    T -- "No, official + unproven" --> W["Durably choose next runtime or restore predecessor; relaunch"]
 ```
 
 No certificate branch ends in “do not launch.” An unknown pair, invalid feed,
@@ -73,14 +76,17 @@ manifest from different offers are never an accepted state.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Proven: Existing set adopted or first frame reported
-    Proven --> Stashed: Persist exact files + active manifest + previous record
-    Stashed --> Proven: Download fails or process exits before mutation
-    Stashed --> Proven: Promotion is interrupted; next launch restores previous
+    [*] --> GameplayProven: Existing state already gameplay-proven
+    [*] --> Unproven: Existing files adopted
+    GameplayProven --> Stashed: Persist exact files + active manifest + previous record
+    Stashed --> GameplayProven: Download fails or process exits before mutation
+    Stashed --> GameplayProven: Promotion is interrupted; next launch restores previous
     Stashed --> Unproven: Complete files + manifest promoted and recorded
-    Unproven --> Proven: First frame reports POST /__booted
+    Unproven --> FrameProven: Exact launch reports POST /__booted
+    FrameProven --> GameplayProven: Same launch opens allowed gameplay socket
+    FrameProven --> FrameProven: No gameplay socket; predecessor retained
     Unproven --> Unproven: Transformed attempt fails; disable transform only
-    Unproven --> Proven: Official attempt fails; restore previous and reject new ID
+    Unproven --> GameplayProven: Official runtimes fail; restore predecessor and reject new ID
     Unproven --> Unproven: No previous generation exists; retain only client
 ```
 
@@ -133,17 +139,25 @@ The selected glue and Wasm always come from the same official pair:
 
 Before appending the selected glue, the page records the runtime, exact
 runtime-compatibility ID, and whether the module is transformed. That auxiliary
-loopback write has a 1.5-second deadline; losing rollback evidence is safer than
-blocking the client.
+loopback attempt has a 1.5-second per-request deadline and bounded identical
+retries. ArenaNet glue does not execute without a durable acknowledgement;
+failure stops visibly rather than losing rollback evidence.
 
-There are two transform fallbacks:
+There are three bounded fallback transitions:
 
 1. If a derived module cannot compile or instantiate, the same launch records
    the exact transform refusal and requests the official file with
    `?gwnative-original=1`.
 2. If a derived module instantiates but the launch ends before first frame, the
-   next launch disables that exact transform and retries the same official
-   generation.
+   host durably disables that exact transform, acknowledges with a bodyless
+   status, and a fresh native process retries the same official runtime.
+3. If an official JSPI launch ends before first frame, the host durably records
+   that exact failure and a fresh process selects official Asyncify. Failure of
+   the remaining official runtime restores the predecessor when one exists, or
+   reports exhaustion without deleting the only installed client.
+
+The page retries a lost acknowledgement only with the exact launch claim. No
+runtime transition occurs in the settled or contaminated JavaScript realm.
 
 Only an attempted official module can make an unproven ArenaNet generation
 eligible for rollback. A transformed failure never rejects official files.
@@ -233,8 +247,11 @@ deletion and non-fast-forward updates; an identical later poll safely resumes.
 | Candidate semantic anchor changed | Do not sign | Tracking issue; players use official module |
 | Derived build or verification fails | Launch official module | Optional features report failed |
 | Derived instantiate fails | Retry official module in same launch | Disable exact transform |
-| Transformed launch reaches no frame | Keep official generation | Disable exact transform next launch |
-| Official unproven launch reaches no frame | Keep current files until recovery | Restore previous pair and reject generation |
+| Transformed launch reaches no frame | Persist exact refusal; start fresh process | Run the same official runtime without that transform |
+| Official JSPI launch reaches no frame | Persist failure; start fresh process | Try official Asyncify |
+| All official modes for an unproven launch fail | Keep current files until durable transition | Restore previous pair and reject generation |
+| First frame but no gameplay socket | Keep running and keep rollback copy | Do not promote or retire predecessor |
+| First frame plus bound gameplay socket | Continue the game | Promote generation and retire predecessor |
 | First install reaches no frame | Retain only available client | Retry; nothing is deleted |
 | Sync fails before mutation | Restore/verify prior pair | Clear redundant stash |
 | Process exits during promotion | Stop with durable stash present | Restore prior pair before next read |
@@ -248,11 +265,11 @@ Review compatibility changes in this order:
 1. Diff inventory: account for every changed patch, generation, Wasm, server,
    page, workflow, script, and documentation file.
 2. Installation proof: trace active/pending manifests, staging, promotion,
-   process interruption, restoration, record, first-frame proof, rejection, and
-   explicit retry.
+   process interruption, restoration, record, first-frame proof, bound gameplay
+   proof, predecessor retirement, rejection, and explicit retry.
 3. Runtime proof: trace the functional JSPI probe, exact pair selection,
    injected per-runtime facts, derived/original serving, same-launch fallback,
-   next-launch fallback, and first-frame report.
+   fresh-process fallback, exact lost-ack retry, and first-frame report.
 4. Transform proof: check input/glue identities, caller and target anchors,
    authorized mutation set, output validation/hash, cache stamp, and newest
    exact certificate selection.
