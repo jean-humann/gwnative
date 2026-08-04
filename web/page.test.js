@@ -75,4 +75,19 @@ describe('the page', () => {
     assert.match(html, /ArenaNet or NCSOFT/);
     assert.match(html, /Guild Wars Reforged/);
   });
+
+  it('scrubs active credentials before console and host diagnostics', () => {
+    const harness = read('harness.js');
+    assert.ok(
+      harness.indexOf('const protectedDiagnostics') < harness.indexOf("for (const level of ['log'"),
+      'tokens must be protected before console forwarding is installed',
+    );
+    assert.match(harness, /pending\.push\(scrubDiagnostic\(line\)\)/);
+    assert.match(harness, /original\(\.\.\.scrubbed\)/);
+    assert.match(harness, /response\.json\(\)\.then\(protectCredentials\)/);
+    assert.match(
+      harness,
+      /protectCredentials\(\{ username, password \}\);\s*const response = await credentials\('PUT'/,
+    );
+  });
 });

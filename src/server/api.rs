@@ -209,9 +209,15 @@ fn game_state(request: &Request, stream: &mut TcpStream, context: &Context) -> s
                 Err(_) => return text(stream, 400, "waitMs must be an unsigned integer"),
             };
             match context.game_api.state_json_after(after, wait_ms) {
-                Some(state) => json(stream, 200, &state),
+                Some(state) => {
+                    let state = crate::log::redact(&String::from_utf8_lossy(&state));
+                    json(stream, 200, state.as_bytes())
+                }
                 None => text(stream, 404, "no newer game state is available"),
             }
+        }
+        "PUT" if crate::log::contains_secret(&request.body) => {
+            text(stream, 400, "public game state contains a protected value")
         }
         "PUT" => match context.game_api.publish(&request.body) {
             Ok(revision) => {
@@ -272,9 +278,14 @@ fn credentials(
     match request.method.as_str() {
         "GET" => match keychain::load(&context.credential_account) {
             Some(credentials) => {
-                let body = serde_json::to_vec(&credentials).unwrap_or_default();
-                note!("[credentials] read from the keychain");
-                json(stream, 200, &body)
+                let body = keychain::encode(&credentials).unwrap_or_else(|_| {
+                    // Serialization has no fallible field here. An empty body
+                    // still fails closed in the page if that assumption ever
+                    // changes.
+                    keychain::SecretBuffer::default()
+                });
+                note!("[credentials] read from protected storage");
+                json(stream, 200, body.as_ref())
             }
             // Not an error: a first launch has nothing saved, and the client
             // treats "none" as "ask the player".
