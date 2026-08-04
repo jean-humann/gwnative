@@ -85,10 +85,18 @@ fn main() {
             std::process::exit(i32::from(exit.failed) * 2);
         }
     };
-    if let Some((username, password)) = invocation.take_credentials()
-        && let Err(error) = keychain::Credentials::new(username, password).and_then(keychain::offer)
-    {
-        note!("[credentials] invocation values were refused: {error}");
+    // Validate and take the explicitly inherited supervisor pipe before this
+    // process opens any file that could reuse a stale descriptor number.
+    let control = control_pipe();
+    if let Some((username, password)) = invocation.take_credentials() {
+        match keychain::Credentials::new(username, password) {
+            Ok(credentials) => {
+                if let Err(error) = keychain::offer(credentials) {
+                    note!("[credentials] invocation values were refused: {error}");
+                }
+            }
+            Err(error) => note!("[credentials] invocation values were refused: {error}"),
+        }
     }
     for notice in &invocation.notices {
         note!(
@@ -148,6 +156,16 @@ fn main() {
     // The two commands above are the runs with a terminal attached. Everything
     // that would otherwise put a message on screen asks this first.
     let windowed = !headless && !maintenance;
+
+    if matches!(command, cli::Command::Run | cli::Command::Serve)
+        && let Err(error) = keychain::prime(&profile.keychain_account())
+    {
+        alert::fatal(
+            windowed,
+            "Guild Wars could not protect the saved login",
+            &error,
+        );
+    }
 
     // Held for as long as the process lives; the kernel takes it back if the
     // process does not.
@@ -411,21 +429,29 @@ fn main() {
         root.display(),
         loopback.addr
     );
-    publish_control_tokens(&tokens);
+    publish_control_tokens(control, &tokens, &launch_nonce);
 
     if headless {
-        park_headless(&loopback, &tokens.browser);
+        park_headless(&loopback);
     }
     run_windowed(
         &loopback,
-        &tokens,
-        &module,
-        &launch_nonce,
+        WindowLaunch {
+            tokens: &tokens,
+            module: &module,
+            nonce: &launch_nonce,
+        },
         &invocation,
         paths.support_dir(),
         profile.website_data_store_id(),
         (root, generations),
     );
+}
+
+struct WindowLaunch<'a> {
+    tokens: &'a server::CapabilityTokens,
+    module: &'a wasm::Module,
+    nonce: &'a str,
 }
 
 fn verify_and_download_snapshot(snapshot: Option<Arc<chunks::ChunkStore>>, jobs: Option<usize>) {
@@ -817,17 +843,17 @@ fn open_and_warm_snapshot(
     }
 }
 
-/// Serve until killed, with the address and token on stdout.
+/// Serve until killed, with only the non-secret address on stdout.
 ///
 /// One line, because every route worth exercising is behind the gate and there
 /// is otherwise no way past it from outside the page. Only ever printed here: in
 /// the app the token reaches the page over the injection channel and nowhere
 /// else. Written the same forgiving way as every line on stderr — see `log` — as
 /// a harness that has already left is not worth aborting over.
-fn park_headless(loopback: &server::Loopback, token: &str) -> ! {
+fn park_headless(loopback: &server::Loopback) -> ! {
     {
         use std::io::Write as _;
-        let _ = writeln!(std::io::stdout().lock(), "{} {token}", loopback.addr);
+        let _ = writeln!(std::io::stdout().lock(), "{}", loopback.addr);
     }
     loop {
         std::thread::park();
@@ -836,12 +862,9 @@ fn park_headless(loopback: &server::Loopback, token: &str) -> ! {
 
 /// Build the window and hand the thread to AppKit. Returns once the app has
 /// terminated.
-#[allow(clippy::too_many_arguments)]
 fn run_windowed(
     loopback: &server::Loopback,
-    tokens: &server::CapabilityTokens,
-    module: &wasm::Module,
-    launch_nonce: &str,
+    launch: WindowLaunch<'_>,
     invocation: &cli::Invocation,
     support_dir: &Path,
     website_data_store_id: Option<&str>,
@@ -875,13 +898,13 @@ fn run_windowed(
         frame,
         webview::Origin {
             url: &url,
-            token: &tokens.browser,
-            game_publisher_token: &tokens.game_publisher,
-            launch_nonce,
+            token: &launch.tokens.browser,
+            game_publisher_token: &launch.tokens.game_publisher,
+            launch_nonce: launch.nonce,
             website_data_store_id,
         },
         &loopback.settings.get(),
-        module,
+        launch.module,
         invocation,
     );
     let window = window::open(
@@ -1069,32 +1092,61 @@ impl ClientSync<'_> {
 /// process started.
 fn session_token() -> String {
     use std::fmt::Write as _;
-    let mut bytes = [0u8; 32];
-    getrandom(&mut bytes);
-    bytes.iter().fold(String::with_capacity(64), |mut out, b| {
-        let _ = write!(out, "{b:02x}");
-        out
-    })
+    loop {
+        let mut bytes = [0u8; 32];
+        getrandom(&mut bytes);
+        let mut token = bytes.iter().fold(String::with_capacity(64), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        });
+        crate::log::wipe(&mut bytes);
+        if !crate::log::contains_secret(token.as_bytes()) {
+            return token;
+        }
+        crate::log::wipe_string(&mut token);
+    }
 }
 
 /// Hand explicitly requested capabilities to a supervising process without a
 /// terminal, environment value, URL, file, or report ever containing them.
-fn publish_control_tokens(tokens: &server::CapabilityTokens) {
-    use std::io::Write as _;
+fn control_pipe() -> Option<std::fs::File> {
     use std::os::fd::FromRawFd as _;
 
-    let Some(fd) = std::env::var("GWNATIVE_CONTROL_FD")
+    let fd = std::env::var("GWNATIVE_CONTROL_FD")
+        .ok()?
+        .parse::<i32>()
         .ok()
-        .and_then(|value| value.parse::<i32>().ok())
-        .filter(|fd| *fd > 2)
-    else {
-        return;
-    };
-    // SAFETY: the opt-in contract is an inherited, uniquely owned descriptor.
-    // Taking ownership closes the child copy immediately after this one write.
-    let mut pipe = unsafe { std::fs::File::from_raw_fd(fd) };
+        .filter(|fd| *fd > 2)?;
+    if !is_anonymous_pipe(fd) {
+        return None;
+    }
+    // SAFETY: validation happened at process start, before another open could
+    // reuse a stale number, and the opt-in inherited pipe is uniquely owned by
+    // this child. Ownership closes the child end immediately after publishing.
+    Some(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+fn is_anonymous_pipe(fd: i32) -> bool {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `stat` is writable and a successful fstat proves both that the
+    // descriptor is live and that the structure was initialized.
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let stat = unsafe { stat.assume_init() };
+    stat.st_mode & libc::S_IFMT == libc::S_IFIFO && stat.st_nlink == 0
+}
+
+fn publish_control_tokens(
+    mut pipe: Option<std::fs::File>,
+    tokens: &server::CapabilityTokens,
+    launch_nonce: &str,
+) {
+    use std::io::Write as _;
+    let Some(pipe) = pipe.as_mut() else { return };
     let _ = writeln!(pipe, "browser {}", tokens.browser);
     let _ = writeln!(pipe, "game-reader {}", tokens.game_reader);
+    let _ = writeln!(pipe, "launch-nonce {launch_nonce}");
 }
 
 fn getrandom(buffer: &mut [u8]) {
@@ -1113,6 +1165,18 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_channel_accepts_only_a_live_anonymous_pipe() {
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        assert!(is_anonymous_pipe(fds[1]));
+        assert!(!is_anonymous_pipe(-1));
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
 
     #[test]
     fn unchanged_client_artifacts_activate_pending_snapshot_metadata() {
