@@ -186,6 +186,60 @@ pub struct Credentials {
     pub password: String,
 }
 
+impl Credentials {
+    pub fn new(username: String, password: String) -> Self {
+        let credentials = Self { username, password };
+        credentials.remember();
+        credentials
+    }
+
+    fn remember(&self) {
+        crate::log::remember(&self.username);
+        crate::log::remember(&self.password);
+    }
+}
+
+impl Drop for Credentials {
+    fn drop(&mut self) {
+        // Strings keep their initialized bytes inside their allocation; wiping
+        // the visible range is the strongest guarantee available before Rust
+        // releases that allocation.
+        unsafe {
+            crate::log::wipe(self.username.as_mut_vec());
+            crate::log::wipe(self.password.as_mut_vec());
+        }
+    }
+}
+
+/// A raw or serialized credential allocation, wiped on every return path.
+#[derive(Default)]
+pub struct SecretBuffer(Vec<u8>);
+
+impl SecretBuffer {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl AsRef<[u8]> for SecretBuffer {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for SecretBuffer {
+    fn drop(&mut self) {
+        crate::log::wipe(&mut self.0);
+        #[cfg(test)]
+        WIPED.with(|count| count.set(count.get() + 1));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static WIPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Bound well above any real account name or password. A caller that sends more
 /// is confused about what this stores, and the keychain is not the place to find
 /// out how large an item it will take.
@@ -288,17 +342,39 @@ impl Vault for System<'_> {
     }
 }
 
+fn offered() -> &'static Mutex<Option<Credentials>> {
+    static OFFERED: OnceLock<Mutex<Option<Credentials>>> = OnceLock::new();
+    OFFERED.get_or_init(|| Mutex::new(None))
+}
+
+/// Put invocation-only credentials behind the same one-shot route as Keychain.
+pub fn offer(credentials: Credentials) {
+    *offered().lock().unwrap_or_else(|e| e.into_inner()) = Some(credentials);
+}
+
 pub fn load(account: &str) -> Option<Credentials> {
-    load_from(&System(account))
+    offered()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .or_else(|| load_from(&System(account)))
 }
 
 pub fn store(account: &str, credentials: &Credentials) -> Result<(), String> {
+    credentials.remember();
     store_in(&System(account), credentials)
+}
+
+pub fn encode(credentials: &Credentials) -> Result<SecretBuffer, String> {
+    serde_json::to_vec(credentials)
+        .map(SecretBuffer::new)
+        .map_err(|error| error.to_string())
 }
 
 /// Deleting what was never there is the caller's intended end state, so a
 /// missing item is not an error worth reporting.
 pub fn clear(account: &str) -> Result<(), String> {
+    *offered().lock().unwrap_or_else(|e| e.into_inner()) = None;
     clear_in(&System(account))
 }
 
@@ -312,7 +388,7 @@ fn clear_in(vault: &impl Vault) -> Result<(), String> {
 
 fn load_from(vault: &impl Vault) -> Option<Credentials> {
     let raw = match vault.get() {
-        Ok(raw) => raw,
+        Ok(raw) => SecretBuffer::new(raw),
         Err(e) => {
             match Denial::of(&e) {
                 // A first run. The ordinary state, and nothing to say about it.
@@ -333,8 +409,11 @@ fn load_from(vault: &impl Vault) -> Option<Credentials> {
             return None;
         }
     };
-    match serde_json::from_slice::<Credentials>(&raw) {
-        Ok(credentials) => Some(credentials),
+    match serde_json::from_slice::<Credentials>(raw.as_ref()) {
+        Ok(credentials) => {
+            credentials.remember();
+            Some(credentials)
+        }
         // An item that will not parse is one this app cannot use, and leaving it
         // in place would fail the same way on every launch.
         Err(e) => {
@@ -349,8 +428,9 @@ fn store_in(vault: &impl Vault, credentials: &Credentials) -> Result<(), String>
     if credentials.username.len() > MAX_FIELD || credentials.password.len() > MAX_FIELD {
         return Err("credentials are too long to store".into());
     }
-    let encoded = serde_json::to_vec(credentials).map_err(|e| e.to_string())?;
-    match vault.set(&encoded) {
+    credentials.remember();
+    let encoded = encode(credentials)?;
+    match vault.set(encoded.as_ref()) {
         Ok(()) => Ok(()),
         // Saving over an existing item is an update, and an update asks the
         // same permission a read does. So an item left by a differently signed
@@ -366,7 +446,7 @@ fn store_in(vault: &impl Vault, credentials: &Credentials) -> Result<(), String>
         // say is what to remove by hand.
         Err(e) if Denial::of(&e).is_some() => {
             vault.delete().map_err(|e| by_hand(&e))?;
-            vault.set(&encoded).map_err(|e| by_hand(&e))
+            vault.set(encoded.as_ref()).map_err(|e| by_hand(&e))
         }
         Err(e) => Err(e.to_string()),
     }
@@ -459,6 +539,48 @@ mod tests {
         Credentials {
             username: "player@example.com".into(),
             password: "not a real one".into(),
+        }
+    }
+
+    fn reset_wiped() {
+        WIPED.with(|count| count.set(0));
+    }
+
+    fn wiped() -> usize {
+        WIPED.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn serialized_buffers_are_wiped_on_success_and_every_update_exit() {
+        let cases = [
+            Fake::default(),
+            Fake::refusing(&[-50]),
+            Fake::refusing(&[AUTH_FAILED, AUTH_FAILED]),
+            Fake {
+                delete_answer: Some(AUTH_FAILED),
+                ..Fake::refusing(&[AUTH_FAILED])
+            },
+        ];
+        for vault in cases {
+            reset_wiped();
+            let _ = store_in(&vault, &credentials());
+            assert_eq!(wiped(), 1, "one serialized owner on every exit");
+        }
+    }
+
+    #[test]
+    fn raw_keychain_buffers_are_wiped_after_parse_success_and_failure() {
+        for item in [
+            serde_json::to_vec(&credentials()).unwrap(),
+            b"not credential json".to_vec(),
+        ] {
+            reset_wiped();
+            let vault = Fake {
+                item: RefCell::new(Some(item)),
+                ..Fake::default()
+            };
+            drop(load_from(&vault));
+            assert_eq!(wiped(), 1, "one raw keychain owner on every exit");
         }
     }
 

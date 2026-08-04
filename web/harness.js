@@ -10,6 +10,23 @@ var Module;
 
 const LOG_LINES = 400;
 const logBuf = [];
+const protectedDiagnostics = new Set(
+  [window.__gwnativeToken, window.__gwnativeGamePublisherToken]
+    .filter((value) => typeof value === 'string' && value !== ''),
+);
+const protectCredentials = (credentials) => {
+  for (const value of [credentials?.username, credentials?.password]) {
+    if (typeof value === 'string' && value !== '') protectedDiagnostics.add(value);
+  }
+  return credentials;
+};
+const scrubDiagnostic = (value) => {
+  let text = String(value);
+  for (const protectedValue of protectedDiagnostics) {
+    text = text.replaceAll(protectedValue, '<redacted>');
+  }
+  return text;
+};
 let client;
 let frameAudit = null;
 let firstFramePresented = false;
@@ -30,7 +47,7 @@ window.gwFlushBootProof = async () => {
 const pending = [];
 let flushTimer = 0;
 const forward = (line) => {
-  pending.push(line);
+  pending.push(scrubDiagnostic(line));
   if (flushTimer) return;
   flushTimer = setTimeout(() => {
     flushTimer = 0;
@@ -51,9 +68,9 @@ const forward = (line) => {
 for (const level of ['log', 'warn', 'error']) {
   const original = console[level].bind(console);
   console[level] = (...values) => {
-    original(...values);
-    forward(level === 'log' ? values.map(String).join(' ')
-                            : `[${level}] ${values.map(String).join(' ')}`);
+    const scrubbed = values.map(scrubDiagnostic);
+    original(...scrubbed);
+    forward(level === 'log' ? scrubbed.join(' ') : `[${level}] ${scrubbed.join(' ')}`);
   };
 }
 window.addEventListener('error', (e) => forward(`[uncaught] ${e.message} @ ${e.filename}:${e.lineno}`));
@@ -345,7 +362,7 @@ const credentials = (method, body) => {
 /// with "Remember Account Name" ticked and nothing in the field. Started at load
 /// it is minutes early instead.
 let saved = launchOptions.credentials
-  ? Promise.resolve({ ...launchOptions.credentials })
+  ? Promise.resolve(protectCredentials({ ...launchOptions.credentials }))
   : null;
 
 const readSaved = () => {
@@ -354,7 +371,7 @@ const readSaved = () => {
     // saved" is a value worth caching, and a first launch legitimately has it.
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`credential read failed: ${response.status}`);
-    return response.json();
+    return response.json().then(protectCredentials);
   });
   return saved;
 };
@@ -563,6 +580,7 @@ Module = {
       return stored;
     },
     async storeCredentials(username, password) {
+      protectCredentials({ username, password });
       const response = await credentials('PUT', { username, password });
       if (!response.ok) throw new Error(await response.text());
       // Held rather than re-read: the host now has exactly this, and a client

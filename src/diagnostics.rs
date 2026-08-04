@@ -412,7 +412,10 @@ impl Recorder {
     /// Append one record. Failures are silent past the first: diagnostics that
     /// can interrupt the thing they are measuring are worse than none.
     pub fn write(&self, record: &serde_json::Value) {
-        let mut line = record.to_string();
+        // The page is handed credentials by the official login contract, so
+        // arbitrary page text is not a safe diagnostic merely because it
+        // crossed the loopback boundary. Scrub before the raw JSONL exists.
+        let mut line = crate::log::redact(&record.to_string());
         line.push('\n');
         let mut slot = self.file.lock().unwrap();
         // Reopened rather than held across a rotation, and checked by length
@@ -726,6 +729,25 @@ mod tests {
 
         let line = records(&dir.0)[0]["line"].as_str().unwrap().to_owned();
         assert_eq!(line.chars().count(), MAX_PAGE_LINE_LEN);
+    }
+
+    #[test]
+    fn active_credentials_are_scrubbed_before_jsonl() {
+        let dir = TempDir::new("diag-secret");
+        let recorder = Recorder::open(dir.0.clone());
+        crate::log::remember("console-canary-credential");
+        recorder.page(
+            "console console-canary-credential\nprintErr console-canary-credential\n\
+             exception console-canary-credential",
+        );
+        recorder.write(&serde_json::json!({
+            "kind": "response",
+            "body": "console-canary-credential"
+        }));
+
+        let body = fs::read_to_string(dir.0.join("gwnative.jsonl")).unwrap();
+        assert!(!body.contains("console-canary-credential"), "{body}");
+        assert_eq!(body.matches("<redacted>").count(), 4);
     }
 
     /// One test rather than two, because [`BURST`] is process-wide and two tests

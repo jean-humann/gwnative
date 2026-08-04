@@ -424,6 +424,8 @@ def launch(
     stages: list[Stage],
     seconds: float,
     before_stop=None,
+    pass_fds: tuple[int, ...] = (),
+    parent_close_fds: tuple[int, ...] = (),
 ) -> None:
     """Start the build, watch it for `seconds`, then stop it.
 
@@ -445,7 +447,10 @@ def launch(
         # that leaves a web content process behind would keep holding the
         # scratch home open, and the disk reading would be taken mid-write.
         start_new_session=True,
+        pass_fds=pass_fds,
     )
+    for fd in parent_close_fds:
+        os.close(fd)
 
     def read() -> None:
         assert process.stdout is not None
@@ -544,26 +549,32 @@ GWNATIVE_STAGES = [
     Stage("first frame", re.compile(r"first frame presented")),
 ]
 
-# `[gwnative] serving <root> at http://127.0.0.1:38112/index.html`, and on the
-# next line `[gwnative] session token <hex>`. Both are stderr, and the token one
-# only appears when a benchmark has asked for it.
+# `[gwnative] serving <root> at http://127.0.0.1:38112/index.html`. The address
+# is public process state; the capability arrives only through an inherited
+# private pipe and can never enter the captured timeline or JSON report.
 ADDRESS = re.compile(r"serving .* at (https?://[^/]+)/")
-TOKEN = re.compile(r"session token ([0-9a-f]{16,})")
 
 
-def read_diag(run: Run) -> None:
+def read_diag(run: Run, control_fd: int) -> None:
     """Ask the host for its own account of the session.
 
     `__diag` is behind the session token, which is how a loopback port on a
-    machine-wide address stays private. `GWNATIVE_PRINT_TOKEN` is the deliberate
-    hole for exactly this, and nothing but a benchmark ever sets it.
+    machine-wide address stays private. The inherited descriptor is an
+    explicit supervisor channel, not a log or environment-carried secret.
     """
-    origin = token = None
+    origin = None
     for _, line in run.lines:
         origin = origin or (ADDRESS.search(line).group(1) if ADDRESS.search(line) else None)
-        token = token or (TOKEN.search(line).group(1) if TOKEN.search(line) else None)
+    try:
+        control = os.read(control_fd, 4096).decode(errors="strict")
+    except (BlockingIOError, OSError, UnicodeError):
+        control = ""
+    token = next(
+        (line.removeprefix("browser ") for line in control.splitlines() if line.startswith("browser ")),
+        None,
+    )
     if not origin or not token:
-        run.notes.append("no address or token was printed; __diag not read")
+        run.notes.append("no address or private control capability; __diag not read")
         return
 
     request = urllib.request.Request(f"{origin}/__diag", headers={"X-Gwnative-Token": token})
@@ -607,7 +618,9 @@ def run_gwnative(root: Path, seconds: float, warm: bool = False) -> Run:
         )
 
     env = dict(os.environ)
-    env["GWNATIVE_PRINT_TOKEN"] = "1"
+    control_read, control_write = os.pipe()
+    os.set_blocking(control_read, False)
+    env["GWNATIVE_CONTROL_FD"] = str(control_write)
     argv = [str(binary)]
     if warm:
         # The real home, deliberately: the whole point of the warm route is the
@@ -625,7 +638,23 @@ def run_gwnative(root: Path, seconds: float, warm: bool = False) -> Run:
         env["HOME"] = str(home)
 
     run = Run("gwnative", home, argv)
-    launch(run, REPO, env, GWNATIVE_STAGES, seconds, before_stop=lambda: read_diag(run))
+    try:
+        launch(
+            run,
+            REPO,
+            env,
+            GWNATIVE_STAGES,
+            seconds,
+            before_stop=lambda: read_diag(run, control_read),
+            pass_fds=(control_write,),
+            parent_close_fds=(control_write,),
+        )
+    finally:
+        for fd in (control_read, control_write):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     # Not on the warm route. The number means "what a blank install wrote", and
     # the same walk over a real home would measure years of unrelated files.
     if not warm:

@@ -46,8 +46,13 @@ pub enum WindowMode {
 pub struct Secret(Vec<u8>);
 
 impl Secret {
-    pub fn expose(&self) -> Option<&str> {
+    #[cfg(test)]
+    fn expose(&self) -> Option<&str> {
         std::str::from_utf8(&self.0).ok()
+    }
+
+    fn take(&mut self) -> Option<String> {
+        String::from_utf8(std::mem::take(&mut self.0)).ok()
     }
 }
 
@@ -142,6 +147,19 @@ impl Default for Invocation {
 }
 
 impl Invocation {
+    /// Move invocation-only credentials to the protected host route.
+    ///
+    /// They must not be serialized into the document-start launch JSON: a
+    /// `WKUserScript` is retained for the lifetime of the web view and every
+    /// later navigation. The page already fetches saved credentials from the
+    /// one-shot host capability, so invocation credentials use that path too.
+    pub fn take_credentials(&mut self) -> Option<(String, String)> {
+        let username = self.legacy.email.take()?;
+        let password = self.legacy.password.as_mut()?.take()?;
+        self.legacy.password = None;
+        Some((username, password))
+    }
+
     /// Whether this launch may schedule automatic client/application refreshes.
     /// Manual checks remain an explicit player action.
     pub fn automatic_updates_allowed(&self) -> bool {
@@ -167,20 +185,8 @@ impl Invocation {
     /// loopback origin. Native filesystem locations and host ports stay on the
     /// Rust side.
     pub fn client_json(&self) -> serde_json::Value {
-        let credentials = self
-            .legacy
-            .email
-            .as_ref()
-            .zip(self.legacy.password.as_ref().and_then(Secret::expose))
-            .map(|(username, password)| {
-                serde_json::json!({
-                    "username": username,
-                    "password": password,
-                })
-            });
         serde_json::json!({
             "profile": self.profile.as_deref().unwrap_or("default"),
-            "credentials": credentials,
             "fps": self.legacy.fps,
             "mute": self.legacy.mute,
             "diagnostics": self.legacy.diagnostics,
@@ -866,7 +872,7 @@ mod tests {
 
     #[test]
     fn official_credentials_and_character_are_retained_but_redacted() {
-        let parsed = parse_str(&[
+        let mut parsed = parse_str(&[
             "-autologin",
             "-email",
             "player@example.test",
@@ -884,12 +890,16 @@ mod tests {
         assert!(parsed.notices.iter().any(|notice| {
             notice.option == "-autologin" && notice.kind == NoticeKind::Unsupported
         }));
-        let client = parsed.client_json();
-        assert!(client.get("autologin").is_none());
-        assert!(client.get("mockSteamDeck").is_none());
         let debug = format!("{parsed:?}");
         assert!(!debug.contains("hunter2"));
         assert!(debug.contains("<redacted>"));
+        let client = parsed.client_json();
+        assert!(client.get("credentials").is_none());
+        let credentials = parsed.take_credentials().unwrap();
+        assert_eq!(credentials.0, "player@example.test");
+        assert_eq!(credentials.1, "hunter2");
+        assert!(client.get("autologin").is_none());
+        assert!(client.get("mockSteamDeck").is_none());
     }
 
     #[test]
@@ -905,7 +915,7 @@ mod tests {
                     .iter()
                     .any(|notice| notice.kind == NoticeKind::Unsupported)
             );
-            assert!(parsed.client_json()["credentials"].is_null());
+            assert!(parsed.client_json().get("credentials").is_none());
         }
     }
 

@@ -73,7 +73,7 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 fn main() {
     // Before anything is opened, downloaded or locked: a question about this
     // executable deserves an answer and not a launch.
-    let invocation = match cli::parse(std::env::args_os().skip(1)) {
+    let mut invocation = match cli::parse(std::env::args_os().skip(1)) {
         Ok(invocation) => invocation,
         Err(exit) => {
             let out: &mut dyn std::io::Write = if exit.failed {
@@ -85,6 +85,9 @@ fn main() {
             std::process::exit(i32::from(exit.failed) * 2);
         }
     };
+    if let Some((username, password)) = invocation.take_credentials() {
+        keychain::offer(keychain::Credentials::new(username, password));
+    }
     for notice in &invocation.notices {
         note!(
             "[gwnative] {}: {} ({:?})",
@@ -352,6 +355,9 @@ fn main() {
         game_reader: session_token(),
         game_publisher: session_token(),
     };
+    crate::log::remember(&tokens.browser);
+    crate::log::remember(&tokens.game_reader);
+    crate::log::remember(&tokens.game_publisher);
     let loopback = match server::spawn(server::Config {
         root: root.clone(),
         shell_root,
@@ -380,18 +386,7 @@ fn main() {
         root.display(),
         loopback.addr
     );
-    // The windowed app keeps its token to itself — it reaches the page over the
-    // injection channel and nowhere else. But every measurement worth taking
-    // lives behind that gate on `__diag`, and a benchmark that cannot read it
-    // is a benchmark of nothing. So: on request, and only on request.
-    if std::env::var_os("GWNATIVE_PRINT_TOKEN").is_some() {
-        note!("[gwnative] session token {}", tokens.browser);
-    }
-    // External state consumers receive no credential, settings, diagnostics,
-    // process-control, or publication authority.
-    if std::env::var_os("GWNATIVE_PRINT_GAME_TOKEN").is_some() {
-        note!("[gwnative] game API read token {}", tokens.game_reader);
-    }
+    publish_control_tokens(&tokens);
 
     if headless {
         park_headless(&loopback, &tokens.browser);
@@ -1053,6 +1048,26 @@ fn session_token() -> String {
         let _ = write!(out, "{b:02x}");
         out
     })
+}
+
+/// Hand explicitly requested capabilities to a supervising process without a
+/// terminal, environment value, URL, file, or report ever containing them.
+fn publish_control_tokens(tokens: &server::CapabilityTokens) {
+    use std::io::Write as _;
+    use std::os::fd::FromRawFd as _;
+
+    let Some(fd) = std::env::var("GWNATIVE_CONTROL_FD")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|fd| *fd > 2)
+    else {
+        return;
+    };
+    // SAFETY: the opt-in contract is an inherited, uniquely owned descriptor.
+    // Taking ownership closes the child copy immediately after this one write.
+    let mut pipe = unsafe { std::fs::File::from_raw_fd(fd) };
+    let _ = writeln!(pipe, "browser {}", tokens.browser);
+    let _ = writeln!(pipe, "game-reader {}", tokens.game_reader);
 }
 
 fn getrandom(buffer: &mut [u8]) {

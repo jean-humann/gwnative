@@ -82,7 +82,10 @@ fn compose(dir: &Path, profile: &settings::Settings, now: u64) -> String {
                 let _ = writeln!(out, "  ({tail} earlier records not included)");
             }
             for line in &lines[tail..] {
-                let _ = writeln!(out, "{}", redact(line));
+                // Active-value redaction covers credentials and capabilities;
+                // the shape-based pass remains useful for an older log whose
+                // account is no longer active in this process.
+                let _ = writeln!(out, "{}", redact(&crate::log::redact(line)));
             }
         }
         // Said in the report rather than refused: everything above it is still
@@ -207,6 +210,21 @@ mod tests {
             redact(r#"{"kind":"page","line":"account: a@b.com"}"#),
             format!(r#"{{"kind":"page","line":"account: {REDACTED}"}}"#)
         );
+    }
+
+    #[test]
+    fn an_active_non_email_secret_does_not_reach_an_export() {
+        let dir = TempDir::new("report-active-secret");
+        crate::log::remember("report-canary-password");
+        fs::write(
+            dir.0.join("gwnative.jsonl"),
+            r#"{"kind":"page","line":"report-canary-password"}"#,
+        )
+        .unwrap();
+
+        let text = compose(&dir.0, &settings::Settings::default(), 0);
+        assert!(!text.contains("report-canary-password"), "{text}");
+        assert!(text.contains(REDACTED), "{text}");
     }
 
     #[test]
