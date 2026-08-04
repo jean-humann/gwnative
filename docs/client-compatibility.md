@@ -26,6 +26,12 @@ therefore remain explicitly blocked until an authorized self-hosted canary runs
 automatic JSPI and forced Asyncify on the exact release commit. A release must
 not infer those cells from macOS 26 results.
 
+The canary evaluates the production `client-runtime.js` selector in a real,
+nonpersistent `WKWebView`. It requires the functional suspend/resume probe to return 42,
+requires automatic selection to choose JSPI, and separately requires the
+forced path to choose Asyncify. This is browser-runtime evidence without an
+ArenaNet client download, login, or gameplay automation.
+
 `lastEvidence` stays `null` until the named command or workflow actually runs.
 The matrix describes required proof; its presence is not itself a pass.
 

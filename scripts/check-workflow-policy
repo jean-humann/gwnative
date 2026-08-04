@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Enforce runner evidence, action pins, and disjoint release authorities."""
+
+from __future__ import annotations
+
+import copy
+import re
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+WORKFLOWS = ROOT / ".github/workflows"
+ACTIONLINT = ROOT / ".github/actionlint.yaml"
+PINNED_USE = re.compile(r"(?m)^\s*-?\s*uses:\s*[^\s@]+@([0-9a-f]{40})(?:\s|$)")
+ANY_USE = re.compile(r"(?m)^\s*-?\s*uses:\s*([^\s#]+)")
+APP_SECRETS = {
+    "APPLE_DEVELOPER_ID_APPLICATION_P12",
+    "APPLE_DEVELOPER_ID_PASSWORD",
+    "APPLE_NOTARY_KEY_ID",
+    "APPLE_NOTARY_KEY_ISSUER",
+    "APPLE_NOTARY_KEY_P8",
+    "SPARKLE_PRIVATE_KEY",
+}
+
+
+class WorkflowError(RuntimeError):
+    pass
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise WorkflowError(message)
+
+
+def load() -> dict[str, str]:
+    return {path.name: path.read_text() for path in sorted(WORKFLOWS.glob("*.yml"))}
+
+
+def validate(workflows: dict[str, str]) -> None:
+    required = {"ci.yml", "release.yml", "certify.yml", "macos-27-canary.yml"}
+    require(required <= workflows.keys(), "required hardening workflow is missing")
+    require(
+        ACTIONLINT.read_text()
+        == "self-hosted-runner:\n  labels: [gwnative-macos-27]\nconfig-variables: null\n",
+        "actionlint must recognize only the authorized custom runner label",
+    )
+
+    for name, content in workflows.items():
+        uses = ANY_USE.findall(content)
+        pins = PINNED_USE.findall(content)
+        require(len(uses) == len(pins), f"{name} contains an action not pinned to a commit SHA")
+
+    release = workflows["release.yml"]
+    require("CERTIFICATE_PRIVATE_KEY" not in release, "release workflow has certificate authority")
+    require("macos_27_gate:" in release, "release workflow has no macOS 27 preflight")
+    require("needs: macos_27_gate" in release, "release job bypasses the macOS 27 preflight")
+    require("actions/workflows/macos-27-canary.yml/runs" in release, "preflight does not query the exact canary workflow")
+    require(".head_sha == $sha" in release, "preflight does not bind the canary to the release commit")
+    require('.conclusion == "success"' in release, "preflight does not require a successful canary")
+    require("environment: release" in release, "release secrets lack their environment gate")
+
+    certificate = workflows["certify.yml"]
+    for secret in APP_SECRETS:
+        require(secret not in certificate, f"certificate workflow gained app release secret {secret}")
+    require("CERTIFICATE_PRIVATE_KEY" in certificate, "certificate workflow lost its isolated key")
+    require("environment: certificate-publishing" in certificate, "certificate signer lacks its environment gate")
+
+    canary = workflows["macos-27-canary.yml"]
+    require("workflow_dispatch:" in canary, "macOS 27 canary is not manually authorized")
+    require("environment: macos-27-canary" in canary, "macOS 27 canary lacks its environment gate")
+    require("[self-hosted, macOS, ARM64, gwnative-macos-27]" in canary, "macOS 27 canary has the wrong runner labels")
+    require("secrets." not in canary, "macOS 27 canary must not receive secrets")
+    require("scripts/check-support-matrix" in canary, "macOS 27 canary skips the evidence contract")
+
+    ci = workflows["ci.yml"]
+    require("runs-on: macos-15" in ci, "CI omits the deployment-floor runner")
+    require("runs-on: macos-26" in ci, "CI omits the current hosted runner")
+    require("scripts/check-support-matrix" in ci, "CI skips the support matrix contract")
+
+
+def expect_rejected(workflows: dict[str, str], name: str, replacement: str) -> None:
+    bad = copy.deepcopy(workflows)
+    bad[name] = replacement
+    try:
+        validate(bad)
+    except WorkflowError:
+        return
+    raise WorkflowError(f"self-test accepted unsafe {name}")
+
+
+def self_test(workflows: dict[str, str]) -> None:
+    validate(workflows)
+    expect_rejected(
+        workflows,
+        "release.yml",
+        workflows["release.yml"].replace("needs: macos_27_gate", "needs: []", 1),
+    )
+    expect_rejected(
+        workflows,
+        "certify.yml",
+        workflows["certify.yml"] + "\n# SPARKLE_PRIVATE_KEY\n",
+    )
+    expect_rejected(
+        workflows,
+        "macos-27-canary.yml",
+        workflows["macos-27-canary.yml"].replace("gwnative-macos-27", "macos-27", 1),
+    )
+
+
+def main(arguments: list[str]) -> int:
+    require(arguments in ([], ["--self-test"]), "usage: scripts/check-workflow-policy [--self-test]")
+    workflows = load()
+    validate(workflows)
+    if arguments:
+        self_test(workflows)
+    print(f"workflow policy: {len(workflows)} pinned, authority-separated workflows ok")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except (OSError, WorkflowError) as error:
+        print(f"workflow policy: {error}", file=sys.stderr)
+        raise SystemExit(1)

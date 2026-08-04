@@ -59,6 +59,34 @@ jobs:
       - name: Distribution policy
         run: python3 scripts/check-distribution --self-test
 
+      - name: Support matrix and workflow authority policy
+        run: |
+          scripts/check-support-matrix
+          scripts/check-workflow-policy --self-test
+
+  deployment-floor:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Deployment-floor native suite
+        run: cargo test --locked
+
+      - name: Forced Asyncify and rendering probes
+        run: |
+          node --test web/client-runtime.test.js web/presentation-barrier.test.js
+          swift scripts/webkit-runtime-probe.swift
+
+      - name: Build at the declared floor
+        run: |
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' packaging/Info.plist)" = 15.2
+          cargo build --locked --release
+
   check:
     # Apple Silicon, and the newest image GitHub offers. Both halves matter.
     #
@@ -111,6 +139,9 @@ jobs:
       - name: Documentation
         run: python3 scripts/check-docs
 
+      - name: Support matrix
+        run: scripts/check-support-matrix
+
       - name: Maintenance scripts
         run: scripts/check-scripts
 
@@ -132,7 +163,9 @@ jobs:
       # pull request should not fail because GitHub was rate limiting the
       # runner's shared address.
       - name: Tests
-        run: cargo test
+        run: |
+          cargo test
+          swift scripts/webkit-runtime-probe.swift
 
       # The release profile is a different compilation — fat LTO, one codegen
       # unit, panic=abort — and it is the one that gets published. A warning
@@ -153,6 +186,7 @@ jobs:
           test -f "dist/Guild Wars.app/Contents/Resources/LICENSE"
           test -f "dist/Guild Wars.app/Contents/Resources/NOTICE.md"
           test -f "dist/Guild Wars.app/Contents/Resources/THIRD-PARTY-NOTICES.md"
+          test -f "dist/Guild Wars.app/Contents/Resources/gwnative.cdx.json"
           test -f "dist/Guild Wars.app/Contents/MacOS/gwnative"
           python3 scripts/check-distribution "dist/Guild Wars.app"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
