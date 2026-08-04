@@ -1,66 +1,27 @@
 #!/usr/bin/env python3
-"""Run both builds from a blank install and print what each one costs.
+"""Run a hermetic, alternating performance protocol for both builds.
 
-The comparison this repo exists to make has been argued from readings taken at
-different times, on different machines, against caches in different states. This
-takes both readings in one go, on one machine, minutes apart, from the same
-starting point — which is the only version of the measurement worth quoting.
+Blank mode creates a fresh named gwnative profile (and therefore a unique
+Keychain account), a non-persistent WebKit store, and a fresh Chromium
+``--user-data-dir`` for every round. Nothing discovers, reads, or mutates an
+installed profile.
 
-A blank install is simulated rather than performed, by different means for each,
-because the two find their data directories in different places.
+Warm mode is explicit: pass a prepared fixture directory containing
+``benchmark-source.json``. The runner hashes that fixture, copy-on-write clones
+it into the round's disposable directory, and refuses the result if bytes or
+mtimes in the source differ afterwards. It never infers an installed path.
 
-Everything gwnative writes hangs off `$HOME`:
-
-    ~/Library/Application Support/gwnative        settings, chunks, derived clients, diagnostics
-    ~/Library/WebKit/<bundle id>                  page storage
-
-so `HOME=<empty dir>` gives it a machine it has never seen. Chromium does not
-read `HOME` on macOS — it asks the password database — so the same trick does
-nothing to the reference build, which silently keeps using the real profile. Its
-equivalent is `--user-data-dir`, which every path it writes derives from, and
-which carries the single-instance lock with it: without that, a copy already
-open on the real profile makes the launch exit immediately, successfully, and
-without a word.
-
-Neither deletes anything. Both leave the real profiles untouched.
-
-The launcher's one question — stream the game image or download all 4.2 GB of
-it — is asked before either build renders anything, and a benchmark cannot
-click. Both are seeded with `dataStrategy: "quick"`, which is the answer that
-measures a first launch rather than a download.
-
-What is measured, and by whom:
-
-    from outside, symmetric      peak and final RSS across the whole process
-                                 tree, CPU seconds across the whole process
-                                 tree, process count, bytes written into the
-                                 scratch home, wall clock to each stage
-    from the build's own logs    everything each one instruments, quoted as it
-                                 reports it and not translated
-
-The outside numbers are the comparison. The inside numbers are each build's own
-account of itself, and the two builds do not instrument the same things — that
-asymmetry is reported, not hidden.
+At least five rounds per cell are mandatory. Two-build runs reverse execution
+order every round. Raw process samples, manifests, source/profile hashes, and
+derived statistics go to the required JSON file. First-frame values are not
+declared comparable unless both fixtures name the same controlled scene.
 
 Usage:
 
-    GWNATIVE_REFERENCE_ROOT=/path/to/reference scripts/benchmark
-                                         both builds, 90 seconds each
-    scripts/benchmark --seconds 180      longer window
-    scripts/benchmark --only gwnative    one of them
-    scripts/benchmark --only reference   the configured reference only
-    scripts/benchmark --keep             leave the scratch homes on disk
-    scripts/benchmark --json out.json    also write the raw readings
-    scripts/benchmark --warm             every launch after the first
-
-`--warm` measures the other launch. A blank install happens once and is mostly
-the CDN — on a bad afternoon the same code reads twice as slow, which makes the
-number a report on ArenaNet's weather rather than on either build. Every launch
-after the first reads what is already on disk, so it is the launch a player
-actually repeats, and it is the one both builds can be compared on regardless of
-the link. It runs against the real profiles, reads them and writes nothing, and
-takes the single-instance lock with it: a copy already open refuses the run
-rather than letting it measure a process that exited a moment after starting.
+    GWNATIVE_REFERENCE_ROOT=/path/to/reference scripts/benchmark --json raw.json
+    scripts/benchmark --only gwnative --json raw.json
+    scripts/benchmark --rounds 7 --seconds 180 --json raw.json
+    scripts/benchmark --warm-gwnative /approved/fixture --json raw.json
 """
 
 from __future__ import annotations
@@ -80,6 +41,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import benchmarklib
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -304,6 +267,16 @@ class Run:
     disowned: set[int] = field(default_factory=set)
     user_data: Path | None = None
     footprints: dict[int, tuple[str, int, int]] = field(default_factory=dict)
+    round_index: int = 0
+    order_position: int = 0
+    manifest: dict = field(default_factory=dict)
+    invalid: list[str] = field(default_factory=list)
+    profile_start: benchmarklib.TreeState | None = None
+    profile_end: benchmarklib.TreeState | None = None
+    source_start: benchmarklib.TreeState | None = None
+    source_end: benchmarklib.TreeState | None = None
+    source_clone_method: str | None = None
+    forbidden: list[str] = field(default_factory=list)
     #: Session logs that were already on disk before this launch, so a warm run
     #: on a real profile reads its own session and not every previous one.
     prior_sessions: set[Path] = field(default_factory=set)
@@ -355,6 +328,17 @@ class Run:
         for pid in survivors:
             self.footprints.pop(pid, None)
 
+        if self.app == "gwnative":
+            candidates = {
+                pid: process.name
+                for sample in self.samples
+                for pid, process in sample.processes.items()
+                if process.name in benchmarklib.WEBKIT_KINDS
+            }
+            self.invalid.extend(
+                benchmarklib.validate_webkit_attribution(candidates, survivors)
+            )
+
     def _total(self, sample: Sample) -> int:
         return sum(p.rss_bytes for p in sample.processes.values())
 
@@ -398,7 +382,7 @@ class Run:
         return dict(sorted(totals.items(), key=lambda kv: -kv[1]))
 
 
-def scratch_home(root: Path, app: str, settings_dir: str) -> Path:
+def scratch_home(root: Path, app: str, settings_dir: str, profile: str | None = None) -> Path:
     """An empty home, with the launcher's one question already answered."""
     home = root / app
     for part in (
@@ -410,6 +394,8 @@ def scratch_home(root: Path, app: str, settings_dir: str) -> Path:
     ):
         (home / part).mkdir(parents=True, exist_ok=True)
     settings = home / "Library/Application Support" / settings_dir
+    if profile:
+        settings = settings / "profiles" / profile
     settings.mkdir(parents=True, exist_ok=True)
     (settings / "settings.json").write_text(
         json.dumps({"formatVersion": 1, "dataStrategy": "quick"}) + "\n"
@@ -607,7 +593,7 @@ def read_diag(run: Run, control_fd: int) -> None:
         )
 
 
-def run_gwnative(root: Path, seconds: float, warm: bool = False) -> Run:
+def run_gwnative(root: Path, seconds: float, fixture: Path | None = None) -> Run:
     binary = REPO / "target/release/gwnative"
     if not binary.exists():
         raise SystemExit(
@@ -621,23 +607,29 @@ def run_gwnative(root: Path, seconds: float, warm: bool = False) -> Run:
     control_read, control_write = os.pipe()
     os.set_blocking(control_read, False)
     env["GWNATIVE_CONTROL_FD"] = str(control_write)
-    argv = [str(binary)]
-    if warm:
-        # The real home, deliberately: the whole point of the warm route is the
-        # chunk cache and the settings that are actually on this machine. Left
-        # alone otherwise — a launch reads them and a benchmark writes none.
-        home = Path.home()
-        # And through the runner, for the same reason. A warm launch reads the
-        # saved login out of the real keychain, and `cargo build` leaves an
-        # ad-hoc signature that the keychain treats as a different application —
-        # so an unsigned binary here stops the run dead behind a password
-        # dialog. `exec` keeps the pid, so the tree below is still this one.
-        argv = [str(REPO / "scripts/signed-run"), *argv]
+    clone = None
+    if fixture:
+        clone = benchmarklib.clone_declared_fixture(fixture, root / "home", "gwnative")
+        home = clone.destination
+        profile = clone.marker.get("profile")
+        if not isinstance(profile, str):
+            raise benchmarklib.Refusal("gwnative warm fixture needs a named profile")
+        benchmarklib.keychain_account(profile)
+        profile = benchmarklib.remap_gwnative_profile(home, profile)
     else:
-        home = scratch_home(root, "gwnative", "gwnative")
-        env["HOME"] = str(home)
+        profile = benchmarklib.profile_id()
+        home = scratch_home(root, "gwnative", "gwnative", profile)
+    env["HOME"] = str(home)
+    env["GWNATIVE_BENCHMARK_EPHEMERAL_WEBKIT"] = "1"
+    argv = [str(binary), "--profile", profile, "--new-instance"]
 
     run = Run("gwnative", home, argv)
+    run.profile_start = benchmarklib.tree_state(home)
+    if clone:
+        run.source_start = clone.source_start
+        run.source_clone_method = clone.method
+        run.manifest["sceneReadiness"] = clone.marker["sceneReadiness"]
+        run.forbidden = list(clone.marker.get("forbiddenCanaries") or [])
     try:
         launch(
             run,
@@ -655,10 +647,10 @@ def run_gwnative(root: Path, seconds: float, warm: bool = False) -> Run:
                 os.close(fd)
             except OSError:
                 pass
-    # Not on the warm route. The number means "what a blank install wrote", and
-    # the same walk over a real home would measure years of unrelated files.
-    if not warm:
-        run.disk_bytes = directory_bytes(home)
+    run.profile_end = benchmarklib.tree_state(home)
+    if clone:
+        run.source_end = benchmarklib.assert_unchanged(clone.source_start, fixture)
+    run.disk_bytes = directory_bytes(home)
     return run
 
 
@@ -754,7 +746,7 @@ def read_events(run: Run) -> None:
         run.notes.append("no first frame within the window")
 
 
-def run_reference(root: Path, seconds: float, warm: bool = False) -> Run:
+def run_reference(root: Path, seconds: float, fixture: Path | None = None) -> Run:
     reference = reference_root()
     electron = reference / "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
     if not electron.exists():
@@ -762,30 +754,11 @@ def run_reference(root: Path, seconds: float, warm: bool = False) -> Run:
     if not (reference / "build/main").exists():
         raise SystemExit(f"{reference}/build is missing — run `pnpm build` there first.")
 
-    # Not a scratch `HOME`, which this build never reads: Chromium takes the
-    # home directory from the password database rather than the environment, so
-    # `HOME=…` reaches the Rust build and is ignored by this one. `--user-data-dir`
-    # is the switch that does what the scratch home does — everything it writes
-    # is under `app.getPath("userData")`, and pointing that somewhere empty is a
-    # blank install. It also gives the run its own single-instance lock, so a
-    # copy already open on the real profile does not turn this launch into an
-    # immediate, silent, successful exit.
-    if warm:
-        # Named explicitly rather than left to default, for the reason above:
-        # the flag is what carries the single-instance lock, and a warm launch
-        # wants the real profile's lock — so a copy the player already has open
-        # refuses this run instead of quietly measuring a process that exited.
-        home = Path.home()
-        user_data = home / "Library/Application Support/Guild Wars"
-        if not user_data.is_dir():
-            raise SystemExit(
-                f"{user_data} is missing — the warm route measures a profile that has "
-                "already been used, and there is none here. Run the build once first."
-            )
-        # Nothing is written into it. On the blank route the settings file is
-        # seeded because the launcher's question has to be answered before
-        # anything renders; here it has already been answered, by the player,
-        # and the answer is part of what is being measured.
+    clone = None
+    if fixture:
+        user_data = root / "reference-user-data"
+        clone = benchmarklib.clone_declared_fixture(fixture, user_data, "reference")
+        home = root / "reference-home"
     else:
         home = root / "reference"
         user_data = home / "Guild Wars"
@@ -796,13 +769,21 @@ def run_reference(root: Path, seconds: float, warm: bool = False) -> Run:
 
     run = Run("reference", home, [str(electron), ".", f"--user-data-dir={user_data}"])
     run.user_data = user_data
+    run.profile_start = benchmarklib.tree_state(user_data)
+    if clone:
+        run.source_start = clone.source_start
+        run.source_clone_method = clone.method
+        run.manifest["sceneReadiness"] = clone.marker["sceneReadiness"]
+        run.forbidden = list(clone.marker.get("forbiddenCanaries") or [])
     diagnostics = user_data / "diagnostics"
     if diagnostics.is_dir():
         run.prior_sessions = set(diagnostics.glob("session-*.jsonl"))
     launch(run, reference, dict(os.environ), [], seconds)
     read_events(run)
-    if not warm:
-        run.disk_bytes = directory_bytes(user_data)
+    run.profile_end = benchmarklib.tree_state(user_data)
+    if clone:
+        run.source_end = benchmarklib.assert_unchanged(clone.source_start, fixture)
+    run.disk_bytes = directory_bytes(user_data)
     return run
 
 
@@ -813,6 +794,155 @@ def run_reference(root: Path, seconds: float, warm: bool = False) -> Run:
 
 def mib(value: float) -> str:
     return f"{value / MIB:,.0f}"
+
+
+RUNTIME_LINE = re.compile(r"client runtime:\s*(jspi|asyncify)", re.I)
+
+
+def artifact_hashes(run: Run) -> dict[str, str]:
+    """Hashes only: official bytes never enter the result artifact."""
+    paths: dict[str, Path] = {"application": Path(run.argv[0])}
+    root = run.user_data or run.home
+    for path in root.rglob("*"):
+        if path.is_file() and path.name in {"Gw.js", "Gw.wasm", "Gw.jspi.js", "Gw.jspi.wasm"}:
+            paths[f"runtime:{path.name}"] = path
+    return {name: benchmarklib.file_sha256(path) for name, path in sorted(paths.items())}
+
+
+def observed_runtime(run: Run) -> str:
+    for _, line in run.lines:
+        match = RUNTIME_LINE.search(line)
+        if match:
+            return match.group(1).lower()
+    return "not-observed"
+
+
+def observed_rendering(run: Run) -> str:
+    lines = "\n".join(line for _, line in run.lines)
+    if "graphics: frame isolation active" in lines:
+        return "isolated"
+    if "official direct rendering" in lines:
+        return "direct"
+    return "not-observed"
+
+
+def finish_manifest(
+    run: Run,
+    args,
+    machine_start: dict[str, str],
+    machine_end: dict[str, str],
+    warm: bool,
+) -> None:
+    scene = run.manifest.get("sceneReadiness") or args.scene_readiness
+    run.manifest.update(
+        {
+            "gitSha": benchmarklib.command_text(["git", "rev-parse", "HEAD"]),
+            "application": run.app,
+            "artifactHashes": artifact_hashes(run),
+            "certificate": benchmarklib.certificate_identity(
+                REPO / "certificates/builds.json"
+            ),
+            "runtime": observed_runtime(run),
+            "rendering": observed_rendering(run),
+            "renderScale": args.render_scale,
+            "display": {
+                "refreshHz": args.display_refresh_hz,
+                "scale": args.display_scale,
+                "limitation": "operator supplied; not changed by the runner",
+            },
+            "window": {"size": args.window_size, "mode": args.window_mode},
+            "cacheState": "approved warm fixture clone" if warm else "blank disposable",
+            "imageState": args.image_state,
+            "machine": {"start": machine_start, "end": machine_end},
+            "sceneReadiness": scene,
+            "profileHashes": {
+                "start": run.profile_start.json() if run.profile_start else None,
+                "end": run.profile_end.json() if run.profile_end else None,
+            },
+            "sourceHashes": {
+                "start": run.source_start.json() if run.source_start else None,
+                "end": run.source_end.json() if run.source_end else None,
+                "cloneMethod": run.source_clone_method,
+            },
+        }
+    )
+
+
+def raw_run(run: Run) -> dict:
+    return {
+        "application": run.app,
+        "round": run.round_index,
+        "orderPosition": run.order_position,
+        "manifest": run.manifest,
+        "stages": run.stages,
+        "firstFrameMs": run.first_frame_ms,
+        "footprintBytes": run.footprint_now,
+        "footprintPeakBytes": run.footprint_peak,
+        "peakRssBytes": run.peak_rss,
+        "finalRssBytes": run.final_rss,
+        "cpuSeconds": run.cpu,
+        "peakProcesses": run.peak_processes,
+        "diskBytes": run.disk_bytes,
+        "inside": run.inside,
+        "exitCode": run.exit_code,
+        "invalid": run.invalid,
+        "notes": run.notes,
+        "samples": [
+            {
+                "at": sample.at,
+                "processes": {
+                    str(pid): {
+                        "name": process.name,
+                        "rssBytes": process.rss_bytes,
+                        "cpuSeconds": process.cpu_seconds,
+                    }
+                    for pid, process in sample.processes.items()
+                },
+            }
+            for sample in run.samples
+        ],
+    }
+
+
+def analysis(raw: list[dict], applications: Sequence[str]) -> dict:
+    result: dict[str, object] = {"cells": {}, "firstFrameComparable": False}
+    manifests = []
+    for app in applications:
+        cell = [sample for sample in raw if sample["application"] == app and not sample["invalid"]]
+        app_manifests = [sample["manifest"] for sample in cell]
+        mismatches = benchmarklib.compatibility_reasons(app_manifests)
+        summaries = {}
+        for metric in ("footprintBytes", "peakRssBytes", "cpuSeconds", "firstFrameMs"):
+            try:
+                summaries[metric] = benchmarklib.summarize(cell, metric)
+            except benchmarklib.Refusal as error:
+                summaries[metric] = {"unavailable": str(error)}
+        result["cells"][app] = {
+            "cleanRounds": len(cell),
+            "manifestMismatches": mismatches,
+            "statistics": summaries if not mismatches else {},
+            "orderBiasDetected": benchmarklib.order_bias(cell, "firstFrameMs"),
+        }
+        manifests.extend(app_manifests[:1])
+    scenes = {manifest.get("sceneReadiness") for manifest in manifests}
+    controlled = scenes and all(
+        isinstance(scene, str) and not scene.startswith("uncontrolled") for scene in scenes
+    )
+    controlled = controlled and all(
+        manifest.get("display", {}).get("refreshHz") is not None
+        and manifest.get("display", {}).get("scale") is not None
+        and not str(manifest.get("imageState", "")).startswith("not controlled")
+        for manifest in manifests
+    )
+    result["firstFrameComparable"] = bool(
+        len(applications) == 2 and len(scenes) == 1 and controlled
+    )
+    if not result["firstFrameComparable"]:
+        result["firstFrameLimitation"] = (
+            "login/scene readiness was not identical and explicitly controlled; "
+            "first-frame values are reported per build but not compared"
+        )
+    return result
 
 
 def table(rows: list[tuple[str, str, str]]) -> str:
@@ -1024,62 +1154,87 @@ def report(runs: dict[str, Run], seconds: float, warm: bool = False) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=90.0)
+    parser.add_argument("--rounds", type=int, default=benchmarklib.MIN_ROUNDS)
     parser.add_argument("--only", choices=["gwnative", "reference"])
     parser.add_argument("--keep", action="store_true", help="leave the scratch homes on disk")
-    parser.add_argument("--json", type=Path, help="also write the raw readings here")
+    parser.add_argument("--json", type=Path, required=True, help="write raw readings here")
     parser.add_argument(
-        "--warm",
-        action="store_true",
-        help="measure the launch every day after the first, on the real profiles",
+        "--warm-gwnative",
+        type=Path,
+        help="explicit prepared gwnative fixture; no installed path is inferred",
+    )
+    parser.add_argument(
+        "--warm-reference",
+        type=Path,
+        help="explicit prepared reference fixture; no installed path is inferred",
+    )
+    parser.add_argument(
+        "--scene-readiness",
+        default="uncontrolled login/scene; no gameplay automation; comparison disabled",
+    )
+    parser.add_argument("--render-scale", type=float, choices=[1, 1.5, 2], default=2)
+    parser.add_argument("--display-refresh-hz", type=float)
+    parser.add_argument("--display-scale", type=float)
+    parser.add_argument("--window-size", default="1280x800")
+    parser.add_argument("--window-mode", choices=["windowed", "fullscreen"], default="windowed")
+    parser.add_argument(
+        "--image-state", default="not controlled; exact fixture/blank state only"
     )
     args = parser.parse_args()
 
+    benchmarklib.require_rounds(args.rounds)
     root = Path(tempfile.mkdtemp(prefix="gw-benchmark-"))
-    runs: dict[str, Run] = {}
+    runs: list[Run] = []
     try:
         wanted = [args.only] if args.only else ["gwnative", "reference"]
-        start = "the installed profile" if args.warm else "a blank home"
-        for app in wanted:
-            print(f"[benchmark] {app}: {args.seconds:.0f}s from {start}", file=sys.stderr)
-            runs[app] = (run_gwnative if app == "gwnative" else run_reference)(
-                root, args.seconds, args.warm
-            )
-
-        print(report(runs, args.seconds, args.warm))
-
-        if args.json:
-            args.json.write_text(
-                json.dumps(
-                    {
-                        app: {
-                            "argv": run.argv,
-                            "home": str(run.home),
-                            "stages": run.stages,
-                            "firstFrameFromPageLoadMs": run.first_frame_ms,
-                            "footprintBytes": run.footprint_now,
-                            "footprintPeakBytes": run.footprint_peak,
-                            "footprintByProcess": {
-                                str(pid): {"name": name, "now": now, "peak": peak}
-                                for pid, (name, now, peak) in run.footprints.items()
-                            },
-                            "peakRssBytes": run.peak_rss,
-                            "finalRssBytes": run.final_rss,
-                            "cpuSeconds": run.cpu,
-                            "peakProcesses": run.peak_processes,
-                            "byCommand": run.by_command,
-                            "diskBytes": run.disk_bytes,
-                            "inside": run.inside,
-                            "notes": run.notes,
-                            "exitCode": run.exit_code,
-                            "output": [[round(at, 3), text] for at, text in run.lines],
-                        }
-                        for app, run in runs.items()
-                    },
-                    indent=2,
+        fixtures = {"gwnative": args.warm_gwnative, "reference": args.warm_reference}
+        for round_index in range(args.rounds):
+            for position, app in enumerate(benchmarklib.alternating_order(round_index, wanted)):
+                fixture = fixtures[app]
+                start = "an approved warm fixture" if fixture else "a blank profile"
+                print(
+                    f"[benchmark] round {round_index + 1}/{args.rounds}, {app}: "
+                    f"{args.seconds:.0f}s from {start}",
+                    file=sys.stderr,
                 )
-                + "\n"
-            )
-            print(f"[benchmark] raw readings in {args.json}", file=sys.stderr)
+                machine_start = benchmarklib.machine_identity()
+                run = (run_gwnative if app == "gwnative" else run_reference)(
+                    root / f"round-{round_index + 1}-{app}", args.seconds, fixture
+                )
+                run.round_index = round_index + 1
+                run.order_position = position
+                if not run.samples:
+                    run.invalid.append("no process samples")
+                if run.exit_code not in (0, -signal.SIGTERM):
+                    run.invalid.append(f"unexpected exit code {run.exit_code}")
+                finish_manifest(
+                    run,
+                    args,
+                    machine_start,
+                    benchmarklib.machine_identity(),
+                    fixture is not None,
+                )
+                runs.append(run)
+
+        raw = [raw_run(run) for run in runs]
+        document = {
+            "schemaVersion": 1,
+            "protocol": {
+                "rounds": args.rounds,
+                "alternatingOrder": len(wanted) == 2,
+                "gameplayAutomation": False,
+            },
+            "runs": raw,
+            "analysis": analysis(raw, wanted),
+        }
+        benchmarklib.assert_no_forbidden(
+            document, [value for run in runs for value in run.forbidden]
+        )
+        args.json.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+        print(json.dumps(document["analysis"], indent=2, sort_keys=True))
+        print(f"[benchmark] raw readings in {args.json}", file=sys.stderr)
+        if any(run.invalid for run in runs):
+            return 2
     finally:
         if args.keep:
             print(f"[benchmark] scratch homes left in {root}", file=sys.stderr)
@@ -1089,4 +1244,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except benchmarklib.Refusal as error:
+        print(f"benchmark refused: {error}", file=sys.stderr)
+        sys.exit(2)

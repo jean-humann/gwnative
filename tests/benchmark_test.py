@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,25 @@ SPEC.loader.exec_module(benchmarklib)
 
 
 class HermeticBenchmarkTests(unittest.TestCase):
+    def test_runner_requires_raw_json_and_five_rounds_before_launch(self):
+        runner = ROOT / "scripts/benchmark"
+        refused = subprocess.run(
+            [
+                str(runner),
+                "--only",
+                "gwnative",
+                "--rounds",
+                "4",
+                "--json",
+                "/tmp/no-run.json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("at least 5 clean rounds", refused.stderr)
+        self.assertNotIn("Traceback", refused.stderr)
+
     def test_blank_profile_cannot_name_the_default_keychain_item(self):
         # The fixture represents an existing real default-profile credential.
         fixture = {"service": "gwnative", "account": "login", "password": "fixture-secret"}
@@ -100,13 +120,29 @@ class HermeticBenchmarkTests(unittest.TestCase):
                     {
                         "schemaVersion": 1,
                         "application": "gwnative",
+                        "profile": "benchmark-aaaaaaaaaaaaaaaaaaaaaaaa",
                         "sceneReadiness": "launcher ready; no login automation",
                     }
                 )
             )
+            old = "benchmark-aaaaaaaaaaaaaaaaaaaaaaaa"
+            profile = source / "Library/Application Support/gwnative/profiles" / old
+            profile.mkdir(parents=True)
+            (profile / "profile.json").write_text(
+                json.dumps({"id": old, "displayName": "Fixture"})
+            )
             (source / "settings.json").write_text("settings")
             clone = benchmarklib.clone_declared_fixture(source, destination, "gwnative")
             self.assertEqual((destination / "settings.json").read_text(), "settings")
+            fresh = benchmarklib.remap_gwnative_profile(destination, old)
+            self.assertNotEqual(fresh, old)
+            remapped = (
+                destination
+                / "Library/Application Support/gwnative/profiles"
+                / fresh
+                / "profile.json"
+            )
+            self.assertEqual(json.loads(remapped.read_text())["id"], fresh)
             (destination / "settings.json").write_text("mutated clone")
             after = benchmarklib.assert_unchanged(clone.source_start, source)
             self.assertEqual(after.digest, clone.source_start.digest)

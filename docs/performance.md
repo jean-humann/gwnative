@@ -58,22 +58,29 @@ Build `target/release/gwnative`, run `pnpm install` and `pnpm build` in
 the reference checkout, then:
 
 ```sh
-scripts/benchmark
-scripts/benchmark --warm
-scripts/benchmark --seconds 180
-scripts/benchmark --only gwnative
 scripts/benchmark --json readings.json
+scripts/benchmark --seconds 180 --rounds 7 --json readings.json
+scripts/benchmark --only gwnative --json readings.json
 ```
 
-The blank route creates disposable profiles; it never deletes the real ones.
-gwnative receives a temporary `HOME`. Chromium ignores `HOME` for its profile,
-so the reference build receives a temporary `--user-data-dir`. Both profiles
-are seeded with `dataStrategy: "quick"` because the first-run question appears
-before either client renders.
+Blank mode is the default. Every round creates a fresh named gwnative profile,
+a unique `login:benchmark-…` Keychain account, a non-persistent WebKit store,
+and a disposable Chromium `--user-data-dir`. It never infers an installed
+profile from `HOME` or the password database.
 
-The warm route uses the installed profiles and their single-instance locks. It
-is the repeated launch and removes CDN variance, but it is not an isolated
-profile. The harness reads the profiles and should not change cache size.
+Warm mode accepts only an explicitly prepared fixture containing
+`benchmark-source.json`; there is no default-profile path. Pass it with
+`--warm-gwnative` or `--warm-reference`. The runner hashes bytes and mtimes,
+uses an APFS clone/reflink when available, runs only against the disposable
+clone, hashes the source again, and refuses the result if the source changed.
+
+Every cell requires at least five clean rounds. Two-build protocols alternate
+execution order. The required JSON retains raw samples, manifests, profile and
+source hashes, rejection reasons, and statistics derived from those samples.
+The manifest records app/runtime/artifact hashes, certificate sequence and
+families, selected JSPI/Asyncify and direct/isolated paths, render and display
+conditions, window mode, cache/image state, macOS/WebKit build, power/thermal
+state, and the exact scene/readiness limitation.
 
 ### What is compared
 
@@ -86,54 +93,28 @@ External sampling measures:
 - process count; and
 - bytes written to the disposable profile.
 
-Each application's own first-frame timing is also reported. Internal stage
-timelines are not directly comparable because the applications instrument
-different stages.
+Each application's own first-frame timing is reported, but the runner does not
+compare the values unless both manifests name the same explicitly controlled
+scene/readiness state. Train A performs no login, character selection,
+movement, targeting, skill use, or other gameplay automation.
 
 WebKit services are launchd children rather than children of the host. The
-harness attributes newly appearing services and excludes candidates that remain
-after the run. Treat process-attribution anomalies as invalid samples, not data
-to average.
+harness accepts only an exact fresh WebContent/GPU/Networking service set that
+ends with the host. Missing, duplicate, unknown, or surviving candidates make
+the sample invalid rather than data to average.
 
 Physical footprint is the primary memory comparison because it approximates
 the process's physical cost. RSS includes shared clean pages and can invert a
 comparison. A summed high-water mark is a ceiling: individual process peaks may
 not have occurred at the same instant.
 
-### Recorded blank-install sample
+### Train A result status
 
-Four alternating rounds on the same machine and within the same hour:
-
-| Metric | gwnative | Reference |
-| --- | ---: | ---: |
-| First frame, best · median · worst | 8.5 · 9.1 · 15.4 s | 10.7 · 11.4 · 14.9 s |
-| CPU seconds, whole tree, 60 s | 27–39 | 15–33 |
-| Footprint peak, summed tree | 2107–2112 MiB | 1316–1412 MiB |
-| Full 4.2 GB download | 87–90 s | 90–346 s |
-
-The CDN path measured roughly 47–48 MiB/s during these runs. Both clients
-showed fast and slow launch modes. CPU cannot be normalised because gwnative
-records its frame count and the comparison build does not; a lower CPU number
-can mean cheaper frames or fewer frames.
-
-The blank-install footprint is dominated by WebKit activity during the image
-transfer. It is not the steady-state game cost.
-
-### Recorded warm-launch sample
-
-Four alternating rounds, with three clean process-attribution samples for the
-tree-wide rows:
-
-| Metric | gwnative | Reference |
-| --- | ---: | ---: |
-| Page load to first frame, min · median · max | 745 · 821 · 898 ms | 1118 · 1260 · 1366 ms |
-| Wall clock to first frame | 1358 · 1496 · 1735 ms | 1715 · 1831 · 2124 ms |
-| Footprint peak, summed tree | 767 · 773 · 783 MiB | 1025 · 1043 · 1057 MiB |
-| Peak RSS, summed tree | 571 · 572 · 592 MiB | 847 · 848 · 855 MiB |
-| CPU seconds, whole tree, 60 s | 18.5 · 19.2 · 19.8 | 10.1 · 22.0 · 26.4 |
-
-The repeated-launch result is the more stable product comparison. It excludes
-the one-time transfer and uses data already on disk.
+No Train A comparison is published by this repository. Real-machine runs,
+reference-build preparation, live scene readiness, and any warm fixtures remain
+external evidence gates. Historical figures gathered under the earlier
+single-run/real-profile protocol are intentionally not carried forward as if
+they satisfied this protocol.
 
 ## Measured design decisions
 

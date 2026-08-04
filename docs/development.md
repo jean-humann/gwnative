@@ -196,9 +196,11 @@ scratch_home="$(mktemp -d)"
 HOME="$scratch_home" cargo run
 ```
 
-The login Keychain is per macOS user and does not follow `HOME`. A clean host
-profile can therefore still see a saved credential if the signing identity
-matches. The benchmark reports this limitation explicitly.
+The login Keychain is per macOS user and does not follow `HOME`. A temporary
+`HOME` by itself is therefore not credential isolation. The benchmark always
+adds a fresh named profile (and thus a unique Keychain account) and selects a
+non-persistent WebKit store. Its warm route accepts only an explicitly prepared
+fixture; it never infers or launches against the default profile.
 
 Do not delete the real Application Support directory to create a test case.
 Use a temporary `HOME`, or move a narrowly identified test directory aside when
