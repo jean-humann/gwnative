@@ -201,6 +201,11 @@ xcrun stapler validate "$dmg" 2>&1 | sed 's/^/[release] /' >&2
 
 rm -f "$root/dist/notarytool.log"
 
+# Re-open every public payload after packaging. The DMG is mounted read-only;
+# the updater ZIP is extracted; both must contain the exact notices and SBOM
+# and neither may contain ArenaNet client or game data.
+scripts/check-release-artifacts --bundle "$app" --zip "$zip" --dmg "$dmg"
+
 say "$dmg"
 say "$zip"
 # scripts/publish rather than `gh release create`, because a release is now
