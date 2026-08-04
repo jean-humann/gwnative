@@ -24,6 +24,7 @@ mod dock;
 mod error;
 mod game_api;
 mod generation;
+mod generation_state;
 mod http;
 mod instance;
 mod keychain;
@@ -838,6 +839,7 @@ fn run_windowed(
     // content view follows.
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
     let url = format!("http://{}/index.html", loopback.addr);
+    let launch_nonce = session_token();
     let webview = webview::make(
         mtm,
         frame,
@@ -845,6 +847,7 @@ fn run_windowed(
             url: &url,
             token: &tokens.browser,
             game_publisher_token: &tokens.game_publisher,
+            launch_nonce: &launch_nonce,
             website_data_store_id,
         },
         &loopback.settings.get(),

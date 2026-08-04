@@ -178,6 +178,7 @@ fn disable_features(preferences: &objc2_web_kit::WKPreferences, prefer_60_fps: b
 fn preamble(
     token: &str,
     game_publisher_token: &str,
+    launch_nonce: &str,
     settings: &settings::Settings,
     module: &wasm::Module,
     frame: FrameOptions,
@@ -188,10 +189,12 @@ fn preamble(
         .filter(|value| value == "jspi" || value == "asyncify");
     format!(
         "window.__gwnativeToken = {};\nwindow.__gwnativeGamePublisherToken = {};\n\
+         window.__gwnativeLaunchNonce = {};\n\
          window.__gwnativeLayout = {};\n\
          window.__gwnativeBridgeMarkers = {};\nwindow.__gwnativeSettings = {};\n\
          window.__gwnativeRuntimeCapabilities = {};\n\
          window.__gwnativeTemplateSave = \"uncertified\";\nwindow.__gwnativeClientBuild = null;\n\
+         window.__gwnativeLaunchIdentity = null;\n\
          window.__gwnativeUpdates = {};\nwindow.__gwnativeAutoInstall = {};\n\
          window.__gwnativeEnhancements = \"off\";\n\
          window.__gwnativeEnhancementManifest = null;\nwindow.__gwnativeClientRuntime = {};\n\
@@ -200,6 +203,7 @@ fn preamble(
          window.__gwnativeLaunch = {};",
         serde_json::Value::from(token),
         serde_json::Value::from(game_publisher_token),
+        serde_json::Value::from(launch_nonce),
         layout::as_json(),
         wasm::markers_json(),
         serde_json::to_string(settings).unwrap_or_else(|_| "{}".to_owned()),
@@ -228,6 +232,7 @@ pub struct Origin<'a> {
     pub url: &'a str,
     pub token: &'a str,
     pub game_publisher_token: &'a str,
+    pub launch_nonce: &'a str,
     pub website_data_store_id: Option<&'a str>,
 }
 
@@ -275,6 +280,7 @@ pub fn make(
             &NSString::from_str(&preamble(
                 origin.token,
                 origin.game_publisher_token,
+                origin.launch_nonce,
                 settings,
                 module,
                 frame_options,
