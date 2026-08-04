@@ -19,11 +19,11 @@
 //! open because the vendored client asks for them itself. This file is the
 //! listener, the connection loop and the one dispatch between the two.
 
-use std::io::BufReader;
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -34,7 +34,7 @@ use crate::chunks::ChunkStore;
 use crate::diagnostics::Recorder;
 use crate::game_api;
 use crate::generation;
-use crate::http::{MAX_BODY_BYTES, POLICY, Request, policy, read_request, text};
+use crate::http::{MAX_BODY_BYTES, POLICY, Request, WipingReader, policy, read_request, text};
 use crate::qos;
 use crate::relaunch;
 use crate::settings;
@@ -102,6 +102,7 @@ struct Context {
     settings: Arc<settings::ScopedStore>,
     generations: Arc<generation::Store>,
     tokens: CapabilityTokens,
+    launch: LaunchContract,
     /// Profile-specific Keychain account name. The service remains stable so
     /// existing default-profile credentials keep working.
     credential_account: String,
@@ -147,6 +148,14 @@ pub struct CapabilityTokens {
     pub game_publisher: String,
 }
 
+impl Drop for CapabilityTokens {
+    fn drop(&mut self) {
+        crate::log::wipe_string(&mut self.browser);
+        crate::log::wipe_string(&mut self.game_reader);
+        crate::log::wipe_string(&mut self.game_publisher);
+    }
+}
+
 pub struct Config {
     pub root: PathBuf,
     pub shell_root: PathBuf,
@@ -156,8 +165,168 @@ pub struct Config {
     pub settings: Arc<settings::ScopedStore>,
     pub generations: Arc<generation::Store>,
     pub tokens: CapabilityTokens,
+    pub launch: LaunchContract,
     pub port: u16,
     pub credential_account: String,
+}
+
+pub struct LaunchContract {
+    pub nonce: String,
+    pub transforms: BTreeMap<String, String>,
+    admission: Mutex<LaunchAdmission>,
+}
+
+#[derive(Default)]
+#[allow(dead_code)]
+enum LaunchAdmission {
+    #[default]
+    Fresh,
+    Active(generation::LaunchClaim),
+    OriginalArmed(generation::LaunchClaim),
+    Failed(generation::LaunchClaim, generation::RuntimeFailure),
+}
+
+#[allow(dead_code)]
+impl LaunchContract {
+    pub fn new(nonce: String, transforms: BTreeMap<String, String>) -> Self {
+        Self {
+            nonce,
+            transforms,
+            admission: Mutex::new(LaunchAdmission::Fresh),
+        }
+    }
+
+    fn valid_claim(&self, claim: &generation::LaunchClaim) -> bool {
+        crate::http::token_matches(&self.nonce, Some(&claim.nonce))
+            && match (
+                claim.transformed,
+                claim.build.as_deref(),
+                self.transforms.get(&claim.runtime),
+            ) {
+                (false, None, _) => true,
+                (true, Some(build), Some(expected)) => {
+                    crate::http::token_matches(expected, Some(build))
+                }
+                _ => false,
+            }
+    }
+
+    /// Admit one runtime per native process, plus the exact derived→original
+    /// fallback armed by a durable transform failure. Exact duplicate POSTs are
+    /// acknowledgements only and never reopen settled evidence.
+    fn record_attempt(
+        &self,
+        claim: &generation::LaunchClaim,
+        generations: &generation::Store,
+    ) -> std::result::Result<(), generation::RuntimeStateError> {
+        if !self.valid_claim(claim) {
+            return Err(generation::RuntimeStateError::Invalid(
+                "runtime attempt is not part of this host launch".into(),
+            ));
+        }
+        let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        let may_record = match &*admission {
+            LaunchAdmission::Fresh => true,
+            LaunchAdmission::Active(active) if active == claim => {
+                return generations
+                    .attempting_claim(claim)
+                    .then_some(())
+                    .ok_or_else(|| {
+                        generation::RuntimeStateError::Invalid(
+                            "a settled document must restart in a fresh host process".into(),
+                        )
+                    });
+            }
+            LaunchAdmission::OriginalArmed(derived) => {
+                !claim.transformed
+                    && claim.runtime == derived.runtime
+                    && claim.nonce == derived.nonce
+            }
+            _ => false,
+        };
+        if !may_record {
+            return Err(generation::RuntimeStateError::Invalid(
+                "a different runtime attempt is already bound to this host launch".into(),
+            ));
+        }
+        generations.record_attempt(
+            &claim.runtime,
+            claim.build.as_deref(),
+            claim.transformed,
+            &claim.nonce,
+        )?;
+        *admission = LaunchAdmission::Active(claim.clone());
+        Ok(())
+    }
+
+    fn matches_active(&self, claim: &generation::LaunchClaim) -> bool {
+        matches!(
+            &*self.admission.lock().unwrap_or_else(|e| e.into_inner()),
+            LaunchAdmission::Active(active) if active == claim
+        )
+    }
+
+    fn disable_transform(
+        &self,
+        claim: &generation::LaunchClaim,
+        generations: &generation::Store,
+    ) -> std::result::Result<(), generation::RuntimeStateError> {
+        let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        match &*admission {
+            LaunchAdmission::OriginalArmed(derived) if derived == claim => return Ok(()),
+            LaunchAdmission::Active(active) if active == claim && claim.transformed => {}
+            _ => {
+                return Err(generation::RuntimeStateError::Invalid(
+                    "transform failure is not bound to this host launch".into(),
+                ));
+            }
+        }
+        let launch = generations.resolve_launch_claim(claim).ok_or_else(|| {
+            generation::RuntimeStateError::Invalid(
+                "transform failure does not match the active launch".into(),
+            )
+        })?;
+        generations.disable_launch_transform(&launch)?;
+        *admission = LaunchAdmission::OriginalArmed(claim.clone());
+        Ok(())
+    }
+
+    fn record_runtime_failure(
+        &self,
+        claim: &generation::LaunchClaim,
+        generations: &generation::Store,
+        root: &std::path::Path,
+    ) -> std::result::Result<generation::RuntimeFailure, generation::RuntimeStateError> {
+        let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        match &*admission {
+            LaunchAdmission::Failed(failed, outcome) if failed == claim => {
+                return Ok(outcome.clone());
+            }
+            LaunchAdmission::Active(active) if active == claim && !claim.transformed => {}
+            _ => {
+                return Err(generation::RuntimeStateError::Invalid(
+                    "runtime failure is not bound to this host launch".into(),
+                ));
+            }
+        }
+        let launch = generations.resolve_launch_claim(claim).ok_or_else(|| {
+            generation::RuntimeStateError::Invalid(
+                "runtime failure does not match the active launch".into(),
+            )
+        })?;
+        let outcome = generations.record_runtime_failure(&launch, root)?;
+        *admission = LaunchAdmission::Failed(claim.clone(), outcome.clone());
+        Ok(outcome)
+    }
+}
+
+impl Drop for LaunchContract {
+    fn drop(&mut self) {
+        crate::log::wipe_string(&mut self.nonce);
+        for value in self.transforms.values_mut() {
+            crate::log::wipe_string(value);
+        }
+    }
 }
 
 pub fn spawn(config: Config) -> std::io::Result<Loopback> {
@@ -170,6 +339,7 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
         settings,
         generations,
         tokens,
+        launch,
         port,
         credential_account,
     } = config;
@@ -190,6 +360,7 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
         settings: Arc::clone(&settings),
         generations,
         tokens,
+        launch,
         credential_account,
         game_api: Arc::default(),
     });
@@ -305,12 +476,12 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
     stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
 
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut reader = WipingReader::new(stream.try_clone()?);
     loop {
         match handle(&mut reader, &mut stream, context)? {
             Flow::Keep => {}
             Flow::Close => return Ok(()),
-            Flow::Bridge(destination, gameplay_launch) => {
+            Flow::Bridge(mut destination, gameplay_launch) => {
                 // A game socket is idle for long stretches by design, so the
                 // HTTP idle timeout must not follow it across the upgrade.
                 stream.set_read_timeout(None)?;
@@ -325,6 +496,7 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
                     gameplay_launch,
                     &context.sockets,
                 );
+                crate::log::wipe_string(&mut destination);
                 return Ok(());
             }
         }
@@ -333,7 +505,7 @@ fn serve(mut stream: TcpStream, context: &Context) -> std::io::Result<()> {
 
 /// Read one request and hand it to whichever half of the server owns it.
 fn handle(
-    reader: &mut BufReader<TcpStream>,
+    reader: &mut WipingReader<TcpStream>,
     stream: &mut TcpStream,
     context: &Context,
 ) -> std::io::Result<Flow> {
@@ -408,6 +580,10 @@ mod tests {
         }
     }
 
+    fn launch_contract() -> LaunchContract {
+        LaunchContract::new("test-launch-nonce".to_owned(), BTreeMap::new())
+    }
+
     /// The settings route end to end, over a real socket.
     ///
     /// Worth a wire test rather than only unit tests of `settings::patch`: the
@@ -438,6 +614,7 @@ mod tests {
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             tokens: capability_tokens(token),
+            launch: launch_contract(),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -511,6 +688,7 @@ mod tests {
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             tokens: capability_tokens(browser),
+            launch: launch_contract(),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -635,6 +813,7 @@ mod tests {
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             tokens: capability_tokens(token),
+            launch: launch_contract(),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -685,6 +864,7 @@ mod tests {
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             tokens: capability_tokens(token),
+            launch: launch_contract(),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -749,6 +929,7 @@ mod tests {
             ))),
             generations: Arc::new(generation::Store::open(dir.join("generations"))),
             tokens: capability_tokens("test-token"),
+            launch: launch_contract(),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -796,6 +977,7 @@ mod tests {
             ))),
             generations: Arc::clone(&generations),
             tokens: capability_tokens(token),
+            launch: launch_contract(),
             port: PORT,
             credential_account: "login".into(),
         })
@@ -924,6 +1106,7 @@ mod tests {
             ))),
             generations: Arc::clone(&generations),
             tokens: capability_tokens(token),
+            launch: launch_contract(),
             port: PORT,
             credential_account: "login".into(),
         })

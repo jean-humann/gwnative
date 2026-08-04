@@ -334,10 +334,7 @@ fn main() {
     // owed a sentence about why, and the log is not where they will look for
     // it; `settings-panel.js` is what turns this into that sentence.
     let enhance = settings.get().enhancements_enabled();
-    let wasm::Prepared {
-        derived: derived_wasm,
-        module,
-    } = match wasm::prepare(
+    let mut prepared = match wasm::prepare(
         &root,
         paths.derived_dir(),
         &paths::certificate_dir(),
@@ -350,6 +347,22 @@ fn main() {
             wasm::failed(enhance)
         }
     };
+    if prepared
+        .module
+        .prepared_transforms()
+        .values()
+        .any(|build| crate::log::contains_secret(build.as_bytes()))
+    {
+        // An accidental equality between a credential and a content identity
+        // must not put that spelling into runtime state. Optional transforms
+        // fail closed; official bytes remain the launch path.
+        note!("[gwnative] optional transforms disabled by protected-value collision");
+        prepared = wasm::failed(enhance);
+    }
+    let wasm::Prepared {
+        derived: derived_wasm,
+        module,
+    } = prepared;
     module.logs();
 
     let tokens = server::CapabilityTokens {
@@ -357,7 +370,18 @@ fn main() {
         game_reader: session_token(),
         game_publisher: session_token(),
     };
-    crate::log::set_capabilities(&[&tokens.browser, &tokens.game_reader, &tokens.game_publisher]);
+    let launch_nonce = session_token();
+    let transforms = module.prepared_transforms();
+    let mut capabilities = vec![
+        tokens.browser.as_str(),
+        tokens.game_reader.as_str(),
+        tokens.game_publisher.as_str(),
+        launch_nonce.as_str(),
+    ];
+    capabilities.extend(transforms.values().map(String::as_str));
+    crate::log::set_capabilities(&capabilities);
+    drop(capabilities);
+    let launch = server::LaunchContract::new(launch_nonce.clone(), transforms);
     let loopback = match server::spawn(server::Config {
         root: root.clone(),
         shell_root,
@@ -367,6 +391,7 @@ fn main() {
         settings,
         generations: Arc::clone(&generations),
         tokens: tokens.clone(),
+        launch,
         port: paths.port(),
         credential_account: profile.keychain_account(),
     }) {
@@ -395,6 +420,7 @@ fn main() {
         &loopback,
         &tokens,
         &module,
+        &launch_nonce,
         &invocation,
         paths.support_dir(),
         profile.website_data_store_id(),
@@ -810,10 +836,12 @@ fn park_headless(loopback: &server::Loopback, token: &str) -> ! {
 
 /// Build the window and hand the thread to AppKit. Returns once the app has
 /// terminated.
+#[allow(clippy::too_many_arguments)]
 fn run_windowed(
     loopback: &server::Loopback,
     tokens: &server::CapabilityTokens,
     module: &wasm::Module,
+    launch_nonce: &str,
     invocation: &cli::Invocation,
     support_dir: &Path,
     website_data_store_id: Option<&str>,
@@ -842,7 +870,6 @@ fn run_windowed(
     // content view follows.
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0));
     let url = format!("http://{}/index.html", loopback.addr);
-    let launch_nonce = session_token();
     let webview = webview::make(
         mtm,
         frame,
@@ -850,7 +877,7 @@ fn run_windowed(
             url: &url,
             token: &tokens.browser,
             game_publisher_token: &tokens.game_publisher,
-            launch_nonce: &launch_nonce,
+            launch_nonce,
             website_data_store_id,
         },
         &loopback.settings.get(),

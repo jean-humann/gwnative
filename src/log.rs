@@ -487,12 +487,10 @@ pub fn rejects_untrusted(bytes: &[u8]) -> bool {
 /// spelling. Omitting the complete record preserves both secrecy and schema;
 /// textual replacement could corrupt JSON, while a scalar replacement would
 /// violate every object-shaped API contract.
-#[cfg_attr(not(test), expect(dead_code))]
 pub fn redact_json(value: &serde_json::Value) -> Option<Vec<u8>> {
     redact_json_bytes(serde_json::to_vec(value).unwrap_or_default())
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 pub fn redact_json_bytes(mut encoded: Vec<u8>) -> Option<Vec<u8>> {
     if !encoded.is_empty() && !rejects_untrusted(&encoded) {
         return Some(encoded);
@@ -516,11 +514,9 @@ pub fn wipe_string(value: &mut String) {
 }
 
 /// A transient sensitive text allocation that clears itself on every exit.
-#[cfg_attr(not(test), expect(dead_code))]
 pub struct SecretText(String);
 
 impl SecretText {
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn new(value: String) -> Self {
         Self(value)
     }

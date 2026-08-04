@@ -128,7 +128,6 @@ impl Module {
     /// prepared. The loopback runtime contract uses the same native facts the
     /// document-start injection does, so a page cannot nominate an arbitrary
     /// credential-shaped build string for durable generation state.
-    #[allow(dead_code)]
     pub fn prepared_transforms(&self) -> BTreeMap<String, String> {
         self.runtimes
             .iter()

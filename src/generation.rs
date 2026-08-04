@@ -94,7 +94,6 @@ pub enum RuntimeFailure {
 /// authority; the browser never needs those values echoed back in an API body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(dead_code)]
 pub struct LaunchClaim {
     pub runtime: String,
     pub build: Option<String>,
@@ -113,7 +112,6 @@ impl Drop for LaunchClaim {
 }
 
 impl LaunchClaim {
-    #[allow(dead_code)]
     fn matches(&self, launch: &LaunchIdentity) -> bool {
         self.runtime == launch.runtime
             && self.nonce == launch.nonce
@@ -983,7 +981,6 @@ impl Store {
     /// Resolve an unprivileged page claim to the exact native identity active
     /// now. A stale nonce, different runtime, or mismatched derived build has
     /// no authority and yields nothing.
-    #[allow(dead_code)]
     pub fn resolve_launch_claim(&self, claim: &LaunchClaim) -> Option<LaunchIdentity> {
         self.launch_for_gameplay()
             .filter(|launch| claim.matches(launch))
