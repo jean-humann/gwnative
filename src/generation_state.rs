@@ -66,6 +66,10 @@ pub(crate) struct State {
     pub(crate) current: Option<Generation>,
     pub(crate) proof_state: Option<ProofState>,
     pub(crate) launch_state: LaunchState,
+    /// Latest renderer acknowledgement, kept separately so an older gameplay
+    /// proof is not falsely attributed to a newer launch nonce.
+    #[serde(default)]
+    pub(crate) last_first_frame: Option<LaunchIdentity>,
     pub(crate) previous: Option<Generation>,
     #[serde(default)]
     pub(crate) previous_proof: Option<ProofState>,
@@ -83,6 +87,7 @@ impl Default for State {
             current: None,
             proof_state: None,
             launch_state: LaunchState::Idle,
+            last_first_frame: None,
             previous: None,
             previous_proof: None,
             failed_runtimes: Vec::new(),
@@ -288,6 +293,11 @@ fn validate_state(state: &State) -> std::result::Result<(), String> {
     };
     let launch = matches!(state.launch_state, LaunchState::Idle)
         || matches!((&state.current, &state.launch_state), (Some(g), LaunchState::AttemptingRuntime(l) | LaunchState::FailedRuntime(l)) if valid_launch(g, l));
+    let first_frame = match (&state.current, &state.last_first_frame) {
+        (_, None) => true,
+        (Some(generation), Some(launch)) => valid_launch(generation, launch),
+        (None, Some(_)) => false,
+    };
     let history = state.rejected.iter().all(|id| !id.is_empty())
         && state
             .disabled_transforms
@@ -304,6 +314,7 @@ fn validate_state(state: &State) -> std::result::Result<(), String> {
         && current
         && previous
         && launch
+        && first_frame
         && history
         && (state.current.is_some() || state.previous.is_none()))
     .then_some(())
@@ -358,7 +369,7 @@ mod tests {
     fn failure_history_cannot_outlive_its_generation_authority() {
         let digest = "00".repeat(32);
         let mut state = State::default();
-        state.failed_runtimes.push(LaunchIdentity {
+        let launch = LaunchIdentity {
             generation_id: "poison".to_owned(),
             runtime: "jspi".to_owned(),
             official_glue_sha256: digest.clone(),
@@ -367,7 +378,11 @@ mod tests {
             transform_abi: None,
             compatibility_id: None,
             nonce: digest,
-        });
+        };
+        state.failed_runtimes.push(launch.clone());
+        assert!(validate_state(&state).is_err());
+        state.failed_runtimes.clear();
+        state.last_first_frame = Some(launch);
         assert!(validate_state(&state).is_err());
     }
 }

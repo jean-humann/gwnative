@@ -27,9 +27,10 @@ export function createDns({ log }) {
  * @param {{
  *   log(...values: unknown[]): void,
  *   audit?: { beginExternalCallback(kind: string): unknown, endExternalCallback(callback: unknown): void },
+ *   launchIdentity?: () => unknown,
  * }} options
  */
-export function createSockets({ log, audit }) {
+export function createSockets({ log, audit, launchIdentity }) {
   let nextId = 1;
 
   const deliver = (kind, receiver, callback, ...args) => {
@@ -54,6 +55,8 @@ export function createSockets({ log, audit }) {
     // route takes its token in the query string. The host accepts it there for
     // the same reason.
     url.searchParams.set('token', window.__gwnativeToken ?? '');
+    const launch = launchIdentity?.();
+    if (launch) url.searchParams.set('launch', JSON.stringify(launch));
 
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';

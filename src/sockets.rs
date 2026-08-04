@@ -10,11 +10,12 @@
 use std::fmt::Write as _;
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 
+use crate::generation;
 use crate::net;
 use crate::qos;
 use crate::ws::{self, BINARY, Message, Sink, TEXT};
@@ -28,12 +29,111 @@ const READ_BUFFER: usize = 64 * 1024;
 /// process died.
 const MAX_SOCKETS: usize = 64;
 
-#[derive(Default)]
 pub struct Registry {
     open: AtomicUsize,
+    gameplay_observed: Mutex<Vec<generation::LaunchIdentity>>,
+    generations: Arc<generation::Store>,
+    pending_proofs: Arc<PendingProofs>,
+}
+
+#[derive(Default)]
+struct PendingProofs {
+    count: Mutex<usize>,
+    done: Condvar,
+}
+
+impl PendingProofs {
+    fn begin(self: &Arc<Self>) -> PendingProof {
+        *self.count.lock().unwrap() += 1;
+        PendingProof(Arc::clone(self))
+    }
+
+    fn wait(&self, timeout: Duration) -> bool {
+        let count = self.count.lock().unwrap();
+        let (count, _) = self
+            .done
+            .wait_timeout_while(count, timeout, |count| *count != 0)
+            .unwrap();
+        *count == 0
+    }
+}
+
+struct PendingProof(Arc<PendingProofs>);
+
+impl Drop for PendingProof {
+    fn drop(&mut self) {
+        let mut count = self.0.count.lock().unwrap();
+        *count -= 1;
+        self.0.done.notify_all();
+    }
 }
 
 impl Registry {
+    pub fn new(generations: Arc<generation::Store>) -> Self {
+        Self {
+            open: AtomicUsize::new(0),
+            gameplay_observed: Mutex::new(Vec::new()),
+            generations,
+            pending_proofs: Arc::new(PendingProofs::default()),
+        }
+    }
+
+    /// Bind a page-provided identity to the exact launch active when its socket
+    /// handshake begins. A missing, malformed, or stale identity never blocks
+    /// the socket; it merely has no authority to prove a different session.
+    pub fn bind_gameplay(
+        &self,
+        claimed: &generation::LaunchIdentity,
+    ) -> Option<generation::LaunchIdentity> {
+        (self.generations.launch_for_gameplay().as_ref() == Some(claimed)).then(|| claimed.clone())
+    }
+
+    fn settle_gameplay_proof(self: &Arc<Self>, launch: generation::LaunchIdentity) {
+        let observed = self
+            .gameplay_observed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate == &launch);
+        if !observed {
+            return;
+        }
+        let pending = self.pending_proofs.begin();
+        let registry = Arc::clone(self);
+        thread::spawn(move || {
+            let _pending = pending;
+            if let Err(error) = registry.generations.prove_gameplay(&launch) {
+                note!("[generation] could not record the gameplay milestone: {error}");
+            }
+        });
+    }
+
+    /// The first permitted ArenaNet TCP connection is a host-owned session
+    /// milestone. It can arrive before the renderer's first-frame request, so
+    /// remember it and let either event settle the proof once both happened.
+    pub fn gameplay_connected(self: &Arc<Self>, launch: generation::LaunchIdentity) {
+        let mut observed = self.gameplay_observed.lock().unwrap();
+        if !observed.contains(&launch) {
+            observed.push(launch.clone());
+            if observed.len() > 8 {
+                observed.remove(0);
+            }
+        }
+        drop(observed);
+        self.settle_gameplay_proof(launch);
+    }
+
+    pub fn first_frame_proven(self: &Arc<Self>, launch: &generation::LaunchIdentity) {
+        self.settle_gameplay_proof(launch.clone());
+    }
+
+    /// Wait only for proof writes already dispatched. The page races this with
+    /// its existing quit deadline, so a wedged filesystem still cannot make the
+    /// application refuse to close.
+    pub fn flush_proofs(&self, timeout: Duration) -> bool {
+        self.pending_proofs.wait(timeout)
+    }
+
     /// Take a slot, returning a guard that releases it on drop.
     fn claim(self: &Arc<Self>) -> Option<Slot> {
         let mut current = self.open.load(Ordering::Relaxed);
@@ -142,6 +242,7 @@ pub fn bridge(
     mut reader: BufReader<TcpStream>,
     page: TcpStream,
     destination: &str,
+    gameplay_launch: Option<generation::LaunchIdentity>,
     registry: &Arc<Registry>,
 ) {
     let sink = Sink::new(match page.try_clone() {
@@ -167,6 +268,9 @@ pub fn bridge(
             return;
         }
     };
+    if let Some(launch) = gameplay_launch {
+        registry.gameplay_connected(launch);
+    }
     note!("[socket] {destination}: connected");
     if sink.send(TEXT, br#"{"type":"open"}"#).is_err() {
         return;
@@ -249,6 +353,24 @@ pub fn bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_quit_waits_for_a_pending_proof_but_remains_bounded() {
+        let pending = Arc::new(PendingProofs::default());
+        let job = pending.begin();
+        let waiter = Arc::clone(&pending);
+        let (sent, received) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            sent.send(waiter.wait(Duration::from_secs(1))).unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(job);
+        assert!(received.recv_timeout(Duration::from_secs(1)).unwrap());
+
+        let job = pending.begin();
+        assert!(!pending.wait(Duration::ZERO));
+        drop(job);
+    }
 
     /// The page parses this frame to find out why its socket never opened, so a
     /// destination that makes the frame unparseable costs it the diagnosis —

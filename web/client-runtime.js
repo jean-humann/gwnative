@@ -29,6 +29,7 @@ const CLIENTS = Object.freeze({
 });
 
 const RUNTIME_STATE_DEADLINE_MS = 1_500;
+const PROOF_RETRY_DELAYS_MS = Object.freeze([0, 50, 150, 350]);
 const JSPI_PROBE_DEADLINE_MS = 1_500;
 const JSPI_PROBE_TIMED_OUT = Symbol('JSPI probe timed out');
 
@@ -152,4 +153,31 @@ export async function postRuntimeState(path, body, options = {}) {
   } finally {
     clearTimeout(deadline);
   }
+}
+
+/**
+ * Deliver an idempotent launch proof in the background. A reply can disappear
+ * after the host has committed the proof, so retries send byte-for-byte the
+ * same launch identity and let the host distinguish that from stale evidence.
+ *
+ * @param {string} path
+ * @param {object} body
+ * @param {{ post?: Function, wait?: Function, delays?: number[] }} options
+ */
+export async function deliverRuntimeProof(path, body, options = {}) {
+  const post = options.post ?? ((proofPath, proofBody) =>
+    postRuntimeState(proofPath, proofBody, options));
+  const wait = options.wait ?? ((milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  const delays = options.delays ?? PROOF_RETRY_DELAYS_MS;
+  let failure = new Error('proof delivery had no attempts');
+  for (const delay of delays) {
+    if (delay) await wait(delay);
+    try {
+      return await post(path, body);
+    } catch (error) {
+      failure = error;
+    }
+  }
+  throw failure;
 }

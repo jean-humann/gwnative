@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
   applyClientLimits,
+  deliverRuntimeProof,
   postRuntimeState,
   selectClient,
   supportsJspi,
@@ -149,5 +150,39 @@ describe('client runtime selection', () => {
       }),
       { name: 'AbortError' },
     );
+  });
+
+  it('retries a lost proof with identical data and bounded backoff', async () => {
+    const calls = [];
+    const waits = [];
+    const body = { launch: { nonce: 'exact' } };
+    const result = await deliverRuntimeProof('__booted', body, {
+      delays: [0, 10, 20],
+      wait: async (delay) => waits.push(delay),
+      post: async (path, sent) => {
+        calls.push({ path, sent });
+        if (calls.length < 3) throw new Error('reply lost');
+        return null;
+      },
+    });
+    assert.equal(result, null);
+    assert.deepEqual(waits, [10, 20]);
+    assert.equal(calls.length, 3);
+    assert.ok(calls.every(({ path, sent }) => path === '__booted' && sent === body));
+  });
+
+  it('stops proof retry after the bounded attempt set', async () => {
+    let attempts = 0;
+    await assert.rejects(
+      deliverRuntimeProof('__booted', {}, {
+        delays: [0, 0, 0],
+        post: async () => {
+          attempts += 1;
+          throw new Error('offline');
+        },
+      }),
+      /offline/,
+    );
+    assert.equal(attempts, 3);
   });
 });

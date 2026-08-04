@@ -12,6 +12,15 @@ const LOG_LINES = 400;
 const logBuf = [];
 let client;
 let frameAudit = null;
+let bootProof = Promise.resolve(true);
+window.gwFlushBootProof = async () => {
+  const booted = await bootProof;
+  const response = await fetch('__proof-flush', {
+    method: 'POST',
+    headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
+  });
+  return booted && response.ok;
+};
 
 // WKWebView has no stdout, so log lines are batched back to the host to land in
 // the terminal alongside its own. Batched because a chatty boot would otherwise
@@ -416,10 +425,15 @@ Module = {
         // Everything the chunk store served up to here is what booting costs.
         // Telling the host now, rather than at some later milestone, is what
         // keeps the recorded list to the chunks that gate the first frame.
-        fetch('__booted', {
-          method: 'POST',
-          headers: { 'X-Gwnative-Token': window.__gwnativeToken ?? '' },
-        }).catch(() => {});
+        bootProof = host.deliverRuntimeProof('__booted', {
+          launch: window.__gwnativeLaunchIdentity,
+        }).then(
+          () => true,
+          (error) => {
+            log('[warn] first-frame proof was not acknowledged:', error);
+            return false;
+          },
+        );
       },
       log,
     });
@@ -906,6 +920,7 @@ function reportTransformFailure() {
   Module.socket = host.createSockets({
     log,
     audit: frameAudit.enabled ? frameAudit : undefined,
+    launchIdentity: () => window.__gwnativeLaunchIdentity,
   });
 
   // Two namespaces the client dereferences after deciding they are missing.
