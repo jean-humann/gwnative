@@ -147,8 +147,7 @@ fn forward(
     }
 }
 
-/// A file from the web root, revalidated rather than re-sent when the page
-/// already holds it.
+/// A file from the immutable shell or official-client root, never a mixture.
 fn static_file(
     request: &Request,
     stream: &mut TcpStream,
@@ -163,7 +162,12 @@ fn static_file(
     let derived = (!original)
         .then(|| context.derived_wasm.get(&request.path).cloned())
         .flatten();
-    let Some(file) = derived.or_else(|| resolve(&context.root, &request.path)) else {
+    let static_root = if crate::patch::artifacts().contains(&request.path.as_str()) {
+        &context.root
+    } else {
+        &context.shell_root
+    };
+    let Some(file) = derived.or_else(|| resolve(static_root, &request.path)) else {
         note!("[loopback] 403 /{}", request.path);
         return text(stream, 403, "forbidden");
     };

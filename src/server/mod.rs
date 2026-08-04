@@ -89,7 +89,10 @@ fn tracing() -> bool {
 }
 
 struct Context {
+    /// Official client artifacts only; never a mutable browser shell.
     root: PathBuf,
+    /// One immutable, inventory-verified shell revision.
+    shell_root: PathBuf,
     snapshot: Option<Arc<ChunkStore>>,
     sockets: Arc<Registry>,
     recorder: Arc<Recorder>,
@@ -146,6 +149,7 @@ pub struct CapabilityTokens {
 
 pub struct Config {
     pub root: PathBuf,
+    pub shell_root: PathBuf,
     pub snapshot: Option<Arc<ChunkStore>>,
     pub recorder: Arc<Recorder>,
     pub derived_wasm: wasm::DerivedModules,
@@ -159,6 +163,7 @@ pub struct Config {
 pub fn spawn(config: Config) -> std::io::Result<Loopback> {
     let Config {
         root,
+        shell_root,
         snapshot,
         recorder,
         derived_wasm,
@@ -177,6 +182,7 @@ pub fn spawn(config: Config) -> std::io::Result<Loopback> {
     let sockets = Arc::new(Registry::new(Arc::clone(&generations)));
     let context = Arc::new(Context {
         root,
+        shell_root,
         snapshot,
         sockets,
         recorder: Arc::clone(&recorder),
@@ -423,6 +429,7 @@ mod tests {
         let token = "test-token";
         let loopback = spawn(Config {
             root: dir.clone(),
+            shell_root: dir.clone(),
             snapshot: None,
             recorder: Recorder::open(dir.join("diagnostics")),
             derived_wasm: wasm::DerivedModules::default(),
@@ -495,6 +502,7 @@ mod tests {
         let publisher = "game-publisher-token";
         let loopback = spawn(Config {
             root: dir.clone(),
+            shell_root: dir.clone(),
             snapshot: None,
             recorder: Recorder::open(dir.join("diagnostics")),
             derived_wasm: wasm::DerivedModules::default(),
@@ -615,6 +623,7 @@ mod tests {
         let token = "test-token";
         let loopback = spawn(Config {
             root: dir.clone(),
+            shell_root: dir.clone(),
             // The interesting half of this test: no store, which is every launch
             // before the manifest is fetched and every launch that failed to get
             // one.
@@ -667,6 +676,7 @@ mod tests {
         let diagnostics = dir.join("diagnostics");
         let loopback = spawn(Config {
             root: dir.clone(),
+            shell_root: dir.clone(),
             snapshot: None,
             recorder: Recorder::open(diagnostics.clone()),
             derived_wasm: wasm::DerivedModules::default(),
@@ -718,6 +728,11 @@ mod tests {
     fn a_failed_transform_can_request_the_exact_official_module() {
         let temp = TempDir::new("server-original-wasm");
         let dir = temp.0.clone();
+        let shell = dir.join("shell");
+        std::fs::create_dir(&shell).unwrap();
+        std::fs::write(dir.join("index.html"), b"stale shell").unwrap();
+        std::fs::write(shell.join("index.html"), b"reviewed shell").unwrap();
+        std::fs::write(shell.join("Gw.wasm"), b"counterfeit").unwrap();
         std::fs::write(dir.join("Gw.wasm"), b"official").unwrap();
         let transformed = dir.join("transformed.wasm");
         std::fs::write(&transformed, b"transformed").unwrap();
@@ -725,6 +740,7 @@ mod tests {
         derived.insert(wasm::Runtime::Asyncify, transformed);
         let loopback = spawn(Config {
             root: dir.clone(),
+            shell_root: shell,
             snapshot: None,
             recorder: Recorder::open(dir.join("diagnostics")),
             derived_wasm: derived,
@@ -738,6 +754,10 @@ mod tests {
         })
         .unwrap();
 
+        assert_eq!(
+            request(loopback.addr, "GET", "/index.html", None, ""),
+            (200, "reviewed shell".to_owned())
+        );
         assert_eq!(
             request(loopback.addr, "GET", "/Gw.wasm", None, ""),
             (200, "transformed".to_owned())
@@ -767,6 +787,7 @@ mod tests {
         generations.record("test", &dir, &["Gw.jspi.js", "Gw.jspi.wasm"]);
         let loopback = spawn(Config {
             root: dir.clone(),
+            shell_root: dir.clone(),
             snapshot: None,
             recorder: Recorder::open(dir.join("diagnostics")),
             derived_wasm: wasm::DerivedModules::default(),
@@ -894,6 +915,7 @@ mod tests {
         assert!(generations.record("test", &dir, &names));
         let loopback = spawn(Config {
             root: dir.clone(),
+            shell_root: dir.clone(),
             snapshot: None,
             recorder: Recorder::open(dir.join("diagnostics")),
             derived_wasm: wasm::DerivedModules::default(),

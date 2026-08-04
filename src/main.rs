@@ -46,6 +46,7 @@ mod report;
 mod scratch;
 mod server;
 mod settings;
+mod shell;
 mod sockets;
 mod transport;
 mod updater;
@@ -146,16 +147,6 @@ fn main() {
     // Held for as long as the process lives; the kernel takes it back if the
     // process does not.
     let _instance = hold_the_only_instance(windowed, &paths, invocation.new_instance);
-
-    // A packaged or named-development profile uses a writable seeded shell.
-    // Only refresh it after instance exclusion: a second launch must not modify
-    // files the already-running process is serving before it is rejected.
-    if let Err(error) = paths.prepare_web_root() {
-        note!(
-            "[gwnative] could not lay out {}: {error}",
-            paths.web_root().display()
-        );
-    }
 
     // Profiles share the content-addressed game-data cache even though their
     // client manifests are isolated. Hold this before any active manifest can
@@ -262,6 +253,20 @@ fn main() {
         return;
     }
 
+    // Every browser launch selects one immutable, inventory-verified shell.
+    // This is after instance exclusion and maintenance, but before the server
+    // or WebKit can observe a path from the revision.
+    let shell_root = paths.prepare_shell().unwrap_or_else(|error| {
+        alert::fatal(
+            windowed,
+            "Guild Wars could not prepare its browser shell",
+            &format!(
+                "No complete reviewed shell revision could be selected, so the browser was not \
+                 started with a partial update.\n\n{error}"
+            ),
+        )
+    });
+
     // Started before the window so that whatever the shell costs to build is
     // in the record too.
     let recorder = diagnostics::Recorder::open(paths.support_dir().join("diagnostics"));
@@ -349,6 +354,7 @@ fn main() {
     };
     let loopback = match server::spawn(server::Config {
         root: root.clone(),
+        shell_root,
         snapshot,
         recorder,
         derived_wasm,

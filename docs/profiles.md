@@ -49,14 +49,10 @@ available below this app's deployment floor. Removing a descriptor and later
 creating a different profile cannot inherit the deleted profile's browser state,
 because a newly created profile receives a new random store identifier.
 
-In a source checkout, the default profile runs directly from the repository's
-`web/` directory for live development. Named profiles are automatically seeded
-into their own support directory, matching packaged builds. Seeding happens only
-after the profile lock is held and copies the same shell-only allowlist as the
-packager; downloaded `Gw*` artifacts and test modules in the source tree are
-never copied into another profile. `--dir` deliberately
-overrides that boundary; pointing two profiles at the same directory makes
-their writable client artifacts shared.
+Every profile installs the reviewed shell allowlist as an immutable,
+inventory-verified revision after its lock is held. Official artifacts, tests,
+chunks, and player data never enter it. `--dir` shares only a custom
+official-client root, never the selected shell.
 
 ## Isolation map
 
@@ -64,7 +60,7 @@ their writable client artifacts shared.
 | --- | --- | --- | --- |
 | Game settings, window, diagnostics | Base support directory | `profiles/<id>/` | No |
 | Application update preferences and cadence | Base `updates.json` | Base `updates.json` | Yes |
-| Writable web root and client artifacts | Base support directory | `profiles/<id>/` | No |
+| Official client artifacts and reviewed shell | Base support directory | `profiles/<id>/` | No |
 | Derived certified modules | Base support directory | `profiles/<id>/` | No |
 | Saved login | Keychain account `login` | Keychain account `login:<id>` | No |
 | Cookies, IndexedDB and local storage | Default WebKit store, origin on port `38112` | Persistent identified WebKit store and assigned origin | No |

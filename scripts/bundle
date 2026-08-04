@@ -69,8 +69,8 @@ cp LICENSE NOTICE.md THIRD-PARTY-NOTICES.md "$app/Contents/Resources/"
 for path in web/*.js web/*.html; do
 	case ${path##*/} in
 	Gw.js|Gw.jspi.*) continue ;;
-	# Nothing at runtime imports these, and `paths::seed_web` copies whatever the
-	# bundle carries into the live web root, so shipping them would leave a
+	# Nothing at runtime imports these, and the shell installer inventories what
+	# the bundle carries, so shipping them would leave a
 	# player's Application Support directory holding this app's test suite.
 	*.test.js) continue ;;
 	esac
