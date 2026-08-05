@@ -95,6 +95,26 @@ pub fn admit_untrusted_parts<'a>(
     .then_some(lease)
 }
 
+/// Hold credential identity stable while clean metadata frames an exact
+/// credential channel.
+///
+/// The caller must already have proved that the destination is the fixed
+/// authentication peer and that protected payload bytes are required by that
+/// protocol. Unlike an arbitrary diagnostic/export sink, that channel remains
+/// necessary after a renderer credential replacement, when
+/// `untrusted_sinks_disabled` is set. Its URL and headers still may not contain
+/// an active credential.
+pub fn admit_credential_channel_metadata<'a>(
+    parts: impl IntoIterator<Item = &'a [u8]>,
+) -> Option<UntrustedLease> {
+    let lease = lease_epoch();
+    let registry = secrets().lock().unwrap_or_else(|e| e.into_inner());
+    (!parts
+        .into_iter()
+        .any(|bytes| registry_contains(&registry, bytes)))
+    .then_some(lease)
+}
+
 /// Hold the credential identity stable through a host-owned response body.
 /// After a renderer credential replacement, even native dynamic bodies close:
 /// the retired immutable page value is intentionally no longer retained in the

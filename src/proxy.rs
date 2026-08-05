@@ -85,6 +85,7 @@ pub struct Reply {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    protected_authentication_body: bool,
 }
 
 impl Drop for Reply {
@@ -94,6 +95,26 @@ impl Drop for Reply {
             crate::log::wipe_string(value);
         }
         crate::log::wipe(&mut self.body);
+    }
+}
+
+impl Reply {
+    pub fn permits_protected_authentication_body(&self) -> bool {
+        self.protected_authentication_body
+    }
+
+    #[cfg(test)]
+    pub fn for_test(
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        protected_authentication_body: bool,
+    ) -> Self {
+        Self {
+            status: 200,
+            headers,
+            body,
+            protected_authentication_body,
+        }
     }
 }
 
@@ -115,9 +136,20 @@ fn upstream_request_headers(headers: &[(String, String)]) -> Vec<(&str, &str)> {
 ///
 /// Saved credentials are useful only when the login form reaches NCSoft's
 /// fixed HTTPS endpoint. They remain forbidden from every URL, query, header,
-/// other route or method, redirect, diagnostic, and response.
+/// other route or method, redirect, diagnostic, and non-authentication
+/// response.
 fn allows_protected_login_body(route: &str, method: &str) -> bool {
     route == "webgate" && method == "POST"
+}
+
+/// Responses on these exact calls legitimately return the account identity to
+/// the official client that submitted it. They are part of the credential
+/// channel, not a diagnostic/export sink. Headers remain guarded and cookies
+/// remain native-only.
+fn allows_protected_login_response(route: &str, tail: &str, method: &str) -> bool {
+    route == "webgate"
+        && method == "POST"
+        && matches!(tail, "/users/login.xml" | "/my_account/upgrade_login.xml")
 }
 
 fn admit_proxy_request(
@@ -133,10 +165,30 @@ fn admit_proxy_request(
             .flat_map(|(name, value)| [name.as_bytes(), value.as_bytes()]),
     );
     if allows_protected_login_body(route, method) {
-        crate::log::admit_untrusted_parts(metadata)
+        crate::log::admit_credential_channel_metadata(metadata)
+    } else if route == "webgate" && method == "GET" {
+        crate::log::admit_credential_channel_metadata(metadata.chain(std::iter::once(body)))
     } else {
         crate::log::admit_untrusted_parts(metadata.chain(std::iter::once(body)))
     }
+}
+
+fn fetch_upstream(
+    route: &str,
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> Result<transport::Response, String> {
+    if uses_native_webgate_session(route) {
+        transport::fetch_webgate(method, url, headers, body, TIMEOUT)
+    } else {
+        transport::fetch(method, url, headers, body, TIMEOUT)
+    }
+}
+
+fn uses_native_webgate_session(route: &str) -> bool {
+    route == "webgate"
 }
 
 /// The host a route label stands for, or `None` if it is not one of the five.
@@ -180,12 +232,12 @@ pub fn forward(
         crate::log::wipe_string(&mut url);
         return Err("protected request material was not forwarded".into());
     };
-    let response = transport::fetch(
+    let response = fetch_upstream(
+        route,
         method,
         &url,
         &forwarded,
         matches!(method, "POST" | "PUT").then_some(body),
-        TIMEOUT,
     );
     drop(lease);
     crate::log::wipe_string(&mut url);
@@ -231,6 +283,7 @@ pub fn forward(
         status: response.status,
         headers: out,
         body: std::mem::take(&mut response.body),
+        protected_authentication_body: allows_protected_login_response(route, tail, method),
     })
 }
 
@@ -289,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn cookie_state_never_crosses_the_five_route_proxy() {
+    fn cookie_state_stays_native_and_scoped_to_webgate() {
         let offered = [
             ("Cookie".into(), "a=1".into()),
             ("cOoKiE".into(), "b=2".into()),
@@ -317,6 +370,25 @@ mod tests {
         }
         assert!(!drop_header("set-cookie", REQUEST_DROP));
         assert!(!drop_header("cookie", RESPONSE_DROP));
+        assert!(uses_native_webgate_session("webgate"));
+        for route in ["account", "help", "store", "www"] {
+            assert!(!uses_native_webgate_session(route));
+        }
+    }
+
+    #[test]
+    fn only_exact_login_responses_may_return_protected_identity() {
+        for tail in ["/users/login.xml", "/my_account/upgrade_login.xml"] {
+            assert!(allows_protected_login_response("webgate", tail, "POST"));
+        }
+        for (route, tail, method) in [
+            ("webgate", "/users/login.xml", "GET"),
+            ("webgate", "/session/create.xml", "GET"),
+            ("webgate", "/my_account/game_accounts.xml", "POST"),
+            ("account", "/users/login.xml", "POST"),
+        ] {
+            assert!(!allows_protected_login_response(route, tail, method));
+        }
     }
 
     #[test]

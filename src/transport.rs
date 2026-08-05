@@ -105,37 +105,55 @@ impl NoRedirect {
     }
 }
 
-/// The one session everything shares. Sharing is not a nicety: HTTP/2
-/// multiplexing happens per connection and connections are pooled per
-/// session, so a session per caller would be back to paying handshakes.
-/// `NSURLSession` is documented thread-safe and marked `Send + Sync`.
+/// Build one private, memory-only session configuration.
+///
+/// Most traffic is deliberately stateless. WebGate is the exception: its
+/// session-creation and login calls form one cookie-authenticated exchange. A
+/// separate ephemeral jar keeps that state in CFNetwork without ever exposing
+/// `Cookie` or `Set-Cookie` to WebKit, another upstream route, or disk.
+fn configuration(cookies: bool) -> Retained<NSURLSessionConfiguration> {
+    let config = NSURLSessionConfiguration::ephemeralSessionConfiguration();
+    // No response cache: the patch client keeps its own content-addressed
+    // store, and the proxy speaks for origins whose caching policy is not
+    // ours to apply. Ephemeral already keeps everything off disk; this keeps
+    // it out of memory too.
+    config.setURLCache(None);
+    config.setRequestCachePolicy(NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData);
+    config.setHTTPShouldSetCookies(cookies);
+    if !cookies {
+        config.setHTTPCookieStorage(None);
+    }
+    config
+}
+
+fn make_session(cookies: bool) -> Retained<NSURLSession> {
+    let config = configuration(cookies);
+    let delegate = NoRedirect::new();
+    // SAFETY: a nil queue asks the session to create its own serial queue for
+    // delegate and completion-handler calls, which is the documented default.
+    // The session retains the delegate.
+    unsafe {
+        NSURLSession::sessionWithConfiguration_delegate_delegateQueue(
+            &config,
+            Some(ProtocolObject::from_ref(&*delegate)),
+            None,
+        )
+    }
+}
+
+/// The stateless session used by patch downloads and four proxy routes.
+/// Sharing is not a nicety: HTTP/2 multiplexing happens per connection and
+/// connections are pooled per session. `NSURLSession` is documented
+/// thread-safe and marked `Send + Sync`.
 fn session() -> &'static NSURLSession {
     static SESSION: OnceLock<Retained<NSURLSession>> = OnceLock::new();
-    SESSION.get_or_init(|| {
-        let config = NSURLSessionConfiguration::ephemeralSessionConfiguration();
-        // No response cache: the patch client keeps its own content-addressed
-        // store, and the proxy speaks for origins whose caching policy is not
-        // ours to apply. Ephemeral already keeps everything off disk; this
-        // keeps it out of memory too.
-        config.setURLCache(None);
-        config.setRequestCachePolicy(NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData);
-        // No cookie jar either. ureq neither stored nor replayed cookies, and
-        // a transport that silently attaches state to requests would change
-        // what the proxy forwards. Cookies stay the page's business.
-        config.setHTTPShouldSetCookies(false);
-        config.setHTTPCookieStorage(None);
-        let delegate = NoRedirect::new();
-        // SAFETY: a nil queue asks the session to create its own serial
-        // queue for delegate and completion-handler calls, which is the
-        // documented default. The session retains the delegate.
-        unsafe {
-            NSURLSession::sessionWithConfiguration_delegate_delegateQueue(
-                &config,
-                Some(ProtocolObject::from_ref(&*delegate)),
-                None,
-            )
-        }
-    })
+    SESSION.get_or_init(|| make_session(false))
+}
+
+/// A process-lifetime, ephemeral cookie jar for the fixed WebGate host only.
+fn webgate_session() -> &'static NSURLSession {
+    static SESSION: OnceLock<Retained<NSURLSession>> = OnceLock::new();
+    SESSION.get_or_init(|| make_session(true))
 }
 
 /// Send one request and block until the whole response has arrived, for at
@@ -143,6 +161,31 @@ fn session() -> &'static NSURLSession {
 /// response); statuses are answers, not errors. The error string is transport
 /// detail — DNS, TLS, timeout — in CFNetwork's words.
 pub fn fetch(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<Response, String> {
+    fetch_with(session(), method, url, headers, body, timeout)
+}
+
+/// Send one request through WebGate's private in-memory cookie session.
+///
+/// This is intentionally not a general cookie-enabled transport. The proxy is
+/// the only caller and selects it only for `webgate.ncplatform.net`.
+pub fn fetch_webgate(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<Response, String> {
+    fetch_with(webgate_session(), method, url, headers, body, timeout)
+}
+
+fn fetch_with(
+    session: &NSURLSession,
     method: &str,
     url: &str,
     headers: &[(&str, &str)],
@@ -213,7 +256,7 @@ pub fn fetch(
     );
     // SAFETY: the completion handler must be sendable; the closure above
     // captures only the channel sender, which is Send.
-    let task = unsafe { session().dataTaskWithRequest_completionHandler(&request, &handler) };
+    let task = unsafe { session.dataTaskWithRequest_completionHandler(&request, &handler) };
     task.resume();
 
     match rx.recv_timeout(timeout) {
@@ -224,5 +267,83 @@ pub fn fetch(
             task.cancel();
             Err(format!("timed out after {}s: {url}", timeout.as_secs()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
+    use std::thread;
+
+    use super::*;
+
+    fn request_head(stream: &mut std::net::TcpStream) -> String {
+        let mut reader = BufReader::new(stream);
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line.is_empty() || line == "\r\n" {
+                break;
+            }
+            head.push_str(&line);
+        }
+        head
+    }
+
+    #[test]
+    fn webgate_cookie_storage_is_private_and_ephemeral() {
+        let stateless = configuration(false);
+        assert!(!stateless.HTTPShouldSetCookies());
+        assert!(stateless.HTTPCookieStorage().is_none());
+
+        let webgate = configuration(true);
+        assert!(webgate.HTTPShouldSetCookies());
+        assert!(webgate.HTTPCookieStorage().is_some());
+        assert!(webgate.URLCache().is_none());
+    }
+
+    #[test]
+    fn webgate_session_replays_an_upstream_cookie_without_webkit() {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut create, _) = listener.accept().unwrap();
+            let first = request_head(&mut create);
+            assert!(!first.to_ascii_lowercase().contains("\r\ncookie:"));
+            create
+                .write_all(concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "Set-Cookie: WGSession=opaque-canary; Path=/; HttpOnly; SameSite=Strict\r\n",
+                    "Content-Length: 0\r\n",
+                    "Connection: close\r\n\r\n"
+                ).as_bytes())
+                .unwrap();
+
+            let (mut login, _) = listener.accept().unwrap();
+            let second = request_head(&mut login);
+            login
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            second
+        });
+
+        let session = make_session(true);
+        let create = format!("http://{address}/session/create.xml");
+        fetch_with(&session, "GET", &create, &[], None, Duration::from_secs(5)).unwrap();
+        let login = format!("http://{address}/users/login.xml");
+        fetch_with(
+            &session,
+            "POST",
+            &login,
+            &[],
+            Some(b"synthetic-login"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let request = server.join().unwrap().to_ascii_lowercase();
+        assert!(request.contains("\r\ncookie: wgsession=opaque-canary\r\n"));
     }
 }

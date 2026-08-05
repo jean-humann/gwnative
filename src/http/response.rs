@@ -250,7 +250,17 @@ pub fn respond_proxy(stream: &mut TcpStream, reply: &proxy::Reply) -> std::io::R
         let _ = write!(head, "{name}: {value}\r\n");
     }
     head.push_str("\r\n");
-    let Some(lease) = crate::log::admit_untrusted_parts([head.as_bytes(), &reply.body]) else {
+    // A successful WebGate login response commonly returns the account name to
+    // the official client that already owns it. That exact body is an
+    // authentication-channel payload, not a diagnostic/export sink. Everything
+    // else, including every upstream header, remains subject to the ordinary
+    // protected-value guard.
+    let lease = if reply.permits_protected_authentication_body() {
+        crate::log::admit_credential_channel_metadata([head.as_bytes()])
+    } else {
+        crate::log::admit_untrusted_parts([head.as_bytes(), &reply.body])
+    };
+    let Some(lease) = lease else {
         crate::log::wipe_string(&mut head);
         let empty = format!(
             "HTTP/1.1 {} Proxied\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -286,24 +296,49 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn protected_proxy_headers_and_bodies_are_never_written() {
+    fn proxy_wire(reply: &crate::proxy::Reply) -> String {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (mut server, _) = listener.accept().unwrap();
-        let secret = "proxy-response-canary";
-        let _registration = crate::log::register(&[secret]).unwrap();
-        let reply = crate::proxy::Reply {
-            status: 200,
-            headers: vec![("x-upstream".into(), secret.into())],
-            body: secret.as_bytes().to_vec(),
-        };
-
-        respond_proxy(&mut server, &reply).unwrap();
+        respond_proxy(&mut server, reply).unwrap();
         drop(server);
         let mut wire = String::new();
         client.read_to_string(&mut wire).unwrap();
-        assert!(!wire.contains(secret), "protected response leaked: {wire}");
-        assert!(wire.contains("Content-Length: 0"), "{wire}");
+        wire
+    }
+
+    #[test]
+    fn protected_proxy_headers_and_ordinary_bodies_are_never_written() {
+        let secret = "proxy-response-canary";
+        let _registration = crate::log::register(&[secret]).unwrap();
+        let header = crate::proxy::Reply::for_test(
+            vec![("x-upstream".into(), secret.into())],
+            b"ordinary".to_vec(),
+            false,
+        );
+        let body = crate::proxy::Reply::for_test(Vec::new(), secret.as_bytes().to_vec(), false);
+
+        for wire in [proxy_wire(&header), proxy_wire(&body)] {
+            assert!(!wire.contains(secret), "protected response leaked: {wire}");
+            assert!(wire.contains("Content-Length: 0"), "{wire}");
+        }
+    }
+
+    #[test]
+    fn exact_authentication_response_can_return_the_account_to_its_owner() {
+        let secret = "login-response-account-canary";
+        let _registration = crate::log::register(&[secret]).unwrap();
+        let reply = crate::proxy::Reply::for_test(
+            Vec::new(),
+            format!("<LoginName>{secret}</LoginName>").into_bytes(),
+            true,
+        );
+
+        let wire = proxy_wire(&reply);
+        assert!(
+            wire.contains(secret),
+            "authentication response was suppressed: {wire}"
+        );
+        assert!(wire.contains("<LoginName>"), "{wire}");
     }
 }
