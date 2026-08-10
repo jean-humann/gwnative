@@ -434,8 +434,10 @@ fn restart_after_credential_change(changed: bool) {
 
 /// What the player chose. GET is the authoritative read — the page is handed a
 /// copy at document start, but a settings window opened an hour later must not
-/// show what was true at launch. PUT takes a patch and answers with the whole,
-/// so the page never has to guess what its change merged into.
+/// show what was true at launch. PUT takes a patch and acknowledges it without
+/// a body. A settings value can deliberately equal a protected capability, so
+/// serializing the merged whole here could make the final response guard erase
+/// an otherwise successful reply and leave the page trying to parse empty JSON.
 fn settings(request: &Request, stream: &mut TcpStream, context: &Context) -> std::io::Result<()> {
     match request.method.as_str() {
         "GET" => {
@@ -459,8 +461,7 @@ fn settings(request: &Request, stream: &mut TcpStream, context: &Context) -> std
                         settings.auto_check_updates,
                         settings.auto_install_updates,
                     );
-                    let body = serde_json::to_vec(&settings).unwrap_or_default();
-                    json(stream, 200, &body)
+                    no_content(stream)
                 }
                 // A refused patch is a bug in the page, not a player error, so
                 // it is said out loud rather than only answered with 400.

@@ -638,11 +638,11 @@ mod tests {
             auth,
             r#"{"dataStrategy":"full"}"#,
         );
-        assert_eq!(status, 200);
-        // The answer is the merged whole, not an acknowledgement: the page has
-        // to be able to render the result without a second read.
-        assert!(body.contains(r#""dataStrategy":"full""#), "{body}");
-        assert!(body.contains(r#""renderScale":2"#), "{body}");
+        assert_eq!(status, 204);
+        assert!(
+            body.is_empty(),
+            "accepted settings writes have no body: {body}"
+        );
 
         // A misspelled name is refused rather than quietly ignored.
         assert_eq!(
