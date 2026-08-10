@@ -18,6 +18,7 @@ mod cache;
 mod chunks;
 mod cli;
 mod commands;
+mod cursor_visibility;
 mod diagnostics;
 mod disk;
 mod dock;

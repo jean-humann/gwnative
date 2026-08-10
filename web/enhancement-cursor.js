@@ -21,7 +21,6 @@ import {
 
 /** The companion refuses any texture that is not exactly this square. */
 const EDGE = 32;
-const RETINA_EDGE = EDGE * 2;
 /** Bounded because the game composes drag cursors at runtime, one per item. */
 const CACHE_LIMIT = 64;
 
@@ -36,7 +35,6 @@ function createSurface(edge) {
 }
 
 const source = createSurface(EDGE);
-const retina = createSurface(RETINA_EDGE);
 /** @type {Map<string, string>} */
 const cssCache = new Map();
 
@@ -44,14 +42,12 @@ const cssCache = new Map();
  * Turn one published bitmap into a `cursor` declaration.
  *
  * The authoring grid stays at 32 — that is the size the game's own cursor
- * textures are, and what the companion checks before publishing one — and
- * sharpness on a Retina display comes from the 2x candidate rather than from a
- * larger grid. Hotspots stay in authoring-grid pixels; the engine scales them
- * per candidate.
+ * textures are, and what the companion checks before publishing one. Hotspots
+ * stay in that authoring grid too.
  *
- * Data URLs rather than blobs because the two canvases are the only source and
- * a blob would need revoking; `img-src 'self' data: blob:` in the host's policy
- * would allow either. The trailing `default` is mandatory — a `cursor`
+ * Data URLs rather than blobs because the canvas is the only source and a blob
+ * would need revoking; `img-src 'self' data: blob:` in the host's policy would
+ * allow either. The trailing `default` is mandatory — a `cursor`
  * declaration with no keyword fallback is dropped whole.
  *
  * @param {Uint8ClampedArray} pixels RGBA8, row-major, 32x32
@@ -62,14 +58,15 @@ export function buildCursorCss(pixels, hotspotX, hotspotY) {
   const image = source.context.createImageData(EDGE, EDGE);
   image.data.set(pixels);
   source.context.putImageData(image, 0, 0);
-  retina.context.clearRect(0, 0, RETINA_EDGE, RETINA_EDGE);
-  // Nearest neighbour: smoothing would blur a doubled 32-pixel bitmap into
-  // something visibly softer than the cursor the game drew.
-  retina.context.imageSmoothingEnabled = false;
-  retina.context.drawImage(source.canvas, 0, 0, RETINA_EDGE, RETINA_EDGE);
-  return `image-set(url("${source.canvas.toDataURL('image/png')}") 1x, url("${
-    retina.canvas.toDataURL('image/png')
-  }") 2x) ${hotspotX} ${hotspotY}, default`;
+  // Chromium (and therefore GWOnMac) keeps the platform cursor behind an
+  // `image-set` stable. WKWebView 27 instead resolves its candidates again as
+  // it constructs a fresh NSCursor for mouse-move hit tests, even while this
+  // declaration and the selected image are unchanged. During that resolution
+  // AppKit briefly exposes the fallback arrow. One URL removes the candidate
+  // handoff and remains stable even when WebKit recreates the platform object.
+  // The source is already the game's canonical 32-pixel artwork; macOS scales
+  // cursor imagery for the display just as it does its own cursors.
+  return `url("${source.canvas.toDataURL('image/png')}") ${hotspotX} ${hotspotY}, default`;
 }
 
 /**
@@ -111,7 +108,7 @@ function cacheSet(key, css) {
  *
  * `poll` is meant to be called once per animation frame. It reads the header
  * only — forty bytes — and returns immediately unless something changed, so
- * the four-kilobyte read and the two canvas draws happen on the handful of
+ * the four-kilobyte read and canvas draw happen on the handful of
  * frames where the cursor is actually different.
  *
  * @param {{

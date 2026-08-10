@@ -244,6 +244,9 @@ pub fn make(
     module: &wasm::Module,
     invocation: &cli::Invocation,
 ) -> Retained<WKWebView> {
+    if settings.native_cursor {
+        crate::cursor_visibility::install();
+    }
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
     if env_flag("GWNATIVE_BENCHMARK_EPHEMERAL_WEBKIT") {
         // Benchmark profiles must disappear with the process. A fresh named
