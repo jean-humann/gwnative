@@ -1,3 +1,0 @@
-self-hosted-runner:
-  labels: [gwnative-macos-27]
-config-variables: null

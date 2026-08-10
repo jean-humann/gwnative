@@ -1,3 +1,0 @@
-# Sparkle's verbatim upstream notice contains one trailing space. Preserve the
-# exact text that is shipped and checked byte-for-byte.
-LICENSES/LicenseRef-Sparkle-2.9.4.txt -whitespace

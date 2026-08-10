@@ -1,6 +1,0 @@
-# Trust and release authority require maintainer review.
-/.github/CODEOWNERS @jean-humann
-/.github/workflows/* @jean-humann
-/certificates/* @jean-humann
-/scripts/* @jean-humann
-/packaging/sparkle/* @jean-humann
