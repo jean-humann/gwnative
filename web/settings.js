@@ -8,9 +8,11 @@
 // settings would either draw one frame at the wrong scale or add a round trip
 // in front of every launch to avoid it.
 //
-// Writes go to the host, which owns the file. It answers with the merged whole
-// rather than an acknowledgement, so `current()` is never a guess about what a
-// patch turned into.
+// Writes go to the host, which owns the file. An accepted patch is already
+// completely validated there and receives a bodyless acknowledgement. Keeping
+// success independent of a response body is important: one of these values can
+// equal a protected runtime capability, for which the host must never reflect a
+// dynamic body.
 
 /** @typedef {'off' | 'dbltap' | 'translate' | 'augment'} TouchMode */
 /** @typedef {'quick' | 'full' | null} DataStrategy */
@@ -115,7 +117,7 @@ export async function relaunchApp() {
 }
 
 /**
- * Write some of the settings and take back the merged whole.
+ * Write some of the settings and update the page's launch-time copy.
  *
  * The host refuses an unknown field rather than ignoring it, so a misspelled
  * name fails here instead of becoming a control that silently does nothing. It
@@ -127,14 +129,24 @@ export async function relaunchApp() {
  * @returns {Promise<Settings>}
  */
 export async function saveSettings(patch) {
+  // Snapshot the exact JSON the host will validate before starting the write.
+  // Besides matching omitted/serialized values precisely, this leaves no
+  // fallible parsing or caller-owned getters to touch after acknowledgement.
+  const body = JSON.stringify(patch);
+  const submitted = JSON.parse(body);
   const response = await fetch('__settings', {
     method: 'PUT',
     headers: headers(),
-    body: JSON.stringify(patch),
+    body,
   });
   if (!response.ok) {
     throw new Error((await response.text()) || `settings not saved (${response.status})`);
   }
-  settings = { ...FALLBACK, ...(await response.json()) };
+  // A 2xx status means Store::apply validated and durably replaced the file.
+  // Do nothing afterwards that can reinterpret that success as a failure: in
+  // particular, do not parse a response body. Every writable value has already
+  // passed the host's closed schema, so the accepted patch is authoritative for
+  // the fields it names while launch-injected values remain untouched.
+  settings = { ...settings, ...submitted };
   return currentSettings();
 }
