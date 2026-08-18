@@ -77,7 +77,7 @@ save never reads game-memory offsets.
 ## Automatic patch workflow
 
 The normal ArenaNet patch cycle requires neither an operator nor a gwnative
-release. `Client certificate` runs every six hours and can also be started
+release. `Client certificate` runs once every 24 hours and can also be started
 manually without capability checkboxes or publisher build numbers.
 
 ```mermaid
