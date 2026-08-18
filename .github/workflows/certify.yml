@@ -1,7 +1,7 @@
 name: Client certificate
 
 on:
-  schedule:
+  #  schedule:
     # ArenaNet exposes no release webhook. The exact official artifact hashes
     # are authoritative, so polling does not depend on a publisher build label.
     # - cron: "17 0 * * *"
