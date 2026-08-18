@@ -17,7 +17,11 @@
 //! that runtime/artifact transform. A freshly synced official set is not trusted
 //! until an unmodified attempt reports a first frame and an accepted gameplay
 //! socket. Until both, the set and manifest it replaced are kept beside it.
-//! Only a failed unmodified attempt restores that pair and refuses the offered
+//! When there is no gameplay-proven predecessor yet, an exact set that reached
+//! a first frame may itself be kept as the installation rollback target. This
+//! lets a stale client that can render but can no longer log in be replaced
+//! without treating unseen or changed bytes as known-good. Only a failed
+//! unmodified attempt restores the retained pair and refuses the offered
 //! generation by identity.
 //!
 //! The two identities are deliberately different things. A generation's `id`
@@ -640,7 +644,8 @@ impl Store {
             let live_is_expected = state.current.as_ref().is_some_and(|current| {
                 generation_matches(root, &self.active_manifest, current).is_ok()
             });
-            if gameplay_proven && live_is_expected {
+            let redundant = state.current.as_ref() == Some(&previous);
+            if live_is_expected && (gameplay_proven || redundant) {
                 let saved_previous = state.previous.take();
                 let saved_proof = state.previous_proof.take();
                 if !self.save(&state) {
@@ -731,9 +736,11 @@ impl Store {
     /// Copy the current artifacts aside so a sync can be undone.
     ///
     /// Called before the download, because afterwards there is nothing left to
-    /// copy. A set that has never been proven is not stashed — it is not a
-    /// rollback target, and overwriting the stash with it would throw away the
-    /// last set that did work.
+    /// copy. A set that has never rendered a first frame is not stashed — it is
+    /// not a rollback target. A first-frame-proven set may be retained when no
+    /// older predecessor exists so a server-obsolete client can update even
+    /// though it cannot reach gameplay. An existing exact predecessor is kept
+    /// across later updates rather than overwritten.
     /// Returns false only when a proven generation needed protection and could
     /// not be copied. A caller replacing a complete client should then keep it.
     pub fn stash(&self, root: &Path, names: &[&'static str]) -> bool {
@@ -741,10 +748,27 @@ impl Store {
             return false;
         }
         let mut state = self.state.lock().unwrap();
-        if state.previous.is_some() {
-            return false;
+        if let Some(previous) = state.previous.as_ref() {
+            let stash = self.dir.join("previous");
+            return match generation_matches(&stash, &stash.join("manifest.cache"), previous) {
+                Ok(()) => true,
+                Err(reason) => {
+                    note!(
+                        "[generation] cannot reuse the client predecessor because its saved copy \
+                         no longer matches its record ({reason})"
+                    );
+                    false
+                }
+            };
         }
-        if !matches!(state.proof_state, Some(ProofState::GameplayProven(_))) {
+        if !matches!(
+            state.proof_state,
+            Some(
+                ProofState::LegacyFirstFrame
+                    | ProofState::FirstFrameProven(_)
+                    | ProofState::GameplayProven(_)
+            )
+        ) {
             return state.current.is_none();
         }
         let Some(mut current) = state.current.clone() else {
@@ -1283,6 +1307,17 @@ mod tests {
         }
         let saved = store.state.lock().unwrap().clone();
         store.save(&saved);
+        store
+    }
+
+    /// A store whose exact official client rendered but has not connected to
+    /// gameplay, as happens when ArenaNet retires a login-compatible build.
+    fn first_frame_proven(dir: PathBuf, root: &Path, flavour: &str) -> Store {
+        write_client(root, flavour);
+        let store = Store::open(dir);
+        assert!(store.record(flavour, root, &NAMES));
+        let launch = attempt(&store, false);
+        store.prove_first_frame(&launch).unwrap();
         store
     }
 
@@ -1875,6 +1910,108 @@ mod tests {
         assert!(!state.join("previous").exists());
         assert!(store.state.lock().unwrap().previous.is_none());
         assert!(store.unsound(&root, &NAMES).is_empty());
+    }
+
+    #[test]
+    fn a_first_frame_client_can_be_preserved_while_it_updates() {
+        let temp = TempDir::new("generation-first-frame-update");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = first_frame_proven(state.clone(), &root, "stale");
+
+        assert!(store.stash(&root, &NAMES));
+        {
+            let saved = store.state.lock().unwrap();
+            assert_eq!(saved.previous.as_ref().unwrap().id, "stale");
+            assert!(matches!(
+                saved.previous_proof,
+                Some(ProofState::FirstFrameProven(_))
+            ));
+        }
+        drop(store);
+
+        // Reopening exercises durable-state validation for the new rollback
+        // proof before a successor replaces the stale files.
+        let store = Store::open(state.clone());
+        assert_eq!(
+            store.state.lock().unwrap().previous.as_ref().unwrap().id,
+            "stale"
+        );
+        write_client(&root, "current");
+        assert!(store.record("current", &root, &NAMES));
+        drop(store);
+
+        let store = Store::open(state);
+        let saved = store.state.lock().unwrap();
+        assert_eq!(saved.current.as_ref().unwrap().id, "current");
+        assert_eq!(saved.previous.as_ref().unwrap().id, "stale");
+    }
+
+    #[test]
+    fn a_failed_update_clears_a_redundant_first_frame_stash() {
+        let temp = TempDir::new("generation-first-frame-failed-sync");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = first_frame_proven(state.clone(), &root, "stale");
+
+        assert!(store.stash(&root, &NAMES));
+        assert_eq!(store.recover(&root), Recovery::None);
+        assert!(!state.join("previous").exists());
+        let saved = store.state.lock().unwrap();
+        assert!(saved.previous.is_none());
+        assert!(matches!(
+            saved.proof_state,
+            Some(ProofState::FirstFrameProven(_))
+        ));
+    }
+
+    #[test]
+    fn a_later_update_reuses_the_existing_viable_predecessor() {
+        let temp = TempDir::new("generation-update-with-predecessor");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "working");
+
+        assert!(store.stash(&root, &NAMES));
+        write_client(&root, "stale");
+        assert!(store.record("stale", &root, &NAMES));
+        let launch = attempt(&store, false);
+        store.prove_first_frame(&launch).unwrap();
+        let predecessor = store.state.lock().unwrap().previous.clone().unwrap();
+
+        assert!(
+            store.stash(&root, &NAMES),
+            "the verified predecessor already protects this update"
+        );
+        assert_eq!(
+            fs::read_to_string(state.join("previous/Gw.jspi.js")).unwrap(),
+            "working:Gw.jspi.js"
+        );
+        write_client(&root, "current");
+        assert!(store.record("current", &root, &NAMES));
+        assert_eq!(
+            store.state.lock().unwrap().previous.as_ref(),
+            Some(&predecessor)
+        );
+    }
+
+    #[test]
+    fn a_changed_predecessor_cannot_authorize_another_update() {
+        let temp = TempDir::new("generation-corrupt-predecessor");
+        let root = temp.0.join("web");
+        let state = temp.0.join("state");
+        let store = proven(state.clone(), &root, "working");
+
+        assert!(store.stash(&root, &NAMES));
+        write_client(&root, "stale");
+        assert!(store.record("stale", &root, &NAMES));
+        fs::write(state.join("previous/Gw.jspi.js"), "changed").unwrap();
+
+        assert!(!store.stash(&root, &NAMES));
+        assert_eq!(
+            fs::read_to_string(root.join("Gw.jspi.js")).unwrap(),
+            "stale:Gw.jspi.js"
+        );
     }
 
     #[test]

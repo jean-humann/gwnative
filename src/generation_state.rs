@@ -286,9 +286,10 @@ fn validate_state(state: &State) -> std::result::Result<(), String> {
     let previous = match (&state.previous, &state.previous_proof) {
         (None, None) => true,
         (Some(generation), Some(ProofState::LegacyFirstFrame)) => valid_generation(generation),
-        (Some(generation), Some(proof @ ProofState::GameplayProven(_))) => {
-            valid_generation(generation) && valid_proof(generation, proof)
-        }
+        (
+            Some(generation),
+            Some(proof @ (ProofState::FirstFrameProven(_) | ProofState::GameplayProven(_))),
+        ) => valid_generation(generation) && valid_proof(generation, proof),
         _ => false,
     };
     let launch = matches!(state.launch_state, LaunchState::Idle)
