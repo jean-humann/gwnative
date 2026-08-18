@@ -83,6 +83,9 @@ export const GUIDE = [
         'that has passed.',
       'A game that hitches while moving between areas on a slow connection is streaming, ' +
         'not breaking. Downloading in full removes it for good.',
+      'If the game says its client may be out of date (Code 058), choose Restart. ' +
+        'The app closes that client, checks and installs the current one in a fresh ' +
+        'process, then opens the game again.',
       'Quitting from the menu, or with ⌘Q, lets the game write its files out first. ' +
         'Force-quitting does not.',
     ],

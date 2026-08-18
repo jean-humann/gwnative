@@ -167,6 +167,12 @@ separate pending offer. Revalidation writes only the pending file, moving the
 network check off the window's critical path without changing the snapshot
 under a running or unsuccessfully updated client.
 
+When the official client asks the browser to reload—for example from its
+stale-build Restart dialog—the navigation guard translates that into a fresh
+native process. That successor refreshes the manifest synchronously before it
+opens another window, so it neither reuses the launch's one-shot identity nor
+races the ordinary background revalidation.
+
 If ArenaNet changes only snapshot metadata while the five client artifacts
 remain identical, the next launch promotes that pending manifest without
 reinstalling or unproving the client. The generation record reconciles the new

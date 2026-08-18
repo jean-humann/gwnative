@@ -212,6 +212,13 @@ When the client fails to boot, the overlay offers:
   keep downloaded chunks, and restart.
 - **Show log** — open the diagnostics overlay.
 
+### Client is out of date (Code 058)
+
+Choose **Restart** in the game's dialog. gwnative cancels the browser-level
+reload, closes the old host cleanly, and starts a fresh process that fetches and
+installs the current client before reopening the window. This avoids reusing a
+one-shot launch identity and cannot race the normal background manifest check.
+
 ### Newly downloaded client does not run
 
 Client artifacts are checked by length and SHA-256 at launch. A newly installed
