@@ -34,6 +34,15 @@ const MARKER: &str = "GWNATIVE_RELAUNCHING";
 /// unbounded chain of fresh native processes.
 const RENDERER_RECOVERY: &str = "GWNATIVE_RENDERER_RECOVERY";
 
+/// Inherited only by a successor started because the official client asked to
+/// reload itself.
+///
+/// A page reload cannot replace the client files underneath the running host,
+/// and the ordinary launch-time manifest check is deliberately asynchronous.
+/// The successor carrying this marker therefore fetches the current manifest
+/// before it opens another window instead of racing that background check.
+const CLIENT_REFRESH: &str = "GWNATIVE_CLIENT_REFRESH";
+
 /// How long a successor waits for its predecessor to let go of the lock.
 ///
 /// Generous on purpose. The predecessor still has to flush the client's files,
@@ -49,6 +58,11 @@ pub fn is_successor() -> bool {
     std::env::var_os(MARKER).is_some()
 }
 
+/// Whether this successor must synchronously check for a current client.
+pub fn client_refresh_requested() -> bool {
+    std::env::var_os(CLIENT_REFRESH).is_some()
+}
+
 /// Start another copy of this app, and report whether it got off the ground.
 ///
 /// Non-credential arguments are carried over so that a relaunched `serve` run
@@ -58,7 +72,16 @@ pub fn is_successor() -> bool {
 /// is part of what this launch *is*, and a successor that quietly dropped them
 /// would be a different app wearing the same window.
 pub fn start() -> Result<(), String> {
-    start_with_renderer_recovery(false)
+    start_with_options(false, false)
+}
+
+/// Start a fresh process that updates the official client before reopening it.
+///
+/// This is the native meaning of a reload requested from inside the game. A
+/// same-document reload would reuse the one-shot launch identity and could not
+/// activate a manifest published after this process started.
+pub fn refresh_client() -> Result<(), String> {
+    start_with_options(false, true)
 }
 
 /// Start the single automatic successor allowed after WebKit's content process
@@ -68,10 +91,10 @@ pub fn recover_renderer() -> Result<(), String> {
     if std::env::var_os(RENDERER_RECOVERY).is_some() {
         return Err("the automatic renderer recovery was already used".into());
     }
-    start_with_renderer_recovery(true)
+    start_with_options(true, false)
 }
 
-fn start_with_renderer_recovery(renderer_recovery: bool) -> Result<(), String> {
+fn start_with_options(renderer_recovery: bool, refresh_client: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("this app has no path on disk: {e}"))?;
     let mut command = Command::new(&exe);
     command
@@ -85,6 +108,13 @@ fn start_with_renderer_recovery(renderer_recovery: bool) -> Result<(), String> {
         command.env(RENDERER_RECOVERY, "1");
     } else {
         command.env_remove(RENDERER_RECOVERY);
+    }
+    if refresh_client {
+        command.env(CLIENT_REFRESH, "1");
+    } else {
+        // A refresh is one launch's work, not a mode inherited by every later
+        // user, settings, runtime, or renderer restart.
+        command.env_remove(CLIENT_REFRESH);
     }
     command
         .spawn()

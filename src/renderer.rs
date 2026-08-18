@@ -50,7 +50,8 @@ use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSAlert, NSAlertStyle};
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSString};
 use objc2_web_kit::{
-    WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKUIDelegate, WKWebView,
+    WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationType,
+    WKUIDelegate, WKWebView,
 };
 
 use crate::{app, generation, relaunch};
@@ -62,6 +63,9 @@ pub struct Ivars {
     /// Whether this process already handled a termination callback. The
     /// cross-process retry budget is carried by [`relaunch::recover_renderer`].
     recovered: Cell<bool>,
+    /// A navigation delegate can be asked more than once while AppKit is
+    /// beginning termination. Only the first reload may create a successor.
+    reloading: Cell<bool>,
     root: PathBuf,
     generations: Arc<generation::Store>,
     runtime_fingerprint: Option<String>,
@@ -90,27 +94,52 @@ define_class!(
             let url = unsafe { action.request().URL() }
                 .and_then(|url| url.absoluteString())
                 .map(|url| url.to_string());
+            let kind = unsafe { action.navigationType() };
+            let disposition =
+                navigation_disposition(&self.ivars().origin, url.as_deref().unwrap_or(""), kind);
 
-            let allowed = url
-                .as_deref()
-                .is_some_and(|url| permits(&self.ivars().origin, url));
-            if !allowed {
-                // The URL is printed because the only way this fires is a bug or
-                // an attack, and neither is diagnosable from "a navigation was
-                // blocked".
-                note!(
-                    "[renderer] refused to navigate to {}",
-                    url.as_deref().unwrap_or("a request with no URL")
-                );
-            }
+            let mut quit = false;
+            let policy = match disposition {
+                NavigationDisposition::Allow => WKNavigationActionPolicy::Allow,
+                NavigationDisposition::Block => {
+                    // The URL is printed because the only way this fires is a
+                    // bug or an attack, and neither is diagnosable from "a
+                    // navigation was blocked".
+                    note!(
+                        "[renderer] refused to navigate to {}",
+                        url.as_deref().unwrap_or("a request with no URL")
+                    );
+                    WKNavigationActionPolicy::Cancel
+                }
+                NavigationDisposition::FreshProcess if self.ivars().reloading.get() => {
+                    WKNavigationActionPolicy::Cancel
+                }
+                NavigationDisposition::FreshProcess => match relaunch::refresh_client() {
+                    Ok(()) => {
+                        self.ivars().reloading.set(true);
+                        quit = true;
+                        note!(
+                            "[renderer] the client requested a reload; refreshing it in a fresh process"
+                        );
+                        WKNavigationActionPolicy::Cancel
+                    }
+                    Err(reason) => {
+                        // A same-origin page reload is worse than a fresh realm
+                        // but better than a Restart button that does nothing.
+                        // It remains the fallback only when no successor could
+                        // be created.
+                        note!("[renderer] fresh-process client reload failed: {reason}");
+                        WKNavigationActionPolicy::Allow
+                    }
+                },
+            };
             // The handler must be called exactly once, on every path. Failing to
             // call it wedges the web view's navigation state permanently, which
             // looks like the page having frozen.
-            handler.call((if allowed {
-                WKNavigationActionPolicy::Allow
-            } else {
-                WKNavigationActionPolicy::Cancel
-            },));
+            handler.call((policy,));
+            if quit {
+                app::request_quit();
+            }
         }
 
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
@@ -200,6 +229,7 @@ impl Guard {
         let this = Self::alloc(mtm).set_ivars(Ivars {
             origin,
             recovered: Cell::new(false),
+            reloading: Cell::new(false),
             root,
             generations,
             runtime_fingerprint,
@@ -230,6 +260,32 @@ fn permits(origin: &str, url: &str) -> bool {
         return true;
     }
     url.len() > origin.len() && url.starts_with(origin) && url.as_bytes()[origin.len()] == b'/'
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NavigationDisposition {
+    Allow,
+    Block,
+    FreshProcess,
+}
+
+/// Decide the security and lifecycle meaning of one top-level navigation.
+///
+/// Reload is special because ArenaNet uses it for the Restart button in stale-
+/// client dialogs. The native process owns manifest selection and launch
+/// identity, so only a fresh process can make that action truthful.
+fn navigation_disposition(
+    origin: &str,
+    url: &str,
+    kind: WKNavigationType,
+) -> NavigationDisposition {
+    if !permits(origin, url) {
+        NavigationDisposition::Block
+    } else if kind == WKNavigationType::Reload {
+        NavigationDisposition::FreshProcess
+    } else {
+        NavigationDisposition::Allow
+    }
 }
 
 /// Say, once, that the game stopped — because the second crash leaves a blank
@@ -284,10 +340,11 @@ pub fn guard(
 
 #[cfg(test)]
 mod tests {
-    use super::{Guard, permits};
+    use super::{Guard, NavigationDisposition, navigation_disposition, permits};
     use objc2::ClassType;
     use objc2::runtime::AnyClass;
     use objc2::sel;
+    use objc2_web_kit::WKNavigationType;
 
     /// Both pointer-lock selectors are private, so nothing at compile time
     /// checks that they are spelled the way WebKit looks them up — and a
@@ -334,5 +391,32 @@ mod tests {
         // The origin itself, with nothing after it, is not a navigation target:
         // WebKit always supplies at least a path.
         assert!(!permits(origin, origin));
+    }
+
+    #[test]
+    fn a_client_reload_requires_a_fresh_native_process() {
+        let origin = "http://127.0.0.1:38112";
+
+        assert_eq!(
+            navigation_disposition(
+                origin,
+                "http://127.0.0.1:38112/index.html",
+                WKNavigationType::Reload,
+            ),
+            NavigationDisposition::FreshProcess,
+        );
+        assert_eq!(
+            navigation_disposition(
+                origin,
+                "http://127.0.0.1:38112/index.html",
+                WKNavigationType::Other,
+            ),
+            NavigationDisposition::Allow,
+        );
+        // Reload never weakens the origin boundary.
+        assert_eq!(
+            navigation_disposition(origin, "https://example.com/", WKNavigationType::Reload,),
+            NavigationDisposition::Block,
+        );
     }
 }

@@ -88,4 +88,10 @@ describe('user guide', () => {
     assert.match(body, /while it is happening/i);
     assert.match(body, /afterwards does not work/i);
   });
+
+  it('says what the stale-client Restart action does', () => {
+    const body = text();
+    assert.match(body, /Code 058/);
+    assert.match(body, /current one in a fresh process/i);
+  });
 });

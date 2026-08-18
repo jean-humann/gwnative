@@ -151,7 +151,16 @@ fn main() {
         }
     };
     let paths = paths::Layout::new(&invocation, &profile);
-    let client_sync = command == cli::Command::Sync;
+    // An explicit sync exits after installation. A client-requested refresh
+    // performs the same current-manifest fetch but remains an ordinary run, so
+    // the successor opens the updated game once installation has settled.
+    // Offline and --no-update launches keep their explicit network contract;
+    // they still get a fresh process, just not a forced request.
+    let client_sync = should_sync_client(
+        command,
+        relaunch::client_refresh_requested(),
+        invocation.automatic_updates_allowed(),
+    );
     let maintenance = matches!(command, cli::Command::Sync | cli::Command::Repair);
     let headless = command == cli::Command::Serve;
     // The two commands above are the runs with a terminal attached. Everything
@@ -960,6 +969,21 @@ fn run_windowed(
     window::flush();
 }
 
+/// Whether this process must fetch the service's current manifest before it
+/// selects a client.
+///
+/// Explicit maintenance remains explicit even with automatic checks disabled.
+/// The internal refresh marker is different: it came from a running client's
+/// Reload action and must still honour this invocation's offline/no-update
+/// contract.
+fn should_sync_client(
+    command: cli::Command,
+    refresh_requested: bool,
+    automatic_updates_allowed: bool,
+) -> bool {
+    command == cli::Command::Sync || (refresh_requested && automatic_updates_allowed)
+}
+
 /// Check the cached manifest against the service, behind the launch.
 ///
 /// Its own client and its own thread, because the point is that nothing waits
@@ -1166,6 +1190,14 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_client_reload_synchronously_refreshes_only_when_network_updates_are_allowed() {
+        assert!(should_sync_client(cli::Command::Run, true, true));
+        assert!(!should_sync_client(cli::Command::Run, true, false));
+        assert!(!should_sync_client(cli::Command::Run, false, true));
+        assert!(should_sync_client(cli::Command::Sync, false, false));
+    }
 
     #[test]
     fn control_channel_accepts_only_a_live_anonymous_pipe() {
