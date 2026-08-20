@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sequence": 2,
+  "sequence": 3,
   "transformAbi": 3,
   "families": [
     {
@@ -274,6 +274,240 @@
             ]
           },
           "passiveEnhancements": true
+        }
+      ]
+    },
+    {
+      "familyId": "2bda5a38bf0818646e487f89d72dd86a83b81e7bd5ef1cd8404277b46c3f6356",
+      "layout": null,
+      "runtimes": [
+        {
+          "runtime": "jspi",
+          "wasmSha256": "f19daa7e1293cbd14891411e15124b1be21d70b94195ef9ba5e3eec6fc3e618c",
+          "glueSha256": "58ecc6377397f01919d8def58e802e19fbfd6ce13f421dbf14123a667e34f7d0",
+          "template": {
+            "outputSha256": "7d0ced840d3dc167b823ed0ad6ed411319faf97316345c8e37620e86d86f536e",
+            "importCount": 219,
+            "carrierImport": 207,
+            "bridges": [
+              {
+                "kind": "ensureDirectory",
+                "stubFunction": 185,
+                "stubBodySha256": "c3cfbb01533c9cdce3fe30fd053d23f0a5244f20f689ca56ecfad671b1fa2f56",
+                "callSites": [
+                  {
+                    "localFunction": 9541,
+                    "callerBodySha256": "869c64cbe355b9ae1dce2998589958cf1406dac7c24a74f2dc9e205529b1a071",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 11528,
+                    "callerBodySha256": "8f5924b4fc8fcb7b43425fa1ff348d82750b6f905af429e09f1fbd96344ff718",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 12217,
+                    "callerBodySha256": "716dcc4d1efcbe3f529cd6586e7ad0cfbcae7a401d5ff13e12db5a3b2362e7e7",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  }
+                ]
+              },
+              {
+                "kind": "findFiles",
+                "stubFunction": 186,
+                "stubBodySha256": "f09a7a12954169ae595d12d870e69a4c0092003157d72523d626d2a3990241e2",
+                "callSites": [
+                  {
+                    "localFunction": 9530,
+                    "callerBodySha256": "4946113aa0f2ed272913cea275f1f5468c0e875979c5a0e5214fbdc339cd007c",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 9531,
+                    "callerBodySha256": "443f04ad67c4ed75cb773fcca40f5672b17d3ec54f0c6445155de534358613df",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 11528,
+                    "callerBodySha256": "8f5924b4fc8fcb7b43425fa1ff348d82750b6f905af429e09f1fbd96344ff718",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 12217,
+                    "callerBodySha256": "716dcc4d1efcbe3f529cd6586e7ad0cfbcae7a401d5ff13e12db5a3b2362e7e7",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  }
+                ]
+              },
+              {
+                "kind": "fileBaseName",
+                "stubFunction": 197,
+                "stubBodySha256": "ffa2edca2d3a0ef88bfcea9e5cf488eb6a4d98e7f1b4011ce4fa3de388c0b4ea",
+                "callSites": [
+                  {
+                    "localFunction": 9530,
+                    "callerBodySha256": "4946113aa0f2ed272913cea275f1f5468c0e875979c5a0e5214fbdc339cd007c",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 9531,
+                    "callerBodySha256": "443f04ad67c4ed75cb773fcca40f5672b17d3ec54f0c6445155de534358613df",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  }
+                ]
+              },
+              {
+                "kind": "deleteFile",
+                "stubFunction": 333,
+                "stubBodySha256": "554a16f69a25ac041fba2fac73ffd9dcb5838c8f096c9a7ea26b50b5dde9cb8e",
+                "callSites": [
+                  {
+                    "localFunction": 459,
+                    "callerBodySha256": "557ab9f824b2ffb84e4dd21ce4d2327026a372bedf6689271b2921d3d62ac33c",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  }
+                ]
+              },
+              {
+                "kind": "fileExists",
+                "stubFunction": 552,
+                "stubBodySha256": "65fbded4f294c74d67972efe9c666f626f3ab6b1223abd17e05228046bb157d4",
+                "callSites": [
+                  {
+                    "localFunction": 9541,
+                    "callerBodySha256": "869c64cbe355b9ae1dce2998589958cf1406dac7c24a74f2dc9e205529b1a071",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 2
+                  }
+                ]
+              }
+            ]
+          },
+          "passiveEnhancements": false
+        },
+        {
+          "runtime": "asyncify",
+          "wasmSha256": "5e70f3459b12f4ff154e45cca531689919b38b7a256177736db9c779df5c2885",
+          "glueSha256": "aabef96eb79469cf6099c5427ec970bc43eb4624cf43511e5aef3dda1ca4542d",
+          "template": {
+            "outputSha256": "00682ec673e8a086aee254fae33dda6d86bfe8c6dde25789f48e177ebba96147",
+            "importCount": 219,
+            "carrierImport": 207,
+            "bridges": [
+              {
+                "kind": "ensureDirectory",
+                "stubFunction": 185,
+                "stubBodySha256": "39c424cc95c7c0615503df80b34ffd66238df56362d9e62ccbc34dff57e3aa66",
+                "callSites": [
+                  {
+                    "localFunction": 9541,
+                    "callerBodySha256": "fd4dbe0656206006ca7cc591ad3de49705f34df1c7dad211b72d0ed5d13eeb99",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 11528,
+                    "callerBodySha256": "9f4f8f71ef9b74b8ebbbe24264432a206a2de297a69de3bbd1ed7c02f1b43703",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 12217,
+                    "callerBodySha256": "319bac5f034c347faefa83117529b213fae8c79ad4404641c90f22a6397e40df",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  }
+                ]
+              },
+              {
+                "kind": "findFiles",
+                "stubFunction": 186,
+                "stubBodySha256": "cef640c73dd860a65dde03408a2173dbaf6b9d40e14dd877c2f6fa53f3947992",
+                "callSites": [
+                  {
+                    "localFunction": 9530,
+                    "callerBodySha256": "24162ad0c98a9b79a6b8a029f9cb5d9000053d5dbdfbcb437abaf8f4c711e19b",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 9531,
+                    "callerBodySha256": "dfb93362fa2e2843b31352fcd817625063c41b261a5938fe24c1214cb1eba405",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 11528,
+                    "callerBodySha256": "9f4f8f71ef9b74b8ebbbe24264432a206a2de297a69de3bbd1ed7c02f1b43703",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 12217,
+                    "callerBodySha256": "319bac5f034c347faefa83117529b213fae8c79ad4404641c90f22a6397e40df",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  }
+                ]
+              },
+              {
+                "kind": "fileBaseName",
+                "stubFunction": 197,
+                "stubBodySha256": "4c409407282d5d0a7167a0a86d50f56d39ccc0d447a3514007391a15815a3006",
+                "callSites": [
+                  {
+                    "localFunction": 9530,
+                    "callerBodySha256": "24162ad0c98a9b79a6b8a029f9cb5d9000053d5dbdfbcb437abaf8f4c711e19b",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  },
+                  {
+                    "localFunction": 9531,
+                    "callerBodySha256": "dfb93362fa2e2843b31352fcd817625063c41b261a5938fe24c1214cb1eba405",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  }
+                ]
+              },
+              {
+                "kind": "deleteFile",
+                "stubFunction": 333,
+                "stubBodySha256": "89814f42218fe9e7a1d9ccf877d013d790d69edce1ab296ae9c4ca3952688516",
+                "callSites": [
+                  {
+                    "localFunction": 459,
+                    "callerBodySha256": "5886be027125e29ac3448d7e7615b9aff821c5c51c508f9d8ea8b4fdbc4ac6e6",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 1
+                  }
+                ]
+              },
+              {
+                "kind": "fileExists",
+                "stubFunction": 552,
+                "stubBodySha256": "df9a7b45c9c96939edf60e799f6dd3838fe29ab3cc5af35d866b00373aae8723",
+                "callSites": [
+                  {
+                    "localFunction": 9541,
+                    "callerBodySha256": "fd4dbe0656206006ca7cc591ad3de49705f34df1c7dad211b72d0ed5d13eeb99",
+                    "occurrence": 0,
+                    "expectedTargetCalls": 2
+                  }
+                ]
+              }
+            ]
+          },
+          "passiveEnhancements": false
         }
       ]
     }
